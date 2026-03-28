@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 
 @Observable
+@MainActor
 final class AppState {
     var selectedMeetingId: String?
     var isRecording = false
@@ -17,9 +18,12 @@ final class AppState {
     let transcriptRepository: TranscriptRepository
     let noteRepository: NoteRepository
     let summaryRepository: SummaryRepository
+    let audioCaptureService: AudioCaptureService
+
+    // State machine — single source of truth for meeting lifecycle
+    private(set) var stateMachine: MeetingStateMachine
 
     private var cancellables = Set<AnyCancellable>()
-    private(set) var stateMachine: MeetingStateMachine?
 
     init() {
         self.database = AppDatabase.shared
@@ -27,6 +31,11 @@ final class AppState {
         self.transcriptRepository = TranscriptRepository(database: database)
         self.noteRepository = NoteRepository(database: database)
         self.summaryRepository = SummaryRepository(database: database)
+        self.audioCaptureService = AudioCaptureService()
+        self.stateMachine = MeetingStateMachine(
+            meetingRepository: meetingRepository,
+            audioCaptureService: audioCaptureService
+        )
 
         loadMeetings()
         observeNotifications()
@@ -65,57 +74,66 @@ final class AppState {
         return meeting
     }
 
+    /// Start recording — delegates to the state machine.
     func startRecording(for meeting: Meeting) {
-        var updated = meeting
-        updated.status = .recording
-        updated.startDate = Date()
-
         Task {
-            try? await meetingRepository.save(&updated)
-            await MainActor.run {
-                self.activeMeeting = updated
-                self.isRecording = true
-                self.selectedMeetingId = updated.id
+            do {
+                try await stateMachine.startRecording(meeting: meeting)
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                self.selectedMeetingId = self.stateMachine.currentMeeting?.id
+                loadMeetings()
+            } catch {
+                print("Failed to start recording: \(error)")
             }
-            loadMeetings()
         }
     }
 
+    /// Stop recording — delegates to the state machine.
     func stopRecording() {
-        guard var meeting = activeMeeting else { return }
-        meeting.status = .transcribing
-        meeting.endDate = Date()
-
         Task {
-            try? await meetingRepository.save(&meeting)
-            await MainActor.run {
-                self.activeMeeting = nil
-                self.isRecording = false
+            do {
+                try await stateMachine.stopRecording()
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                loadMeetings()
+            } catch {
+                print("Failed to stop recording: \(error)")
             }
-            loadMeetings()
         }
     }
 
     // MARK: - Notification Observers
 
     private func observeNotifications() {
+        // Create ad-hoc meeting via state machine
         NotificationCenter.default.publisher(for: .createNewMeeting)
             .sink { [weak self] _ in
+                guard let self else { return }
                 Task {
-                    let meeting = try? await self?.createMeeting(title: "New Meeting")
-                    if let meeting {
+                    do {
+                        let meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
                         await MainActor.run {
-                            self?.startRecording(for: meeting)
+                            self.activeMeeting = self.stateMachine.currentMeeting
+                            self.isRecording = self.stateMachine.isRecording
+                            self.selectedMeetingId = meeting.id
                         }
+                        self.loadMeetings()
+                    } catch {
+                        print("Failed to create ad-hoc meeting: \(error)")
                     }
                 }
             }
             .store(in: &cancellables)
 
-        NotificationCenter.default.publisher(for: .callAppTerminated)
+        // Sync local state when the state machine posts a change
+        NotificationCenter.default.publisher(for: .meetingStateChanged)
             .sink { [weak self] _ in
-                if self?.isRecording == true {
-                    self?.stopRecording()
+                guard let self else { return }
+                Task { @MainActor in
+                    self.activeMeeting = self.stateMachine.currentMeeting
+                    self.isRecording = self.stateMachine.isRecording
+                    self.loadMeetings()
                 }
             }
             .store(in: &cancellables)
