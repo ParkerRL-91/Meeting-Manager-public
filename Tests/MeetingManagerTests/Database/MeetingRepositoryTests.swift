@@ -155,6 +155,72 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(found?.status, .complete)
     }
 
+    // MARK: - Meetings Near Date
+
+    func testMeetingsNearDateReturnsMatchingMeeting() async throws {
+        let anchor = Date()
+        let within = anchor.addingTimeInterval(5 * 60)   // 5 min ahead — inside default 10-min window
+        let outside = anchor.addingTimeInterval(20 * 60) // 20 min ahead — outside window
+
+        var m1 = SampleData.makeMeeting(id: "near-in", status: .scheduled, scheduledStartDate: within)
+        var m2 = SampleData.makeMeeting(id: "near-out", status: .scheduled, scheduledStartDate: outside)
+        try await repo.save(&m1)
+        try await repo.save(&m2)
+
+        let results = try await repo.meetingsNearDate(anchor)
+        let ids = results.map(\.id)
+
+        XCTAssertTrue(ids.contains("near-in"), "Meeting within the window should be returned")
+        XCTAssertFalse(ids.contains("near-out"), "Meeting outside the window should not be returned")
+    }
+
+    func testMeetingsNearDateIgnoresNonScheduled() async throws {
+        let anchor = Date()
+        let within = anchor.addingTimeInterval(3 * 60)
+
+        var m = SampleData.makeMeeting(id: "near-complete", status: .complete, scheduledStartDate: within)
+        try await repo.save(&m)
+
+        let results = try await repo.meetingsNearDate(anchor)
+        XCTAssertFalse(results.map(\.id).contains("near-complete"),
+                       "Only .scheduled meetings should be returned by meetingsNearDate")
+    }
+
+    // MARK: - All Meetings For Date
+
+    func testAllMeetingsForDateReturnsMeetingsOnThatDay() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let todayNoon = calendar.date(byAdding: .hour, value: 12, to: today)!
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today)!
+        let tomorrowNoon = calendar.date(byAdding: .hour, value: 12, to: tomorrow)!
+
+        var m1 = SampleData.makeMeeting(id: "day-today", scheduledStartDate: todayNoon)
+        var m2 = SampleData.makeMeeting(id: "day-tomorrow", scheduledStartDate: tomorrowNoon)
+        try await repo.save(&m1)
+        try await repo.save(&m2)
+
+        let results = try await repo.allMeetingsForDate(today)
+        let ids = results.map(\.id)
+
+        XCTAssertTrue(ids.contains("day-today"), "Meeting scheduled today should be included")
+        XCTAssertFalse(ids.contains("day-tomorrow"), "Meeting scheduled tomorrow should not be included")
+    }
+
+    func testAllMeetingsForDateMatchesByActualStartDate() async throws {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let todayNoon = calendar.date(byAdding: .hour, value: 12, to: today)!
+
+        // No scheduledStartDate — falls back to startDate
+        var m = SampleData.makeMeeting(id: "day-actual", startDate: todayNoon)
+        try await repo.save(&m)
+
+        let results = try await repo.allMeetingsForDate(today)
+        XCTAssertTrue(results.map(\.id).contains("day-actual"),
+                      "Meeting with a matching startDate (no scheduledStartDate) should be included")
+    }
+
     // MARK: - Update
 
     func testUpdate() async throws {

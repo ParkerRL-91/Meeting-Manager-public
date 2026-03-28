@@ -144,7 +144,9 @@ final class MeetingTests: XCTestCase {
 
     // MARK: - Equatable
 
-    func testEquatable() {
+    func testValueEquality() {
+        // Dates are pinned via SampleData.fixedDate so field-by-field equality
+        // is deterministic and not affected by the wall-clock time of the run.
         let a = SampleData.makeMeeting(id: "same-id", title: "A")
         let b = SampleData.makeMeeting(id: "same-id", title: "A")
         let c = SampleData.makeMeeting(id: "different-id", title: "A")

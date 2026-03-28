@@ -4,18 +4,23 @@ import GRDB
 
 final class MigrationsTests: XCTestCase {
 
+    private var db: AppDatabase!
+
+    override func setUpWithError() throws {
+        db = try TestDatabase.create()
+    }
+
     // MARK: - Migrations Run Without Error
 
     func testAllMigrationsRunSuccessfully() throws {
         // AppDatabase.empty() applies all migrations, so this verifies they work.
-        let db = try AppDatabase.empty()
-        XCTAssertNotNil(db)
+        let freshDb = try AppDatabase.empty()
+        XCTAssertNotNil(freshDb)
     }
 
     // MARK: - Table Existence
 
     func testMeetingTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("meeting")
         }
@@ -23,7 +28,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testTranscriptTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("transcript")
         }
@@ -31,7 +35,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testMeetingNoteTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("meetingNote")
         }
@@ -39,7 +42,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testMeetingSummaryTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("meetingSummary")
         }
@@ -47,7 +49,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testAppSettingsTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("appSettings")
         }
@@ -55,7 +56,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testChatMessageTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("chatMessage")
         }
@@ -63,7 +63,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testActionItemTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("actionItem")
         }
@@ -71,7 +70,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testRecipeTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("recipe")
         }
@@ -79,7 +77,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testRecipeResultTableExists() throws {
-        let db = try TestDatabase.create()
         let exists = try db.writer.read { dbConn in
             try dbConn.tableExists("recipeResult")
         }
@@ -89,8 +86,6 @@ final class MigrationsTests: XCTestCase {
     // MARK: - Built-In Recipes Seeded
 
     func testBuiltInRecipesSeeded() throws {
-        let db = try TestDatabase.create()
-
         let count = try db.writer.read { dbConn in
             try Recipe.filter(Recipe.Columns.isBuiltIn == true).fetchCount(dbConn)
         }
@@ -99,8 +94,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testBuiltInRecipeIds() throws {
-        let db = try TestDatabase.create()
-
         let recipes = try db.writer.read { dbConn in
             try Recipe.filter(Recipe.Columns.isBuiltIn == true).fetchAll(dbConn)
         }
@@ -119,8 +112,6 @@ final class MigrationsTests: XCTestCase {
     }
 
     func testBuiltInRecipeCategories() throws {
-        let db = try TestDatabase.create()
-
         let recipes = try db.writer.read { dbConn in
             try Recipe.filter(Recipe.Columns.isBuiltIn == true).fetchAll(dbConn)
         }
@@ -138,8 +129,6 @@ final class MigrationsTests: XCTestCase {
     // MARK: - Default App Settings Inserted
 
     func testDefaultAppSettingsInserted() throws {
-        let db = try TestDatabase.create()
-
         let settings = try db.writer.read { dbConn in
             try AppSettings.fetchOne(dbConn)
         }

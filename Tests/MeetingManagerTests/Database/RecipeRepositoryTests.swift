@@ -56,7 +56,11 @@ final class RecipeRepositoryTests: XCTestCase {
         try await repo.save(&r2)
 
         let customs = try await repo.recipesByCategory(.custom)
-        XCTAssertEqual(customs.count, 2)
+        // Use >= 2 so the assertion stays valid if built-in custom recipes are
+        // ever added, and verify the specific records we inserted are present.
+        XCTAssertGreaterThanOrEqual(customs.count, 2)
+        XCTAssertTrue(customs.contains { $0.id == "c1" })
+        XCTAssertTrue(customs.contains { $0.id == "c2" })
     }
 
     func testRecipesByCategoryEmpty() async throws {

@@ -14,8 +14,8 @@ final class OnboardingManagerTests: XCTestCase {
     }
 
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: "onboardingCompleted")
         super.tearDown()
+        UserDefaults.standard.removeObject(forKey: "onboardingCompleted")
     }
 
     // MARK: - Initial State
