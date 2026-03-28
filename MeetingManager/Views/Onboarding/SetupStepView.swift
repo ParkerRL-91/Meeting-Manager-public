@@ -3,6 +3,8 @@ import SwiftUI
 struct SetupStepView: View {
     @State private var apiKey: String = ""
     @State private var apiKeySaved = false
+    @State private var isTesting = false
+    @State private var testResult: String?
 
     var body: some View {
         VStack(spacing: 32) {
@@ -50,6 +52,24 @@ struct SetupStepView: View {
                             saveAPIKey()
                         }
                         .disabled(apiKey.isEmpty)
+
+                        Button {
+                            testConnection()
+                        } label: {
+                            if isTesting {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Text("Test Connection")
+                            }
+                        }
+                        .disabled(!apiKeySaved || isTesting)
+                    }
+
+                    if let testResult {
+                        Text(testResult)
+                            .font(.caption)
+                            .foregroundStyle(testResult.contains("Success") ? Color.appSuccess : Color.appWarning)
                     }
                 }
 
@@ -88,6 +108,18 @@ struct SetupStepView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func testConnection() {
+        isTesting = true
+        testResult = nil
+
+        Task {
+            let claude = ClaudeService()
+            let success = await claude.testConnection()
+            isTesting = false
+            testResult = success ? "Success — Claude API is connected!" : "Failed — check your API key"
+        }
     }
 
     private func saveAPIKey() {

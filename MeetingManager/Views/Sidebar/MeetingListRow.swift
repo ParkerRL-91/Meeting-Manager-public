@@ -35,6 +35,19 @@ struct MeetingListRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                copySummary()
+            } label: {
+                Label("Copy Summary", systemImage: "doc.on.doc")
+            }
+
+            Button {
+                shareMeeting()
+            } label: {
+                Label("Share...", systemImage: "square.and.arrow.up")
+            }
+        }
         .swipeActions(edge: .leading) {
             Button {
                 toggleArchive()
@@ -70,6 +83,24 @@ struct MeetingListRow: View {
             } catch {
                 print("Failed to toggle archive: \(error)")
             }
+        }
+    }
+
+    private func copySummary() {
+        Task {
+            guard let summary = try? await appState.summaryRepository.latestSummary(meetingId: meeting.id) else { return }
+            let exportService = ExportService()
+            let markdown = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+            ShareService.copyToClipboard(markdown)
+        }
+    }
+
+    private func shareMeeting() {
+        Task {
+            guard let summary = try? await appState.summaryRepository.latestSummary(meetingId: meeting.id) else { return }
+            let exportService = ExportService()
+            let content = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+            ShareService.share(content)
         }
     }
 
