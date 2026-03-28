@@ -41,41 +41,46 @@ final class RecipeEngine {
         lastError = nil
         defer { isProcessing = false }
 
-        Logger.ai.info("Executing recipe '\(recipe.name)' for meeting \(meeting.id)")
+        do {
+            Logger.ai.info("Executing recipe '\(recipe.name)' for meeting \(meeting.id)")
 
-        // 1. Fetch transcript and notes
-        let transcript = try await transcriptRepo.fullText(meetingId: meeting.id)
-        let notes = try await noteRepo.combinedNotes(meetingId: meeting.id)
+            // 1. Fetch transcript and notes
+            let transcript = try await transcriptRepo.fullText(meetingId: meeting.id)
+            let notes = try await noteRepo.combinedNotes(meetingId: meeting.id)
 
-        // 2. Substitute template variables
-        let userPrompt = promptManager.substituteVariables(
-            template: recipe.promptTemplate,
-            meeting: meeting,
-            transcript: transcript,
-            notes: notes
-        )
+            // 2. Substitute template variables
+            let userPrompt = promptManager.substituteVariables(
+                template: recipe.promptTemplate,
+                meeting: meeting,
+                transcript: transcript,
+                notes: notes
+            )
 
-        let systemPrompt = "You are a professional meeting assistant. "
-            + "Produce clear, well-structured output based on the meeting data provided."
+            let systemPrompt = "You are a professional meeting assistant. "
+                + "Produce clear, well-structured output based on the meeting data provided."
 
-        // 3. Call Claude API
-        let model = AppSettings.default.claudeModel
-        let outputText = try await claudeService.sendMessage(
-            systemPrompt: systemPrompt,
-            userPrompt: userPrompt,
-            model: model
-        )
+            // 3. Call Claude API
+            let model = AppSettings.default.claudeModel
+            let outputText = try await claudeService.sendMessage(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                model: model
+            )
 
-        // 4. Save result
-        var result = RecipeResult(
-            meetingId: meeting.id,
-            recipeId: recipe.id,
-            outputText: outputText
-        )
-        try await resultRepo.save(&result)
+            // 4. Save result
+            var result = RecipeResult(
+                meetingId: meeting.id,
+                recipeId: recipe.id,
+                outputText: outputText
+            )
+            try await resultRepo.save(&result)
 
-        Logger.ai.info("Recipe '\(recipe.name)' completed for meeting \(meeting.id), result id=\(result.id ?? -1)")
+            Logger.ai.info("Recipe '\(recipe.name)' completed for meeting \(meeting.id), result id=\(result.id ?? -1)")
 
-        return outputText
+            return outputText
+        } catch {
+            lastError = error.localizedDescription
+            throw error
+        }
     }
 }

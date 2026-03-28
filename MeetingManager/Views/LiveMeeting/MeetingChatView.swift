@@ -8,6 +8,7 @@ struct MeetingChatView: View {
     @State private var messages: [ChatMessage] = []
     @State private var inputText: String = ""
     @State private var chatService: MeetingChatService?
+    @State private var chatMessageRepo: ChatMessageRepository?
     @State private var lastFailedQuestion: String?
 
     var body: some View {
@@ -186,16 +187,18 @@ struct MeetingChatView: View {
     // MARK: - Actions
 
     private func setup() {
+        let repo = ChatMessageRepository(database: appState.database)
+        chatMessageRepo = repo
+
         let service = MeetingChatService(
             claudeService: ClaudeService(),
             transcriptRepository: appState.transcriptRepository,
-            chatMessageRepository: ChatMessageRepository(database: appState.database)
+            chatMessageRepository: repo
         )
         chatService = service
 
         Task {
             do {
-                let repo = ChatMessageRepository(database: appState.database)
                 messages = try await repo.messagesForMeeting(meetingId)
             } catch {
                 // Messages will remain empty on failure
@@ -205,7 +208,7 @@ struct MeetingChatView: View {
 
     private func sendMessage() {
         let question = inputText.trimmingCharacters(in: .whitespaces)
-        guard !question.isEmpty, let service = chatService else { return }
+        guard !question.isEmpty, let service = chatService, let repo = chatMessageRepo else { return }
 
         inputText = ""
         lastFailedQuestion = question
@@ -213,29 +216,24 @@ struct MeetingChatView: View {
         Task {
             do {
                 try await service.sendQuery(meetingId: meetingId, question: question)
-                let repo = ChatMessageRepository(database: appState.database)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
             } catch {
-                // Reload messages to show the user message that was saved
-                let repo = ChatMessageRepository(database: appState.database)
                 messages = (try? await repo.messagesForMeeting(meetingId)) ?? messages
             }
         }
     }
 
     private func retryLastQuestion() {
-        guard let question = lastFailedQuestion, let service = chatService else { return }
+        guard let question = lastFailedQuestion, let service = chatService, let repo = chatMessageRepo else { return }
         service.clearError()
 
         Task {
             do {
                 try await service.sendQuery(meetingId: meetingId, question: question)
-                let repo = ChatMessageRepository(database: appState.database)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
             } catch {
-                let repo = ChatMessageRepository(database: appState.database)
                 messages = (try? await repo.messagesForMeeting(meetingId)) ?? messages
             }
         }

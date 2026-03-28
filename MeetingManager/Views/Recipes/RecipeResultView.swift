@@ -218,7 +218,7 @@ struct RecipeResultView: View {
         copied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
-            copied = false
+            await MainActor.run { copied = false }
         }
     }
 }
