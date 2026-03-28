@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Meeting Manager", action: #selector(openMainWindow), keyEquivalent: "o"))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "u"))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem?.menu = menu
     }
@@ -35,6 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func openMainWindow() {
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func checkForUpdates() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        // Sparkle's update check is triggered via the app menu command
+        // The SPUStandardUpdaterController in MeetingManagerApp handles the actual check
     }
 
     // MARK: - Notifications
