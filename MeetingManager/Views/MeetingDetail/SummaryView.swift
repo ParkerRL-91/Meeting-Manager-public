@@ -16,6 +16,7 @@ struct SummaryView: View {
     // Editing state
     @State private var isEditing = false
     @State private var editedText = ""
+    @State private var errorMessage: String?
 
     // Regeneration state
     @State private var isRegenerating = false
@@ -45,6 +46,7 @@ struct SummaryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .errorAlert($errorMessage)
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadSummary()
@@ -269,7 +271,7 @@ struct SummaryView: View {
                 editedText = ""
             } catch {
                 // Keep editing state on failure so user doesn't lose changes
-                print("Failed to save edited summary: \(error)")
+                errorMessage = "Failed to save edited summary: \(error.localizedDescription)"
             }
         }
     }

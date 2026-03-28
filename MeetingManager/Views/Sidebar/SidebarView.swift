@@ -5,6 +5,7 @@ struct SidebarView: View {
     @State private var searchQuery = ""
     @State private var showArchived = false
     @State private var showAllActionItems = false
+    @State private var errorMessage: String?
     @FocusState private var isSearchFocused: Bool
 
     private var filteredUpcoming: [Meeting] {
@@ -151,6 +152,7 @@ struct SidebarView: View {
             }
         }
         .background(Color.appBackground)
+        .errorAlert($errorMessage)
         .sheet(isPresented: $showAllActionItems) {
             AllActionItemsView()
                 .environment(appState)
@@ -182,7 +184,7 @@ struct SidebarView: View {
                 appState.selectedMeetingId = meeting.id
                 appState.loadMeetings()
             } catch {
-                print("Failed to create meeting: \(error)")
+                errorMessage = "Failed to create meeting: \(error.localizedDescription)"
             }
         }
     }

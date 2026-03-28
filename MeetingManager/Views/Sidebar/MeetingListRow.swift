@@ -4,6 +4,7 @@ struct MeetingListRow: View {
     let meeting: Meeting
 
     @Environment(AppState.self) private var appState
+    @State private var errorMessage: String?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -35,6 +36,7 @@ struct MeetingListRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .errorAlert($errorMessage)
         .contextMenu {
             Button {
                 copySummary()
@@ -81,7 +83,7 @@ struct MeetingListRow: View {
                 }
                 appState.loadMeetings()
             } catch {
-                print("Failed to toggle archive: \(error)")
+                errorMessage = "Failed to toggle archive: \(error.localizedDescription)"
             }
         }
     }
@@ -113,7 +115,7 @@ struct MeetingListRow: View {
                 }
                 appState.loadMeetings()
             } catch {
-                print("Failed to delete meeting: \(error)")
+                errorMessage = "Failed to delete meeting: \(error.localizedDescription)"
             }
         }
     }

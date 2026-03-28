@@ -13,6 +13,7 @@ struct MeetingDetailView: View {
     @State private var showingEditor = false
     @State private var showingDeleteConfirmation = false
     @State private var showingRecipes = false
+    @State private var errorMessage: String?
 
     private let exportService = ExportService()
 
@@ -75,6 +76,7 @@ struct MeetingDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
+        .errorAlert($errorMessage)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let meeting {
@@ -202,7 +204,7 @@ struct MeetingDetailView: View {
                 meeting = updatedMeeting
                 appState.loadMeetings()
             } catch {
-                print("Failed to update meeting: \(error)")
+                errorMessage = "Failed to update meeting: \(error.localizedDescription)"
             }
         }
     }
@@ -214,7 +216,7 @@ struct MeetingDetailView: View {
                 meeting?.status = .archived
                 appState.loadMeetings()
             } catch {
-                print("Failed to archive meeting: \(error)")
+                errorMessage = "Failed to archive meeting: \(error.localizedDescription)"
             }
         }
     }
@@ -226,7 +228,7 @@ struct MeetingDetailView: View {
                 meeting?.status = .complete
                 appState.loadMeetings()
             } catch {
-                print("Failed to unarchive meeting: \(error)")
+                errorMessage = "Failed to unarchive meeting: \(error.localizedDescription)"
             }
         }
     }
@@ -241,7 +243,7 @@ struct MeetingDetailView: View {
                 meeting = updatedMeeting
                 appState.loadMeetings()
             } catch {
-                print("Failed to cancel meeting: \(error)")
+                errorMessage = "Failed to cancel meeting: \(error.localizedDescription)"
             }
         }
     }
@@ -307,7 +309,7 @@ struct MeetingDetailView: View {
                 appState.selectedMeetingId = nil
                 appState.loadMeetings()
             } catch {
-                print("Failed to delete meeting: \(error)")
+                errorMessage = "Failed to delete meeting: \(error.localizedDescription)"
             }
         }
     }
