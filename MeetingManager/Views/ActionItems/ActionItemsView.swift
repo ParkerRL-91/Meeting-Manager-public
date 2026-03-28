@@ -76,6 +76,11 @@ struct ActionItemsView: View {
 
                 Spacer()
 
+                CopyButton(
+                    text: { formatItemsAsMarkdown() },
+                    label: "Copy as Checklist"
+                )
+
                 Button {
                     Task { await extractItems() }
                 } label: {
@@ -146,6 +151,21 @@ struct ActionItemsView: View {
             Spacer()
         }
         .padding(.vertical, 4)
+    }
+
+    // MARK: - Copy
+
+    private func formatItemsAsMarkdown() -> String {
+        items.map { item in
+            var line = "- [\(item.isCompleted ? "x" : " ")] \(item.title)"
+            if let assignee = item.assignee, !assignee.isEmpty {
+                line += " (@\(assignee))"
+            }
+            if let dueDate = item.dueDate {
+                line += " - due \(DateFormatting.shortDate(from: dueDate))"
+            }
+            return line
+        }.joined(separator: "\n")
     }
 
     // MARK: - Actions

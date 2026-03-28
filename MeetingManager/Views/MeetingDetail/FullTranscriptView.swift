@@ -30,6 +30,12 @@ struct FullTranscriptView: View {
             HStack(spacing: 12) {
                 SearchBar(query: $searchQuery, placeholder: "Search transcript...")
 
+                CopyButton(
+                    text: { formatTranscriptText() },
+                    label: "Copy Transcript"
+                )
+                .disabled(transcripts.isEmpty)
+
                 Button {
                     Task { await exportTranscript() }
                 } label: {
@@ -95,6 +101,14 @@ struct FullTranscriptView: View {
             }
             .padding(.vertical, 8)
         }
+    }
+
+    // MARK: - Copy
+
+    private func formatTranscriptText() -> String {
+        transcripts.map { transcript in
+            "[\(transcript.formattedTimestamp)] \(transcript.speakerDisplayName): \(transcript.text)"
+        }.joined(separator: "\n\n")
     }
 
     // MARK: - Export

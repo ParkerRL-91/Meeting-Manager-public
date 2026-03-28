@@ -302,11 +302,7 @@ struct SummaryView: View {
     private func copyAsMarkdown(_ summary: MeetingSummary) {
         guard let meeting else { return }
         let markdown = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
-
-        #if canImport(AppKit)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(markdown, forType: .string)
-        #endif
+        ShareService.copyToClipboard(markdown)
 
         withAnimation {
             copiedMarkdownToClipboard = true
@@ -323,10 +319,7 @@ struct SummaryView: View {
     }
 
     private func copyToClipboard(_ text: String) {
-        #if canImport(AppKit)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        #endif
+        ShareService.copyToClipboard(text)
 
         withAnimation {
             copiedToClipboard = true

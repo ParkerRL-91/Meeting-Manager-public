@@ -118,6 +118,18 @@ struct MeetingDetailView: View {
                     .help("Run AI recipes on this meeting")
 
                     Menu {
+                        Button("Share Summary") {
+                            Task { await shareSummary() }
+                        }
+                        Button("Share Full Report") {
+                            Task { await shareFullReport() }
+                        }
+                    } label: {
+                        Label("Share", systemImage: "square.and.arrow.up.on.square")
+                    }
+                    .help("Share meeting content")
+
+                    Menu {
                         Button("Summary (Markdown)") { Task { await exportSummary() } }
                         Button("Transcript (Text)") { Task { await exportTranscript() } }
                         Button("Full Report (Markdown)") { Task { await exportFullReport() } }
@@ -267,11 +279,24 @@ struct MeetingDetailView: View {
         Task {
             guard let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) else { return }
             let markdown = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
-            #if canImport(AppKit)
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(markdown, forType: .string)
-            #endif
+            ShareService.copyToClipboard(markdown)
         }
+    }
+
+    private func shareSummary() async {
+        guard let meeting else { return }
+        guard let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) else { return }
+        let content = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+        ShareService.share(content)
+    }
+
+    private func shareFullReport() async {
+        guard let meeting else { return }
+        let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId)
+        let transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        let notes = (try? await appState.noteRepository.notesForMeeting(meetingId)) ?? []
+        let content = exportService.exportFullReport(meeting: meeting, summary: summary, transcripts: transcripts, notes: notes)
+        ShareService.share(content)
     }
 
     private func deleteMeeting() {
