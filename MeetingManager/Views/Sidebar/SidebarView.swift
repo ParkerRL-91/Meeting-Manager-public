@@ -108,7 +108,7 @@ struct SidebarView: View {
                     if !filteredUpcoming.isEmpty {
                         Section("Upcoming") {
                             ForEach(filteredUpcoming) { meeting in
-                                MeetingListRow(meeting: meeting)
+                                MeetingListRow(meeting: meeting, onError: { errorMessage = $0 })
                                     .tag(meeting.id)
                                     .contextMenu {
                                         if meeting.status == .scheduled || meeting.status == .notified {
@@ -134,7 +134,7 @@ struct SidebarView: View {
                     if !filteredPast.isEmpty {
                         Section("Past") {
                             ForEach(filteredPast) { meeting in
-                                MeetingListRow(meeting: meeting)
+                                MeetingListRow(meeting: meeting, onError: { errorMessage = $0 })
                                     .tag(meeting.id)
                             }
                         }

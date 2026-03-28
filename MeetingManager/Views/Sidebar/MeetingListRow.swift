@@ -2,9 +2,9 @@ import SwiftUI
 
 struct MeetingListRow: View {
     let meeting: Meeting
+    var onError: ((String) -> Void)?
 
     @Environment(AppState.self) private var appState
-    @State private var errorMessage: String?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -36,7 +36,6 @@ struct MeetingListRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-        .errorAlert($errorMessage)
         .contextMenu {
             Button {
                 copySummary()
@@ -83,7 +82,7 @@ struct MeetingListRow: View {
                 }
                 appState.loadMeetings()
             } catch {
-                errorMessage = "Failed to toggle archive: \(error.localizedDescription)"
+                onError?("Failed to toggle archive: \(error.localizedDescription)")
             }
         }
     }
@@ -115,7 +114,7 @@ struct MeetingListRow: View {
                 }
                 appState.loadMeetings()
             } catch {
-                errorMessage = "Failed to delete meeting: \(error.localizedDescription)"
+                onError?("Failed to delete meeting: \(error.localizedDescription)")
             }
         }
     }
