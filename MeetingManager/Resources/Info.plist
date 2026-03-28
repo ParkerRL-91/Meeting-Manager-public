@@ -26,6 +26,8 @@
     <string>NSApplication</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Meeting Manager needs access to your microphone to record and transcribe meetings.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Meeting Manager uses on-device speech recognition to transcribe your meetings in real-time.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

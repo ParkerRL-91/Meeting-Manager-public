@@ -4,8 +4,10 @@ import os
 /// Captures microphone input using AVAudioEngine
 final class MicrophoneCapture {
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    /// Raw (unconverted) buffer callback — for SFSpeechRecognizer which handles its own conversion.
+    var onRawBuffer: ((AVAudioPCMBuffer) -> Void)?
 
-    private let engine = AVAudioEngine()
+    let engine = AVAudioEngine()
     private var isRunning = false
     private var converter: AVAudioConverter?
     private(set) var preferredInputDeviceID: String?
@@ -33,6 +35,9 @@ final class MicrophoneCapture {
         inputNode.installTap(onBus: 0, bufferSize: 8192, format: nil) {
             [weak self] buffer, time in
             guard let self else { return }
+
+            // Send raw buffer to speech recognizer (it handles its own format conversion)
+            self.onRawBuffer?(buffer)
 
             // Lazy-init the converter on first buffer (now we know the actual hardware format)
             if self.converter == nil {

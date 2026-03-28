@@ -11,11 +11,14 @@ final class AudioBufferManager {
     private var audioFile: AVAudioFile?
     private let sampleRate: Double = 16000
 
-    /// Duration of audio chunks provided to the transcriber (seconds)
-    let chunkDuration: TimeInterval = 5.0
+    /// Duration of audio chunks provided to the transcriber (seconds).
+    /// Whisper is designed for 30-second windows — shorter chunks destroy context
+    /// and produce [BLANK_AUDIO] / [inaudible] output.
+    let chunkDuration: TimeInterval = 30.0
 
-    /// Overlap between consecutive chunks (seconds)
-    let chunkOverlap: TimeInterval = 1.0
+    /// Overlap between consecutive chunks (seconds).
+    /// 5s overlap ensures no speech is lost at chunk boundaries.
+    let chunkOverlap: TimeInterval = 5.0
 
     private var chunkSampleCount: Int { Int(chunkDuration * sampleRate) }
     private var overlapSampleCount: Int { Int(chunkOverlap * sampleRate) }

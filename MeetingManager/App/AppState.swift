@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Speech
 import UserNotifications
 import os
 
@@ -31,6 +32,7 @@ final class AppState {
     let audioCaptureService: AudioCaptureService
     let transcriptionService: TranscriptionService
     let streamingTranscriber: StreamingTranscriber
+    let appleSpeechTranscriber: AppleSpeechTranscriber
 
     // State machine — single source of truth for meeting lifecycle
     private(set) var stateMachine: MeetingStateMachine
@@ -55,6 +57,7 @@ final class AppState {
         let txService = TranscriptionService()
         self.transcriptionService = txService
         self.streamingTranscriber = StreamingTranscriber(transcriptionService: txService)
+        self.appleSpeechTranscriber = AppleSpeechTranscriber()
 
         self.stateMachine = MeetingStateMachine(
             meetingRepository: meetingRepository,
@@ -162,8 +165,9 @@ final class AppState {
     /// Stop recording — stops transcription, delegates to the state machine, and marks complete.
     func stopRecording() {
         Task {
-            // Stop the streaming transcriber first
+            // Stop both transcribers
             await streamingTranscriber.stop()
+            appleSpeechTranscriber.stop()
 
             do {
                 // Save the meeting reference before stopRecording clears it
@@ -206,7 +210,7 @@ final class AppState {
             case "tiny-en", WhisperModel.tinyEn.rawValue: model = .tinyEn
             case "base-en", WhisperModel.baseEn.rawValue: model = .baseEn
             case "small-en", WhisperModel.smallEn.rawValue: model = .smallEn
-            default: model = .tinyEn  // Safe default
+            default: model = .baseEn  // base-en is 2x more accurate than tiny-en
             }
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
@@ -237,19 +241,20 @@ final class AppState {
 
         if settings.autoRecord {
             // Auto-record: immediately create meeting and start recording
-            Logger.general.info("Auto-recording for detected call: \(appName)")
-            Task {
+            fileLog("handleCallDetected: autoRecord=true, creating meeting for \(appName)")
+            Task { @MainActor in
                 do {
                     let title = "\(appName) Meeting"
-                    let meeting = try await stateMachine.createAndStartMeeting(title: title)
+                    let meeting = try await self.stateMachine.createAndStartMeeting(title: title)
                     self.activeMeeting = self.stateMachine.currentMeeting
                     self.isRecording = self.stateMachine.isRecording
                     self.selectedMeetingId = meeting.id
-                    loadMeetings()
-                    startTranscription(meetingId: meeting.id)
+                    self.loadMeetings()
+                    self.fileLog("handleCallDetected: meeting created \(meeting.id), calling startTranscription")
+                    self.startTranscription(meetingId: meeting.id)
                 } catch {
-                    Logger.general.error("Auto-record failed: \(error.localizedDescription)")
-                    lastUserError = error.localizedDescription
+                    self.fileLog("handleCallDetected: FAILED — \(error.localizedDescription)")
+                    self.lastUserError = error.localizedDescription
                 }
             }
         } else if settings.autoInvite {
@@ -282,32 +287,28 @@ final class AppState {
         }
     }
 
-    /// Start the streaming transcription loop for the given meeting.
-    /// If the model isn't loaded yet, waits up to 60 seconds for it.
+    /// Start live transcription using WhisperKit with 30-second audio chunks.
     private func startTranscription(meetingId: String) {
-        fileLog("startTranscription() called for \(meetingId), modelLoaded=\(transcriptionService.isModelLoaded)")
-        Task {
-            // If model isn't loaded yet, wait for it (it loads at app startup)
-            if !transcriptionService.isModelLoaded {
-                Logger.transcription.info("Waiting for WhisperKit model to finish loading before starting transcription...")
-                fileLog("Transcription: waiting for model to load...")
+        fileLog("startTranscription() called for \(meetingId) — using WhisperKit (30s chunks)")
 
-                for _ in 0..<60 {  // Wait up to 60 seconds
+        Task {
+            if !transcriptionService.isModelLoaded {
+                fileLog("WhisperKit: waiting for model to load...")
+                for _ in 0..<90 {
                     try? await Task.sleep(for: .seconds(1))
                     if transcriptionService.isModelLoaded { break }
                 }
             }
 
             guard transcriptionService.isModelLoaded else {
-                Logger.transcription.warning("WhisperKit model not loaded after 60s — recording without transcription")
-                fileLog("Transcription: FAILED — model not loaded after 60s")
+                fileLog("WhisperKit: model not loaded after 90s — no transcription")
                 await MainActor.run {
                     self.lastUserError = "Transcription model could not load. Recording audio only."
                 }
                 return
             }
 
-            fileLog("Transcription: model loaded, starting StreamingTranscriber for \(meetingId)")
+            fileLog("WhisperKit: model ready, starting StreamingTranscriber")
             await MainActor.run {
                 self.streamingTranscriber.start(
                     meetingId: meetingId,
@@ -315,8 +316,7 @@ final class AppState {
                     repository: self.transcriptRepository
                 )
             }
-            Logger.transcription.info("StreamingTranscriber started for meeting \(meetingId)")
-            fileLog("Transcription: StreamingTranscriber STARTED")
+            fileLog("WhisperKit StreamingTranscriber STARTED (30s chunks, base-en model)")
         }
     }
 

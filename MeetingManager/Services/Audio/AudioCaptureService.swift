@@ -8,7 +8,13 @@ final class AudioCaptureService: ObservableObject {
     @Published var micLevel: Float = 0
     @Published var systemLevel: Float = 0
 
-    private let micCapture = MicrophoneCapture()
+    let micCapture = MicrophoneCapture()
+
+    /// Callback for raw (unconverted) mic buffers — used by SFSpeechRecognizer.
+    var onRawMicBuffer: ((AVAudioPCMBuffer) -> Void)?
+
+    /// The AVAudioEngine used by mic capture — exposed for SFSpeechRecognizer integration.
+    var micEngine: AVAudioEngine { micCapture.engine }
     private let systemTap: AnyObject? = {
         if #available(macOS 14.2, *) {
             return SystemAudioTap()
@@ -47,7 +53,12 @@ final class AudioCaptureService: ObservableObject {
             Logger.audio.info("No preferred input device found; using system default")
         }
 
-        // Start mic capture
+        // Wire raw buffer callback for speech recognizer
+        micCapture.onRawBuffer = { [weak self] buffer in
+            self?.onRawMicBuffer?(buffer)
+        }
+
+        // Start mic capture — converted 16kHz buffers to buffer manager
         micCapture.onBuffer = { [weak self] buffer, time in
             self?.bufferManager.appendMicBuffer(buffer, at: time)
             self?.updateMicLevel(buffer)
