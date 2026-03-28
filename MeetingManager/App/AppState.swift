@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UserNotifications
 import os
 
 @Observable
@@ -219,6 +220,63 @@ final class AppState {
         }
     }
 
+    // MARK: - Call Detection Response
+
+    /// Called when a call app or browser meeting is detected.
+    /// Respects `autoRecord` and `autoInvite` settings.
+    @MainActor
+    private func handleCallDetected(appName: String) {
+        guard !isRecording else {
+            Logger.general.info("Call detected (\(appName)) but already recording — ignoring")
+            return
+        }
+
+        if settings.autoRecord {
+            // Auto-record: immediately create meeting and start recording
+            Logger.general.info("Auto-recording for detected call: \(appName)")
+            Task {
+                do {
+                    let title = "\(appName) Meeting"
+                    let meeting = try await stateMachine.createAndStartMeeting(title: title)
+                    self.activeMeeting = self.stateMachine.currentMeeting
+                    self.isRecording = self.stateMachine.isRecording
+                    self.selectedMeetingId = meeting.id
+                    loadMeetings()
+                    startTranscription(meetingId: meeting.id)
+                } catch {
+                    Logger.general.error("Auto-record failed: \(error.localizedDescription)")
+                    lastUserError = error.localizedDescription
+                }
+            }
+        } else if settings.autoInvite {
+            // Auto-invite: show a notification asking the user to start recording
+            Logger.general.info("Sending recording invite for detected call: \(appName)")
+            sendMeetingDetectedNotification(appName: appName)
+        } else {
+            Logger.general.info("Call detected (\(appName)) but auto-invite and auto-record are both off")
+        }
+    }
+
+    /// Send a macOS notification inviting the user to start recording.
+    private func sendMeetingDetectedNotification(appName: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(appName) detected"
+        content.body = "Tap to start recording this meeting."
+        content.sound = .default
+        content.categoryIdentifier = NotificationActions.meetingDetectedCategory
+
+        let request = UNNotificationRequest(
+            identifier: "meeting-detected-\(UUID().uuidString)",
+            content: content,
+            trigger: nil  // deliver immediately
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send meeting notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Start the streaming transcription loop for the given meeting.
     private func startTranscription(meetingId: String) {
         guard transcriptionService.isModelLoaded else {
@@ -281,7 +339,7 @@ final class AppState {
     // MARK: - Notification Observers
 
     private func observeNotifications() {
-        // Create ad-hoc meeting via state machine
+        // Create ad-hoc meeting via state machine (manual "New Meeting" button)
         NotificationCenter.default.publisher(for: .createNewMeeting)
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -294,16 +352,36 @@ final class AppState {
                             self.selectedMeetingId = meeting.id
                         }
                         self.loadMeetings()
-
-                        // Start live transcription
                         await MainActor.run {
                             self.startTranscription(meetingId: meeting.id)
                         }
                     } catch {
                         Logger.general.error("Failed to create ad-hoc meeting: \(error.localizedDescription)")
-                        await MainActor.run {
-                            self.lastUserError = error.localizedDescription
-                        }
+                        await MainActor.run { self.lastUserError = error.localizedDescription }
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // Call app detected — decide auto-record vs notification based on settings
+        NotificationCenter.default.publisher(for: .callAppLaunched)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                let appName = notification.userInfo?["appName"] as? String ?? "Meeting"
+                Task { @MainActor in
+                    self.handleCallDetected(appName: appName)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Call app closed — auto-stop recording if active
+        NotificationCenter.default.publisher(for: .callAppTerminated)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    if self.isRecording {
+                        Logger.general.info("Call ended — auto-stopping recording")
+                        self.stopRecording()
                     }
                 }
             }
@@ -319,7 +397,7 @@ final class AppState {
                     self.isRecording = self.stateMachine.isRecording
                     self.loadMeetings()
 
-                    // If recording just started (e.g., via auto-detect), start transcription
+                    // If recording just started, start transcription
                     if !wasRecording && self.isRecording,
                        let meetingId = self.stateMachine.currentMeeting?.id {
                         self.startTranscription(meetingId: meetingId)

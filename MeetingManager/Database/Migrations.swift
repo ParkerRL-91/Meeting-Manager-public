@@ -321,5 +321,12 @@ enum Migrations {
                 t.add(column: "aiEnabled", .boolean).notNull().defaults(to: true)
             }
         }
+
+        migrator.registerMigration("v6-auto-record-invite") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "autoRecord", .boolean).notNull().defaults(to: false)
+                t.add(column: "autoInvite", .boolean).notNull().defaults(to: true)
+            }
+        }
     }
 }

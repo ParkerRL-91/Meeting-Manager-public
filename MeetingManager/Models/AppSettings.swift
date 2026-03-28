@@ -12,6 +12,13 @@ struct AppSettings: Codable, Equatable {
     var theme: String
     var aiEnabled: Bool = true
 
+    /// When true, automatically start recording when a call app or browser meeting is detected.
+    var autoRecord: Bool = false
+
+    /// When true, show a notification suggesting to record when a meeting is detected.
+    /// Ignored if autoRecord is true (auto-record takes precedence).
+    var autoInvite: Bool = true
+
     static let `default` = AppSettings(
         whisperModel: "tiny-en",
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -31,7 +38,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
     enum Columns: String, ColumnExpression {
         case id, whisperModel, summaryPromptTemplate, claudeModel
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
-        case launchAtLogin, theme, aiEnabled
+        case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite
     }
 }
 

@@ -18,9 +18,12 @@ enum NotificationActions {
     /// Action to dismiss the notification without further action.
     static let dismiss = "DISMISS"
 
+    /// Category for auto-detected meeting invites (call app / browser meet).
+    static let meetingDetectedCategory = "MEETING_DETECTED"
+
     // MARK: - Registration
 
-    /// Register the meeting alert notification category with its associated actions.
+    /// Register all notification categories with their associated actions.
     static func registerCategories() {
         let startAction = UNNotificationAction(
             identifier: startRecording,
@@ -40,6 +43,7 @@ enum NotificationActions {
             options: [.destructive]
         )
 
+        // Scheduled meeting alert
         let meetingCategory = UNNotificationCategory(
             identifier: categoryIdentifier,
             actions: [startAction, snoozeAction, dismissAction],
@@ -47,7 +51,15 @@ enum NotificationActions {
             options: [.customDismissAction]
         )
 
-        UNUserNotificationCenter.current().setNotificationCategories([meetingCategory])
+        // Auto-detected call/meeting invite
+        let detectedCategory = UNNotificationCategory(
+            identifier: meetingDetectedCategory,
+            actions: [startAction, dismissAction],
+            intentIdentifiers: [],
+            options: [.customDismissAction]
+        )
+
+        UNUserNotificationCenter.current().setNotificationCategories([meetingCategory, detectedCategory])
         Logger.general.info("Registered notification categories")
     }
 }

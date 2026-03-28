@@ -235,22 +235,21 @@ final class MeetingStateMachine {
     private func handleCallAppLaunched(appName: String?) async {
         // Don't interrupt an already-running recording.
         guard !isRecording else {
-            Logger.general.info("Call app launched but recording already in progress — skipping auto-start")
+            Logger.general.info("Call app launched but recording already in progress — skipping")
             return
         }
 
+        // The state machine no longer auto-starts. It forwards the event to AppState
+        // (via .callAppLaunched notification, which AppState already observes) and lets
+        // AppState decide whether to auto-record or just show a notification, based on
+        // user settings. This method now only handles linking to nearby scheduled meetings.
         do {
-            // Check for a scheduled meeting that's within 15 minutes of now.
             let nearbyMeetings = try await meetingRepository.meetingsNearDate(Date(), windowMinutes: 15)
             if let scheduledMeeting = nearbyMeetings.first(where: { $0.status == .scheduled || $0.status == .notified }) {
-                Logger.general.info("Call app launched — auto-starting scheduled meeting: \(scheduledMeeting.title)")
-                try await startRecording(meeting: scheduledMeeting)
-            } else {
-                // No pre-scheduled meeting — create an ad-hoc one named after the detected app.
-                let title = appName.map { "\($0) Meeting" } ?? "Meeting"
-                Logger.general.info("Call app launched — creating ad-hoc meeting: \(title)")
-                _ = try await createAndStartMeeting(title: title)
+                Logger.general.info("Call app launched — notifying for scheduled meeting: \(scheduledMeeting.title)")
+                try await notifyUpcoming(meeting: scheduledMeeting)
             }
+            // Ad-hoc meeting creation is now handled by AppState based on autoRecord/autoInvite settings
         } catch {
             Logger.general.error("Failed to handle call app launch: \(error.localizedDescription)")
         }
