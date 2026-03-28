@@ -8,8 +8,12 @@ struct SummaryView: View {
 
     @Environment(AppState.self) private var appState
     @State private var summary: MeetingSummary?
+    @State private var meeting: Meeting?
     @State private var isLoading = true
     @State private var copiedToClipboard = false
+    @State private var copiedMarkdownToClipboard = false
+
+    private let exportService = ExportService()
 
     var body: some View {
         Group {
@@ -31,6 +35,7 @@ struct SummaryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadSummary()
         }
     }
@@ -60,6 +65,19 @@ struct SummaryView: View {
                     Label(
                         copiedToClipboard ? "Copied" : "Copy",
                         systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
+                    )
+                    .font(.caption)
+                    .fontWeight(.medium)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    copyAsMarkdown(summary)
+                } label: {
+                    Label(
+                        copiedMarkdownToClipboard ? "Copied" : "Copy as Markdown",
+                        systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
                     )
                     .font(.caption)
                     .fontWeight(.medium)
@@ -102,6 +120,29 @@ struct SummaryView: View {
         isLoading = true
         defer { isLoading = false }
         summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId)
+    }
+
+    private func copyAsMarkdown(_ summary: MeetingSummary) {
+        guard let meeting else { return }
+        let markdown = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+
+        #if canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
+        #endif
+
+        withAnimation {
+            copiedMarkdownToClipboard = true
+        }
+
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            await MainActor.run {
+                withAnimation {
+                    copiedMarkdownToClipboard = false
+                }
+            }
+        }
     }
 
     private func copyToClipboard(_ text: String) {

@@ -1,12 +1,18 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct FullTranscriptView: View {
     let meetingId: String
 
     @Environment(AppState.self) private var appState
     @State private var transcripts: [Transcript] = []
+    @State private var meeting: Meeting?
     @State private var searchQuery: String = ""
     @State private var isLoading = true
+
+    private let exportService = ExportService()
 
     private var filteredTranscripts: [Transcript] {
         if searchQuery.isEmpty {
@@ -20,10 +26,23 @@ struct FullTranscriptView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Search bar
-            SearchBar(query: $searchQuery, placeholder: "Search transcript...")
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+            // Search bar and export button
+            HStack(spacing: 12) {
+                SearchBar(query: $searchQuery, placeholder: "Search transcript...")
+
+                Button {
+                    Task { await exportTranscript() }
+                } label: {
+                    Label("Export Transcript", systemImage: "square.and.arrow.up")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(transcripts.isEmpty)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
 
             Divider()
                 .foregroundStyle(Color.appSeparator)
@@ -54,6 +73,7 @@ struct FullTranscriptView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadTranscripts()
         }
     }
@@ -75,6 +95,15 @@ struct FullTranscriptView: View {
             }
             .padding(.vertical, 8)
         }
+    }
+
+    // MARK: - Export
+
+    private func exportTranscript() async {
+        guard let meeting else { return }
+        let content = exportService.exportTranscriptText(meeting: meeting, transcripts: transcripts)
+        let filename = ExportService.sanitizedFilename(from: meeting.title) + "-transcript.txt"
+        _ = await exportService.saveToFile(content: content, suggestedName: filename, fileType: "txt")
     }
 
     // MARK: - Data Loading

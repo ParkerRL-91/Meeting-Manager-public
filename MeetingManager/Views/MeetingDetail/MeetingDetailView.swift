@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct MeetingDetailView: View {
     let meetingId: String
@@ -9,6 +12,8 @@ struct MeetingDetailView: View {
     @State private var selectedTab: DetailTab = .summary
     @State private var showingEditor = false
     @State private var showingDeleteConfirmation = false
+
+    private let exportService = ExportService()
 
     enum DetailTab: String, CaseIterable {
         case summary, transcript, notes
@@ -95,6 +100,17 @@ struct MeetingDetailView: View {
                         }
                         .help("Cancel meeting")
                     }
+
+                    Menu {
+                        Button("Summary (Markdown)") { Task { await exportSummary() } }
+                        Button("Transcript (Text)") { Task { await exportTranscript() } }
+                        Button("Full Report (Markdown)") { Task { await exportFullReport() } }
+                        Divider()
+                        Button("Copy Summary as Markdown") { copySummaryMarkdown() }
+                    } label: {
+                        Label("Export", systemImage: "square.and.arrow.up")
+                    }
+                    .help("Export meeting")
 
                     Button(role: .destructive) {
                         showingDeleteConfirmation = true
@@ -184,6 +200,46 @@ struct MeetingDetailView: View {
             } catch {
                 print("Failed to cancel meeting: \(error)")
             }
+        }
+    }
+
+    // MARK: - Export Actions
+
+    private func exportSummary() async {
+        guard let meeting else { return }
+        guard let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) else { return }
+        let content = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+        let filename = ExportService.sanitizedFilename(from: meeting.title) + "-summary.md"
+        _ = await exportService.saveToFile(content: content, suggestedName: filename, fileType: "md")
+    }
+
+    private func exportTranscript() async {
+        guard let meeting else { return }
+        let transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        let content = exportService.exportTranscriptText(meeting: meeting, transcripts: transcripts)
+        let filename = ExportService.sanitizedFilename(from: meeting.title) + "-transcript.txt"
+        _ = await exportService.saveToFile(content: content, suggestedName: filename, fileType: "txt")
+    }
+
+    private func exportFullReport() async {
+        guard let meeting else { return }
+        let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId)
+        let transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        let notes = (try? await appState.noteRepository.notesForMeeting(meetingId)) ?? []
+        let content = exportService.exportFullReport(meeting: meeting, summary: summary, transcripts: transcripts, notes: notes)
+        let filename = ExportService.sanitizedFilename(from: meeting.title) + "-report.md"
+        _ = await exportService.saveToFile(content: content, suggestedName: filename, fileType: "md")
+    }
+
+    private func copySummaryMarkdown() {
+        guard let meeting else { return }
+        Task {
+            guard let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) else { return }
+            let markdown = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+            #if canImport(AppKit)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(markdown, forType: .string)
+            #endif
         }
     }
 
