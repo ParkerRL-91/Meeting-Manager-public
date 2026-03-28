@@ -4,6 +4,7 @@ struct SidebarView: View {
     @Environment(AppState.self) private var appState
     @State private var searchQuery = ""
     @State private var showArchived = false
+    @State private var showAllActionItems = false
     @FocusState private var isSearchFocused: Bool
 
     private var filteredUpcoming: [Meeting] {
@@ -58,11 +59,23 @@ struct SidebarView: View {
                 SearchBar(query: $searchQuery, placeholder: "Search meetings...")
                     .focused($isSearchFocused)
 
-                Toggle(isOn: $showArchived) {
-                    Label("Show Archived", systemImage: "archivebox")
-                        .font(.subheadline)
+                HStack {
+                    Toggle(isOn: $showArchived) {
+                        Label("Show Archived", systemImage: "archivebox")
+                            .font(.subheadline)
+                    }
+                    .toggleStyle(.checkbox)
+
+                    Spacer()
+
+                    Button {
+                        showAllActionItems = true
+                    } label: {
+                        Label("Action Items", systemImage: "checklist")
+                            .font(.subheadline)
+                    }
+                    .buttonStyle(.borderless)
                 }
-                .toggleStyle(.checkbox)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -138,6 +151,11 @@ struct SidebarView: View {
             }
         }
         .background(Color.appBackground)
+        .sheet(isPresented: $showAllActionItems) {
+            AllActionItemsView()
+                .environment(appState)
+                .frame(minWidth: 500, minHeight: 400)
+        }
         .onAppear {
             appState.loadMeetings()
         }

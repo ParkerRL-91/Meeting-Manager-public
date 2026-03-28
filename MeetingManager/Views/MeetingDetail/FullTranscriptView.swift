@@ -36,6 +36,12 @@ struct FullTranscriptView: View {
                 )
                 .disabled(transcripts.isEmpty)
 
+                CopyButton(
+                    text: { formatTranscriptMarkdown() },
+                    label: "Copy as Markdown"
+                )
+                .disabled(transcripts.isEmpty)
+
                 Button {
                     Task { await exportTranscript() }
                 } label: {
@@ -109,6 +115,11 @@ struct FullTranscriptView: View {
         transcripts.map { transcript in
             "[\(transcript.formattedTimestamp)] \(transcript.speakerDisplayName): \(transcript.text)"
         }.joined(separator: "\n\n")
+    }
+
+    private func formatTranscriptMarkdown() -> String {
+        guard let meeting else { return formatTranscriptText() }
+        return exportService.exportTranscriptText(meeting: meeting, transcripts: transcripts)
     }
 
     // MARK: - Export
