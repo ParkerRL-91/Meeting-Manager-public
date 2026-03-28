@@ -59,7 +59,7 @@ struct TranscriptionConfiguration: Codable, Equatable {
 
     /// Voice Activity Detection energy threshold (0.0 – 1.0).
     /// Chunks whose RMS energy is below this value are skipped.
-    var vadEnergyThreshold: Float = 0.02
+    var vadEnergyThreshold: Float = 0.001
 
     /// Minimum segment confidence to keep (0.0 – 1.0).
     /// Segments below this are discarded as low-quality.

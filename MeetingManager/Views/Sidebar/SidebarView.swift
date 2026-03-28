@@ -164,9 +164,7 @@ struct SidebarView: View {
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
             isSearchFocused = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .createNewMeeting)) { _ in
-            createAdHocMeeting()
-        }
+        // .createNewMeeting is handled by AppState — no need to observe here
     }
 
     // MARK: - Actions
@@ -176,17 +174,8 @@ struct SidebarView: View {
     }
 
     private func createAdHocMeeting() {
-        Task {
-            do {
-                let meeting = try await appState.stateMachine.createAndStartMeeting(title: "New Meeting")
-                appState.activeMeeting = meeting
-                appState.isRecording = true
-                appState.selectedMeetingId = meeting.id
-                appState.loadMeetings()
-            } catch {
-                errorMessage = "Failed to create meeting: \(error.localizedDescription)"
-            }
-        }
+        // Post notification so AppState handles meeting creation + transcription start
+        NotificationCenter.default.post(name: .createNewMeeting, object: nil)
     }
 }
 

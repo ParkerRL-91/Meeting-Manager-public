@@ -66,6 +66,8 @@ final class AppState {
         observeNotifications()
         startProximityCheck()
         autoLoadTranscriptionModel()
+
+        fileLog("AppState initialized — starting model download")
     }
 
     // MARK: - Settings
@@ -208,13 +210,15 @@ final class AppState {
             }
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
+            fileLog("Model: loading \(model.rawValue)...")
             isLoadingModel = true
             do {
                 try await transcriptionService.loadModel(model)
                 Logger.transcription.info("WhisperKit model loaded — transcription is ready")
+                fileLog("Model: LOADED successfully — ready for transcription")
             } catch {
                 Logger.transcription.error("Failed to auto-load WhisperKit model: \(error.localizedDescription)")
-                // Non-fatal — recording works without transcription, user can retry from settings
+                fileLog("Model: FAILED to load — \(error.localizedDescription)")
             }
             isLoadingModel = false
         }
@@ -251,6 +255,7 @@ final class AppState {
         } else if settings.autoInvite {
             // Auto-invite: show a notification asking the user to start recording
             Logger.general.info("Sending recording invite for detected call: \(appName)")
+            fileLog("Detection: sending notification for \(appName) (autoInvite=true)")
             sendMeetingDetectedNotification(appName: appName)
         } else {
             Logger.general.info("Call detected (\(appName)) but auto-invite and auto-record are both off")
@@ -278,19 +283,63 @@ final class AppState {
     }
 
     /// Start the streaming transcription loop for the given meeting.
+    /// If the model isn't loaded yet, waits up to 60 seconds for it.
     private func startTranscription(meetingId: String) {
-        guard transcriptionService.isModelLoaded else {
-            Logger.transcription.warning("Cannot start transcription: WhisperKit model not loaded. Recording will continue without live transcript.")
-            lastUserError = "Transcription model is not loaded. Recording audio only. Go to Settings → Transcription to download a model."
-            return
-        }
+        fileLog("startTranscription() called for \(meetingId), modelLoaded=\(transcriptionService.isModelLoaded)")
+        Task {
+            // If model isn't loaded yet, wait for it (it loads at app startup)
+            if !transcriptionService.isModelLoaded {
+                Logger.transcription.info("Waiting for WhisperKit model to finish loading before starting transcription...")
+                fileLog("Transcription: waiting for model to load...")
 
-        streamingTranscriber.start(
-            meetingId: meetingId,
-            bufferManager: audioCaptureService.transcriptionBuffer,
-            repository: transcriptRepository
-        )
-        Logger.transcription.info("StreamingTranscriber started for meeting \(meetingId)")
+                for _ in 0..<60 {  // Wait up to 60 seconds
+                    try? await Task.sleep(for: .seconds(1))
+                    if transcriptionService.isModelLoaded { break }
+                }
+            }
+
+            guard transcriptionService.isModelLoaded else {
+                Logger.transcription.warning("WhisperKit model not loaded after 60s — recording without transcription")
+                fileLog("Transcription: FAILED — model not loaded after 60s")
+                await MainActor.run {
+                    self.lastUserError = "Transcription model could not load. Recording audio only."
+                }
+                return
+            }
+
+            fileLog("Transcription: model loaded, starting StreamingTranscriber for \(meetingId)")
+            await MainActor.run {
+                self.streamingTranscriber.start(
+                    meetingId: meetingId,
+                    bufferManager: self.audioCaptureService.transcriptionBuffer,
+                    repository: self.transcriptRepository
+                )
+            }
+            Logger.transcription.info("StreamingTranscriber started for meeting \(meetingId)")
+            fileLog("Transcription: StreamingTranscriber STARTED")
+        }
+    }
+
+    // MARK: - File Logging (for debugging with user)
+
+    /// Append a line to a shared log file that both the app and Claude can read.
+    static let logFile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
+
+    func fileLog(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: Self.logFile.path) {
+                if let handle = try? FileHandle(forWritingTo: Self.logFile) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                try? data.write(to: Self.logFile)
+            }
+        }
     }
 
     // MARK: - Meeting Proximity Detection
@@ -343,6 +392,7 @@ final class AppState {
         NotificationCenter.default.publisher(for: .createNewMeeting)
             .sink { [weak self] _ in
                 guard let self else { return }
+                self.fileLog("createNewMeeting notification received")
                 Task {
                     do {
                         let meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
@@ -350,6 +400,7 @@ final class AppState {
                             self.activeMeeting = self.stateMachine.currentMeeting
                             self.isRecording = self.stateMachine.isRecording
                             self.selectedMeetingId = meeting.id
+                            self.fileLog("Meeting created: \(meeting.id), starting transcription...")
                         }
                         self.loadMeetings()
                         await MainActor.run {

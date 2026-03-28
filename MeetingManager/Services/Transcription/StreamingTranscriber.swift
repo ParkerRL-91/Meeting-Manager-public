@@ -52,6 +52,15 @@ final class StreamingTranscriber {
         bufferManager: AudioBufferManager,
         repository: TranscriptRepository
     ) {
+        // File log for debugging
+        let logLine = "[StreamingTranscriber] start() called — isActive=\(isActive), modelLoaded=\(transcriptionService.isModelLoaded)\n"
+        if let data = logLine.data(using: .utf8),
+           let handle = try? FileHandle(forWritingTo: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MeetingManager/app.log")) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
+        }
+
         guard !isActive else {
             Logger.transcription.warning("StreamingTranscriber.start called while already active")
             return

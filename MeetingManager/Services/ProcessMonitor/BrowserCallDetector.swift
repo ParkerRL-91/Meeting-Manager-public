@@ -1,15 +1,16 @@
 import AppKit
+import CoreAudio
 import Foundation
 import os
 
-/// Detects browser-based video calls (Google Meet, Zoom web, etc.) by polling
-/// browser tab titles via AppleScript.
+/// Detects browser-based video calls (Google Meet, Zoom web, etc.)
 ///
-/// Posts `.callAppLaunched` when a meeting tab is found and `.callAppTerminated`
-/// when no matching tabs remain.
+/// Uses multiple detection strategies in order of reliability:
+/// 1. AppleScript to read Chrome/Safari tab titles (needs Automation permission)
+/// 2. CGWindowList to read window titles (needs Screen Recording permission)
+/// 3. Check if a browser is using the microphone (needs no special permissions)
 ///
-/// Uses AppleScript (Automation permission) rather than CGWindowList (Screen Recording permission)
-/// because Automation permission is easier to obtain and more reliably returns tab titles.
+/// Posts `.callAppLaunched` / `.callAppTerminated` notifications.
 @MainActor
 final class BrowserCallDetector {
 
@@ -18,17 +19,17 @@ final class BrowserCallDetector {
     private var pollTimer: Timer?
     private(set) var isInBrowserCall = false
     private(set) var detectedMeetingName: String?
+    private var pollCount = 0
 
     // MARK: - Lifecycle
 
-    /// Start polling every `interval` seconds (default 5 s).
     func start(interval: TimeInterval = 5) {
         guard pollTimer == nil else { return }
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
         }
         pollTimer?.fire()
-        Logger.general.info("BrowserCallDetector: started (interval \(interval, format: .fixed(precision: 0))s)")
+        fileLog("started (interval \(Int(interval))s)")
     }
 
     func stop() {
@@ -38,47 +39,61 @@ final class BrowserCallDetector {
             isInBrowserCall = false
             postNotification(.callAppTerminated)
         }
-        Logger.general.info("BrowserCallDetector: stopped")
     }
 
     // MARK: - Polling
 
     private func poll() {
+        pollCount += 1
         let result = detectBrowserCall()
+
+        if pollCount % 6 == 1 {
+            fileLog("poll #\(pollCount) — inCall=\(result.inCall), name=\(result.name ?? "nil"), method=\(result.method)")
+        }
 
         if result.inCall && !isInBrowserCall {
             isInBrowserCall = true
             detectedMeetingName = result.name
-            Logger.general.info("BrowserCallDetector: meeting detected — \(result.name ?? "unknown")")
+            fileLog("DETECTED: \(result.name ?? "unknown") via \(result.method)")
             postNotification(.callAppLaunched, meetingName: result.name)
         } else if !result.inCall && isInBrowserCall {
             isInBrowserCall = false
-            Logger.general.info("BrowserCallDetector: meeting ended")
+            fileLog("ENDED: \(detectedMeetingName ?? "unknown")")
             postNotification(.callAppTerminated, meetingName: detectedMeetingName)
             detectedMeetingName = nil
         }
     }
 
-    // MARK: - Detection Logic
+    // MARK: - Detection
 
     private struct DetectionResult {
         let inCall: Bool
         let name: String?
+        let method: String
     }
 
     private func detectBrowserCall() -> DetectionResult {
-        // Try Chrome first, then Safari
-        if let match = checkChromeTabTitles() {
-            return DetectionResult(inCall: true, name: match)
+        // Strategy 1: AppleScript (best — gives tab titles)
+        if let match = checkChromeTabsViaAppleScript() {
+            return DetectionResult(inCall: true, name: match, method: "AppleScript")
         }
-        if let match = checkSafariTabTitles() {
-            return DetectionResult(inCall: true, name: match)
+
+        // Strategy 2: CGWindowList (needs Screen Recording permission)
+        if let match = checkViaCGWindowList() {
+            return DetectionResult(inCall: true, name: match, method: "CGWindowList")
         }
-        return DetectionResult(inCall: false, name: nil)
+
+        // Strategy 3: Check if a browser is using the microphone (no permissions needed)
+        if isBrowserUsingMicrophone() {
+            return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage")
+        }
+
+        return DetectionResult(inCall: false, name: nil, method: "none")
     }
 
-    /// Query Chrome tab titles via AppleScript. Returns the matched meeting name, or nil.
-    private func checkChromeTabTitles() -> String? {
+    // MARK: - Strategy 1: AppleScript
+
+    private func checkChromeTabsViaAppleScript() -> String? {
         guard NSWorkspace.shared.runningApplications.contains(where: {
             $0.bundleIdentifier == "com.google.Chrome"
         }) else { return nil }
@@ -94,78 +109,132 @@ final class BrowserCallDetector {
             return tabTitles
         end tell
         """
-        return runAppleScriptAndMatch(script)
-    }
-
-    /// Query Safari tab titles via AppleScript. Returns the matched meeting name, or nil.
-    private func checkSafariTabTitles() -> String? {
-        guard NSWorkspace.shared.runningApplications.contains(where: {
-            $0.bundleIdentifier == "com.apple.Safari"
-        }) else { return nil }
-
-        let script = """
-        tell application "Safari"
-            set tabTitles to {}
-            repeat with w in windows
-                repeat with t in tabs of w
-                    set end of tabTitles to name of t
-                end repeat
-            end repeat
-            return tabTitles
-        end tell
-        """
-        return runAppleScriptAndMatch(script)
-    }
-
-    /// Execute an AppleScript that returns a list of tab titles, then check for meeting keywords.
-    private func runAppleScriptAndMatch(_ source: String) -> String? {
-        guard let appleScript = NSAppleScript(source: source) else { return nil }
-
+        guard let appleScript = NSAppleScript(source: script) else { return nil }
         var errorInfo: NSDictionary?
         let result = appleScript.executeAndReturnError(&errorInfo)
+        if errorInfo != nil { return nil }
 
-        if errorInfo != nil {
-            // AppleScript failed — user may not have granted Automation permission.
-            // This is expected on first run; macOS will prompt the user.
-            return nil
-        }
-
-        // Result is an AEDescriptor list of strings
         let count = result.numberOfItems
         guard count > 0 else { return nil }
 
         for i in 1...count {
-            guard let titleDescriptor = result.atIndex(i),
-                  let title = titleDescriptor.stringValue,
-                  !title.isEmpty else { continue }
-
-            // Check against meeting keywords
-            for keyword in CallAppRegistry.browserMeetingKeywords {
-                if title.localizedCaseInsensitiveContains(keyword) {
-                    return title
-                }
-            }
-
-            // Also match Google Meet URL-style titles: "Meet - xxx-xxxx-xxx"
-            if title.hasPrefix("Meet - ") || title.hasPrefix("Meet with ") {
-                return title
-            }
+            guard let desc = result.atIndex(i), let title = desc.stringValue, !title.isEmpty else { continue }
+            if matchesMeetingKeyword(title) { return title }
         }
-
         return nil
+    }
+
+    // MARK: - Strategy 2: CGWindowList
+
+    private func checkViaCGWindowList() -> String? {
+        let browserNames: Set<String> = ["Google Chrome", "Safari", "Firefox", "Microsoft Edge", "Brave Browser"]
+        let options = CGWindowListOption([.optionOnScreenOnly, .excludeDesktopElements])
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+
+        for w in list {
+            guard let owner = w[kCGWindowOwnerName as String] as? String,
+                  browserNames.contains(owner),
+                  let title = w[kCGWindowName as String] as? String,
+                  !title.isEmpty else { continue }
+            if matchesMeetingKeyword(title) { return title }
+        }
+        return nil
+    }
+
+    // MARK: - Strategy 3: Browser Microphone Usage
+
+    /// Check if any browser process is currently using the microphone.
+    /// This works without any special permissions — if Chrome/Safari has an active
+    /// audio input stream, the user is likely in a call.
+    private func isBrowserUsingMicrophone() -> Bool {
+        // Check if the default input device is being "hogged" or has active streams
+        // from a browser process. A simpler heuristic: if a browser is running AND
+        // the system's default input device is in use, the user is probably in a call.
+        let browserBundleIDs: Set<String> = [
+            "com.google.Chrome",
+            "com.apple.Safari",
+            "org.mozilla.firefox",
+            "com.microsoft.edgemac",
+            "com.brave.Browser",
+        ]
+
+        let browserIsRunning = NSWorkspace.shared.runningApplications.contains {
+            guard let bid = $0.bundleIdentifier else { return false }
+            return browserBundleIDs.contains(bid)
+        }
+        guard browserIsRunning else { return false }
+
+        // Check if the default input device has active IO (someone is using the mic)
+        var defaultDeviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0, nil,
+            &size,
+            &defaultDeviceID
+        )
+        guard status == noErr, defaultDeviceID != kAudioObjectUnknown else { return false }
+
+        // Check if the device is running (has active IO)
+        var isRunning: UInt32 = 0
+        var runningSize = UInt32(MemoryLayout<UInt32>.size)
+        var runningAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let runStatus = AudioObjectGetPropertyData(
+            defaultDeviceID,
+            &runningAddress,
+            0, nil,
+            &runningSize,
+            &isRunning
+        )
+        return runStatus == noErr && isRunning != 0
+    }
+
+    // MARK: - Keyword Matching
+
+    private func matchesMeetingKeyword(_ title: String) -> Bool {
+        for keyword in CallAppRegistry.browserMeetingKeywords {
+            if title.localizedCaseInsensitiveContains(keyword) { return true }
+        }
+        if title.hasPrefix("Meet - ") || title.hasPrefix("Meet with ") { return true }
+        return false
     }
 
     // MARK: - Notification
 
     private func postNotification(_ name: Notification.Name, meetingName: String? = nil) {
-        let displayName = meetingName ?? "Google Meet"
         NotificationCenter.default.post(
             name: name,
             object: self,
             userInfo: [
-                "appName": displayName,
+                "appName": meetingName ?? "Google Meet",
                 "bundleIdentifier": "browser.googleMeet",
             ]
         )
+    }
+
+    // MARK: - File Logging
+
+    private func fileLog(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] BrowserDetector: \(message)\n"
+        let logURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
+        if let data = line.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            }
+        }
     }
 }
