@@ -136,8 +136,21 @@ final class StreamingTranscriber {
                             return nil
                         }
 
-                        // Filter out Whisper hallucinations (repeated identical text)
-                        if text.hasPrefix(">> ") { return nil }  // fake "other speaker" from tiny model
+                        // Filter out Whisper hallucinations
+                        if text.hasPrefix(">> ") { return nil }  // fake "other speaker"
+
+                        // Detect repetitive hallucinations: "1 2 2 2 2 2..." or "same 1, 10, s. same 1, 10, s."
+                        // If the text is longer than 50 chars, check if any 5-char substring repeats 5+ times
+                        if text.count > 50 {
+                            let words = text.components(separatedBy: .whitespaces)
+                            if words.count > 10 {
+                                let uniqueWords = Set(words)
+                                // If <20% of words are unique, it's repetitive hallucination
+                                if Double(uniqueWords.count) / Double(words.count) < 0.2 {
+                                    return nil
+                                }
+                            }
+                        }
 
                         return Transcript(
                             meetingId: meetingId,
