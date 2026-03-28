@@ -49,7 +49,7 @@ enum WhisperModel: String, CaseIterable, Identifiable, Codable {
 /// User-configurable settings for the transcription pipeline.
 struct TranscriptionConfiguration: Codable, Equatable {
     /// The WhisperKit model to use.
-    var model: WhisperModel = .tinyEn
+    var model: WhisperModel = .baseEn
 
     /// Language code for transcription (BCP-47). WhisperKit uses this as a hint.
     var language: String = "en"

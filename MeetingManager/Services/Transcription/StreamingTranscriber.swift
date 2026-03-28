@@ -117,30 +117,55 @@ final class StreamingTranscriber {
 
                     guard !txSegments.isEmpty else { continue }
 
-                    // Map to Transcript records
+                    // Map to Transcript records, filtering out noise and hallucinations
                     let speakerLabel = Self.speakerLabel(for: chunk.source)
-                    let transcripts = txSegments.map { seg in
-                        Transcript(
+                    let transcripts = txSegments.compactMap { seg -> Transcript? in
+                        let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                        // Filter out WhisperKit noise tokens
+                        let noisePatterns = [
+                            "[BLANK_AUDIO]", "[INAUDIBLE]", "[inaudible]", "[INAAUDIBLE]",
+                            "[Music]", "[MUSIC]", "[ Inaudible ]", "[inautible]",
+                            "(chuckles)", "(mumbles)", "[no audio]", "[audio cuts out]",
+                            "[ Pause ]", "[", ">>", ""
+                        ]
+                        if noisePatterns.contains(where: { text.caseInsensitiveCompare($0) == .orderedSame })
+                            || text.count <= 1
+                            || text.hasPrefix("[") && text.hasSuffix("]")
+                            || text.hasPrefix("(") && text.hasSuffix(")") {
+                            return nil
+                        }
+
+                        // Filter out Whisper hallucinations (repeated identical text)
+                        if text.hasPrefix(">> ") { return nil }  // fake "other speaker" from tiny model
+
+                        return Transcript(
                             meetingId: meetingId,
                             speakerLabel: speakerLabel,
-                            text: seg.text,
+                            text: text,
                             startTime: chunkStartSeconds + seg.startTime,
                             endTime: chunkStartSeconds + seg.endTime,
                             confidence: seg.confidence
                         )
                     }
 
+                    // Deduplicate: if the same text appears 3+ times in a batch, it's hallucination
+                    let textCounts = Dictionary(grouping: transcripts, by: { $0.text }).mapValues { $0.count }
+                    let filteredTranscripts = transcripts.filter { (textCounts[$0.text] ?? 0) < 3 }
+
+                    guard !filteredTranscripts.isEmpty else { continue }
+
                     // Persist to database
-                    try await repository.saveBatch(transcripts)
+                    try await repository.saveBatch(filteredTranscripts)
 
                     // Update local state on the main actor
                     await MainActor.run {
-                        self.segments.append(contentsOf: transcripts)
+                        self.segments.append(contentsOf: filteredTranscripts)
                         self.segmentCount = self.segments.count
                     }
 
                     Logger.transcription.info(
-                        "Saved \(transcripts.count) segment(s) at offset \(chunkStartSeconds, format: .fixed(precision: 1))s"
+                        "Saved \(filteredTranscripts.count) segment(s) at offset \(chunkStartSeconds, format: .fixed(precision: 1))s"
                     )
                 } catch {
                     Logger.transcription.error(

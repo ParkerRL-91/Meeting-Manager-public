@@ -1,22 +1,24 @@
 import AVFoundation
 import os
 
-/// Captures microphone input using AVAudioEngine
+/// Captures microphone input using AVAudioEngine.
+///
+/// Feeds raw hardware-format audio to onRawBuffer (for SFSpeechRecognizer),
+/// and manually downsampled 16kHz mono Float32 to onBuffer (for WhisperKit + WAV recording).
+///
+/// Uses simple linear interpolation for downsampling instead of AVAudioConverter,
+/// which produces near-silent output in real-time streaming scenarios.
 final class MicrophoneCapture {
+    /// 16kHz mono Float32 buffers for WhisperKit + WAV recording.
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
-    /// Raw (unconverted) buffer callback — for SFSpeechRecognizer which handles its own conversion.
+    /// Raw hardware-format buffers for SFSpeechRecognizer.
     var onRawBuffer: ((AVAudioPCMBuffer) -> Void)?
 
     let engine = AVAudioEngine()
     private var isRunning = false
-    private var converter: AVAudioConverter?
     private(set) var preferredInputDeviceID: String?
 
-    func configure(inputDeviceID: String) {
-        self.preferredInputDeviceID = inputDeviceID
-    }
-
-    /// Target format: 16kHz mono Float32 (WhisperKit's expected input)
+    /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 16000,
@@ -24,84 +26,88 @@ final class MicrophoneCapture {
         interleaved: false
     )!
 
+    func configure(inputDeviceID: String) {
+        self.preferredInputDeviceID = inputDeviceID
+    }
+
     func start() throws {
         guard !isRunning else { return }
 
         let inputNode = engine.inputNode
         inputNode.removeTap(onBus: 0)
 
-        // Pass nil format — AVAudioEngine will use the hardware's native format.
-        // We set up a persistent converter to downsample to 16kHz mono.
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        guard hwFormat.sampleRate > 0 else {
+            throw AudioCaptureError.deviceNotFound
+        }
+
+        let hwRate = hwFormat.sampleRate
+        let hwChannels = Int(hwFormat.channelCount)
+        Logger.audio.info("Mic: \(hwRate)Hz \(hwChannels)ch → downsampling to 16kHz mono")
+
         inputNode.installTap(onBus: 0, bufferSize: 8192, format: nil) {
             [weak self] buffer, time in
             guard let self else { return }
 
-            // Send raw buffer to speech recognizer (it handles its own format conversion)
+            // Send raw buffer for SFSpeechRecognizer
             self.onRawBuffer?(buffer)
 
-            // Lazy-init the converter on first buffer (now we know the actual hardware format)
-            if self.converter == nil {
-                self.converter = AVAudioConverter(from: buffer.format, to: self.targetFormat)
-                let hwFmt = buffer.format
-                Logger.audio.info("Mic tap format: \(hwFmt.sampleRate)Hz \(hwFmt.channelCount)ch → converter created")
+            // Downsample to 16kHz mono using simple linear interpolation
+            guard let channelData = buffer.floatChannelData else { return }
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0 else { return }
+
+            // Mix all channels to mono
+            var monoSamples = [Float](repeating: 0, count: frameCount)
+            for ch in 0..<hwChannels {
+                let chPtr = channelData[ch]
+                for i in 0..<frameCount {
+                    monoSamples[i] += chPtr[i]
+                }
+            }
+            if hwChannels > 1 {
+                let scale = 1.0 / Float(hwChannels)
+                for i in 0..<frameCount {
+                    monoSamples[i] *= scale
+                }
             }
 
-            if let converted = self.convert(buffer) {
-                self.onBuffer?(converted, time)
+            // Resample from hwRate to 16000 Hz
+            let ratio = 16000.0 / hwRate
+            let outputCount = Int(Double(frameCount) * ratio)
+            guard outputCount > 0 else { return }
+
+            guard let outBuffer = AVAudioPCMBuffer(pcmFormat: self.targetFormat,
+                                                    frameCapacity: AVAudioFrameCount(outputCount)) else { return }
+            outBuffer.frameLength = AVAudioFrameCount(outputCount)
+            guard let outPtr = outBuffer.floatChannelData?[0] else { return }
+
+            // Linear interpolation resampling
+            for i in 0..<outputCount {
+                let srcPos = Double(i) / ratio
+                let srcIdx = Int(srcPos)
+                let frac = Float(srcPos - Double(srcIdx))
+
+                if srcIdx + 1 < frameCount {
+                    outPtr[i] = monoSamples[srcIdx] * (1 - frac) + monoSamples[srcIdx + 1] * frac
+                } else if srcIdx < frameCount {
+                    outPtr[i] = monoSamples[srcIdx]
+                }
             }
+
+            self.onBuffer?(outBuffer, time)
         }
 
         try engine.start()
         isRunning = true
-        Logger.audio.info("MicrophoneCapture started (format: nil, converter will init on first buffer)")
+        Logger.audio.info("MicrophoneCapture started (manual downsample to 16kHz)")
     }
 
     func stop() {
         guard isRunning else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        converter = nil
         isRunning = false
         Logger.audio.info("MicrophoneCapture stopped")
-    }
-
-    // MARK: - Conversion
-
-    /// Convert a buffer to 16kHz mono using the persistent converter.
-    private func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        // If already in target format, pass through
-        if buffer.format.sampleRate == targetFormat.sampleRate
-            && buffer.format.channelCount == targetFormat.channelCount {
-            return buffer
-        }
-
-        guard let converter else { return nil }
-
-        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
-        let outputFrameCount = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
-        guard outputFrameCount > 0 else { return nil }
-
-        guard let outputBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: outputFrameCount
-        ) else { return nil }
-
-        var error: NSError?
-        var consumed = false
-        let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
-
-        guard status == .haveData || status == .endOfStream, error == nil else {
-            return nil
-        }
-
-        return outputBuffer.frameLength > 0 ? outputBuffer : nil
     }
 }
