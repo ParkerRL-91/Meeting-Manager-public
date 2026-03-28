@@ -41,8 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func setupNotifications() {
         UNUserNotificationCenter.current().delegate = self
+        NotificationActions.registerCategories()
         notificationService = NotificationService()
-        notificationService?.requestAuthorization()
+        Task {
+            _ = await notificationService?.requestAuthorization()
+        }
     }
 
     func userNotificationCenter(

@@ -1,0 +1,102 @@
+import Foundation
+import os
+
+/// Manages prompt templates for AI summarization, including loading, saving,
+/// and variable substitution.
+final class PromptManager {
+
+    // MARK: - Available Template Variables
+
+    /// The placeholder tokens that can be used inside a prompt template.
+    static let availableVariables: [(token: String, description: String)] = [
+        ("{{meetingTitle}}", "Title of the meeting"),
+        ("{{date}}", "Date the meeting took place"),
+        ("{{duration}}", "Formatted duration (e.g. \"45 min\")"),
+        ("{{transcript}}", "Full meeting transcript"),
+        ("{{notes}}", "User-created notes"),
+    ]
+
+    // MARK: - Template Persistence
+
+    /// Loads the current prompt template from `AppSettings`, falling back to the
+    /// built-in default when the stored value is empty.
+    func loadTemplate() -> String {
+        let stored = AppSettings.default.summaryPromptTemplate
+        return stored.isEmpty ? DefaultPrompts.meetingSummary : stored
+    }
+
+    /// Persists a custom prompt template. Pass an empty string to effectively
+    /// revert to the default on next load.
+    func saveTemplate(_ template: String) {
+        do {
+            try AppDatabase.shared.writer.write { db in
+                if var settings = try AppSettings.fetchOne(db) {
+                    settings.summaryPromptTemplate = template
+                    try settings.update(db)
+                } else {
+                    var settings = AppSettings.default
+                    settings.summaryPromptTemplate = template
+                    try settings.insert(db)
+                }
+            }
+            Logger.ai.info("Prompt template saved (\(template.count) characters)")
+        } catch {
+            Logger.ai.error("Failed to save prompt template: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Variable Substitution
+
+    /// Replaces template placeholders with concrete meeting data.
+    ///
+    /// - Parameters:
+    ///   - template: The raw prompt template containing `{{…}}` placeholders.
+    ///   - meeting: The meeting whose metadata is injected.
+    ///   - transcript: The full transcript text.
+    ///   - notes: The combined user notes text.
+    /// - Returns: A ready-to-send prompt string with all placeholders filled in.
+    func substituteVariables(
+        template: String,
+        meeting: Meeting,
+        transcript: String,
+        notes: String
+    ) -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .long
+        dateFormatter.timeStyle = .short
+
+        let dateString: String
+        if let start = meeting.startDate ?? meeting.scheduledStartDate {
+            dateString = dateFormatter.string(from: start)
+        } else {
+            dateString = "Unknown date"
+        }
+
+        var result = template
+        result = result.replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
+        result = result.replacingOccurrences(of: "{{date}}", with: dateString)
+        result = result.replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
+        result = result.replacingOccurrences(of: "{{transcript}}", with: transcript)
+        result = result.replacingOccurrences(of: "{{notes}}", with: notes)
+
+        return result
+    }
+
+    // MARK: - Preview Helpers
+
+    /// Returns a sample-substituted prompt for UI preview purposes.
+    func previewSubstitution(template: String) -> String {
+        let sampleMeeting = Meeting(
+            title: "Sprint Planning",
+            startDate: Date().addingTimeInterval(-3600),
+            endDate: Date(),
+            status: .complete
+        )
+        return substituteVariables(
+            template: template,
+            meeting: sampleMeeting,
+            transcript: "[00:00] Alice: Let's discuss the roadmap.\n[00:15] Bob: Sounds good.",
+            notes: "Need to finalize Q3 priorities."
+        )
+    }
+}
