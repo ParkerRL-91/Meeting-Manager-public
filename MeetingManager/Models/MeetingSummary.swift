@@ -8,6 +8,7 @@ struct MeetingSummary: Identifiable, Codable, Equatable {
     var summaryText: String
     var modelUsed: String?
     var generatedAt: Date
+    var isEdited: Bool
 
     init(
         id: Int64? = nil,
@@ -15,7 +16,8 @@ struct MeetingSummary: Identifiable, Codable, Equatable {
         promptUsed: String,
         summaryText: String,
         modelUsed: String? = nil,
-        generatedAt: Date = Date()
+        generatedAt: Date = Date(),
+        isEdited: Bool = false
     ) {
         self.id = id
         self.meetingId = meetingId
@@ -23,6 +25,7 @@ struct MeetingSummary: Identifiable, Codable, Equatable {
         self.summaryText = summaryText
         self.modelUsed = modelUsed
         self.generatedAt = generatedAt
+        self.isEdited = isEdited
     }
 }
 
@@ -32,7 +35,7 @@ extension MeetingSummary: FetchableRecord, PersistableRecord {
     static let databaseTableName = "meetingSummary"
 
     enum Columns: String, ColumnExpression {
-        case id, meetingId, promptUsed, summaryText, modelUsed, generatedAt
+        case id, meetingId, promptUsed, summaryText, modelUsed, generatedAt, isEdited
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) {

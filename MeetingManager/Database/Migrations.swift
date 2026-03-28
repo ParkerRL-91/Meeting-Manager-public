@@ -86,5 +86,11 @@ enum Migrations {
                 t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
             }
         }
+
+        migrator.registerMigration("add-isEdited") { db in
+            try db.alter(table: "meetingSummary") { t in
+                t.add(column: "isEdited", .boolean).notNull().defaults(to: false)
+            }
+        }
     }
 }

@@ -13,6 +13,17 @@ struct SummaryView: View {
     @State private var copiedToClipboard = false
     @State private var copiedMarkdownToClipboard = false
 
+    // Editing state
+    @State private var isEditing = false
+    @State private var editedText = ""
+
+    // Regeneration state
+    @State private var isRegenerating = false
+    @State private var regenerateError: String?
+
+    // History
+    @State private var showHistory = false
+
     private let exportService = ExportService()
 
     var body: some View {
@@ -38,6 +49,10 @@ struct SummaryView: View {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadSummary()
         }
+        .sheet(isPresented: $showHistory) {
+            SummaryHistoryView(meetingId: meetingId)
+                .environment(appState)
+        }
     }
 
     // MARK: - Summary Content
@@ -57,43 +72,24 @@ struct SummaryView: View {
                     .font(.caption)
                     .foregroundStyle(Color.appTextTertiary)
 
+                if summary.isEdited {
+                    Text("Edited")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.appWarning)
+                        .clipShape(Capsule())
+                }
+
                 Spacer()
 
-                Button {
-                    copyToClipboard(summary.summaryText)
-                } label: {
-                    Label(
-                        copiedToClipboard ? "Copied" : "Copy",
-                        systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
-                    )
-                    .font(.caption)
-                    .fontWeight(.medium)
+                if isEditing {
+                    editingToolbar
+                } else {
+                    standardToolbar(summary)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
-                    copyAsMarkdown(summary)
-                } label: {
-                    Label(
-                        copiedMarkdownToClipboard ? "Copied" : "Copy as Markdown",
-                        systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
-                    )
-                    .font(.caption)
-                    .fontWeight(.medium)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
-                    // Placeholder for regenerate functionality
-                } label: {
-                    Label("Regenerate", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -101,17 +97,155 @@ struct SummaryView: View {
             Divider()
                 .foregroundStyle(Color.appSeparator)
 
-            // Summary text
-            ScrollView {
-                Text(summary.summaryText)
+            // Regeneration overlay or content
+            if isRegenerating {
+                Spacer()
+                VStack(spacing: 12) {
+                    ProgressView("Regenerating...")
+                        .foregroundStyle(Color.appTextPrimary)
+                }
+                Spacer()
+            } else if let error = regenerateError {
+                Spacer()
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.title)
+                        .foregroundStyle(Color.appWarning)
+
+                    Text("Regeneration Failed")
+                        .font(.headline)
+                        .foregroundStyle(Color.appTextPrimary)
+
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                        .multilineTextAlignment(.center)
+
+                    Button {
+                        regenerateSummary()
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Dismiss") {
+                        regenerateError = nil
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+                }
+                Spacer()
+            } else if isEditing {
+                // Editable text
+                TextEditor(text: $editedText)
                     .font(.body)
                     .foregroundStyle(Color.appTextPrimary)
-                    .textSelection(.enabled)
+                    .scrollContentBackground(.hidden)
                     .lineSpacing(4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
+                    .padding(12)
+                    .background(Color.appSurface)
+            } else {
+                // Summary text (read-only)
+                ScrollView {
+                    Text(summary.summaryText)
+                        .font(.body)
+                        .foregroundStyle(Color.appTextPrimary)
+                        .textSelection(.enabled)
+                        .lineSpacing(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
             }
         }
+    }
+
+    // MARK: - Toolbars
+
+    @ViewBuilder
+    private var editingToolbar: some View {
+        Button {
+            saveEdit()
+        } label: {
+            Label("Save", systemImage: "checkmark")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .tint(Color.appAccent)
+
+        Button {
+            isEditing = false
+            editedText = ""
+        } label: {
+            Label("Cancel", systemImage: "xmark")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private func standardToolbar(_ summary: MeetingSummary) -> some View {
+        Button {
+            copyToClipboard(summary.summaryText)
+        } label: {
+            Label(
+                copiedToClipboard ? "Copied" : "Copy",
+                systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
+            )
+            .font(.caption)
+            .fontWeight(.medium)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+
+        Button {
+            copyAsMarkdown(summary)
+        } label: {
+            Label(
+                copiedMarkdownToClipboard ? "Copied" : "Copy as Markdown",
+                systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
+            )
+            .font(.caption)
+            .fontWeight(.medium)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+
+        Button {
+            isEditing = true
+            editedText = summary.summaryText
+        } label: {
+            Label("Edit", systemImage: "pencil")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+
+        Button {
+            regenerateSummary()
+        } label: {
+            Label("Regenerate", systemImage: "arrow.clockwise")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+
+        Button {
+            showHistory = true
+        } label: {
+            Label("History", systemImage: "clock.arrow.circlepath")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
     }
 
     // MARK: - Actions
@@ -120,6 +254,49 @@ struct SummaryView: View {
         isLoading = true
         defer { isLoading = false }
         summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId)
+    }
+
+    private func saveEdit() {
+        guard var updatedSummary = summary else { return }
+        updatedSummary.summaryText = editedText
+        updatedSummary.isEdited = true
+
+        Task {
+            do {
+                try await appState.summaryRepository.update(updatedSummary)
+                summary = updatedSummary
+                isEditing = false
+                editedText = ""
+            } catch {
+                // Keep editing state on failure so user doesn't lose changes
+                print("Failed to save edited summary: \(error)")
+            }
+        }
+    }
+
+    private func regenerateSummary() {
+        guard let meeting else { return }
+
+        isRegenerating = true
+        regenerateError = nil
+
+        Task {
+            do {
+                let generator = SummaryGenerator()
+                let newSummary = try await generator.generateSummary(
+                    for: meeting,
+                    transcriptRepo: appState.transcriptRepository,
+                    noteRepo: appState.noteRepository,
+                    summaryRepo: appState.summaryRepository,
+                    claudeService: ClaudeService()
+                )
+                summary = newSummary
+                isRegenerating = false
+            } catch {
+                isRegenerating = false
+                regenerateError = error.localizedDescription
+            }
+        }
     }
 
     private func copyAsMarkdown(_ summary: MeetingSummary) {

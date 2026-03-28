@@ -32,6 +32,12 @@ final class SummaryRepository {
         }
     }
 
+    func update(_ summary: MeetingSummary) async throws {
+        try await database.writer.write { db in
+            try summary.update(db)
+        }
+    }
+
     func delete(_ summary: MeetingSummary) async throws {
         try await database.writer.write { db in
             _ = try summary.delete(db)
