@@ -21,6 +21,9 @@ final class CallDetectionService {
     private var launchObserver: NSObjectProtocol?
     private var terminateObserver: NSObjectProtocol?
 
+    /// Detects browser-based meetings (Google Meet, etc.) via window title polling.
+    private var browserDetector: BrowserCallDetector?
+
     // MARK: - Lifecycle
 
     init(startImmediately: Bool = true) {
@@ -37,6 +40,10 @@ final class CallDetectionService {
 
     func startMonitoring() {
         guard launchObserver == nil else { return }
+
+        // Start browser-based meeting detection (Google Meet, etc.)
+        browserDetector = BrowserCallDetector()
+        browserDetector?.start()
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter
 
@@ -73,6 +80,9 @@ final class CallDetectionService {
     }
 
     func stopMonitoring() {
+        browserDetector?.stop()
+        browserDetector = nil
+
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         if let observer = launchObserver {
             workspaceCenter.removeObserver(observer)

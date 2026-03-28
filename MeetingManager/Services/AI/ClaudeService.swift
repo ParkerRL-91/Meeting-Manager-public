@@ -55,6 +55,7 @@ enum ClaudeServiceError: LocalizedError {
     case emptyResponse
     case networkError(Error)
     case decodingError(Error)
+    case aiDisabled
 
     var errorDescription: String? {
         switch self {
@@ -70,6 +71,8 @@ enum ClaudeServiceError: LocalizedError {
             return "Network error: \(error.localizedDescription)"
         case .decodingError(let error):
             return "Failed to parse API response: \(error.localizedDescription)"
+        case .aiDisabled:
+            return "AI features are disabled. Enable them in Settings under Claude."
         }
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 
 // MARK: - State Transition Errors
 
@@ -193,11 +194,12 @@ final class MeetingStateMachine {
     // MARK: - Notification Observers
 
     private func observeNotifications() {
-        // When a call app launches, check for meetings near the current time
+        // When a call app launches, auto-start recording
         NotificationCenter.default.publisher(for: .callAppLaunched)
-            .sink { [weak self] _ in
+            .sink { [weak self] notification in
+                let appName = notification.userInfo?["appName"] as? String
                 Task { [weak self] in
-                    await self?.handleCallAppLaunched()
+                    await self?.handleCallAppLaunched(appName: appName)
                 }
             }
             .store(in: &cancellables)
@@ -230,24 +232,37 @@ final class MeetingStateMachine {
             .store(in: &cancellables)
     }
 
-    private func handleCallAppLaunched() async {
-        // Look for scheduled meetings near the current time
+    private func handleCallAppLaunched(appName: String?) async {
+        // Don't interrupt an already-running recording.
+        guard !isRecording else {
+            Logger.general.info("Call app launched but recording already in progress — skipping auto-start")
+            return
+        }
+
         do {
-            let nearbyMeetings = try await meetingRepository.meetingsNearDate(Date(), windowMinutes: 10)
-            for meeting in nearbyMeetings where meeting.status == .scheduled {
-                try await notifyUpcoming(meeting: meeting)
+            // Check for a scheduled meeting that's within 15 minutes of now.
+            let nearbyMeetings = try await meetingRepository.meetingsNearDate(Date(), windowMinutes: 15)
+            if let scheduledMeeting = nearbyMeetings.first(where: { $0.status == .scheduled || $0.status == .notified }) {
+                Logger.general.info("Call app launched — auto-starting scheduled meeting: \(scheduledMeeting.title)")
+                try await startRecording(meeting: scheduledMeeting)
+            } else {
+                // No pre-scheduled meeting — create an ad-hoc one named after the detected app.
+                let title = appName.map { "\($0) Meeting" } ?? "Meeting"
+                Logger.general.info("Call app launched — creating ad-hoc meeting: \(title)")
+                _ = try await createAndStartMeeting(title: title)
             }
         } catch {
-            print("[MeetingStateMachine] Failed to check nearby meetings: \(error)")
+            Logger.general.error("Failed to handle call app launch: \(error.localizedDescription)")
         }
     }
 
     private func handleCallAppTerminated() async {
         guard isRecording else { return }
+        Logger.general.info("Call app terminated — stopping recording")
         do {
             try await stopRecording()
         } catch {
-            print("[MeetingStateMachine] Failed to stop recording on call app termination: \(error)")
+            Logger.general.error("Failed to stop recording on call app termination: \(error.localizedDescription)")
         }
     }
 
@@ -256,18 +271,18 @@ final class MeetingStateMachine {
         if let meetingId = notification.userInfo?["meetingId"] as? String {
             do {
                 guard let meeting = try await meetingRepository.find(id: meetingId) else {
-                    print("[MeetingStateMachine] Meeting not found: \(meetingId)")
+                    Logger.general.warning("Meeting not found for start-recording notification: \(meetingId)")
                     return
                 }
                 try await startRecording(meeting: meeting)
             } catch {
-                print("[MeetingStateMachine] Failed to start recording for meeting \(meetingId): \(error)")
+                Logger.general.error("Failed to start recording for meeting \(meetingId): \(error.localizedDescription)")
             }
         } else {
             do {
                 _ = try await createAndStartMeeting(title: "New Meeting")
             } catch {
-                print("[MeetingStateMachine] Failed to create ad-hoc meeting: \(error)")
+                Logger.general.error("Failed to create ad-hoc meeting: \(error.localizedDescription)")
             }
         }
     }

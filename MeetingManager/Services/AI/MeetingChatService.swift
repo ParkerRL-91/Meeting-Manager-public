@@ -51,13 +51,20 @@ final class MeetingChatService {
     ///   - meetingId: The meeting to query about.
     ///   - question: The user's question.
     ///   - recentTranscriptMinutes: How many minutes of recent transcript to include (default 10).
+    ///   - settings: The user's app settings.
     /// - Returns: The assistant's response text.
     @discardableResult
     func sendQuery(
         meetingId: String,
         question: String,
-        recentTranscriptMinutes: Double = 10
+        recentTranscriptMinutes: Double = 10,
+        settings: AppSettings = .default
     ) async throws -> String {
+        guard settings.aiEnabled else {
+            Logger.ai.info("AI is disabled — skipping chat query for meeting \(meetingId)")
+            throw ClaudeServiceError.aiDisabled
+        }
+
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -99,7 +106,7 @@ final class MeetingChatService {
         try await chatMessageRepository.save(&userMessage)
 
         // 4. Call Claude
-        let model = AppSettings.default.claudeModel
+        let model = settings.claudeModel
         let response: String
         do {
             response = try await claudeService.sendMessage(

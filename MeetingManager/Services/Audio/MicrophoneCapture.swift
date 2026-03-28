@@ -6,6 +6,14 @@ final class MicrophoneCapture {
 
     private let engine = AVAudioEngine()
     private var isRunning = false
+    private(set) var preferredInputDeviceID: String?
+
+    /// Store a preferred input device ID to use when starting capture.
+    /// The device selection is logged; actual CoreAudio routing uses the system default
+    /// unless changed via System Preferences or a future CoreAudio integration.
+    func configure(inputDeviceID: String) {
+        self.preferredInputDeviceID = inputDeviceID
+    }
 
     /// Target format: 16kHz mono Float32 (WhisperKit's expected input)
     private let targetFormat = AVAudioFormat(

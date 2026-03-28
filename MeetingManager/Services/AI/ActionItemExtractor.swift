@@ -23,13 +23,20 @@ final class ActionItemExtractor {
     ///   - meeting: The meeting to extract action items from.
     ///   - transcriptRepo: Repository providing transcript text.
     ///   - actionItemRepo: Repository for persisting extracted items.
+    ///   - settings: The user's app settings.
     /// - Returns: The extracted and saved action items.
     @discardableResult
     func extractActionItems(
         for meeting: Meeting,
         transcriptRepo: TranscriptRepository,
-        actionItemRepo: ActionItemRepository
+        actionItemRepo: ActionItemRepository,
+        settings: AppSettings = .default
     ) async throws -> [ActionItem] {
+        guard settings.aiEnabled else {
+            Logger.ai.info("AI is disabled — skipping action item extraction for meeting \(meeting.id)")
+            return []
+        }
+
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -58,7 +65,7 @@ final class ActionItemExtractor {
         let userPrompt = "Extract action items from this meeting transcript:\n\n\(transcript)"
 
         // 3. Call Claude API
-        let model = AppSettings.default.claudeModel
+        let model = settings.claudeModel
         let responseText = try await claudeService.sendMessage(
             systemPrompt: systemPrompt,
             userPrompt: userPrompt,

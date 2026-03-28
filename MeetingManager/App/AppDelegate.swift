@@ -112,4 +112,5 @@ extension Notification.Name {
     static let exportMeeting = Notification.Name("exportMeeting")
     static let copySummary = Notification.Name("copySummary")
     static let focusSearch = Notification.Name("focusSearch")
+    static let meetingStartingSoon = Notification.Name("meetingStartingSoon")
 }

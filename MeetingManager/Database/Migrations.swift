@@ -315,5 +315,11 @@ enum Migrations {
                 )
             }
         }
+
+        migrator.registerMigration("v5-ai-enabled") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "aiEnabled", .boolean).notNull().defaults(to: true)
+            }
+        }
     }
 }

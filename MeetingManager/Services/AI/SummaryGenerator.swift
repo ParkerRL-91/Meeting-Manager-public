@@ -26,6 +26,7 @@ final class SummaryGenerator {
     ///   - noteRepo: Repository providing user notes.
     ///   - summaryRepo: Repository for persisting the generated summary.
     ///   - claudeService: The Claude API service.
+    ///   - settings: The user's app settings.
     /// - Returns: The saved `MeetingSummary`.
     @discardableResult
     func generateSummary(
@@ -33,8 +34,14 @@ final class SummaryGenerator {
         transcriptRepo: TranscriptRepository,
         noteRepo: NoteRepository,
         summaryRepo: SummaryRepository,
-        claudeService: ClaudeService
+        claudeService: ClaudeService,
+        settings: AppSettings = .default
     ) async throws -> MeetingSummary {
+        guard settings.aiEnabled else {
+            Logger.ai.info("AI is disabled — skipping summary generation for meeting \(meeting.id)")
+            throw ClaudeServiceError.aiDisabled
+        }
+
         isGenerating = true
         progress = "Fetching transcript..."
         defer {
@@ -51,7 +58,7 @@ final class SummaryGenerator {
 
         // 2. Build prompt
         progress = "Building prompt..."
-        let template = promptManager.loadTemplate()
+        let template = promptManager.loadTemplate(settings: settings)
         let userPrompt = promptManager.substituteVariables(
             template: template,
             meeting: meeting,
@@ -64,7 +71,7 @@ final class SummaryGenerator {
 
         // 3. Call Claude API
         progress = "Generating summary with Claude..."
-        let model = AppSettings.default.claudeModel
+        let model = settings.claudeModel
         let summaryText = try await claudeService.sendMessage(
             systemPrompt: systemPrompt,
             userPrompt: userPrompt,

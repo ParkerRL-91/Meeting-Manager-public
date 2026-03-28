@@ -10,6 +10,7 @@ struct AppSettings: Codable, Equatable {
     var notificationLeadTimeMinutes: Int
     var launchAtLogin: Bool
     var theme: String
+    var aiEnabled: Bool = true
 
     static let `default` = AppSettings(
         whisperModel: "tiny-en",
@@ -30,7 +31,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
     enum Columns: String, ColumnExpression {
         case id, whisperModel, summaryPromptTemplate, claudeModel
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
-        case launchAtLogin, theme
+        case launchAtLogin, theme, aiEnabled
     }
 }
 

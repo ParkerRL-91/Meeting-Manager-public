@@ -30,8 +30,10 @@ final class SystemAudioTap {
             tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [AudioObjectID]())
         }
 
+        // The tap UUID is used as its UID string when building the aggregate device.
+        let tapUUID = UUID()
         tapDescription.name = "MeetingManager.SystemAudioTap"
-        tapDescription.uuid = NSUUID() as UUID
+        tapDescription.uuid = tapUUID
 
         // Create the hardware tap
         var tapObjectID: AudioObjectID = kAudioObjectUnknown
@@ -41,9 +43,13 @@ final class SystemAudioTap {
         }
         self.tapID = tapObjectID
 
-        // Create aggregate device that includes the tap
-        let aggregateID = try createAggregateDevice(tapID: tapObjectID)
+        // Create aggregate device that includes the tap, identified by UUID string.
+        let aggregateID = try createAggregateDevice(tapUID: tapUUID.uuidString)
         self.aggregateDeviceID = aggregateID
+
+        // Give the aggregate device a moment to finish hardware negotiation
+        // before installing the IO proc — avoids kAudioHardwareNotReadyError ('nrdy').
+        try await Task.sleep(for: .milliseconds(300))
 
         // Set up IO proc to receive audio buffers
         try setupIOProc(deviceID: aggregateID)
@@ -96,15 +102,14 @@ final class SystemAudioTap {
 
     // MARK: - Private
 
-    private func createAggregateDevice(tapID: AudioObjectID) throws -> AudioObjectID {
+    private func createAggregateDevice(tapUID: String) throws -> AudioObjectID {
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: "MeetingManager Aggregate",
             kAudioAggregateDeviceUIDKey as String: "com.meetingmanager.aggregate.\(UUID().uuidString)",
             kAudioAggregateDeviceIsPrivateKey as String: true,
             kAudioAggregateDeviceTapListKey as String: [
-                [
-                    kAudioSubTapUIDKey as String: tapID
-                ]
+                // kAudioSubTapUIDKey expects the tap's UUID string, not its AudioObjectID.
+                [kAudioSubTapUIDKey as String: tapUID]
             ]
         ]
 

@@ -1,13 +1,12 @@
 import Foundation
+import WhisperKit
 import os
-
-// TODO: Replace with actual WhisperKit import when SPM dependency is added
-// import WhisperKit
 
 // MARK: - Transcription Segment
 
 /// A single segment produced by the transcription engine.
-struct TranscriptionSegment: Sendable {
+/// Named `TranscriptSegment` to avoid conflict with `WhisperKit.TranscriptSegment`.
+struct TranscriptSegment: Sendable {
     /// The transcribed text.
     let text: String
     /// Start time in seconds relative to the beginning of the chunk.
@@ -35,7 +34,7 @@ protocol TranscriptionEngine: Sendable {
         language: String,
         temperature: Float,
         suppressBlank: Bool
-    ) async throws -> [TranscriptionSegment]
+    ) async throws -> [TranscriptSegment]
 
     /// Release model resources.
     func unload()
@@ -66,49 +65,40 @@ enum TranscriptionError: LocalizedError {
     }
 }
 
-// MARK: - Whisper Engine Stub
+// MARK: - WhisperKit Engine
 
-/// Stub engine used until the real WhisperKit SPM package is added.
-/// Replace the body of each method with actual WhisperKit calls.
+/// Real transcription engine backed by WhisperKit (on-device Whisper).
 final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
-    // TODO: Replace with actual WhisperKit instance when SPM dependency is added
-    // private var whisperKit: WhisperKit?
-
     private let lock = NSLock()
+    private var whisperKit: WhisperKit?
     private var isLoaded = false
 
     func loadModel(
         named model: WhisperModel,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
-        Logger.transcription.info("Loading model: \(model.rawValue)")
+        Logger.transcription.info("Downloading/loading WhisperKit model: \(model.rawValue)")
+        progressHandler(0.05)
 
-        // TODO: Replace with actual WhisperKit calls when SPM dependency is added
-        // ──────────────────────────────────────────────────────────
-        // let config = WhisperKitConfig(
-        //     model: model.rawValue,
-        //     downloadBase: nil,  // uses default HuggingFace repo
-        //     verbose: false,
-        //     logLevel: .none,
-        //     prewarm: true,
-        //     load: true,
-        //     useBackgroundDownloadSession: false
-        // )
-        // whisperKit = try await WhisperKit(config)
-        // ──────────────────────────────────────────────────────────
+        let config = WhisperKitConfig(
+            model: model.rawValue,
+            verbose: false,
+            logLevel: .error,
+            prewarm: true,
+            load: true,
+            download: true,
+            useBackgroundDownloadSession: false
+        )
 
-        // Simulate progressive download for UI development
-        for step in stride(from: 0.0, through: 1.0, by: 0.1) {
-            try await Task.sleep(for: .milliseconds(100))
-            progressHandler(min(step, 1.0))
-        }
+        let kit = try await WhisperKit(config)
         progressHandler(1.0)
 
         lock.lock()
+        whisperKit = kit
         isLoaded = true
         lock.unlock()
 
-        Logger.transcription.info("Model loaded successfully: \(model.rawValue)")
+        Logger.transcription.info("WhisperKit model ready: \(model.rawValue)")
     }
 
     func transcribe(
@@ -116,62 +106,55 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         language: String,
         temperature: Float,
         suppressBlank: Bool
-    ) async throws -> [TranscriptionSegment] {
+    ) async throws -> [TranscriptSegment] {
         lock.lock()
+        let kit = whisperKit
         let loaded = isLoaded
         lock.unlock()
-        guard loaded else { throw TranscriptionError.modelNotLoaded }
+
+        guard loaded, let kit else { throw TranscriptionError.modelNotLoaded }
         guard !samples.isEmpty else { throw TranscriptionError.invalidSamples }
 
-        // TODO: Replace with actual WhisperKit calls when SPM dependency is added
-        // ──────────────────────────────────────────────────────────
-        // let decodingOptions = DecodingOptions(
-        //     verbose: false,
-        //     task: .transcribe,
-        //     language: language,
-        //     temperature: temperature,
-        //     temperatureIncrementOnFallback: 0.2,
-        //     temperatureFallbackCount: 3,
-        //     sampleLength: 224,
-        //     topK: 5,
-        //     usePrefillPrompt: true,
-        //     usePrefillCache: true,
-        //     skipSpecialTokens: true,
-        //     withoutTimestamps: false,
-        //     suppressBlank: suppressBlank
-        // )
-        //
-        // guard let whisperKit else { throw TranscriptionError.modelNotLoaded }
-        // let results = try await whisperKit.transcribe(
-        //     audioArray: samples,
-        //     decodeOptions: decodingOptions
-        // )
-        //
-        // return results.flatMap { result in
-        //     result.segments.map { seg in
-        //         TranscriptionSegment(
-        //             text: seg.text.trimmingCharacters(in: .whitespacesAndNewlines),
-        //             startTime: seg.start,
-        //             endTime: seg.end,
-        //             confidence: Double(seg.avgLogprob).normalized
-        //         )
-        //     }
-        // }
-        // ──────────────────────────────────────────────────────────
+        let decodingOptions = DecodingOptions(
+            verbose: false,
+            task: .transcribe,
+            language: language.isEmpty ? nil : language,
+            temperature: temperature,
+            temperatureIncrementOnFallback: 0.2,
+            temperatureFallbackCount: 3,
+            usePrefillPrompt: true,
+            usePrefillCache: true,
+            skipSpecialTokens: true,
+            suppressBlank: suppressBlank
+        )
 
-        // Stub: return an empty array so the pipeline compiles and runs
-        return []
+        let results = try await kit.transcribe(
+            audioArray: samples,
+            decodeOptions: decodingOptions
+        )
+
+        return results.flatMap { result in
+            result.segments.compactMap { seg in
+                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+                // Convert log-probability to a 0–1 confidence score.
+                let confidence = min(max(Double(Foundation.exp(seg.avgLogprob)), 0), 1)
+                return TranscriptSegment(
+                    text: text,
+                    startTime: Double(seg.start),
+                    endTime: Double(seg.end),
+                    confidence: confidence
+                )
+            }
+        }
     }
 
     func unload() {
-        // TODO: Replace with actual WhisperKit calls when SPM dependency is added
-        // whisperKit = nil
-
         lock.lock()
+        whisperKit = nil
         isLoaded = false
         lock.unlock()
-
-        Logger.transcription.info("Model unloaded")
+        Logger.transcription.info("WhisperKit model unloaded")
     }
 }
 
@@ -261,7 +244,7 @@ final class TranscriptionService {
 
     /// Transcribe raw 16 kHz mono samples and return segments.
     /// Segments with confidence below `configuration.minimumConfidence` are filtered out.
-    func transcribe(samples: [Float]) async throws -> [TranscriptionSegment] {
+    func transcribe(samples: [Float]) async throws -> [TranscriptSegment] {
         guard isModelLoaded else { throw TranscriptionError.modelNotLoaded }
         guard !samples.isEmpty else { throw TranscriptionError.invalidSamples }
 

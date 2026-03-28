@@ -18,10 +18,10 @@ final class PromptManager {
 
     // MARK: - Template Persistence
 
-    /// Loads the current prompt template from `AppSettings`, falling back to the
+    /// Loads the current prompt template from the provided `AppSettings`, falling back to the
     /// built-in default when the stored value is empty.
-    func loadTemplate() -> String {
-        let stored = AppSettings.default.summaryPromptTemplate
+    func loadTemplate(settings: AppSettings = .default) -> String {
+        let stored = settings.summaryPromptTemplate
         return stored.isEmpty ? DefaultPrompts.meetingSummary : stored
     }
 

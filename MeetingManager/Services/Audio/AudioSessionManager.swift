@@ -34,6 +34,35 @@ final class AudioSessionManager {
         AVCaptureDevice.default(for: .audio)
     }
 
+    /// Returns the best available input device, preferring external/USB devices over built-in
+    func bestInputDevice() -> AVCaptureDevice? {
+        let devices = availableInputDevices()
+
+        // Priority order: external/USB > headset > built-in default
+        let externalKeywords = ["headset", "headphone", "external", "usb", "thunderbolt", "interface", "yeti", "blue", "focusrite", "scarlett"]
+        let builtInKeywords = ["built-in", "macbook", "macpro", "mac mini", "imac"]
+
+        // First try to find a high-quality external device
+        for device in devices {
+            let name = device.localizedName.lowercased()
+            if externalKeywords.contains(where: { name.contains($0) }) {
+                return device
+            }
+        }
+
+        // Avoid built-in if possible, return first non-built-in
+        let nonBuiltIn = devices.filter { device in
+            let name = device.localizedName.lowercased()
+            return !builtInKeywords.contains(where: { name.contains($0) })
+        }
+        if let first = nonBuiltIn.first {
+            return first
+        }
+
+        // Fall back to system default
+        return defaultInputDevice()
+    }
+
     /// Check if screen recording permission is granted (needed for system audio capture)
     func hasScreenRecordingPermission() -> Bool {
         // Screen recording permission check via CGWindowListCopyWindowInfo

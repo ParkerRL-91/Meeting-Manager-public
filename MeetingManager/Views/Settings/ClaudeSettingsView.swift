@@ -4,6 +4,10 @@ import os
 /// Settings view for configuring the Claude API key and model selection.
 struct ClaudeSettingsView: View {
 
+    // MARK: - Environment
+
+    @Environment(AppState.self) private var appState
+
     // MARK: - State
 
     @State private var apiKey: String = ""
@@ -32,16 +36,38 @@ struct ClaudeSettingsView: View {
     // MARK: - Body
 
     var body: some View {
+        @Bindable var appState = appState
         Form {
+            aiToggleSection
             apiKeySection
+                .disabled(!appState.settings.aiEnabled)
+                .opacity(appState.settings.aiEnabled ? 1 : 0.5)
             modelSection
+                .disabled(!appState.settings.aiEnabled)
+                .opacity(appState.settings.aiEnabled ? 1 : 0.5)
             connectionSection
+                .disabled(!appState.settings.aiEnabled)
+                .opacity(appState.settings.aiEnabled ? 1 : 0.5)
         }
         .formStyle(.grouped)
         .onAppear(perform: loadSettings)
     }
 
     // MARK: - Sections
+
+    private var aiToggleSection: some View {
+        @Bindable var appState = appState
+        return Section {
+            Toggle("Enable AI Features", isOn: $appState.settings.aiEnabled)
+            if !appState.settings.aiEnabled {
+                Text("Transcription and meeting storage will still work. AI summaries, action items, and chat require a Claude API key.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("AI Features")
+        }
+    }
 
     private var apiKeySection: some View {
         Section {
@@ -154,7 +180,7 @@ struct ClaudeSettingsView: View {
         } catch {
             Logger.ai.error("Failed to load API key: \(error.localizedDescription)")
         }
-        selectedModel = AppSettings.default.claudeModel
+        selectedModel = appState.settings.claudeModel
     }
 
     private func saveAPIKey() {
@@ -171,21 +197,8 @@ struct ClaudeSettingsView: View {
     }
 
     private func saveModelSelection(_ model: String) {
-        do {
-            try AppDatabase.shared.writer.write { db in
-                if var settings = try AppSettings.fetchOne(db) {
-                    settings.claudeModel = model
-                    try settings.update(db)
-                } else {
-                    var settings = AppSettings.default
-                    settings.claudeModel = model
-                    try settings.insert(db)
-                }
-            }
-            Logger.ai.info("Model selection changed to \(model)")
-        } catch {
-            Logger.ai.error("Failed to save model selection: \(error.localizedDescription)")
-        }
+        appState.settings.claudeModel = model
+        Logger.ai.info("Model selection changed to \(model)")
     }
 
     private func testConnection() {

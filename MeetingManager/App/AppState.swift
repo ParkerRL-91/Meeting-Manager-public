@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import os
 
 @Observable
 @MainActor
@@ -11,6 +12,14 @@ final class AppState {
     var upcomingMeetings: [Meeting] = []
     var pastMeetings: [Meeting] = []
     var navigationPath = NavigationPath()
+
+    /// The user's persisted settings. Changes are automatically written to the database.
+    var settings: AppSettings = .default {
+        didSet {
+            guard settings != oldValue else { return }
+            persistSettings()
+        }
+    }
 
     // Services
     let database: AppDatabase
@@ -24,6 +33,7 @@ final class AppState {
     private(set) var stateMachine: MeetingStateMachine
 
     private var cancellables = Set<AnyCancellable>()
+    private var proximityTimer: Timer?
 
     init() {
         self.database = AppDatabase.shared
@@ -38,7 +48,44 @@ final class AppState {
         )
 
         loadMeetings()
+        loadSettings()
         observeNotifications()
+        startProximityCheck()
+    }
+
+    // MARK: - Settings
+
+    func loadSettings() {
+        Task {
+            do {
+                let loaded = try await database.writer.read { db in
+                    try AppSettings.fetchOne(db)
+                }
+                if let loaded {
+                    await MainActor.run { self.settings = loaded }
+                }
+            } catch {
+                print("Failed to load settings: \(error)")
+            }
+        }
+    }
+
+    private func persistSettings() {
+        let current = settings
+        Task {
+            do {
+                try await database.writer.write { db in
+                    if try AppSettings.fetchOne(db) != nil {
+                        try current.update(db)
+                    } else {
+                        var s = current
+                        try s.insert(db)
+                    }
+                }
+            } catch {
+                print("Failed to persist settings: \(error)")
+            }
+        }
     }
 
     func loadMeetings() {
@@ -99,6 +146,49 @@ final class AppState {
                 loadMeetings()
             } catch {
                 print("Failed to stop recording: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Meeting Proximity Detection
+
+    func startProximityCheck() {
+        proximityTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.checkUpcomingMeetings()
+            }
+        }
+        proximityTimer?.fire() // Run immediately
+    }
+
+    func stopProximityCheck() {
+        proximityTimer?.invalidate()
+        proximityTimer = nil
+    }
+
+    @MainActor
+    private func checkUpcomingMeetings() {
+        let now = Date()
+        let warningWindow: TimeInterval = Double(settings.notificationLeadTimeMinutes * 60)
+
+        for meeting in upcomingMeetings {
+            guard let startDate = meeting.scheduledStartDate else { continue }
+            let timeUntilStart = startDate.timeIntervalSince(now)
+
+            // Meeting starting within the notification window and not yet notified
+            if timeUntilStart > 0 && timeUntilStart <= warningWindow && meeting.status == .scheduled {
+                NotificationCenter.default.post(
+                    name: .meetingStartingSoon,
+                    object: nil,
+                    userInfo: ["meetingId": meeting.id, "minutesUntilStart": Int(timeUntilStart / 60)]
+                )
+                Logger.general.info("Meeting '\(meeting.title)' starting in \(Int(timeUntilStart / 60)) minutes")
+            }
+
+            // Auto-start: if meeting should have started (within 0-2 min past start) and we're not recording
+            if timeUntilStart >= -120 && timeUntilStart <= 0 && meeting.status == .scheduled && !isRecording {
+                Logger.general.info("Auto-starting recording for meeting: \(meeting.title)")
+                startRecording(for: meeting)
             }
         }
     }

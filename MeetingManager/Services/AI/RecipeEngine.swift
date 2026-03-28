@@ -27,6 +27,7 @@ final class RecipeEngine {
     ///   - noteRepo: Repository providing user notes.
     ///   - resultRepo: Repository for persisting the generated result.
     ///   - claudeService: The Claude API service.
+    ///   - settings: The user's app settings.
     /// - Returns: The generated output text.
     @discardableResult
     func execute(
@@ -35,8 +36,14 @@ final class RecipeEngine {
         transcriptRepo: TranscriptRepository,
         noteRepo: NoteRepository,
         resultRepo: RecipeResultRepository,
-        claudeService: ClaudeService
+        claudeService: ClaudeService,
+        settings: AppSettings = .default
     ) async throws -> String {
+        guard settings.aiEnabled else {
+            Logger.ai.info("AI is disabled — skipping recipe '\(recipe.name)' for meeting \(meeting.id)")
+            throw ClaudeServiceError.aiDisabled
+        }
+
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -60,7 +67,7 @@ final class RecipeEngine {
                 + "Produce clear, well-structured output based on the meeting data provided."
 
             // 3. Call Claude API
-            let model = AppSettings.default.claudeModel
+            let model = settings.claudeModel
             let outputText = try await claudeService.sendMessage(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,

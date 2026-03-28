@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import os
 
 /// Orchestrates mic + system audio capture for meeting recording
 final class AudioCaptureService: ObservableObject {
@@ -38,6 +39,14 @@ final class AudioCaptureService: ObservableObject {
 
         try bufferManager.prepareForRecording(outputURL: fileURL)
 
+        // Select the best available input device and configure mic capture
+        if let bestDevice = sessionManager.bestInputDevice() {
+            Logger.audio.info("Selected input device: \(bestDevice.localizedName) (id: \(bestDevice.uniqueID))")
+            micCapture.configure(inputDeviceID: bestDevice.uniqueID)
+        } else {
+            Logger.audio.info("No preferred input device found; using system default")
+        }
+
         // Start mic capture
         micCapture.onBuffer = { [weak self] buffer, time in
             self?.bufferManager.appendMicBuffer(buffer, at: time)
@@ -45,13 +54,20 @@ final class AudioCaptureService: ObservableObject {
         }
         try micCapture.start()
 
-        // Start system audio capture (for remote participant audio)
+        // Start system audio capture (for remote participant audio).
+        // Failure here is non-fatal — mic-only recording is still useful.
         if #available(macOS 14.2, *) {
             systemAudioTap?.onBuffer = { [weak self] buffer, time in
                 self?.bufferManager.appendSystemBuffer(buffer, at: time)
                 self?.updateSystemLevel(buffer)
             }
-            try await systemAudioTap?.start()
+            do {
+                try await systemAudioTap?.start()
+                Logger.audio.info("System audio tap started successfully")
+            } catch {
+                Logger.audio.error("System audio tap unavailable (mic-only mode): \(error.localizedDescription)")
+                // Continue — microphone capture alone is still recorded and transcribed.
+            }
         }
 
         await MainActor.run {
