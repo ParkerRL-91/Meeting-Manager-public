@@ -2,15 +2,30 @@ import SwiftUI
 
 struct MeetingMetadataHeader: View {
     let meeting: Meeting
+    var onEdit: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(meeting.title)
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Color.appTextPrimary)
-                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(meeting.title)
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.appTextPrimary)
+                        .lineLimit(2)
+
+                    if let onEdit {
+                        Button {
+                            onEdit()
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Edit meeting")
+                    }
+                }
 
                 HStack(spacing: 6) {
                     Image(systemName: "calendar")

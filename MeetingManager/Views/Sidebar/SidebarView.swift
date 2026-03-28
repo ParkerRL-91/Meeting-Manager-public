@@ -3,21 +3,28 @@ import SwiftUI
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
     @State private var searchQuery = ""
+    @State private var showArchived = false
 
     private var filteredUpcoming: [Meeting] {
+        let base = showArchived
+            ? appState.upcomingMeetings
+            : appState.upcomingMeetings.filter { $0.status != .archived }
         if searchQuery.isEmpty {
-            return appState.upcomingMeetings
+            return base
         }
-        return appState.upcomingMeetings.filter {
+        return base.filter {
             $0.title.localizedCaseInsensitiveContains(searchQuery)
         }
     }
 
     private var filteredPast: [Meeting] {
+        let base = showArchived
+            ? appState.pastMeetings
+            : appState.pastMeetings.filter { $0.status != .archived }
         if searchQuery.isEmpty {
-            return appState.pastMeetings
+            return base
         }
-        return appState.pastMeetings.filter {
+        return base.filter {
             $0.title.localizedCaseInsensitiveContains(searchQuery)
         }
     }
@@ -48,6 +55,12 @@ struct SidebarView: View {
                 .controlSize(.large)
 
                 SearchBar(query: $searchQuery, placeholder: "Search meetings...")
+
+                Toggle(isOn: $showArchived) {
+                    Label("Show Archived", systemImage: "archivebox")
+                        .font(.subheadline)
+                }
+                .toggleStyle(.checkbox)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -81,6 +94,15 @@ struct SidebarView: View {
                             ForEach(filteredUpcoming) { meeting in
                                 MeetingListRow(meeting: meeting)
                                     .tag(meeting.id)
+                                    .contextMenu {
+                                        if meeting.status == .scheduled || meeting.status == .notified {
+                                            Button {
+                                                startEarly(meeting)
+                                            } label: {
+                                                Label("Start Early", systemImage: "play.fill")
+                                            }
+                                        }
+                                    }
                             }
                         }
                     } else if searchQuery.isEmpty {
@@ -120,6 +142,10 @@ struct SidebarView: View {
     }
 
     // MARK: - Actions
+
+    private func startEarly(_ meeting: Meeting) {
+        appState.startRecording(for: meeting)
+    }
 
     private func createAdHocMeeting() {
         Task {

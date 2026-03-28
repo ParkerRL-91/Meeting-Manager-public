@@ -91,6 +91,30 @@ final class MeetingRepository {
         }
     }
 
+    func update(_ meeting: Meeting) async throws {
+        try await database.writer.write { db in
+            try meeting.update(db)
+        }
+    }
+
+    func archive(id: String) async throws {
+        try await database.writer.write { db in
+            if var meeting = try Meeting.fetchOne(db, key: id) {
+                meeting.status = .archived
+                try meeting.update(db)
+            }
+        }
+    }
+
+    func unarchive(id: String) async throws {
+        try await database.writer.write { db in
+            if var meeting = try Meeting.fetchOne(db, key: id) {
+                meeting.status = .complete
+                try meeting.update(db)
+            }
+        }
+    }
+
     /// Observe meetings list for real-time UI updates
     func observeUpcoming(
         onChange: @escaping ([Meeting]) -> Void

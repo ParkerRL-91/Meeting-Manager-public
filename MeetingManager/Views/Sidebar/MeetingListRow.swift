@@ -3,6 +3,8 @@ import SwiftUI
 struct MeetingListRow: View {
     let meeting: Meeting
 
+    @Environment(AppState.self) private var appState
+
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
@@ -33,6 +35,56 @@ struct MeetingListRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .swipeActions(edge: .leading) {
+            Button {
+                toggleArchive()
+            } label: {
+                Label(
+                    meeting.status == .archived ? "Unarchive" : "Archive",
+                    systemImage: "archivebox"
+                )
+            }
+            .tint(.blue)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deleteMeeting()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .tint(.red)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func toggleArchive() {
+        Task {
+            do {
+                if meeting.status == .archived {
+                    try await appState.meetingRepository.unarchive(id: meeting.id)
+                } else {
+                    try await appState.meetingRepository.archive(id: meeting.id)
+                }
+                appState.loadMeetings()
+            } catch {
+                print("Failed to toggle archive: \(error)")
+            }
+        }
+    }
+
+    private func deleteMeeting() {
+        Task {
+            do {
+                try await appState.meetingRepository.delete(meeting)
+                if appState.selectedMeetingId == meeting.id {
+                    appState.selectedMeetingId = nil
+                }
+                appState.loadMeetings()
+            } catch {
+                print("Failed to delete meeting: \(error)")
+            }
+        }
     }
 }
 
@@ -44,6 +96,7 @@ struct MeetingListRow: View {
         scheduledStartDate: Date().addingTimeInterval(3600),
         status: .scheduled
     ))
+    .environment(AppState())
     .padding()
     .frame(width: 320)
 }
@@ -55,6 +108,7 @@ struct MeetingListRow: View {
         endDate: Date().addingTimeInterval(-3600),
         status: .complete
     ))
+    .environment(AppState())
     .padding()
     .frame(width: 320)
 }
@@ -65,6 +119,7 @@ struct MeetingListRow: View {
         startDate: Date().addingTimeInterval(-1800),
         status: .recording
     ))
+    .environment(AppState())
     .padding()
     .frame(width: 320)
 }

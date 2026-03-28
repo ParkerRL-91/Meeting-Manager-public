@@ -8,6 +8,7 @@ enum MeetingStatus: String, Codable, CaseIterable {
     case summarizing
     case complete
     case cancelled
+    case archived
 
     var displayName: String {
         switch self {
@@ -18,6 +19,7 @@ enum MeetingStatus: String, Codable, CaseIterable {
         case .summarizing: return "Summarizing"
         case .complete: return "Complete"
         case .cancelled: return "Cancelled"
+        case .archived: return "Archived"
         }
     }
 
@@ -30,6 +32,7 @@ enum MeetingStatus: String, Codable, CaseIterable {
         case .summarizing: return .indigo
         case .complete: return .green
         case .cancelled: return .gray
+        case .archived: return .gray
         }
     }
 
@@ -42,6 +45,7 @@ enum MeetingStatus: String, Codable, CaseIterable {
         case .summarizing: return "sparkles"
         case .complete: return "checkmark.circle.fill"
         case .cancelled: return "xmark.circle"
+        case .archived: return "archivebox"
         }
     }
 

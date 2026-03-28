@@ -4,8 +4,11 @@ struct MeetingDetailView: View {
     let meetingId: String
 
     @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
     @State private var meeting: Meeting?
     @State private var selectedTab: DetailTab = .summary
+    @State private var showingEditor = false
+    @State private var showingDeleteConfirmation = false
 
     enum DetailTab: String, CaseIterable {
         case summary, transcript, notes
@@ -24,7 +27,9 @@ struct MeetingDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let meeting {
-                MeetingMetadataHeader(meeting: meeting)
+                MeetingMetadataHeader(meeting: meeting, onEdit: {
+                    showingEditor = true
+                })
 
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(DetailTab.allCases, id: \.self) { tab in
@@ -56,8 +61,142 @@ struct MeetingDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if let meeting {
+                    Button {
+                        showingEditor = true
+                    } label: {
+                        Label("Edit", systemImage: "pencil.circle")
+                    }
+                    .help("Edit meeting")
+
+                    if meeting.status == .archived {
+                        Button {
+                            unarchiveMeeting()
+                        } label: {
+                            Label("Unarchive", systemImage: "archivebox")
+                        }
+                        .help("Unarchive meeting")
+                    } else if !meeting.status.isActive {
+                        Button {
+                            archiveMeeting()
+                        } label: {
+                            Label("Archive", systemImage: "archivebox")
+                        }
+                        .help("Archive meeting")
+                    }
+
+                    if meeting.status == .scheduled {
+                        Button {
+                            cancelMeeting()
+                        } label: {
+                            Label("Cancel", systemImage: "xmark.circle")
+                        }
+                        .help("Cancel meeting")
+                    }
+
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .help("Delete meeting")
+                }
+            }
+        }
+        .sheet(isPresented: $showingEditor) {
+            if let meeting {
+                MeetingEditorSheet(meeting: meeting) { title, startDate, endDate in
+                    saveMeetingEdits(title: title, startDate: startDate, endDate: endDate)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete Meeting",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                deleteMeeting()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to delete this meeting? This will also delete all associated transcripts, notes, and summaries. This action cannot be undone.")
+        }
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func saveMeetingEdits(title: String, startDate: Date?, endDate: Date?) {
+        guard var updatedMeeting = meeting else { return }
+        updatedMeeting.title = title
+        updatedMeeting.scheduledStartDate = startDate
+        updatedMeeting.scheduledEndDate = endDate
+
+        Task {
+            do {
+                try await appState.meetingRepository.update(updatedMeeting)
+                meeting = updatedMeeting
+                appState.loadMeetings()
+            } catch {
+                print("Failed to update meeting: \(error)")
+            }
+        }
+    }
+
+    private func archiveMeeting() {
+        Task {
+            do {
+                try await appState.meetingRepository.archive(id: meetingId)
+                meeting?.status = .archived
+                appState.loadMeetings()
+            } catch {
+                print("Failed to archive meeting: \(error)")
+            }
+        }
+    }
+
+    private func unarchiveMeeting() {
+        Task {
+            do {
+                try await appState.meetingRepository.unarchive(id: meetingId)
+                meeting?.status = .complete
+                appState.loadMeetings()
+            } catch {
+                print("Failed to unarchive meeting: \(error)")
+            }
+        }
+    }
+
+    private func cancelMeeting() {
+        guard var updatedMeeting = meeting else { return }
+        updatedMeeting.status = .cancelled
+
+        Task {
+            do {
+                try await appState.meetingRepository.update(updatedMeeting)
+                meeting = updatedMeeting
+                appState.loadMeetings()
+            } catch {
+                print("Failed to cancel meeting: \(error)")
+            }
+        }
+    }
+
+    private func deleteMeeting() {
+        guard let meeting else { return }
+        Task {
+            do {
+                try await appState.meetingRepository.delete(meeting)
+                appState.selectedMeetingId = nil
+                appState.loadMeetings()
+            } catch {
+                print("Failed to delete meeting: \(error)")
+            }
         }
     }
 }
