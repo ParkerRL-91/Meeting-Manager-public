@@ -75,5 +75,16 @@ enum Migrations {
                 VALUES (1, ?)
                 """, arguments: [AppSettings.default.summaryPromptTemplate])
         }
+
+        migrator.registerMigration("v2") { db in
+            try db.create(table: "chatMessage") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("role", .text).notNull()
+                t.column("content", .text).notNull()
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+        }
     }
 }
