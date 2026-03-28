@@ -141,7 +141,7 @@ struct SidebarView: View {
         .onAppear {
             appState.loadMeetings()
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("focusSearch"))) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
             isSearchFocused = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .createNewMeeting)) { _ in

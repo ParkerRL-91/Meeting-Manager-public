@@ -8,10 +8,9 @@ final class ShareService {
     /// Opens native macOS share sheet for text content
     static func share(_ content: String, from view: NSView? = nil) {
         #if canImport(AppKit)
+        guard let anchorView = view ?? NSApplication.shared.keyWindow?.contentView else { return }
         let picker = NSSharingServicePicker(items: [content])
-        if let view = view {
-            picker.show(relativeTo: .zero, of: view, preferredEdge: .minY)
-        }
+        picker.show(relativeTo: .zero, of: anchorView, preferredEdge: .minY)
         #endif
     }
 

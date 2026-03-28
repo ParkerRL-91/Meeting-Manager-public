@@ -5,9 +5,8 @@ import Foundation
 final class OnboardingManager {
     private let completedKey = "onboardingCompleted"
 
-    var isCompleted: Bool {
-        get { UserDefaults.standard.bool(forKey: completedKey) }
-        set { UserDefaults.standard.set(newValue, forKey: completedKey) }
+    var isCompleted: Bool = UserDefaults.standard.bool(forKey: "onboardingCompleted") {
+        didSet { UserDefaults.standard.set(isCompleted, forKey: completedKey) }
     }
 
     var currentStep: OnboardingStep = .welcome

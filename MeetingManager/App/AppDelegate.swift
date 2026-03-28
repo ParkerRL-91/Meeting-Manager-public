@@ -108,4 +108,8 @@ extension Notification.Name {
     static let callAppLaunched = Notification.Name("callAppLaunched")
     static let callAppTerminated = Notification.Name("callAppTerminated")
     static let meetingStateChanged = Notification.Name("meetingStateChanged")
+    static let switchTab = Notification.Name("switchTab")
+    static let exportMeeting = Notification.Name("exportMeeting")
+    static let copySummary = Notification.Name("copySummary")
+    static let focusSearch = Notification.Name("focusSearch")
 }

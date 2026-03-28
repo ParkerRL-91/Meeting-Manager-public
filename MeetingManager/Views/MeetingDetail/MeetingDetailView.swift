@@ -171,16 +171,16 @@ struct MeetingDetailView: View {
         } message: {
             Text("Are you sure you want to delete this meeting? This will also delete all associated transcripts, notes, and summaries. This action cannot be undone.")
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("switchTab"))) { notification in
+        .onReceive(NotificationCenter.default.publisher(for: .switchTab)) { notification in
             if let tabName = notification.object as? String,
                let tab = DetailTab(rawValue: tabName) {
                 selectedTab = tab
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("exportMeeting"))) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .exportMeeting)) { _ in
             Task { await exportFullReport() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("copySummary"))) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .copySummary)) { _ in
             copySummaryMarkdown()
         }
         .task {

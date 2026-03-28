@@ -48,43 +48,43 @@ struct MeetingManagerApp: App {
                 .keyboardShortcut(KeyboardShortcuts.toggleRecording)
 
                 Button("Export Meeting...") {
-                    NotificationCenter.default.post(name: Notification.Name("exportMeeting"), object: nil)
+                    NotificationCenter.default.post(name: .exportMeeting, object: nil)
                 }
                 .keyboardShortcut(KeyboardShortcuts.exportMeeting)
 
                 Divider()
 
                 Button("Copy Summary") {
-                    NotificationCenter.default.post(name: Notification.Name("copySummary"), object: nil)
+                    NotificationCenter.default.post(name: .copySummary, object: nil)
                 }
                 .keyboardShortcut(KeyboardShortcuts.copySummary)
             }
 
             CommandMenu("Navigate") {
                 Button("Summary") {
-                    NotificationCenter.default.post(name: Notification.Name("switchTab"), object: "summary")
+                    NotificationCenter.default.post(name: .switchTab, object: "summary")
                 }
                 .keyboardShortcut(KeyboardShortcuts.tabSummary)
 
                 Button("Transcript") {
-                    NotificationCenter.default.post(name: Notification.Name("switchTab"), object: "transcript")
+                    NotificationCenter.default.post(name: .switchTab, object: "transcript")
                 }
                 .keyboardShortcut(KeyboardShortcuts.tabTranscript)
 
                 Button("Notes") {
-                    NotificationCenter.default.post(name: Notification.Name("switchTab"), object: "notes")
+                    NotificationCenter.default.post(name: .switchTab, object: "notes")
                 }
                 .keyboardShortcut(KeyboardShortcuts.tabNotes)
 
                 Button("Action Items") {
-                    NotificationCenter.default.post(name: Notification.Name("switchTab"), object: "actionItems")
+                    NotificationCenter.default.post(name: .switchTab, object: "actionItems")
                 }
                 .keyboardShortcut(KeyboardShortcuts.tabActionItems)
 
                 Divider()
 
                 Button("Find...") {
-                    NotificationCenter.default.post(name: Notification.Name("focusSearch"), object: nil)
+                    NotificationCenter.default.post(name: .focusSearch, object: nil)
                 }
                 .keyboardShortcut(KeyboardShortcuts.search)
             }
