@@ -115,7 +115,7 @@ private struct RecordingDot: View {
 
 // MARK: - Preview
 
-#Preview {
-    RecordingControlBar(meetingId: "preview-123")
-        .environment(AppState())
-}
+// #Preview {
+//     RecordingControlBar(meetingId: "preview-123")
+//         .environment(AppState())
+// }

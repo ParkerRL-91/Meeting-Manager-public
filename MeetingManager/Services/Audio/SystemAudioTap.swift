@@ -1,12 +1,13 @@
 import AVFoundation
 import CoreAudio
 
-/// Captures system audio output using Core Audio Taps (macOS 14.4+)
+/// Captures system audio output using Core Audio Taps (macOS 14.2+)
 ///
 /// This taps into the audio output of call apps (Zoom, Teams, etc.)
 /// to capture the remote participant's audio.
 ///
 /// Requires Screen Recording permission in System Settings > Privacy & Security.
+@available(macOS 14.2, *)
 final class SystemAudioTap {
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
 
@@ -20,21 +21,21 @@ final class SystemAudioTap {
         guard !isRunning else { return }
 
         // Create a process tap targeting call app audio
-        var tapDescription: CATapDescription
+        let tapDescription: CATapDescription
         if let pid = processID {
             // Tap a specific process
-            tapDescription = CATapDescription(stereoMixdownOfProcesses: [pid])
+            tapDescription = CATapDescription(stereoMixdownOfProcesses: [AudioObjectID(pid)])
         } else {
             // Tap all system output (fallback)
-            tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [AudioObjectID]())
         }
 
-        tapDescription.name = "MeetingManager.SystemAudioTap" as CFString
-        tapDescription.uuid = UUID()
+        tapDescription.name = "MeetingManager.SystemAudioTap"
+        tapDescription.uuid = NSUUID() as UUID
 
         // Create the hardware tap
         var tapObjectID: AudioObjectID = kAudioObjectUnknown
-        let tapStatus = AudioHardwareCreateProcessTap(&tapDescription, &tapObjectID)
+        let tapStatus = AudioHardwareCreateProcessTap(tapDescription, &tapObjectID)
         guard tapStatus == noErr else {
             throw AudioCaptureError.captureSetupFailed("Failed to create process tap: \(tapStatus)")
         }
@@ -65,14 +66,14 @@ final class SystemAudioTap {
         // Destroy aggregate device
         if aggregateDeviceID != kAudioObjectUnknown {
             var deviceID = aggregateDeviceID
-            let address = AudioObjectPropertyAddress(
+            var address = AudioObjectPropertyAddress(
                 mSelector: kAudioPlugInDestroyAggregateDevice,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain
             )
             var size = UInt32(MemoryLayout<AudioObjectID>.size)
             AudioObjectGetPropertyData(
-                kAudioObjectSystemObject,
+                UInt32(kAudioObjectSystemObject),
                 &address,
                 0,
                 nil,
@@ -122,20 +123,22 @@ final class SystemAudioTap {
     private func setupIOProc(deviceID: AudioObjectID) throws {
         let callback = self
 
+        let format = AVAudioFormat(
+            standardFormatWithSampleRate: 16000,
+            channels: 1
+        )!
+
         var procID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, nil) {
             _, inputData, inputTime, _, _ in
 
-            guard let bufferList = inputData?.pointee else { return }
-
-            let format = AVAudioFormat(
-                standardFormatWithSampleRate: 16000,
-                channels: 1
-            )!
-
-            guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: &bufferList) else {
-                return
-            }
+            let bufferList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+            guard let firstBuffer = bufferList.first,
+                  let data = firstBuffer.mData else { return }
+            let frameCount = firstBuffer.mDataByteSize / UInt32(MemoryLayout<Float>.size)
+            guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else { return }
+            pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
+            memcpy(pcmBuffer.floatChannelData?[0], data, Int(firstBuffer.mDataByteSize))
 
             let time = AVAudioTime(hostTime: inputTime.pointee.mHostTime)
             callback.onBuffer?(pcmBuffer, time)
@@ -151,24 +154,5 @@ final class SystemAudioTap {
         guard startStatus == noErr else {
             throw AudioCaptureError.captureSetupFailed("Failed to start audio device: \(startStatus)")
         }
-    }
-}
-
-// MARK: - CATapDescription (available macOS 14.4+)
-
-struct CATapDescription {
-    var name: CFString = "" as CFString
-    var uuid: UUID = UUID()
-    private var processes: [pid_t]
-    private var isExclusive: Bool
-
-    init(stereoMixdownOfProcesses processes: [pid_t]) {
-        self.processes = processes
-        self.isExclusive = false
-    }
-
-    init(stereoGlobalTapButExcludeProcesses excluded: [pid_t]) {
-        self.processes = excluded
-        self.isExclusive = true
     }
 }

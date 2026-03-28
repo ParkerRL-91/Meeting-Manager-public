@@ -9,9 +9,11 @@ final class MeetingRepository {
     }
 
     func save(_ meeting: inout Meeting) async throws {
+        var copy = meeting
         try await database.writer.write { db in
-            try meeting.save(db)
+            try copy.save(db)
         }
+        meeting = copy
     }
 
     func delete(_ meeting: Meeting) async throws {

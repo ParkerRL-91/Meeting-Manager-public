@@ -142,16 +142,16 @@ struct FullTranscriptView: View {
 
 // MARK: - Previews
 
-#Preview("With Transcripts") {
-    FullTranscriptView(meetingId: "preview-1")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-}
+// #Preview("With Transcripts") {
+//     FullTranscriptView(meetingId: "preview-1")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+// }
 
-#Preview("Empty") {
-    FullTranscriptView(meetingId: "no-transcript")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-}
+// #Preview("Empty") {
+//     FullTranscriptView(meetingId: "no-transcript")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+// }

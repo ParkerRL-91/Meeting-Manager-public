@@ -9,9 +9,11 @@ final class SummaryRepository {
     }
 
     func save(_ summary: inout MeetingSummary) async throws {
+        var copy = summary
         try await database.writer.write { db in
-            try summary.save(db)
+            try copy.save(db)
         }
+        summary = copy
     }
 
     func latestSummary(meetingId: String) async throws -> MeetingSummary? {

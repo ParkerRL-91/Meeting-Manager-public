@@ -40,9 +40,9 @@ struct WelcomeStepView: View {
     }
 }
 
-#Preview {
-    WelcomeStepView(onNext: {})
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-        .preferredColorScheme(.dark)
-}
+// #Preview {
+//     WelcomeStepView(onNext: {})
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+//         .preferredColorScheme(.dark)
+// }

@@ -30,7 +30,7 @@ final class CallDetectionService {
     }
 
     deinit {
-        stopMonitoring()
+        // Observers use [weak self] so they're safe when object is deallocated
     }
 
     // MARK: - Monitoring
@@ -55,7 +55,9 @@ final class CallDetectionService {
             queue: .main
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.handleAppLaunched(app)
+            MainActor.assumeIsolated {
+                self?.handleAppLaunched(app)
+            }
         }
 
         terminateObserver = workspaceCenter.addObserver(
@@ -64,7 +66,9 @@ final class CallDetectionService {
             queue: .main
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.handleAppTerminated(app)
+            MainActor.assumeIsolated {
+                self?.handleAppTerminated(app)
+            }
         }
     }
 

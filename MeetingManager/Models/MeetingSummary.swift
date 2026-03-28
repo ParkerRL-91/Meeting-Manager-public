@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-struct MeetingSummary: Identifiable, Codable, Equatable {
+struct MeetingSummary: Identifiable, Codable, Equatable, Hashable {
     var id: Int64?
     var meetingId: String
     var promptUsed: String

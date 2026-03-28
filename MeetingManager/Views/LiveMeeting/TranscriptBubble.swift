@@ -43,26 +43,26 @@ struct TranscriptBubble: View {
 
 // MARK: - Preview
 
-#Preview {
-    VStack(spacing: 0) {
-        TranscriptBubble(
-            transcript: Transcript(
-                meetingId: "preview",
-                speakerLabel: "mic",
-                text: "Let's review the quarterly numbers and see where we stand.",
-                startTime: 602,
-                endTime: 608
-            )
-        )
-        TranscriptBubble(
-            transcript: Transcript(
-                meetingId: "preview",
-                speakerLabel: "system",
-                text: "Sure, I've prepared the slides for this discussion.",
-                startTime: 610,
-                endTime: 615
-            )
-        )
-    }
-    .background(Color.appBackground)
-}
+// #Preview {
+//     VStack(spacing: 0) {
+//         TranscriptBubble(
+//             transcript: Transcript(
+//                 meetingId: "preview",
+//                 speakerLabel: "mic",
+//                 text: "Let's review the quarterly numbers and see where we stand.",
+//                 startTime: 602,
+//                 endTime: 608
+//             )
+//         )
+//         TranscriptBubble(
+//             transcript: Transcript(
+//                 meetingId: "preview",
+//                 speakerLabel: "system",
+//                 text: "Sure, I've prepared the slides for this discussion.",
+//                 startTime: 610,
+//                 endTime: 615
+//             )
+//         )
+//     }
+//     .background(Color.appBackground)
+// }

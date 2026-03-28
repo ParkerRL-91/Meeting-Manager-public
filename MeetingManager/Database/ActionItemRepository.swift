@@ -9,9 +9,11 @@ final class ActionItemRepository {
     }
 
     func save(_ item: inout ActionItem) async throws {
+        var copy = item
         try await database.writer.write { db in
-            try item.save(db)
+            try copy.save(db)
         }
+        item = copy
     }
 
     func saveBatch(_ items: [ActionItem]) async throws {

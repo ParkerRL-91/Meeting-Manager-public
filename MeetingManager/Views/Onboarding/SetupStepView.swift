@@ -133,9 +133,9 @@ struct SetupStepView: View {
     }
 }
 
-#Preview {
-    SetupStepView()
-        .frame(width: 600, height: 550)
-        .background(Color.appBackground)
-        .preferredColorScheme(.dark)
-}
+// #Preview {
+//     SetupStepView()
+//         .frame(width: 600, height: 550)
+//         .background(Color.appBackground)
+//         .preferredColorScheme(.dark)
+// }

@@ -31,11 +31,11 @@ struct AudioLevelIndicator: View {
 
 // MARK: - Preview
 
-#Preview {
-    HStack(spacing: 16) {
-        AudioLevelIndicator(label: "\u{1F3A4}", level: 0.6, color: .appAccent)
-        AudioLevelIndicator(label: "\u{1F50A}", level: 0.85, color: .appSuccess)
-    }
-    .padding()
-    .background(Color.appBackground)
-}
+// #Preview {
+//     HStack(spacing: 16) {
+//         AudioLevelIndicator(label: "\u{1F3A4}", level: 0.6, color: .appAccent)
+//         AudioLevelIndicator(label: "\u{1F50A}", level: 0.85, color: .appSuccess)
+//     }
+//     .padding()
+//     .background(Color.appBackground)
+// }

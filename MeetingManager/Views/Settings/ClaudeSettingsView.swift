@@ -134,7 +134,7 @@ struct ClaudeSettingsView: View {
                 .font(.caption)
         case .success:
             Label("Connected", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.appSuccess)
+                .foregroundStyle(Color.appSuccess)
                 .font(.caption)
         case .failed(let message):
             Label(message, systemImage: "xmark.circle.fill")
@@ -203,7 +203,7 @@ struct ClaudeSettingsView: View {
 
 // MARK: - Preview
 
-#Preview("Claude Settings") {
-    ClaudeSettingsView()
-        .frame(width: 500, height: 400)
-}
+// #Preview("Claude Settings") {
+//     ClaudeSettingsView()
+//         .frame(width: 500, height: 400)
+// }

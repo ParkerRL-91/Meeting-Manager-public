@@ -46,7 +46,7 @@ struct GoogleCalendarSettingsView: View {
             if authManager.isSignedIn {
                 HStack {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.appSuccess)
+                        .foregroundStyle(Color.appSuccess)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Connected")
                             .font(.headline)
@@ -225,7 +225,7 @@ struct GoogleCalendarSettingsView: View {
 
 // MARK: - Preview
 
-#Preview("Google Calendar Settings") {
-    GoogleCalendarSettingsView()
-        .frame(width: 500, height: 400)
-}
+// #Preview("Google Calendar Settings") {
+//     GoogleCalendarSettingsView()
+//         .frame(width: 500, height: 400)
+// }

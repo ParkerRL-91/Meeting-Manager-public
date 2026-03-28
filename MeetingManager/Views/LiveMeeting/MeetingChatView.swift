@@ -242,8 +242,8 @@ struct MeetingChatView: View {
 
 // MARK: - Preview
 
-#Preview {
-    MeetingChatView(meetingId: "preview-123")
-        .frame(width: 300, height: 500)
-        .environment(AppState())
-}
+// #Preview {
+//     MeetingChatView(meetingId: "preview-123")
+//         .frame(width: 300, height: 500)
+//         .environment(AppState())
+// }

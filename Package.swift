@@ -21,6 +21,7 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "MeetingManager",
+            exclude: ["Resources/Info.plist", "Resources/MeetingManager.entitlements"],
             resources: [
                 .process("Resources"),
             ]

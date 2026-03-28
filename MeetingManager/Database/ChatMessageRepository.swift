@@ -9,9 +9,11 @@ final class ChatMessageRepository {
     }
 
     func save(_ message: inout ChatMessage) async throws {
+        var copy = message
         try await database.writer.write { db in
-            try message.save(db)
+            try copy.save(db)
         }
+        message = copy
     }
 
     func messagesForMeeting(_ meetingId: String) async throws -> [ChatMessage] {

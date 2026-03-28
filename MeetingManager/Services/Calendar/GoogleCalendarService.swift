@@ -29,13 +29,13 @@ enum GoogleCalendarError: LocalizedError {
 // MARK: - API Response Types
 
 /// Mirrors the Google Calendar API event list response.
-private struct EventListResponse: Decodable {
+private struct EventListResponse: Decodable, Sendable {
     let items: [EventResource]?
     let nextPageToken: String?
 }
 
 /// Mirrors a single Google Calendar API event resource.
-private struct EventResource: Decodable {
+private struct EventResource: Decodable, Sendable {
     let id: String
     let summary: String?
     let description: String?
@@ -45,20 +45,20 @@ private struct EventResource: Decodable {
     let hangoutLink: String?
     let conferenceData: ConferenceData?
 
-    struct EventDateTime: Decodable {
+    struct EventDateTime: Decodable, Sendable {
         let dateTime: String?
         let date: String?
     }
 
-    struct Attendee: Decodable {
+    struct Attendee: Decodable, Sendable {
         let email: String?
         let displayName: String?
     }
 
-    struct ConferenceData: Decodable {
+    struct ConferenceData: Decodable, Sendable {
         let entryPoints: [EntryPoint]?
 
-        struct EntryPoint: Decodable {
+        struct EntryPoint: Decodable, Sendable {
             let entryPointType: String?
             let uri: String?
         }
@@ -66,11 +66,11 @@ private struct EventResource: Decodable {
 }
 
 /// Mirrors the Google Calendar API calendar list response.
-private struct CalendarListResponse: Decodable {
+private struct CalendarListResponse: Decodable, Sendable {
     let items: [CalendarResource]?
 }
 
-private struct CalendarResource: Decodable {
+private struct CalendarResource: Decodable, Sendable {
     let id: String
     let summary: String?
     let primary: Bool?

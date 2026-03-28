@@ -76,9 +76,9 @@ struct ReadyStepView: View {
     }
 }
 
-#Preview {
-    ReadyStepView(onComplete: {})
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-        .preferredColorScheme(.dark)
-}
+// #Preview {
+//     ReadyStepView(onComplete: {})
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+//         .preferredColorScheme(.dark)
+// }

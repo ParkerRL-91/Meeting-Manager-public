@@ -9,9 +9,11 @@ final class NoteRepository {
     }
 
     func save(_ note: inout MeetingNote) async throws {
+        var copy = note
         try await database.writer.write { db in
-            try note.save(db)
+            try copy.save(db)
         }
+        note = copy
     }
 
     func notesForMeeting(_ meetingId: String) async throws -> [MeetingNote] {

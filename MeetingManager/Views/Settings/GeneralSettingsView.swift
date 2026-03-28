@@ -133,7 +133,7 @@ struct GeneralSettingsView: View {
 
 // MARK: - Preview
 
-#Preview("General Settings") {
-    GeneralSettingsView()
-        .frame(width: 500, height: 400)
-}
+// #Preview("General Settings") {
+//     GeneralSettingsView()
+//         .frame(width: 500, height: 400)
+// }

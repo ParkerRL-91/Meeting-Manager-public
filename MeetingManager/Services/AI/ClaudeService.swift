@@ -191,10 +191,7 @@ final class ClaudeService {
             throw serviceError
         }
 
-        Logger.ai.info(
-            "Received response: \(claudeResponse.usage.input_tokens) input tokens, "
-            + "\(claudeResponse.usage.output_tokens) output tokens"
-        )
+        Logger.ai.info("Received response: \(claudeResponse.usage.input_tokens) input tokens, \(claudeResponse.usage.output_tokens) output tokens")
 
         return text
     }

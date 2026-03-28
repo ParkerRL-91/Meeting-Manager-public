@@ -34,7 +34,7 @@ struct PromptConfigView: View {
             HStack {
                 Text("Prompt Template")
                     .font(.headline)
-                    .foregroundStyle(.appTextPrimary)
+                    .foregroundStyle(Color.appTextPrimary)
 
                 Spacer()
 
@@ -81,11 +81,11 @@ struct PromptConfigView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Available Variables")
                 .font(.headline)
-                .foregroundStyle(.appTextPrimary)
+                .foregroundStyle(Color.appTextPrimary)
 
             Text("Use these placeholders in your template. They will be replaced with actual meeting data when generating a summary.")
                 .font(.caption)
-                .foregroundStyle(.appTextSecondary)
+                .foregroundStyle(Color.appTextSecondary)
 
             Divider()
 
@@ -93,12 +93,12 @@ struct PromptConfigView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(variable.token)
                         .font(.system(.callout, design: .monospaced))
-                        .foregroundStyle(.appAccent)
+                        .foregroundStyle(Color.appAccent)
                         .textSelection(.enabled)
 
                     Text(variable.description)
                         .font(.caption)
-                        .foregroundStyle(.appTextSecondary)
+                        .foregroundStyle(Color.appTextSecondary)
                 }
                 .padding(.vertical, 4)
             }
@@ -117,12 +117,12 @@ struct PromptConfigView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Sample output with placeholder data:")
                 .font(.caption)
-                .foregroundStyle(.appTextSecondary)
+                .foregroundStyle(Color.appTextSecondary)
 
             ScrollView {
                 Text(promptManager.previewSubstitution(template: template))
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.appTextPrimary)
+                    .foregroundStyle(Color.appTextPrimary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
@@ -141,11 +141,11 @@ struct PromptConfigView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Label("Tips", systemImage: "lightbulb")
                     .font(.caption.bold())
-                    .foregroundStyle(.appWarning)
+                    .foregroundStyle(Color.appWarning)
 
                 Text("Use Markdown formatting in your template for structured output. Ask for specific sections like action items or decisions.")
                     .font(.caption2)
-                    .foregroundStyle(.appTextSecondary)
+                    .foregroundStyle(Color.appTextSecondary)
             }
         }
     }
@@ -153,7 +153,7 @@ struct PromptConfigView: View {
 
 // MARK: - Preview
 
-#Preview("Prompt Configuration") {
-    PromptConfigView()
-        .frame(width: 700, height: 500)
-}
+// #Preview("Prompt Configuration") {
+//     PromptConfigView()
+//         .frame(width: 700, height: 500)
+// }

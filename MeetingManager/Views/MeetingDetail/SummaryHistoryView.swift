@@ -149,8 +149,8 @@ private struct SummaryHistoryRow: View {
 
 // MARK: - Preview
 
-#Preview {
-    SummaryHistoryView(meetingId: "preview-1")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-}
+// #Preview {
+//     SummaryHistoryView(meetingId: "preview-1")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+// }

@@ -24,20 +24,20 @@ struct EmptyStateView: View {
     }
 }
 
-#Preview("No Meetings") {
-    EmptyStateView(
-        icon: "calendar.badge.plus",
-        title: "No Meetings",
-        subtitle: "Your upcoming meetings will appear here once they are scheduled."
-    )
-    .frame(width: 400, height: 300)
-}
+// #Preview("No Meetings") {
+//     EmptyStateView(
+//         icon: "calendar.badge.plus",
+//         title: "No Meetings",
+//         subtitle: "Your upcoming meetings will appear here once they are scheduled."
+//     )
+//     .frame(width: 400, height: 300)
+// }
 
-#Preview("No Results") {
-    EmptyStateView(
-        icon: "magnifyingglass",
-        title: "No Results",
-        subtitle: "Try adjusting your search terms or filters."
-    )
-    .frame(width: 400, height: 300)
-}
+// #Preview("No Results") {
+//     EmptyStateView(
+//         icon: "magnifyingglass",
+//         title: "No Results",
+//         subtitle: "Try adjusting your search terms or filters."
+//     )
+//     .frame(width: 400, height: 300)
+// }

@@ -93,7 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     // MARK: - Call Detection
 
-    private func startCallDetection() {
+    @MainActor private func startCallDetection() {
         callDetectionService = CallDetectionService()
         callDetectionService?.startMonitoring()
     }

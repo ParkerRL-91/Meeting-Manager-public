@@ -35,6 +35,6 @@ struct SettingsView: View {
 
 // MARK: - Preview
 
-#Preview("Settings") {
-    SettingsView(updateService: UpdateService())
-}
+// #Preview("Settings") {
+//     SettingsView(updateService: UpdateService())
+// }

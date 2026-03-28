@@ -100,8 +100,8 @@ struct TranscriptPaneView: View {
 
 // MARK: - Preview
 
-#Preview {
-    TranscriptPaneView(meetingId: "preview-123")
-        .frame(width: 400, height: 500)
-        .environment(AppState())
-}
+// #Preview {
+//     TranscriptPaneView(meetingId: "preview-123")
+//         .frame(width: 400, height: 500)
+//         .environment(AppState())
+// }

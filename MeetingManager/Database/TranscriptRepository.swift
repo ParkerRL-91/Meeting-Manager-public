@@ -9,9 +9,11 @@ final class TranscriptRepository {
     }
 
     func save(_ transcript: inout Transcript) async throws {
+        var copy = transcript
         try await database.writer.write { db in
-            try transcript.save(db)
+            try copy.save(db)
         }
+        transcript = copy
     }
 
     func saveBatch(_ transcripts: [Transcript]) async throws {

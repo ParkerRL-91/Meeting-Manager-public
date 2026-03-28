@@ -340,16 +340,16 @@ struct SummaryView: View {
 
 // MARK: - Preview
 
-#Preview("With Summary") {
-    SummaryView(meetingId: "preview-1")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-}
+// #Preview("With Summary") {
+//     SummaryView(meetingId: "preview-1")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+// }
 
-#Preview("Empty") {
-    SummaryView(meetingId: "no-summary")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-}
+// #Preview("Empty") {
+//     SummaryView(meetingId: "no-summary")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+// }

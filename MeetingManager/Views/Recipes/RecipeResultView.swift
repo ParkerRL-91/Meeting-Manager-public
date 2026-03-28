@@ -225,17 +225,17 @@ struct RecipeResultView: View {
 
 // MARK: - Preview
 
-#Preview("Recipe Result") {
-    RecipeResultView(
-        recipe: Recipe(
-            name: "Follow-Up Email",
-            description: "Draft a follow-up email",
-            promptTemplate: "Test",
-            category: .email,
-            isBuiltIn: true
-        ),
-        meetingId: "preview-1"
-    )
-    .environment(AppState())
-    .frame(width: 560, height: 550)
-}
+// #Preview("Recipe Result") {
+//     RecipeResultView(
+//         recipe: Recipe(
+//             name: "Follow-Up Email",
+//             description: "Draft a follow-up email",
+//             promptTemplate: "Test",
+//             category: .email,
+//             isBuiltIn: true
+//         ),
+//         meetingId: "preview-1"
+//     )
+//     .environment(AppState())
+//     .frame(width: 560, height: 550)
+// }

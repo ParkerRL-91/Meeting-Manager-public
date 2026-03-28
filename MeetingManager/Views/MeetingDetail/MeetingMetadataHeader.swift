@@ -68,35 +68,35 @@ struct MeetingMetadataHeader: View {
 
 // MARK: - Previews
 
-#Preview("Completed Meeting") {
-    MeetingMetadataHeader(meeting: Meeting(
-        title: "Weekly Design Sync",
-        startDate: Date().addingTimeInterval(-7200),
-        endDate: Date().addingTimeInterval(-3600),
-        scheduledStartDate: Date().addingTimeInterval(-7200),
-        status: .complete
-    ))
-    .padding()
-    .background(Color.appBackground)
-}
+// #Preview("Completed Meeting") {
+//     MeetingMetadataHeader(meeting: Meeting(
+//         title: "Weekly Design Sync",
+//         startDate: Date().addingTimeInterval(-7200),
+//         endDate: Date().addingTimeInterval(-3600),
+//         scheduledStartDate: Date().addingTimeInterval(-7200),
+//         status: .complete
+//     ))
+//     .padding()
+//     .background(Color.appBackground)
+// }
 
-#Preview("Recording Meeting") {
-    MeetingMetadataHeader(meeting: Meeting(
-        title: "Sprint Planning - Q2 Roadmap Review",
-        startDate: Date().addingTimeInterval(-1800),
-        status: .recording
-    ))
-    .padding()
-    .background(Color.appBackground)
-}
+// #Preview("Recording Meeting") {
+//     MeetingMetadataHeader(meeting: Meeting(
+//         title: "Sprint Planning - Q2 Roadmap Review",
+//         startDate: Date().addingTimeInterval(-1800),
+//         status: .recording
+//     ))
+//     .padding()
+//     .background(Color.appBackground)
+// }
 
-#Preview("Scheduled Meeting") {
-    MeetingMetadataHeader(meeting: Meeting(
-        title: "1:1 with Manager",
-        scheduledStartDate: Date().addingTimeInterval(3600),
-        scheduledEndDate: Date().addingTimeInterval(5400),
-        status: .scheduled
-    ))
-    .padding()
-    .background(Color.appBackground)
-}
+// #Preview("Scheduled Meeting") {
+//     MeetingMetadataHeader(meeting: Meeting(
+//         title: "1:1 with Manager",
+//         scheduledStartDate: Date().addingTimeInterval(3600),
+//         scheduledEndDate: Date().addingTimeInterval(5400),
+//         status: .scheduled
+//     ))
+//     .padding()
+//     .background(Color.appBackground)
+// }

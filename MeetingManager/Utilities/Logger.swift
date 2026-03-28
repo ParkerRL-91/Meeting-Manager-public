@@ -1,3 +1,4 @@
+import Foundation
 import os
 
 /// Centralized logging categories built on top of `os.Logger`.

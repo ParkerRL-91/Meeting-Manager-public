@@ -317,8 +317,8 @@ struct MeetingDetailView: View {
 
 // MARK: - Preview
 
-#Preview("Detail View") {
-    MeetingDetailView(meetingId: "preview-1")
-        .environment(AppState())
-        .frame(width: 600, height: 700)
-}
+// #Preview("Detail View") {
+//     MeetingDetailView(meetingId: "preview-1")
+//         .environment(AppState())
+//         .frame(width: 600, height: 700)
+// }

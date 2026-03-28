@@ -78,16 +78,16 @@ struct NotesReviewView: View {
 
 // MARK: - Previews
 
-#Preview("With Notes") {
-    NotesReviewView(meetingId: "preview-1")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-}
+// #Preview("With Notes") {
+//     NotesReviewView(meetingId: "preview-1")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+// }
 
-#Preview("Empty") {
-    NotesReviewView(meetingId: "no-notes")
-        .environment(AppState())
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-}
+// #Preview("Empty") {
+//     NotesReviewView(meetingId: "no-notes")
+//         .environment(AppState())
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+// }

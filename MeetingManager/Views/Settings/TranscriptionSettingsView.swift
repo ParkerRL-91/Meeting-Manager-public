@@ -56,7 +56,7 @@ struct TranscriptionSettingsView: View {
                         .font(.caption)
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.appWarning)
+                        .foregroundStyle(Color.appWarning)
                 }
             }
         } header: {
@@ -102,7 +102,7 @@ struct TranscriptionSettingsView: View {
 
 // MARK: - Preview
 
-#Preview("Transcription Settings") {
-    TranscriptionSettingsView()
-        .frame(width: 500, height: 400)
-}
+// #Preview("Transcription Settings") {
+//     TranscriptionSettingsView()
+//         .frame(width: 500, height: 400)
+// }

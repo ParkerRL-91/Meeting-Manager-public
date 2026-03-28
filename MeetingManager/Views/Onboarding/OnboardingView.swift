@@ -95,8 +95,8 @@ private struct TrailingIconLabelStyle: LabelStyle {
     }
 }
 
-#Preview {
-    OnboardingView(onboardingManager: OnboardingManager())
-        .frame(width: 700, height: 550)
-        .preferredColorScheme(.dark)
-}
+// #Preview {
+//     OnboardingView(onboardingManager: OnboardingManager())
+//         .frame(width: 700, height: 550)
+//         .preferredColorScheme(.dark)
+// }

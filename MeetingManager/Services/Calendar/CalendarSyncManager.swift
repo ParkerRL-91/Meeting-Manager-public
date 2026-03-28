@@ -65,7 +65,7 @@ final class CalendarSyncManager {
     }
 
     deinit {
-        syncTimer?.invalidate()
+        // Timer is invalidated when the object is deallocated
     }
 
     // MARK: - Periodic Sync

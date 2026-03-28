@@ -9,9 +9,11 @@ final class RecipeRepository {
     }
 
     func save(_ recipe: inout Recipe) async throws {
+        var copy = recipe
         try await database.writer.write { db in
-            try recipe.save(db)
+            try copy.save(db)
         }
+        recipe = copy
     }
 
     func allRecipes() async throws -> [Recipe] {

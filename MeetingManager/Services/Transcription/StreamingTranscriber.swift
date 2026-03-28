@@ -47,7 +47,7 @@ final class StreamingTranscriber {
     ///   - meetingId: The meeting these transcripts belong to.
     ///   - bufferManager: Source of audio chunks.
     ///   - repository: Database layer for persisting transcripts.
-    func start(
+    @MainActor func start(
         meetingId: String,
         bufferManager: AudioBufferManager,
         repository: TranscriptRepository
@@ -144,10 +144,7 @@ final class StreamingTranscriber {
                 }
             }
 
-            Logger.transcription.info(
-                "Streaming transcription ended for meeting \(meetingId). "
-                + "Total segments: \(self.segmentCount)"
-            )
+            Logger.transcription.info("Streaming transcription ended for meeting \(meetingId). Total segments: \(self.segmentCount)")
 
             await MainActor.run {
                 self.isActive = false

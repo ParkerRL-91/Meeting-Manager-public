@@ -135,9 +135,9 @@ struct PermissionsStepView: View {
     }
 }
 
-#Preview {
-    PermissionsStepView()
-        .frame(width: 600, height: 500)
-        .background(Color.appBackground)
-        .preferredColorScheme(.dark)
-}
+// #Preview {
+//     PermissionsStepView()
+//         .frame(width: 600, height: 500)
+//         .background(Color.appBackground)
+//         .preferredColorScheme(.dark)
+// }

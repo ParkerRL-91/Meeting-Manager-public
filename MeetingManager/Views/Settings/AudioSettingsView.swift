@@ -57,7 +57,7 @@ struct AudioSettingsView: View {
                     Text("Microphone Access")
                 } icon: {
                     Image(systemName: hasMicPermission ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(hasMicPermission ? .appSuccess : .red)
+                        .foregroundStyle(hasMicPermission ? Color.appSuccess : .red)
                 }
 
                 Spacer()
@@ -65,7 +65,7 @@ struct AudioSettingsView: View {
                 if hasMicPermission {
                     Text("Granted")
                         .font(.caption)
-                        .foregroundStyle(.appSuccess)
+                        .foregroundStyle(Color.appSuccess)
                 } else {
                     Button("Request Permission") {
                         requestMicPermission()
@@ -80,7 +80,7 @@ struct AudioSettingsView: View {
                     Text("Screen Recording")
                 } icon: {
                     Image(systemName: hasScreenRecordingPermission ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(hasScreenRecordingPermission ? .appSuccess : .red)
+                        .foregroundStyle(hasScreenRecordingPermission ? Color.appSuccess : .red)
                 }
 
                 Spacer()
@@ -88,7 +88,7 @@ struct AudioSettingsView: View {
                 if hasScreenRecordingPermission {
                     Text("Granted")
                         .font(.caption)
-                        .foregroundStyle(.appSuccess)
+                        .foregroundStyle(Color.appSuccess)
                 } else {
                     Button("Open System Settings") {
                         openScreenRecordingSettings()
@@ -151,7 +151,7 @@ struct AudioSettingsView: View {
 
 // MARK: - Preview
 
-#Preview("Audio Settings") {
-    AudioSettingsView()
-        .frame(width: 500, height: 400)
-}
+// #Preview("Audio Settings") {
+//     AudioSettingsView()
+//         .frame(width: 500, height: 400)
+// }

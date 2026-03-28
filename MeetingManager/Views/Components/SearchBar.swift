@@ -33,14 +33,14 @@ struct SearchBar: View {
     }
 }
 
-#Preview("Empty") {
-    SearchBar(query: .constant(""))
-        .frame(width: 260)
-        .padding()
-}
+// #Preview("Empty") {
+//     SearchBar(query: .constant(""))
+//         .frame(width: 260)
+//         .padding()
+// }
 
-#Preview("With Text") {
-    SearchBar(query: .constant("Weekly standup"))
-        .frame(width: 260)
-        .padding()
-}
+// #Preview("With Text") {
+//     SearchBar(query: .constant("Weekly standup"))
+//         .frame(width: 260)
+//         .padding()
+// }

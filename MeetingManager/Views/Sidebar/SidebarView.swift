@@ -192,14 +192,14 @@ struct SidebarView: View {
 
 // MARK: - Previews
 
-#Preview("With Meetings") {
-    SidebarView()
-        .environment(AppState())
-        .frame(width: 300, height: 600)
-}
+// #Preview("With Meetings") {
+//     SidebarView()
+//         .environment(AppState())
+//         .frame(width: 300, height: 600)
+// }
 
-#Preview("Empty State") {
-    SidebarView()
-        .environment(AppState())
-        .frame(width: 300, height: 600)
-}
+// #Preview("Empty State") {
+//     SidebarView()
+//         .environment(AppState())
+//         .frame(width: 300, height: 600)
+// }

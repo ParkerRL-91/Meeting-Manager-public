@@ -126,8 +126,8 @@ struct NotepadPaneView: View {
 
 // MARK: - Preview
 
-#Preview {
-    NotepadPaneView(meetingId: "preview-123")
-        .frame(width: 350, height: 500)
-        .environment(AppState())
-}
+// #Preview {
+//     NotepadPaneView(meetingId: "preview-123")
+//         .frame(width: 350, height: 500)
+//         .environment(AppState())
+// }

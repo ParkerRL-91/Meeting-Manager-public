@@ -8,11 +8,19 @@ final class AudioCaptureService: ObservableObject {
     @Published var systemLevel: Float = 0
 
     private let micCapture = MicrophoneCapture()
-    private let systemTap = SystemAudioTap()
+    private let systemTap: AnyObject? = {
+        if #available(macOS 14.2, *) {
+            return SystemAudioTap()
+        }
+        return nil
+    }()
     private let bufferManager = AudioBufferManager()
     private let sessionManager = AudioSessionManager()
 
     private var audioFileURL: URL?
+
+    @available(macOS 14.2, *)
+    private var systemAudioTap: SystemAudioTap? { systemTap as? SystemAudioTap }
 
     /// Start capturing audio from both mic and system
     func startCapture(meetingId: String) async throws {
@@ -38,11 +46,13 @@ final class AudioCaptureService: ObservableObject {
         try micCapture.start()
 
         // Start system audio capture (for remote participant audio)
-        systemTap.onBuffer = { [weak self] buffer, time in
-            self?.bufferManager.appendSystemBuffer(buffer, at: time)
-            self?.updateSystemLevel(buffer)
+        if #available(macOS 14.2, *) {
+            systemAudioTap?.onBuffer = { [weak self] buffer, time in
+                self?.bufferManager.appendSystemBuffer(buffer, at: time)
+                self?.updateSystemLevel(buffer)
+            }
+            try await systemAudioTap?.start()
         }
-        try await systemTap.start()
 
         await MainActor.run {
             isCapturing = true
@@ -52,7 +62,9 @@ final class AudioCaptureService: ObservableObject {
     /// Stop all audio capture
     func stopCapture() -> URL? {
         micCapture.stop()
-        systemTap.stop()
+        if #available(macOS 14.2, *) {
+            systemAudioTap?.stop()
+        }
         bufferManager.finishRecording()
 
         Task { @MainActor in

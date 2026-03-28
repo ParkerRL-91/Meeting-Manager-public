@@ -34,16 +34,16 @@ struct StatusBadge: View {
     }
 }
 
-#Preview("All Statuses") {
-    VStack(alignment: .leading, spacing: 8) {
-        ForEach(MeetingStatus.allCases, id: \.self) { status in
-            StatusBadge(status: status)
-        }
-    }
-    .padding()
-}
+// #Preview("All Statuses") {
+//     VStack(alignment: .leading, spacing: 8) {
+//         ForEach(MeetingStatus.allCases, id: \.self) { status in
+//             StatusBadge(status: status)
+//         }
+//     }
+//     .padding()
+// }
 
-#Preview("Recording Pulse") {
-    StatusBadge(status: .recording)
-        .padding()
-}
+// #Preview("Recording Pulse") {
+//     StatusBadge(status: .recording)
+//         .padding()
+// }
