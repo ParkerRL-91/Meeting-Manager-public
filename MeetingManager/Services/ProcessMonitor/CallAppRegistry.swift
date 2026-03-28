@@ -3,20 +3,30 @@ import Foundation
 /// Static registry of known video/voice call application bundle identifiers.
 enum CallAppRegistry {
     /// Maps bundle identifiers to human-readable display names.
+    /// Apps that are ONLY open during calls — detecting their launch means a call started.
+    /// Slack and Discord are excluded because they run all the time, not just during calls.
     static let knownApps: [String: String] = [
+        // Zoom (multiple bundle IDs across versions)
         "us.zoom.xos": "Zoom",
+        "us.zoom.videomeetings": "Zoom",
+        "us.zoom.CptHost": "Zoom",
+        // Microsoft Teams
         "com.microsoft.teams": "Microsoft Teams",
         "com.microsoft.teams2": "Microsoft Teams",
+        "MSTeams": "Microsoft Teams",
+        // Apple
         "com.apple.FaceTime": "FaceTime",
+        // Cisco
         "com.cisco.webexmeetingsapp": "Webex",
-        "com.tinyspeck.slackmacgap": "Slack",
-        "com.hnc.Discord": "Discord",
+        "com.cisco.webex.meetings": "Webex",
+        // Others
         "com.skype.skype": "Skype",
         "com.loom.desktop": "Loom",
         "com.ringcentral.glip": "RingCentral",
         "com.bluejeans.BlueJeans": "BlueJeans",
         "com.goto.GoToMeeting": "GoToMeeting",
-        "com.cisco.webex.meetings": "Webex",
+        "com.pop.pop.app": "Pop",
+        "com.around.around": "Around",
     ]
 
     /// Bundle IDs of browsers we scan for browser-based meeting windows (Google Meet, etc.).

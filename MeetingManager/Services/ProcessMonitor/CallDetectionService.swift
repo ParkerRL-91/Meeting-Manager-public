@@ -47,13 +47,13 @@ final class CallDetectionService {
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter
 
-        // Scan for call apps that are already running.
+        // Scan for call apps that are already running and treat them as new detections.
         let alreadyRunning = NSWorkspace.shared.runningApplications.filter {
             guard let bundleID = $0.bundleIdentifier else { return false }
             return CallAppRegistry.isCallApp(bundleIdentifier: bundleID)
         }
         for app in alreadyRunning {
-            trackLaunch(of: app)
+            handleAppLaunched(app)
         }
 
         launchObserver = workspaceCenter.addObserver(

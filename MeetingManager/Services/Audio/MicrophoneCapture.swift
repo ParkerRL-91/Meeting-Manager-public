@@ -1,4 +1,5 @@
 import AVFoundation
+import os
 
 /// Captures microphone input using AVAudioEngine
 final class MicrophoneCapture {
@@ -9,8 +10,6 @@ final class MicrophoneCapture {
     private(set) var preferredInputDeviceID: String?
 
     /// Store a preferred input device ID to use when starting capture.
-    /// The device selection is logged; actual CoreAudio routing uses the system default
-    /// unless changed via System Preferences or a future CoreAudio integration.
     func configure(inputDeviceID: String) {
         self.preferredInputDeviceID = inputDeviceID
     }
@@ -27,25 +26,33 @@ final class MicrophoneCapture {
         guard !isRunning else { return }
 
         let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        guard inputFormat.sampleRate > 0 else {
+        // Remove any leftover tap from a previous session to avoid
+        // "tap already installed" NSException.
+        inputNode.removeTap(onBus: 0)
+
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        guard hwFormat.sampleRate > 0 else {
             throw AudioCaptureError.deviceNotFound
         }
 
-        // Install tap on the input node to receive mic audio
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) {
+        Logger.audio.info("Mic hardware format: \(hwFormat.sampleRate)Hz, \(hwFormat.channelCount)ch")
+
+        // Pass nil for format to let AVAudioEngine auto-negotiate with the
+        // hardware. This avoids NSException crashes from format mismatches
+        // (e.g. when the hardware format doesn't support the requested layout).
+        // We convert to 16kHz mono in the callback instead.
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) {
             [weak self] buffer, time in
             guard let self else { return }
-
-            // Convert to 16kHz mono if needed
-            if let converted = self.convertBuffer(buffer, from: inputFormat) {
+            if let converted = self.convertBuffer(buffer, from: buffer.format) {
                 self.onBuffer?(converted, time)
             }
         }
 
         try engine.start()
         isRunning = true
+        Logger.audio.info("MicrophoneCapture started")
     }
 
     func stop() {
@@ -53,6 +60,7 @@ final class MicrophoneCapture {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         isRunning = false
+        Logger.audio.info("MicrophoneCapture stopped")
     }
 
     // MARK: - Private
