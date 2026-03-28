@@ -178,6 +178,9 @@ final class AppState {
                     }
                 }
 
+                // Notify the menu bar that recording has stopped
+                NotificationCenter.default.post(name: .stopRecording, object: nil)
+
                 loadMeetings()
             } catch {
                 Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
