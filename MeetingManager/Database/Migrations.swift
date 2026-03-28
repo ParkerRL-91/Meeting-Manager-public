@@ -111,5 +111,209 @@ enum Migrations {
                 columns: ["meetingId"]
             )
         }
+        migrator.registerMigration("v4") { db in
+            // Recipes table
+            try db.create(table: "recipe") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("description", .text).notNull()
+                t.column("promptTemplate", .text).notNull()
+                t.column("category", .text).notNull()
+                t.column("isBuiltIn", .boolean).notNull().defaults(to: false)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+
+            // Recipe results table
+            try db.create(table: "recipeResult") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("recipeId", .text).notNull()
+                    .references("recipe", onDelete: .cascade)
+                t.column("outputText", .text).notNull()
+                t.column("generatedAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+
+            try db.create(
+                index: "idx_recipeResult_meeting",
+                on: "recipeResult",
+                columns: ["meetingId"]
+            )
+
+            try db.create(
+                index: "idx_recipeResult_recipe",
+                on: "recipeResult",
+                columns: ["recipeId"]
+            )
+
+            // Seed built-in recipes
+            let builtInRecipes: [(id: String, name: String, description: String, promptTemplate: String, category: String)] = [
+                (
+                    id: "builtin-follow-up-email",
+                    name: "Follow-Up Email",
+                    description: "Draft a professional follow-up email summarizing decisions and next steps",
+                    promptTemplate: """
+                    Based on the following meeting, draft a professional follow-up email to send to all attendees.
+
+                    Meeting: {{meetingTitle}}
+                    Date: {{date}}
+
+                    ## Transcript:
+                    {{transcript}}
+
+                    ## Notes:
+                    {{notes}}
+
+                    Please write a concise, professional email that:
+                    1. Thanks attendees for their time
+                    2. Summarizes the key decisions made
+                    3. Lists next steps and action items with owners
+                    4. Notes any upcoming deadlines or follow-up meetings
+                    5. Ends with a professional closing
+
+                    Format the email with a subject line, greeting, body, and sign-off.
+                    """,
+                    category: "email"
+                ),
+                (
+                    id: "builtin-action-items",
+                    name: "Action Items List",
+                    description: "Extract all action items with owners and deadlines",
+                    promptTemplate: """
+                    Analyze the following meeting and extract all action items.
+
+                    Meeting: {{meetingTitle}}
+                    Date: {{date}}
+
+                    ## Transcript:
+                    {{transcript}}
+
+                    ## Notes:
+                    {{notes}}
+
+                    For each action item, provide:
+                    - **Task**: Clear description of what needs to be done
+                    - **Owner**: Who is responsible (use names from the transcript, or "Unassigned")
+                    - **Deadline**: Any mentioned deadline, or "TBD"
+                    - **Priority**: High / Medium / Low (inferred from context)
+
+                    Format as a numbered list. If no action items were identified, state that clearly.
+                    """,
+                    category: "summary"
+                ),
+                (
+                    id: "builtin-decisions-summary",
+                    name: "Decisions Summary",
+                    description: "List all decisions made with context",
+                    promptTemplate: """
+                    Review the following meeting and identify all decisions that were made.
+
+                    Meeting: {{meetingTitle}}
+                    Date: {{date}}
+
+                    ## Transcript:
+                    {{transcript}}
+
+                    ## Notes:
+                    {{notes}}
+
+                    For each decision, provide:
+                    - **Decision**: What was decided
+                    - **Context**: Brief background on why this decision was needed
+                    - **Alternatives Considered**: Any other options that were discussed
+                    - **Impact**: Who or what is affected
+
+                    Format as a numbered list. If no clear decisions were made, summarize the key discussion points that are pending resolution.
+                    """,
+                    category: "summary"
+                ),
+                (
+                    id: "builtin-meeting-brief",
+                    name: "Meeting Brief",
+                    description: "One-paragraph executive summary",
+                    promptTemplate: """
+                    Write a concise executive summary of the following meeting in a single paragraph (3-5 sentences).
+
+                    Meeting: {{meetingTitle}}
+                    Date: {{date}}
+
+                    ## Transcript:
+                    {{transcript}}
+
+                    ## Notes:
+                    {{notes}}
+
+                    The summary should capture the purpose of the meeting, the most important outcomes, and any critical next steps. Write in a professional tone suitable for sharing with senior leadership.
+                    """,
+                    category: "summary"
+                ),
+                (
+                    id: "builtin-prd-brainstorm",
+                    name: "PRD from Brainstorm",
+                    description: "Generate a product requirements document from a brainstorming session",
+                    promptTemplate: """
+                    Based on the following brainstorming meeting, generate a Product Requirements Document (PRD).
+
+                    Meeting: {{meetingTitle}}
+                    Date: {{date}}
+
+                    ## Transcript:
+                    {{transcript}}
+
+                    ## Notes:
+                    {{notes}}
+
+                    Structure the PRD with the following sections:
+                    1. **Overview** - Brief description of the product/feature
+                    2. **Problem Statement** - What problem this solves
+                    3. **Goals & Success Metrics** - What success looks like
+                    4. **User Stories** - Key user stories in "As a [user], I want [goal] so that [benefit]" format
+                    5. **Requirements** - Functional and non-functional requirements
+                    6. **Out of Scope** - What is explicitly not included
+                    7. **Open Questions** - Unresolved items needing further discussion
+
+                    Infer details from the discussion. Mark assumptions clearly.
+                    """,
+                    category: "planning"
+                ),
+                (
+                    id: "builtin-coaching-feedback",
+                    name: "Coaching Feedback",
+                    description: "Provide coaching feedback based on discussion dynamics",
+                    promptTemplate: """
+                    Analyze the following meeting discussion and provide constructive coaching feedback.
+
+                    Meeting: {{meetingTitle}}
+                    Date: {{date}}
+
+                    ## Transcript:
+                    {{transcript}}
+
+                    ## Notes:
+                    {{notes}}
+
+                    Please provide feedback on:
+                    1. **Participation Balance** - Were all participants engaged? Did anyone dominate or stay silent?
+                    2. **Communication Clarity** - Were ideas communicated clearly? Any confusion or misunderstandings?
+                    3. **Meeting Effectiveness** - Did the meeting stay on track? Was time used efficiently?
+                    4. **Decision-Making Process** - How were decisions reached? Was there healthy debate?
+                    5. **Suggestions for Improvement** - Specific, actionable tips for better meetings
+
+                    Be constructive and specific. Reference particular moments from the transcript where appropriate.
+                    """,
+                    category: "feedback"
+                ),
+            ]
+
+            for recipe in builtInRecipes {
+                try db.execute(
+                    sql: """
+                        INSERT INTO recipe (id, name, description, promptTemplate, category, isBuiltIn, createdAt)
+                        VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                        """,
+                    arguments: [recipe.id, recipe.name, recipe.description, recipe.promptTemplate, recipe.category]
+                )
+            }
+        }
     }
 }

@@ -12,6 +12,7 @@ struct MeetingDetailView: View {
     @State private var selectedTab: DetailTab = .summary
     @State private var showingEditor = false
     @State private var showingDeleteConfirmation = false
+    @State private var showingRecipes = false
 
     private let exportService = ExportService()
 
@@ -109,6 +110,13 @@ struct MeetingDetailView: View {
                         .help("Cancel meeting")
                     }
 
+                    Button {
+                        showingRecipes = true
+                    } label: {
+                        Label("Recipes", systemImage: "text.book.closed")
+                    }
+                    .help("Run AI recipes on this meeting")
+
                     Menu {
                         Button("Summary (Markdown)") { Task { await exportSummary() } }
                         Button("Transcript (Text)") { Task { await exportTranscript() } }
@@ -128,6 +136,9 @@ struct MeetingDetailView: View {
                     .help("Delete meeting")
                 }
             }
+        }
+        .sheet(isPresented: $showingRecipes) {
+            RecipeListView(meetingId: meetingId)
         }
         .sheet(isPresented: $showingEditor) {
             if let meeting {
