@@ -25,5 +25,13 @@ let package = Package(
                 .process("Resources"),
             ]
         ),
+        .testTarget(
+            name: "MeetingManagerTests",
+            dependencies: [
+                "MeetingManager",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/MeetingManagerTests"
+        ),
     ]
 )
