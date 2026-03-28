@@ -1,0 +1,75 @@
+import Foundation
+import GRDB
+
+final class TranscriptRepository {
+    private let database: AppDatabase
+
+    init(database: AppDatabase) {
+        self.database = database
+    }
+
+    func save(_ transcript: inout Transcript) async throws {
+        try await database.writer.write { db in
+            try transcript.save(db)
+        }
+    }
+
+    func saveBatch(_ transcripts: [Transcript]) async throws {
+        try await database.writer.write { db in
+            for var transcript in transcripts {
+                try transcript.save(db)
+            }
+        }
+    }
+
+    func transcriptsForMeeting(_ meetingId: String) async throws -> [Transcript] {
+        try await database.writer.read { db in
+            try Transcript
+                .filter(Transcript.Columns.meetingId == meetingId)
+                .order(Transcript.Columns.startTime.asc)
+                .fetchAll(db)
+        }
+    }
+
+    func fullText(meetingId: String) async throws -> String {
+        let segments = try await transcriptsForMeeting(meetingId)
+        return segments.map { segment in
+            "[\(segment.formattedTimestamp)] \(segment.speakerDisplayName): \(segment.text)"
+        }.joined(separator: "\n")
+    }
+
+    func search(meetingId: String, query: String) async throws -> [Transcript] {
+        try await database.writer.read { db in
+            try Transcript
+                .filter(Transcript.Columns.meetingId == meetingId)
+                .filter(Transcript.Columns.text.like("%\(query)%"))
+                .order(Transcript.Columns.startTime.asc)
+                .fetchAll(db)
+        }
+    }
+
+    func deleteForMeeting(_ meetingId: String) async throws {
+        try await database.writer.write { db in
+            _ = try Transcript
+                .filter(Transcript.Columns.meetingId == meetingId)
+                .deleteAll(db)
+        }
+    }
+
+    /// Observe transcript for real-time UI updates during recording
+    func observeTranscripts(
+        meetingId: String,
+        onChange: @escaping ([Transcript]) -> Void
+    ) -> DatabaseCancellable {
+        ValueObservation
+            .tracking { db in
+                try Transcript
+                    .filter(Transcript.Columns.meetingId == meetingId)
+                    .order(Transcript.Columns.startTime.asc)
+                    .fetchAll(db)
+            }
+            .start(in: database.writer, onError: { error in
+                print("Transcript observation error: \(error)")
+            }, onChange: onChange)
+    }
+}
