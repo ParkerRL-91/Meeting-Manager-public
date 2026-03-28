@@ -73,4 +73,19 @@ enum DateFormatting {
     static func timeRange(from start: Date, to end: Date) -> String {
         "\(timeOnly(from: start)) - \(timeOnly(from: end))"
     }
+
+    // MARK: - Short Date
+
+    /// Short date formatter, e.g. "Mar 28, 2026".
+    static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    /// Returns a short date string, e.g. "Mar 28, 2026".
+    static func shortDate(from date: Date) -> String {
+        shortDateFormatter.string(from: date)
+    }
 }

@@ -92,5 +92,24 @@ enum Migrations {
                 t.add(column: "isEdited", .boolean).notNull().defaults(to: false)
             }
         }
+
+        migrator.registerMigration("v3") { db in
+            try db.create(table: "actionItem") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("title", .text).notNull()
+                t.column("assignee", .text)
+                t.column("dueDate", .datetime)
+                t.column("isCompleted", .boolean).notNull().defaults(to: false)
+                t.column("extractedAt", .datetime).notNull()
+            }
+
+            try db.create(
+                index: "idx_actionItem_meeting",
+                on: "actionItem",
+                columns: ["meetingId"]
+            )
+        }
     }
 }
