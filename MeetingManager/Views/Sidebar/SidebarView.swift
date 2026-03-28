@@ -4,6 +4,7 @@ struct SidebarView: View {
     @Environment(AppState.self) private var appState
     @State private var searchQuery = ""
     @State private var showArchived = false
+    @FocusState private var isSearchFocused: Bool
 
     private var filteredUpcoming: [Meeting] {
         let base = showArchived
@@ -55,6 +56,7 @@ struct SidebarView: View {
                 .controlSize(.large)
 
                 SearchBar(query: $searchQuery, placeholder: "Search meetings...")
+                    .focused($isSearchFocused)
 
                 Toggle(isOn: $showArchived) {
                     Label("Show Archived", systemImage: "archivebox")
@@ -138,6 +140,12 @@ struct SidebarView: View {
         .background(Color.appBackground)
         .onAppear {
             appState.loadMeetings()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("focusSearch"))) { _ in
+            isSearchFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .createNewMeeting)) { _ in
+            createAdHocMeeting()
         }
     }
 
