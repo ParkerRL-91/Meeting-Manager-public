@@ -28,9 +28,17 @@ final class AppState {
     let noteRepository: NoteRepository
     let summaryRepository: SummaryRepository
     let audioCaptureService: AudioCaptureService
+    let transcriptionService: TranscriptionService
+    let streamingTranscriber: StreamingTranscriber
 
     // State machine — single source of truth for meeting lifecycle
     private(set) var stateMachine: MeetingStateMachine
+
+    /// True while the WhisperKit model is downloading/loading.
+    private(set) var isLoadingModel = false
+
+    /// User-visible error from the most recent operation (shown via alert).
+    var lastUserError: String?
 
     private var cancellables = Set<AnyCancellable>()
     private var proximityTimer: Timer?
@@ -42,6 +50,11 @@ final class AppState {
         self.noteRepository = NoteRepository(database: database)
         self.summaryRepository = SummaryRepository(database: database)
         self.audioCaptureService = AudioCaptureService()
+
+        let txService = TranscriptionService()
+        self.transcriptionService = txService
+        self.streamingTranscriber = StreamingTranscriber(transcriptionService: txService)
+
         self.stateMachine = MeetingStateMachine(
             meetingRepository: meetingRepository,
             audioCaptureService: audioCaptureService
@@ -51,6 +64,7 @@ final class AppState {
         loadSettings()
         observeNotifications()
         startProximityCheck()
+        autoLoadTranscriptionModel()
     }
 
     // MARK: - Settings
@@ -121,7 +135,7 @@ final class AppState {
         return meeting
     }
 
-    /// Start recording — delegates to the state machine.
+    /// Start recording — delegates to the state machine, then starts live transcription.
     func startRecording(for meeting: Meeting) {
         Task {
             do {
@@ -130,24 +144,92 @@ final class AppState {
                 self.isRecording = self.stateMachine.isRecording
                 self.selectedMeetingId = self.stateMachine.currentMeeting?.id
                 loadMeetings()
+
+                // Start live transcription if model is loaded
+                if let meetingId = self.stateMachine.currentMeeting?.id {
+                    startTranscription(meetingId: meetingId)
+                }
             } catch {
-                print("Failed to start recording: \(error)")
+                Logger.general.error("Failed to start recording: \(error.localizedDescription)")
+                self.lastUserError = error.localizedDescription
             }
         }
     }
 
-    /// Stop recording — delegates to the state machine.
+    /// Stop recording — stops transcription, delegates to the state machine, and marks complete.
     func stopRecording() {
         Task {
+            // Stop the streaming transcriber first
+            await streamingTranscriber.stop()
+
             do {
+                // Save the meeting reference before stopRecording clears it
+                let stoppedMeeting = stateMachine.currentMeeting
+
                 try await stateMachine.stopRecording()
                 self.activeMeeting = self.stateMachine.currentMeeting
                 self.isRecording = self.stateMachine.isRecording
+
+                // Transition directly to complete (skip summarizing — user can trigger AI later)
+                if let stopped = stoppedMeeting {
+                    if let refreshed = try? await meetingRepository.find(id: stopped.id),
+                       refreshed.status == .transcribing {
+                        try await stateMachine.complete(meeting: refreshed)
+                    }
+                }
+
                 loadMeetings()
             } catch {
-                print("Failed to stop recording: \(error)")
+                Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
+                self.lastUserError = error.localizedDescription
             }
         }
+    }
+
+    // MARK: - Transcription Lifecycle
+
+    /// Automatically load the default WhisperKit model at app startup.
+    private func autoLoadTranscriptionModel() {
+        Task {
+            guard !transcriptionService.isModelLoaded else { return }
+
+            // Map the stored settings string to a WhisperModel enum.
+            // AppSettings stores short names like "tiny-en"; WhisperModel uses full HuggingFace names.
+            let model: WhisperModel
+            switch settings.whisperModel {
+            case "tiny-en", WhisperModel.tinyEn.rawValue: model = .tinyEn
+            case "base-en", WhisperModel.baseEn.rawValue: model = .baseEn
+            case "small-en", WhisperModel.smallEn.rawValue: model = .smallEn
+            default: model = .tinyEn  // Safe default
+            }
+
+            Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
+            isLoadingModel = true
+            do {
+                try await transcriptionService.loadModel(model)
+                Logger.transcription.info("WhisperKit model loaded — transcription is ready")
+            } catch {
+                Logger.transcription.error("Failed to auto-load WhisperKit model: \(error.localizedDescription)")
+                // Non-fatal — recording works without transcription, user can retry from settings
+            }
+            isLoadingModel = false
+        }
+    }
+
+    /// Start the streaming transcription loop for the given meeting.
+    private func startTranscription(meetingId: String) {
+        guard transcriptionService.isModelLoaded else {
+            Logger.transcription.warning("Cannot start transcription: WhisperKit model not loaded. Recording will continue without live transcript.")
+            lastUserError = "Transcription model is not loaded. Recording audio only. Go to Settings → Transcription to download a model."
+            return
+        }
+
+        streamingTranscriber.start(
+            meetingId: meetingId,
+            bufferManager: audioCaptureService.transcriptionBuffer,
+            repository: transcriptRepository
+        )
+        Logger.transcription.info("StreamingTranscriber started for meeting \(meetingId)")
     }
 
     // MARK: - Meeting Proximity Detection
@@ -209,8 +291,16 @@ final class AppState {
                             self.selectedMeetingId = meeting.id
                         }
                         self.loadMeetings()
+
+                        // Start live transcription
+                        await MainActor.run {
+                            self.startTranscription(meetingId: meeting.id)
+                        }
                     } catch {
-                        print("Failed to create ad-hoc meeting: \(error)")
+                        Logger.general.error("Failed to create ad-hoc meeting: \(error.localizedDescription)")
+                        await MainActor.run {
+                            self.lastUserError = error.localizedDescription
+                        }
                     }
                 }
             }
@@ -218,12 +308,19 @@ final class AppState {
 
         // Sync local state when the state machine posts a change
         NotificationCenter.default.publisher(for: .meetingStateChanged)
-            .sink { [weak self] _ in
+            .sink { [weak self] notification in
                 guard let self else { return }
                 Task { @MainActor in
+                    let wasRecording = self.isRecording
                     self.activeMeeting = self.stateMachine.currentMeeting
                     self.isRecording = self.stateMachine.isRecording
                     self.loadMeetings()
+
+                    // If recording just started (e.g., via auto-detect), start transcription
+                    if !wasRecording && self.isRecording,
+                       let meetingId = self.stateMachine.currentMeeting?.id {
+                        self.startTranscription(meetingId: meetingId)
+                    }
                 }
             }
             .store(in: &cancellables)

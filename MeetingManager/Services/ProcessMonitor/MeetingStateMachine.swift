@@ -52,7 +52,7 @@ final class MeetingStateMachine {
         .scheduled:    [.notified, .recording, .cancelled],
         .notified:     [.recording, .cancelled],
         .recording:    [.transcribing, .cancelled],
-        .transcribing: [.summarizing, .cancelled],
+        .transcribing: [.summarizing, .complete, .cancelled],
         .summarizing:  [.complete, .cancelled],
         .complete:     [],
         .cancelled:    [],
