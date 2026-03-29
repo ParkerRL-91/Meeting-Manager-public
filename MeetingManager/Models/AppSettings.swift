@@ -28,6 +28,12 @@ struct AppSettings: Codable, Equatable {
     /// The Ollama model name to use for on-device summarization (e.g. "llama3.2:3b").
     var ollamaModel: String = OllamaService.defaultModel
 
+    /// When true, automatically generate a summary ~10 minutes after transcription completes.
+    var autoGenerateSummary: Bool = false
+
+    /// The recipe ID to use for auto-generated summaries. nil = use the default meeting summary prompt.
+    var defaultRecipeId: String? = nil
+
     static let `default` = AppSettings(
         whisperModel: "large-v3",
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -49,6 +55,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
         case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite, selectedCalendarId
         case useLocalLLM, ollamaModel
+        case autoGenerateSummary, defaultRecipeId
     }
 }
 
