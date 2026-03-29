@@ -340,5 +340,12 @@ enum Migrations {
                 t.add(column: "selectedCalendarId", .text)
             }
         }
+
+        migrator.registerMigration("v9-local-llm") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "useLocalLLM", .boolean).notNull().defaults(to: false)
+                t.add(column: "ollamaModel", .text).notNull().defaults(to: "llama3.2:3b")
+            }
+        }
     }
 }

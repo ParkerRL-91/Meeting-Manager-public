@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MeetingListRow: View {
     let meeting: Meeting
+    var isHistory: Bool = false
     var onError: ((String) -> Void)?
 
     @Environment(AppState.self) private var appState
@@ -25,7 +26,11 @@ struct MeetingListRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
-                StatusBadge(status: meeting.status)
+                if isHistory && meeting.status == .complete {
+                    HistoryBadge(hasRecording: meeting.audioFilePath != nil)
+                } else {
+                    StatusBadge(status: meeting.status)
+                }
 
                 if meeting.duration != nil {
                     Text(meeting.formattedDuration)
@@ -117,6 +122,27 @@ struct MeetingListRow: View {
                 onError?("Failed to delete meeting: \(error.localizedDescription)")
             }
         }
+    }
+}
+
+// MARK: - History Badge
+
+private struct HistoryBadge: View {
+    let hasRecording: Bool
+
+    var body: some View {
+        Label(
+            hasRecording ? "Recorded" : "Completed",
+            systemImage: hasRecording ? "mic.fill" : "checkmark"
+        )
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(hasRecording ? Color.appAccent : Color.appTextSecondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            (hasRecording ? Color.appAccent : Color.appTextSecondary).opacity(0.12),
+            in: RoundedRectangle(cornerRadius: 4)
+        )
     }
 }
 

@@ -31,6 +31,8 @@ final class AppState {
 
     // Services
     let database: AppDatabase
+    let ollamaService: OllamaService
+    let ollamaInstaller: OllamaInstaller
     let meetingRepository: MeetingRepository
     let transcriptRepository: TranscriptRepository
     let noteRepository: NoteRepository
@@ -54,6 +56,8 @@ final class AppState {
 
     init() {
         self.database = AppDatabase.shared
+        self.ollamaService = OllamaService()
+        self.ollamaInstaller = OllamaInstaller()
         self.meetingRepository = MeetingRepository(database: database)
         self.transcriptRepository = TranscriptRepository(database: database)
         self.noteRepository = NoteRepository(database: database)

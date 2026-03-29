@@ -7,6 +7,8 @@ struct SidebarView: View {
     @State private var showAllActionItems = false
     @State private var errorMessage: String?
     @FocusState private var isSearchFocused: Bool
+    @State private var scheduledExpanded = true
+    @State private var historyExpanded = true
 
     private var filteredUpcoming: [Meeting] {
         let base = showArchived
@@ -116,7 +118,7 @@ struct SidebarView: View {
             } else {
                 List(selection: $appState.selectedMeetingId) {
                     if !filteredUpcoming.isEmpty {
-                        Section("Upcoming") {
+                        Section(isExpanded: $scheduledExpanded) {
                             ForEach(filteredUpcoming) { meeting in
                                 MeetingListRow(meeting: meeting, onError: { errorMessage = $0 })
                                     .tag(meeting.id)
@@ -130,31 +132,39 @@ struct SidebarView: View {
                                         }
                                     }
                             }
+                        } header: {
+                            Text("Scheduled")
                         }
                     } else if searchQuery.isEmpty {
-                        Section("Upcoming") {
-                            Text("No upcoming meetings")
+                        Section(isExpanded: $scheduledExpanded) {
+                            Text("No scheduled meetings")
                                 .font(.subheadline)
                                 .foregroundStyle(Color.appTextSecondary)
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .padding(.vertical, 8)
+                        } header: {
+                            Text("Scheduled")
                         }
                     }
 
                     if !filteredPast.isEmpty {
-                        Section("Past") {
+                        Section(isExpanded: $historyExpanded) {
                             ForEach(filteredPast) { meeting in
-                                MeetingListRow(meeting: meeting, onError: { errorMessage = $0 })
+                                MeetingListRow(meeting: meeting, isHistory: true, onError: { errorMessage = $0 })
                                     .tag(meeting.id)
                             }
+                        } header: {
+                            Text("History")
                         }
                     } else if searchQuery.isEmpty {
-                        Section("Past") {
+                        Section(isExpanded: $historyExpanded) {
                             Text("No past meetings")
                                 .font(.subheadline)
                                 .foregroundStyle(Color.appTextSecondary)
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .padding(.vertical, 8)
+                        } header: {
+                            Text("History")
                         }
                     }
                 }

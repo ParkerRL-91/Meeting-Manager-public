@@ -22,6 +22,12 @@ struct AppSettings: Codable, Equatable {
     /// The Google Calendar ID to sync. nil = use the primary calendar.
     var selectedCalendarId: String? = nil
 
+    /// When true, meeting summaries are generated on-device using a local LLM instead of the Claude API.
+    var useLocalLLM: Bool = false
+
+    /// The Ollama model name to use for on-device summarization (e.g. "llama3.2:3b").
+    var ollamaModel: String = OllamaService.defaultModel
+
     static let `default` = AppSettings(
         whisperModel: "large-v3",
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -42,6 +48,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case id, whisperModel, summaryPromptTemplate, claudeModel
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
         case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite, selectedCalendarId
+        case useLocalLLM, ollamaModel
     }
 }
 

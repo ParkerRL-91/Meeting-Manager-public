@@ -25,7 +25,8 @@ final class SummaryGenerator {
     ///   - transcriptRepo: Repository providing transcript text.
     ///   - noteRepo: Repository providing user notes.
     ///   - summaryRepo: Repository for persisting the generated summary.
-    ///   - claudeService: The Claude API service.
+    ///   - textGenerator: Async closure `(systemPrompt, userPrompt) -> responseText`. May be Claude or a local LLM.
+    ///   - modelUsed: Human-readable model identifier stored in the summary record (e.g. "claude-sonnet-4-20250514").
     ///   - settings: The user's app settings.
     /// - Returns: The saved `MeetingSummary`.
     @discardableResult
@@ -34,7 +35,8 @@ final class SummaryGenerator {
         transcriptRepo: TranscriptRepository,
         noteRepo: NoteRepository,
         summaryRepo: SummaryRepository,
-        claudeService: ClaudeService,
+        textGenerator: (String, String) async throws -> String,
+        modelUsed: String,
         settings: AppSettings = .default
     ) async throws -> MeetingSummary {
         guard settings.aiEnabled else {
@@ -69,14 +71,9 @@ final class SummaryGenerator {
         let systemPrompt = "You are a professional meeting assistant. "
             + "Provide clear, well-structured summaries."
 
-        // 3. Call Claude API
-        progress = "Generating summary with Claude..."
-        let model = settings.claudeModel
-        let summaryText = try await claudeService.sendMessage(
-            systemPrompt: systemPrompt,
-            userPrompt: userPrompt,
-            model: model
-        )
+        // 3. Generate summary text
+        progress = "Generating summary..."
+        let summaryText = try await textGenerator(systemPrompt, userPrompt)
 
         // 4. Create and save MeetingSummary
         progress = "Saving summary..."
@@ -84,7 +81,7 @@ final class SummaryGenerator {
             meetingId: meeting.id,
             promptUsed: userPrompt,
             summaryText: summaryText,
-            modelUsed: model,
+            modelUsed: modelUsed,
             generatedAt: Date()
         )
         try await summaryRepo.save(&summary)

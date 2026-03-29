@@ -284,13 +284,37 @@ struct SummaryView: View {
 
         Task {
             do {
+                let settings = appState.settings
+                let textGenerator: (String, String) async throws -> String
+                let modelUsed: String
+
+                if settings.useLocalLLM {
+                    // On-device: route through Ollama
+                    let ollamaService = appState.ollamaService
+                    let ollamaModel = settings.ollamaModel
+                    textGenerator = { sys, usr in
+                        try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
+                    }
+                    modelUsed = "ollama/\(ollamaModel)"
+                } else {
+                    // Cloud: route through Claude API
+                    let claude = ClaudeService()
+                    let claudeModel = settings.claudeModel
+                    textGenerator = { sys, usr in
+                        try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+                    }
+                    modelUsed = settings.claudeModel
+                }
+
                 let generator = SummaryGenerator()
                 let newSummary = try await generator.generateSummary(
                     for: meeting,
                     transcriptRepo: appState.transcriptRepository,
                     noteRepo: appState.noteRepository,
                     summaryRepo: appState.summaryRepository,
-                    claudeService: ClaudeService()
+                    textGenerator: textGenerator,
+                    modelUsed: modelUsed,
+                    settings: settings
                 )
                 summary = newSummary
                 isRegenerating = false

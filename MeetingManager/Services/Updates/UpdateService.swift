@@ -11,15 +11,14 @@ import os
 final class UpdateService: ObservableObject {
 
     private let updaterController: SPUStandardUpdaterController
+    private let delegate = UpdateDelegate()
 
     init() {
         updaterController = SPUStandardUpdaterController(
-            startingUpdater: false,   // don't auto-check on launch; no valid feed URL yet
-            updaterDelegate: nil,
+            startingUpdater: true,
+            updaterDelegate: delegate,
             userDriverDelegate: nil
         )
-        // Ensure automatic checks are off until the user opts in
-        updaterController.updater.automaticallyChecksForUpdates = false
     }
 
     /// The underlying SPUUpdater for SwiftUI CheckForUpdatesView binding.
@@ -36,5 +35,29 @@ final class UpdateService: ObservableObject {
     var automaticallyChecksForUpdates: Bool {
         get { updaterController.updater.automaticallyChecksForUpdates }
         set { updaterController.updater.automaticallyChecksForUpdates = newValue }
+    }
+}
+
+// MARK: - Update Delegate
+
+/// Clears ephemeral caches before Sparkle relaunches the app after installing an update.
+private final class UpdateDelegate: NSObject, SPUUpdaterDelegate {
+
+    func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        clearCaches()
+    }
+
+    private func clearCaches() {
+        let fm = FileManager.default
+        let cacheURL = fm.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("com.meetingmanager.app")
+        if let url = cacheURL, fm.fileExists(atPath: url.path) {
+            try? fm.removeItem(at: url)
+        }
+
+        let tempURL = fm.temporaryDirectory.appendingPathComponent("MeetingManager")
+        if fm.fileExists(atPath: tempURL.path) {
+            try? fm.removeItem(at: tempURL)
+        }
     }
 }

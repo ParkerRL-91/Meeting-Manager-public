@@ -23,6 +23,9 @@ struct SettingsView: View {
             ClaudeSettingsView()
                 .tabItem { Label("Claude", systemImage: "brain") }
 
+            OnDeviceSettingsView()
+                .tabItem { Label("On-Device", systemImage: "cpu") }
+
             PromptConfigView()
                 .tabItem { Label("Prompts", systemImage: "text.quote") }
 

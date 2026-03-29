@@ -48,10 +48,10 @@
         </dict>
     </array>
     <key>SUFeedURL</key>
-    <string>https://yourdomain.com/appcast.xml</string>
+    <string>https://parkerrl-91.github.io/Meeting-Manager/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>REPLACE_WITH_YOUR_SPARKLE_EDDSA_PUBLIC_KEY</string>
+    <string>87p6s92HRx5+UO39ogrrjkxnWdiLiAQiA8zABqV5mM4=</string>
     <key>SUEnableAutomaticChecks</key>
-    <true/>
+    <false/>
 </dict>
 </plist>

@@ -6,7 +6,7 @@ struct TranscriptionSettingsView: View {
 
     // MARK: - State
 
-    @State private var selectedModel: WhisperModel = .tinyEn
+    @State private var selectedModel: WhisperModel = .largev3
     @State private var language: String = "en"
 
     // MARK: - Body
@@ -17,6 +17,7 @@ struct TranscriptionSettingsView: View {
             languageSection
         }
         .formStyle(.grouped)
+        .onAppear { loadSettings() }
     }
 
     // MARK: - Sections
@@ -59,6 +60,16 @@ struct TranscriptionSettingsView: View {
                         .foregroundStyle(Color.appWarning)
                 }
             }
+
+            if selectedModel != .largev3 {
+                Label {
+                    Text("Large v3 is the recommended model — it's significantly more accurate than smaller options. Smaller models may produce unreliable transcriptions.")
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                }
+            }
         } header: {
             Text("Model")
         } footer: {
@@ -81,6 +92,18 @@ struct TranscriptionSettingsView: View {
     }
 
     // MARK: - Persistence
+
+    private func loadSettings() {
+        do {
+            if let settings = try AppDatabase.shared.writer.read({ db in
+                try AppSettings.fetchOne(db)
+            }) {
+                selectedModel = WhisperModel(rawValue: settings.whisperModel) ?? .largev3
+            }
+        } catch {
+            Logger.transcription.error("Failed to load transcription settings: \(error.localizedDescription)")
+        }
+    }
 
     private func persistSetting(_ mutation: (inout AppSettings) -> Void) {
         do {

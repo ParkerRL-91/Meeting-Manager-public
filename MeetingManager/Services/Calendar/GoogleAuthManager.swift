@@ -1,5 +1,6 @@
 import Foundation
 import AuthenticationServices
+import CryptoKit
 import os
 
 // MARK: - OAuth Token Model
@@ -15,7 +16,6 @@ private struct OAuthTokens: Codable {
 // MARK: - GoogleAuthError
 
 enum GoogleAuthError: LocalizedError {
-    case notConfigured
     case authenticationFailed(String)
     case tokenRefreshFailed(String)
     case noRefreshToken
@@ -24,8 +24,6 @@ enum GoogleAuthError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notConfigured:
-            return "Google OAuth client ID is not configured. Set it in Settings."
         case .authenticationFailed(let message):
             return "Authentication failed: \(message)"
         case .tokenRefreshFailed(let message):
@@ -42,101 +40,77 @@ enum GoogleAuthError: LocalizedError {
 
 // MARK: - GoogleAuthManager
 
-/// Manages Google OAuth 2.0 authentication using `ASWebAuthenticationSession`.
+/// Manages Google OAuth 2.0 authentication using PKCE + `ASWebAuthenticationSession`.
 ///
-/// Tokens are persisted in the macOS Keychain via `KeychainHelper`. When the
-/// Google Sign-In SDK is integrated later, the `signIn()` and token-refresh
-/// logic can be swapped out while the rest of the app continues to use the
-/// same `GoogleAuthManager` interface.
+/// No client secret is required — PKCE (RFC 7636) replaces it for native apps.
+/// Tokens are persisted in the macOS Keychain via `KeychainHelper`.
+/// Dedicated NSObject subclass that provides the macOS window anchor for
+/// `ASWebAuthenticationSession`. Kept separate from `GoogleAuthManager` so
+/// the `@Observable` macro doesn't interfere with NSObject/KVO machinery.
+private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        NSApp.mainWindow
+            ?? NSApp.keyWindow
+            ?? NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) })
+            ?? NSWindow()
+    }
+}
+
 @Observable
 @MainActor
 final class GoogleAuthManager {
+
+    // MARK: - Embedded Credentials (registered once by the developer)
+
+    private enum OAuthConfig {
+        static let clientId     = "168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu.apps.googleusercontent.com"
+        /// Reversed client ID — used as the custom URL scheme for the OAuth callback.
+        static let redirectScheme = "com.googleusercontent.apps.168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu"
+        static let redirectURI  = redirectScheme + ":/"
+        static let authURL      = "https://accounts.google.com/o/oauth2/v2/auth"
+        static let tokenURL     = "https://oauth2.googleapis.com/token"
+        static let scopes       = "https://www.googleapis.com/auth/calendar.readonly email profile"
+    }
+
+    // MARK: - Keychain Keys
+
+    private enum Keys {
+        static let oauthTokens = "google-oauth-tokens"
+    }
 
     // MARK: - Public State
 
     private(set) var isSignedIn = false
     private(set) var userEmail: String?
 
-    /// The OAuth client ID entered by the user. `nil` means not yet configured.
-    private(set) var oauthClientId: String?
-
-    /// Whether a client ID has been saved and sign-in is possible.
-    var isConfigured: Bool { !(oauthClientId?.isEmpty ?? true) }
-
-    // MARK: - Keychain Keys
-
-    private enum Keys {
-        static let accessToken = "google-oauth-access-token"
-        static let refreshToken = "google-oauth-refresh-token"
-        static let oauthTokens = "google-oauth-tokens"
-    }
-
-    // MARK: - OAuth Configuration
-
-    /// Fixed OAuth endpoints and scopes; the client ID is user-supplied (see `oauthClientId`).
-    private enum OAuthConfig {
-        static let redirectURI = "com.meetingmanager:/oauth2callback"
-        static let authURL = "https://accounts.google.com/o/oauth2/v2/auth"
-        static let tokenURL = "https://oauth2.googleapis.com/token"
-        static let scopes = "https://www.googleapis.com/auth/calendar.readonly email profile"
-    }
-
     // MARK: - Private
 
     private let session: URLSession
     private var cachedTokens: OAuthTokens?
+    /// Held strongly so the OS doesn't cancel the in-flight session.
+    private var authSession: ASWebAuthenticationSession?
+    /// Must be retained for the lifetime of the auth session.
+    private var authPresenter: WebAuthPresenter?
 
     // MARK: - Init
 
     init(session: URLSession = .shared) {
         self.session = session
-        restoreClientId()
         restoreSession()
-    }
-
-    // MARK: - Client ID Management
-
-    /// Saves the user-provided OAuth client ID to the Keychain.
-    func saveClientId(_ clientId: String) throws {
-        let trimmed = clientId.trimmingCharacters(in: .whitespaces)
-        try KeychainHelper.save(trimmed, forKey: KeychainHelper.Key.googleOAuthClientId)
-        oauthClientId = trimmed.isEmpty ? nil : trimmed
-        Logger.calendar.info("Google OAuth client ID saved")
-    }
-
-    /// Removes the stored client ID and signs the user out.
-    func clearClientId() throws {
-        try KeychainHelper.delete(forKey: KeychainHelper.Key.googleOAuthClientId)
-        oauthClientId = nil
-        signOut()
-        Logger.calendar.info("Google OAuth client ID cleared")
-    }
-
-    private func restoreClientId() {
-        do {
-            if let stored = try KeychainHelper.loadString(forKey: KeychainHelper.Key.googleOAuthClientId),
-               !stored.isEmpty {
-                oauthClientId = stored
-            }
-        } catch {
-            Logger.calendar.warning("Could not restore Google client ID: \(error.localizedDescription)")
-        }
     }
 
     // MARK: - Public API
 
     /// Initiates the Google OAuth 2.0 sign-in flow via `ASWebAuthenticationSession`.
     ///
-    /// Opens the system browser sheet, exchanges the authorization code for
-    /// tokens, and persists them in the Keychain.
+    /// Opens the system browser, the user signs in, Google redirects back via
+    /// the custom URL scheme, and the auth code is exchanged for tokens using PKCE.
     func signIn() async throws {
-        guard isConfigured else {
-            throw GoogleAuthError.notConfigured
-        }
-        Logger.calendar.info("Starting Google sign-in flow")
+        Logger.calendar.info("Starting Google sign-in flow (PKCE)")
 
-        let authorizationCode = try await requestAuthorizationCode()
-        let tokens = try await exchangeCodeForTokens(authorizationCode)
+        let (verifier, challenge) = pkceChallenge()
+        let authorizationCode = try await requestAuthorizationCode(challenge: challenge)
+        let tokens = try await exchangeCodeForTokens(authorizationCode, verifier: verifier)
 
         try persistTokens(tokens)
         cachedTokens = tokens
@@ -152,8 +126,6 @@ final class GoogleAuthManager {
 
         do {
             try KeychainHelper.delete(forKey: Keys.oauthTokens)
-            try KeychainHelper.delete(forKey: Keys.accessToken)
-            try KeychainHelper.delete(forKey: Keys.refreshToken)
         } catch {
             Logger.calendar.warning("Error clearing tokens from Keychain: \(error.localizedDescription)")
         }
@@ -166,10 +138,9 @@ final class GoogleAuthManager {
     /// Returns a valid access token, refreshing it first if expired.
     func refreshTokenIfNeeded() async throws -> String {
         guard let tokens = cachedTokens else {
-            throw GoogleAuthError.notConfigured
+            throw GoogleAuthError.authenticationFailed("Not signed in")
         }
 
-        // If the token is still valid (with a 60-second buffer), return it.
         if tokens.expiresAt.timeIntervalSinceNow > 60 {
             return tokens.accessToken
         }
@@ -180,7 +151,6 @@ final class GoogleAuthManager {
 
     // MARK: - Session Restoration
 
-    /// Restores a previous session from the Keychain on launch.
     private func restoreSession() {
         do {
             if let tokens: OAuthTokens = try KeychainHelper.load(forKey: Keys.oauthTokens) {
@@ -194,19 +164,39 @@ final class GoogleAuthManager {
         }
     }
 
+    // MARK: - PKCE
+
+    /// Generates a PKCE code_verifier and its SHA-256 code_challenge (S256 method).
+    private func pkceChallenge() -> (verifier: String, challenge: String) {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let verifier = Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        let hash = SHA256.hash(data: Data(verifier.utf8))
+        let challenge = Data(hash).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        return (verifier, challenge)
+    }
+
     // MARK: - Authorization Code Flow
 
-    /// Opens `ASWebAuthenticationSession` to get an authorization code.
-    private func requestAuthorizationCode() async throws -> String {
-        let clientId = oauthClientId ?? ""
+    private func requestAuthorizationCode(challenge: String) async throws -> String {
         var components = URLComponents(string: OAuthConfig.authURL)!
         components.queryItems = [
-            URLQueryItem(name: "client_id", value: clientId),
-            URLQueryItem(name: "redirect_uri", value: OAuthConfig.redirectURI),
-            URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "scope", value: OAuthConfig.scopes),
-            URLQueryItem(name: "access_type", value: "offline"),
-            URLQueryItem(name: "prompt", value: "consent"),
+            URLQueryItem(name: "client_id",             value: OAuthConfig.clientId),
+            URLQueryItem(name: "redirect_uri",          value: OAuthConfig.redirectURI),
+            URLQueryItem(name: "response_type",         value: "code"),
+            URLQueryItem(name: "scope",                 value: OAuthConfig.scopes),
+            URLQueryItem(name: "access_type",           value: "offline"),
+            URLQueryItem(name: "prompt",                value: "consent"),
+            URLQueryItem(name: "code_challenge",        value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
         ]
 
         guard let authURL = components.url else {
@@ -214,11 +204,20 @@ final class GoogleAuthManager {
         }
 
         return try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
+            let presenter = WebAuthPresenter()
+            let webSession = ASWebAuthenticationSession(
                 url: authURL,
-                callbackURLScheme: "com.meetingmanager"
-            ) { callbackURL, error in
+                callbackURLScheme: OAuthConfig.redirectScheme
+            ) { [weak self] callbackURL, error in
+                self?.authSession = nil
+                self?.authPresenter = nil
+
                 if let error {
+                    // User cancelled — don't surface as an error
+                    if (error as NSError).code == ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                        continuation.resume(throwing: GoogleAuthError.authenticationFailed("Sign-in cancelled"))
+                        return
+                    }
                     continuation.resume(throwing: GoogleAuthError.authenticationFailed(error.localizedDescription))
                     return
                 }
@@ -233,39 +232,37 @@ final class GoogleAuthManager {
                 continuation.resume(returning: code)
             }
 
-            session.prefersEphemeralWebBrowserSession = false
-            session.start()
+            webSession.presentationContextProvider = presenter
+            webSession.prefersEphemeralWebBrowserSession = false
+            self.authPresenter = presenter
+            self.authSession = webSession
+            webSession.start()
         }
     }
 
-    // MARK: - Token Exchange
+    // MARK: - Token Exchange (PKCE — no client_secret needed)
 
-    /// Exchanges an authorization code for access and refresh tokens.
-    private func exchangeCodeForTokens(_ code: String) async throws -> OAuthTokens {
+    private func exchangeCodeForTokens(_ code: String, verifier: String) async throws -> OAuthTokens {
         var request = URLRequest(url: URL(string: OAuthConfig.tokenURL)!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
-        let params = [
-            "code": code,
-            "client_id": oauthClientId ?? "",
-            "redirect_uri": OAuthConfig.redirectURI,
-            "grant_type": "authorization_code",
+        let params: [String: String] = [
+            "code":          code,
+            "client_id":     OAuthConfig.clientId,
+            "redirect_uri":  OAuthConfig.redirectURI,
+            "grant_type":    "authorization_code",
+            "code_verifier": verifier,
         ]
-        let body = params.map { key, value in
-            "\(key)=\(value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value)"
-        }.joined(separator: "&")
-        request.httpBody = body.data(using: .utf8)
+        request.httpBody = urlEncode(params)
 
         let (data, response) = try await performRequest(request)
         try validateHTTPResponse(response, data: data)
-
         return try parseTokenResponse(data)
     }
 
     // MARK: - Token Refresh
 
-    /// Uses the stored refresh token to obtain a new access token.
     private func refreshAccessToken() async throws -> String {
         guard let refreshToken = cachedTokens?.refreshToken else {
             throw GoogleAuthError.noRefreshToken
@@ -275,15 +272,12 @@ final class GoogleAuthManager {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
-        let params = [
+        let params: [String: String] = [
             "refresh_token": refreshToken,
-            "client_id": oauthClientId ?? "",
-            "grant_type": "refresh_token",
+            "client_id":     OAuthConfig.clientId,
+            "grant_type":    "refresh_token",
         ]
-        let body = params.map { key, value in
-            "\(key)=\(value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value)"
-        }.joined(separator: "&")
-        request.httpBody = body.data(using: .utf8)
+        request.httpBody = urlEncode(params)
 
         let (data, response) = try await performRequest(request)
         try validateHTTPResponse(response, data: data)
@@ -297,6 +291,12 @@ final class GoogleAuthManager {
     }
 
     // MARK: - Helpers
+
+    private func urlEncode(_ params: [String: String]) -> Data? {
+        params.map { k, v in
+            "\(k)=\(v.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? v)"
+        }.joined(separator: "&").data(using: .utf8)
+    }
 
     private func performRequest(_ request: URLRequest) async throws -> (Data, URLResponse) {
         do {
@@ -316,7 +316,6 @@ final class GoogleAuthManager {
         }
     }
 
-    /// Parses the JSON token response from Google's OAuth endpoint.
     private func parseTokenResponse(_ data: Data, existingRefreshToken: String? = nil) throws -> OAuthTokens {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = json["access_token"] as? String,
@@ -326,8 +325,6 @@ final class GoogleAuthManager {
 
         let refreshToken = json["refresh_token"] as? String ?? existingRefreshToken
         let expiresAt = Date().addingTimeInterval(expiresIn)
-
-        // Decode the email from the id_token if present (JWT payload).
         let email = extractEmail(from: json["id_token"] as? String)
 
         return OAuthTokens(
@@ -339,27 +336,23 @@ final class GoogleAuthManager {
     }
 
     /// Extracts the email claim from a JWT id_token without verification.
-    /// This is only used for display purposes; the server validates the token.
+    /// Used only for display purposes.
     private func extractEmail(from idToken: String?) -> String? {
         guard let idToken,
               let payloadSegment = idToken.split(separator: ".").dropFirst().first else {
             return cachedTokens?.email
         }
 
-        // Base64URL decode the payload
         var base64 = String(payloadSegment)
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 {
-            base64.append("=")
-        }
+        while base64.count % 4 != 0 { base64.append("=") }
 
         guard let data = Data(base64Encoded: base64),
               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let email = payload["email"] as? String else {
             return cachedTokens?.email
         }
-
         return email
     }
 
@@ -368,3 +361,4 @@ final class GoogleAuthManager {
         Logger.calendar.debug("OAuth tokens persisted to Keychain")
     }
 }
+
