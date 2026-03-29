@@ -11,6 +11,8 @@ struct Meeting: Identifiable, Codable, Equatable {
     var status: MeetingStatus
     var calendarEventId: String?
     var audioFilePath: String?
+    /// Comma-separated list of participant names/emails detected from calendar or speaker diarization.
+    var participants: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -24,6 +26,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         status: MeetingStatus = .scheduled,
         calendarEventId: String? = nil,
         audioFilePath: String? = nil,
+        participants: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -36,8 +39,14 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.status = status
         self.calendarEventId = calendarEventId
         self.audioFilePath = audioFilePath
+        self.participants = participants
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    /// Parsed list of participant names.
+    var participantList: [String] {
+        participants?.components(separatedBy: ", ").filter { !$0.isEmpty } ?? []
     }
 
     var duration: TimeInterval? {
@@ -68,7 +77,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePath, createdAt, updatedAt
+        case status, calendarEventId, audioFilePath, participants, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

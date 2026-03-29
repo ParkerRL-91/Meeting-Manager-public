@@ -2,6 +2,7 @@ import AVFoundation
 import SwiftUI
 import Combine
 import Speech
+import SpeakerKit
 import UserNotifications
 import os
 
@@ -227,9 +228,6 @@ final class AppState {
         do {
             // Read the WAV file into Float32 samples
             let audioFile = try AVAudioFile(forReading: audioURL)
-            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
-
-            // If the file isn't 16kHz, we need to read in the file's format
             let fileFormat = audioFile.processingFormat
             let frameCount = AVAudioFrameCount(audioFile.length)
             guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
@@ -238,22 +236,64 @@ final class AppState {
             }
             try audioFile.read(into: buffer)
 
-            // Convert to [Float] array for WhisperKit
             guard let channelData = buffer.floatChannelData else {
                 fileLog("Batch transcribe: no channel data")
                 return
             }
             let samples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
 
-            let duration = Double(samples.count) / 16000.0
+            let duration = Double(samples.count) / Double(fileFormat.sampleRate)
             fileLog("Batch transcribe: \(samples.count) samples (\(String(format: "%.0f", duration))s)")
 
-            // Transcribe the complete file
+            // Step 1: Transcribe the complete file with WhisperKit
             let segments = try await transcriptionService.transcribe(samples: samples)
-
             fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
 
-            // Filter and save to database
+            // Step 2: Run speaker diarization with SpeakerKit
+            var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
+            do {
+                let config = PyannoteConfig()
+                let modelManager = SpeakerKitModelManager(config: config)
+                try await modelManager.loadModels()
+                fileLog("Diarization: SpeakerKit models loaded")
+
+                guard let models = modelManager.models as? PyannoteModels else {
+                    fileLog("Diarization: failed to cast models")
+                    throw SpeakerKitError.invalidConfiguration("Model cast failed")
+                }
+
+                let kit = try SpeakerKit(models: models)
+                let diarResult = try await kit.diarize(audioArray: samples)
+                fileLog("Diarization: \(diarResult.segments.count) speaker segments found")
+
+                // Build a lookup: for each second, which speaker is active
+                for seg in diarResult.segments {
+                    let sid = seg.speaker.speakerId ?? 0
+                    let label = "Speaker \(sid + 1)"
+                    var t = Int(seg.startTime)
+                    while t < Int(seg.endTime) + 1 {
+                        speakerMap[t] = label
+                        t += 1
+                    }
+                }
+
+                let uniqueSpeakers = Set(diarResult.segments.compactMap { $0.speaker.speakerId })
+                fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
+
+                // Update meeting participants
+                if uniqueSpeakers.count > 1 {
+                    let speakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
+                    if var meeting = try? await meetingRepository.find(id: meetingId) {
+                        let existing = meeting.participants ?? ""
+                        meeting.participants = existing.isEmpty ? speakerLabels : "\(existing) (\(speakerLabels))"
+                        try? await meetingRepository.save(&meeting)
+                    }
+                }
+            } catch {
+                fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
+            }
+
+            // Step 3: Filter and save transcripts with speaker labels
             var savedCount = 0
             for seg in segments {
                 let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -266,15 +306,15 @@ final class AppState {
                 // Skip repetitive hallucinations
                 if text.count > 50 {
                     let words = text.components(separatedBy: .whitespaces)
-                    if words.count > 10 {
-                        let uniqueWords = Set(words)
-                        if Double(uniqueWords.count) / Double(words.count) < 0.2 { continue }
-                    }
+                    if words.count > 10 && Double(Set(words).count) / Double(words.count) < 0.2 { continue }
                 }
+
+                // Look up speaker for this segment's time
+                let speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
 
                 let transcript = Transcript(
                     meetingId: meetingId,
-                    speakerLabel: "mic",
+                    speakerLabel: speaker,
                     text: text,
                     startTime: seg.startTime,
                     endTime: seg.endTime,
@@ -284,7 +324,7 @@ final class AppState {
                 savedCount += 1
             }
 
-            fileLog("Batch transcribe: saved \(savedCount) transcript segments to DB")
+            fileLog("Batch transcribe: saved \(savedCount) segments with speaker labels to DB")
             Logger.transcription.info("Batch transcription complete: \(savedCount) segments for meeting \(meetingId)")
 
         } catch {
@@ -341,8 +381,17 @@ final class AppState {
             fileLog("handleCallDetected: autoRecord=true, creating meeting for \(appName)")
             Task { @MainActor in
                 do {
-                    let title = "\(appName) Meeting"
+                    // Try to get meeting name from browser tab title
+                    let enriched = CalendarMeetingMatcher.enrichFromBrowserTitle(appName)
+                    let title = enriched?.title ?? "\(appName) Meeting"
                     let meeting = try await self.stateMachine.createAndStartMeeting(title: title)
+
+                    // Attach participant info if we got it from the browser title
+                    if let participants = enriched?.participants {
+                        var updated = meeting
+                        updated.participants = participants
+                        try? await self.meetingRepository.save(&updated)
+                    }
                     self.activeMeeting = self.stateMachine.currentMeeting
                     self.isRecording = self.stateMachine.isRecording
                     self.selectedMeetingId = meeting.id

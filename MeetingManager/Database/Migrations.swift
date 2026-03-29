@@ -328,5 +328,11 @@ enum Migrations {
                 t.add(column: "autoInvite", .boolean).notNull().defaults(to: true)
             }
         }
+
+        migrator.registerMigration("v7-meeting-participants") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "participants", .text)
+            }
+        }
     }
 }

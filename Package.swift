@@ -18,6 +18,7 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "WhisperKit", package: "WhisperKit"),
+                .product(name: "SpeakerKit", package: "WhisperKit"),
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "MeetingManager",
