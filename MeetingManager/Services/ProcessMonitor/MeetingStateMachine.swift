@@ -39,7 +39,7 @@ final class MeetingStateMachine {
     // MARK: - Dependencies
 
     private let meetingRepository: MeetingRepository
-    private let audioCaptureService: AudioCaptureService
+    private let audioCaptureService: any AudioCapturing
 
     // MARK: - Notification Observers
 
@@ -60,7 +60,7 @@ final class MeetingStateMachine {
 
     // MARK: - Init
 
-    init(meetingRepository: MeetingRepository, audioCaptureService: AudioCaptureService) {
+    init(meetingRepository: MeetingRepository, audioCaptureService: any AudioCapturing) {
         self.meetingRepository = meetingRepository
         self.audioCaptureService = audioCaptureService
         observeNotifications()

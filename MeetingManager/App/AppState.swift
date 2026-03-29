@@ -12,6 +12,10 @@ final class AppState {
     var selectedMeetingId: String?
     var isRecording = false
     var activeMeeting: Meeting?
+
+    /// The name of a detected call app when a meeting is in progress but recording hasn't started.
+    /// Cleared when recording begins or the call app exits.
+    private(set) var detectedCallApp: String?
     var meetings: [Meeting] = []
     var upcomingMeetings: [Meeting] = []
     var pastMeetings: [Meeting] = []
@@ -161,6 +165,7 @@ final class AppState {
                 self.activeMeeting = self.stateMachine.currentMeeting
                 self.isRecording = self.stateMachine.isRecording
                 self.selectedMeetingId = self.stateMachine.currentMeeting?.id
+                self.detectedCallApp = nil
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
@@ -394,6 +399,9 @@ final class AppState {
             return
         }
 
+        // Show the in-app indicator whenever a call is detected but we haven't started recording.
+        detectedCallApp = appName
+
         if settings.autoRecord {
             // Auto-record: immediately create meeting and start recording
             fileLog("handleCallDetected: autoRecord=true, creating meeting for \(appName)")
@@ -413,6 +421,7 @@ final class AppState {
                     self.activeMeeting = self.stateMachine.currentMeeting
                     self.isRecording = self.stateMachine.isRecording
                     self.selectedMeetingId = meeting.id
+                    self.detectedCallApp = nil
                     self.loadMeetings()
                     self.fileLog("handleCallDetected: meeting created \(meeting.id) — transcription runs after meeting ends")
                 } catch {
@@ -596,11 +605,12 @@ final class AppState {
             }
             .store(in: &cancellables)
 
-        // Call app closed — auto-stop recording if active
+        // Call app closed — auto-stop recording if active, clear detected-call banner
         NotificationCenter.default.publisher(for: .callAppTerminated)
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
+                    self.detectedCallApp = nil
                     if self.isRecording {
                         Logger.general.info("Call ended — auto-stopping recording")
                         self.stopRecording()

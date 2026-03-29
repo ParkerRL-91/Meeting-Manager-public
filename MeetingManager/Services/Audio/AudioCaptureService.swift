@@ -2,8 +2,22 @@ import AVFoundation
 import Combine
 import os
 
+// MARK: - AudioCapturing Protocol
+
+/// Abstraction over audio capture so MeetingStateMachine can be tested without hardware.
+protocol AudioCapturing: AnyObject {
+    var micLevel: Float { get }
+    var systemLevel: Float { get }
+    var currentAudioFileURL: URL? { get }
+    var onSilenceDetected: (() -> Void)? { get set }
+    func startCapture(meetingId: String) async throws
+    @discardableResult func stopCapture() -> URL?
+}
+
+// MARK: - AudioCaptureService
+
 /// Orchestrates mic + system audio capture for meeting recording
-final class AudioCaptureService: ObservableObject {
+final class AudioCaptureService: ObservableObject, AudioCapturing {
     @Published var isCapturing = false
     @Published var micLevel: Float = 0
     @Published var systemLevel: Float = 0

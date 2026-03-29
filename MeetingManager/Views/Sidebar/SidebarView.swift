@@ -83,6 +83,16 @@ struct SidebarView: View {
 
             Divider()
 
+            // MARK: - Status Banners
+
+            if appState.isRecording, let meeting = appState.activeMeeting {
+                SidebarRecordingBar(meeting: meeting)
+                Divider()
+            } else if let callApp = appState.detectedCallApp {
+                DetectedCallBanner(appName: callApp)
+                Divider()
+            }
+
             // MARK: - Meeting List
 
             if hasNoMeetings {
@@ -176,6 +186,122 @@ struct SidebarView: View {
     private func createAdHocMeeting() {
         // Post notification so AppState handles meeting creation + transcription start
         NotificationCenter.default.post(name: .createNewMeeting, object: nil)
+    }
+}
+
+// MARK: - Sidebar Recording Bar
+
+/// Compact recording indicator shown in the sidebar when a meeting is being recorded.
+/// Visible even when the user navigates away from LiveMeetingView.
+private struct SidebarRecordingBar: View {
+    let meeting: Meeting
+    @Environment(AppState.self) private var appState
+    @State private var elapsedSeconds: Int = 0
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.appRecording)
+                .frame(width: 8, height: 8)
+                .opacity(pulse ? 0.3 : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Recording")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appRecording)
+                Text(formattedElapsed)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+
+            Spacer()
+
+            Button {
+                appState.stopRecording()
+            } label: {
+                Image(systemName: "stop.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(Color.appRecording)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
+            .help("Stop Recording")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.appRecording.opacity(0.08))
+        .onAppear(perform: startTimer)
+        .onDisappear(perform: stopTimer)
+    }
+
+    @State private var timer: Timer?
+
+    private var formattedElapsed: String {
+        let h = elapsedSeconds / 3600
+        let m = (elapsedSeconds % 3600) / 60
+        let s = elapsedSeconds % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%02d:%02d", m, s)
+    }
+
+    private func startTimer() {
+        updateElapsed()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            updateElapsed()
+        }
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func updateElapsed() {
+        guard let start = meeting.startDate else { elapsedSeconds = 0; return }
+        elapsedSeconds = max(0, Int(Date().timeIntervalSince(start)))
+    }
+}
+
+// MARK: - Detected Call Banner
+
+/// Shown when a call app is running but recording hasn't started (manual-start mode).
+private struct DetectedCallBanner: View {
+    let appName: String
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "video.fill")
+                .font(.caption)
+                .foregroundStyle(Color.appAccent)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(appName) detected")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appTextPrimary)
+                Text("Tap to begin recording")
+                    .font(.caption2)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+
+            Spacer()
+
+            Button("Record") {
+                NotificationCenter.default.post(name: .startRecording, object: nil)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.appAccent)
+            .controlSize(.mini)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.appAccent.opacity(0.08))
     }
 }
 

@@ -35,6 +35,14 @@ let package = Package(
             ],
             path: "Tests/MeetingManagerTests"
         ),
+        .testTarget(
+            name: "MeetingDetectionTests",
+            dependencies: [
+                "MeetingManager",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/MeetingDetectionTests"
+        ),
         // CLI tool used by the WER evaluation harness.
         // Build: swift build --product transcribe-audio
         // Usage: .build/debug/transcribe-audio path/to/audio.aiff
