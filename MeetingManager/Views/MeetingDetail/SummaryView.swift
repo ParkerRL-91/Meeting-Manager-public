@@ -25,6 +25,11 @@ struct SummaryView: View {
     // History
     @State private var showHistory = false
 
+    // Empty state
+    @State private var transcriptCount = 0
+    @State private var recipes: [Recipe] = []
+    @State private var selectedRecipe: Recipe? = nil
+
     private let exportService = ExportService()
 
     var body: some View {
@@ -36,25 +41,149 @@ struct SummaryView: View {
             } else if let summary {
                 summaryContent(summary)
             } else {
-                Spacer()
-                EmptyStateView(
-                    icon: "doc.text.magnifyingglass",
-                    title: "No Summary Generated",
-                    subtitle: "A summary will appear here once the meeting is processed."
-                )
-                Spacer()
+                noSummaryEmptyState
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .errorAlert($errorMessage)
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
-            await loadSummary()
+            async let summaryLoad: () = loadSummary()
+            async let metaLoad: () = loadEmptyStateMeta()
+            await summaryLoad
+            await metaLoad
         }
         .sheet(isPresented: $showHistory) {
             SummaryHistoryView(meetingId: meetingId)
                 .environment(appState)
         }
+    }
+
+    // MARK: - No Summary Empty State
+
+    @ViewBuilder
+    private var noSummaryEmptyState: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            if transcriptCount == 0 {
+                // No transcript — explain why generation isn't possible
+                VStack(spacing: 12) {
+                    Image(systemName: "waveform.slash")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.tertiary)
+                    Text("No Transcript Available")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("A summary can only be generated from a transcript.\nRecord this meeting to capture audio, then Meeting Manager\nwill transcribe it automatically.")
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                }
+                .padding(.horizontal, 40)
+            } else {
+                // Has transcript — show generate button with recipe picker
+                VStack(spacing: 20) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.secondary)
+
+                    VStack(spacing: 6) {
+                        Text("Ready to Summarize")
+                            .font(.title3.weight(.semibold))
+                        Text("This meeting has a transcript. Choose a template and generate your summary.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    if isRegenerating {
+                        VStack(spacing: 8) {
+                            ProgressView()
+                            Text("Generating summary…")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        // Generate button + recipe dropdown
+                        HStack(spacing: 0) {
+                            Button {
+                                regenerateSummary(recipe: selectedRecipe)
+                            } label: {
+                                Label(
+                                    selectedRecipe == nil ? "Generate Summary" : "Generate: \(selectedRecipe!.name)",
+                                    systemImage: "sparkles"
+                                )
+                                .padding(.horizontal, 4)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color.appAccent)
+                            .controlSize(.large)
+
+                            Divider()
+                                .frame(height: 20)
+                                .padding(.horizontal, 2)
+
+                            Menu {
+                                Button {
+                                    selectedRecipe = nil
+                                } label: {
+                                    HStack {
+                                        Label("Standard Summary", systemImage: "doc.text")
+                                        if selectedRecipe == nil {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+
+                                if !recipes.isEmpty {
+                                    Divider()
+                                    ForEach(recipes) { recipe in
+                                        Button {
+                                            selectedRecipe = recipe
+                                        } label: {
+                                            HStack {
+                                                Label(recipe.name, systemImage: recipe.category.icon)
+                                                if selectedRecipe?.id == recipe.id {
+                                                    Image(systemName: "checkmark")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color.appAccent)
+                            .controlSize(.large)
+                        }
+
+                        if let recipe = selectedRecipe {
+                            Text(recipe.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+
+                    if let error = regenerateError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                    }
+                }
+                .padding(.horizontal, 60)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Summary Content
@@ -230,7 +359,7 @@ struct SummaryView: View {
         .controlSize(.small)
 
         Button {
-            regenerateSummary()
+            regenerateSummary(recipe: selectedRecipe)
         } label: {
             Label("Regenerate", systemImage: "arrow.clockwise")
                 .font(.caption)
@@ -251,6 +380,13 @@ struct SummaryView: View {
     }
 
     // MARK: - Actions
+
+    private func loadEmptyStateMeta() async {
+        let segments = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        transcriptCount = segments.count
+        let repo = RecipeRepository(database: appState.database)
+        recipes = (try? await repo.allRecipes()) ?? []
+    }
 
     private func loadSummary() async {
         isLoading = true
@@ -276,7 +412,7 @@ struct SummaryView: View {
         }
     }
 
-    private func regenerateSummary() {
+    private func regenerateSummary(recipe: Recipe? = nil) {
         guard let meeting else { return }
 
         isRegenerating = true
@@ -285,25 +421,42 @@ struct SummaryView: View {
         Task {
             do {
                 let settings = appState.settings
-                let textGenerator: (String, String) async throws -> String
+                let baseTextGenerator: (String, String) async throws -> String
                 let modelUsed: String
 
-                if settings.useLocalLLM {
-                    // On-device: route through Ollama
+                let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+                // Refresh Ollama status so we have a live check, not a stale cached value
+                await appState.ollamaService.refreshStatus()
+                let ollamaReachable = appState.ollamaService.isReachable
+
+                let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+                if useOllama {
                     let ollamaService = appState.ollamaService
                     let ollamaModel = settings.ollamaModel
-                    textGenerator = { sys, usr in
+                    baseTextGenerator = { sys, usr in
                         try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
                     }
                     modelUsed = "ollama/\(ollamaModel)"
-                } else {
-                    // Cloud: route through Claude API
+                } else if hasClaudeKey {
                     let claude = ClaudeService()
                     let claudeModel = settings.claudeModel
-                    textGenerator = { sys, usr in
+                    baseTextGenerator = { sys, usr in
                         try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
                     }
                     modelUsed = settings.claudeModel
+                } else {
+                    isRegenerating = false
+                    regenerateError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+                    return
+                }
+
+                // If a recipe is selected, override the system prompt with its template
+                let textGenerator: (String, String) async throws -> String
+                if let recipe {
+                    textGenerator = { _, usr in try await baseTextGenerator(recipe.promptTemplate, usr) }
+                } else {
+                    textGenerator = baseTextGenerator
                 }
 
                 let generator = SummaryGenerator()

@@ -32,7 +32,7 @@ struct SettingsView: View {
             UpdateSettingsView(updater: updateService.updater)
                 .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
         }
-        .frame(width: 600, height: 450)
+        .frame(width: 750, height: 500)
     }
 }
 

@@ -39,11 +39,6 @@ final class SummaryGenerator {
         modelUsed: String,
         settings: AppSettings = .default
     ) async throws -> MeetingSummary {
-        guard settings.aiEnabled else {
-            Logger.ai.info("AI is disabled — skipping summary generation for meeting \(meeting.id)")
-            throw ClaudeServiceError.aiDisabled
-        }
-
         isGenerating = true
         progress = "Fetching transcript..."
         defer {
