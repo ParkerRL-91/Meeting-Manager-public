@@ -1,0 +1,9 @@
+A|Did the build pass?
+B|No, two tests are failing in the payment module.
+A|Which tests?
+B|The refund calculation and the currency conversion tests.
+A|I think I know what's wrong. I made a change to the decimal precision yesterday.
+B|That would do it. Can you fix it today?
+A|Yes, give me an hour.
+B|Perfect. Let me know when the build is green and I'll do the code review.
+A|Will do.

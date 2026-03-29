@@ -29,11 +29,11 @@ protocol TranscriptionEngine: Sendable {
     ) async throws
 
     /// Transcribe a buffer of 16 kHz mono Float32 samples.
+    /// The full configuration is passed so the engine can apply all
+    /// accuracy and anti-hallucination options in one place.
     func transcribe(
         samples: [Float],
-        language: String,
-        temperature: Float,
-        suppressBlank: Bool
+        configuration: TranscriptionConfiguration
     ) async throws -> [TranscriptSegment]
 
     /// Release model resources.
@@ -103,9 +103,7 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
 
     func transcribe(
         samples: [Float],
-        language: String,
-        temperature: Float,
-        suppressBlank: Bool
+        configuration: TranscriptionConfiguration
     ) async throws -> [TranscriptSegment] {
         lock.lock()
         let kit = whisperKit
@@ -115,17 +113,29 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         guard loaded, let kit else { throw TranscriptionError.modelNotLoaded }
         guard !samples.isEmpty else { throw TranscriptionError.invalidSamples }
 
+        // Build full decoding options from configuration.
+        // These settings work together as a hallucination prevention system:
+        // - temperature=0 → deterministic greedy decoding (most accurate)
+        // - noSpeechThreshold → discard silent segments before they hallucinate
+        // - logProbThreshold → discard low-confidence segments
+        // - compressionRatioThreshold → detect and discard repetitive output
+        // - suppressBlank → eliminate empty stretch tokens
         let decodingOptions = DecodingOptions(
             verbose: false,
             task: .transcribe,
-            language: language.isEmpty ? nil : language,
-            temperature: temperature,
+            language: configuration.language.isEmpty ? nil : configuration.language,
+            temperature: configuration.temperature,
             temperatureIncrementOnFallback: 0.2,
-            temperatureFallbackCount: 3,
+            temperatureFallbackCount: configuration.temperatureFallbackCount,
             usePrefillPrompt: true,
             usePrefillCache: true,
             skipSpecialTokens: true,
-            suppressBlank: suppressBlank
+            wordTimestamps: configuration.wordTimestamps,
+            suppressBlank: configuration.suppressBlank,
+            supressTokens: [Int]?.none,
+            compressionRatioThreshold: configuration.compressionRatioThreshold,
+            logProbThreshold: configuration.logProbThreshold,
+            noSpeechThreshold: configuration.noSpeechThreshold
         )
 
         let results = try await kit.transcribe(
@@ -135,7 +145,7 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
 
         return results.flatMap { result in
             result.segments.compactMap { seg in
-                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = seg.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
                 // Convert log-probability to a 0–1 confidence score.
                 let confidence = min(max(Double(Foundation.exp(seg.avgLogprob)), 0), 1)
@@ -254,9 +264,7 @@ final class TranscriptionService {
         do {
             let segments = try await engine.transcribe(
                 samples: samples,
-                language: configuration.language,
-                temperature: configuration.temperature,
-                suppressBlank: configuration.suppressBlank
+                configuration: configuration
             )
 
             // Filter low-confidence segments

@@ -14,8 +14,8 @@ Package.resolved
 *.swp
 *~
 
-# Claude Code
-.claude/
+# Claude Code — ignore local settings, track skills
+.claude/settings.local.json
 
 # Xcode
 *.pbxuser

@@ -35,5 +35,15 @@ let package = Package(
             ],
             path: "Tests/MeetingManagerTests"
         ),
+        // CLI tool used by the WER evaluation harness.
+        // Build: swift build --product transcribe-audio
+        // Usage: .build/debug/transcribe-audio path/to/audio.aiff
+        .executableTarget(
+            name: "transcribe-audio",
+            dependencies: [
+                .product(name: "WhisperKit", package: "WhisperKit"),
+            ],
+            path: "Tools/TranscribeAudio"
+        ),
     ]
 )

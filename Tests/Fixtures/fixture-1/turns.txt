@@ -1,0 +1,10 @@
+A|Good morning everyone. Let's get started with our weekly sync.
+B|Good morning. I wanted to start by reviewing the progress from last week.
+A|Sure. We completed the authentication module and the user dashboard.
+B|That's great. What about the reporting feature? Is that on track?
+A|We're about two days behind schedule, but we'll catch up by Thursday.
+B|Okay. Let's make sure we prioritize that. Anything blocking you?
+A|Just waiting on the API documentation from the backend team.
+B|I'll follow up with them today. What's next on the agenda?
+A|We need to discuss the deployment timeline and testing strategy.
+B|Right. I think we should plan for a staged rollout starting next Monday.

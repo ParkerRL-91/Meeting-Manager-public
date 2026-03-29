@@ -1,0 +1,16 @@
+A|I've been reviewing the customer feedback from last quarter.
+B|What are the main themes coming through?
+A|Three things keep coming up. Speed, reliability, and the mobile experience.
+B|Speed has always been a pain point for us. What specifically are customers saying?
+A|They want the dashboard to load in under two seconds. Right now it takes about five.
+B|Five seconds is unacceptable for a dashboard. What's causing it?
+A|A combination of large JavaScript bundles and too many synchronous API calls on load.
+B|We should implement code splitting and move to parallel API calls.
+A|Agreed. That alone should get us to under two seconds.
+B|What about reliability? Are we seeing outages or just slowness?
+A|Mostly slowness during peak hours. We had two brief outages last month.
+B|Two outages in a month is too many. We need to look at our infrastructure scaling.
+A|I'll set up a meeting with the DevOps team to review our auto-scaling configuration.
+B|Good. And for mobile, is this an iOS or Android problem or both?
+A|Primarily iOS. The Android app is actually in pretty good shape.
+B|Let's get the iOS team involved. I want a plan by end of week.

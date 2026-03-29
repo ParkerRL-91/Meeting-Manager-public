@@ -3,11 +3,15 @@ import Foundation
 
 /// Thread-safe ring buffer that bridges audio capture to transcription.
 /// Receives buffers from mic and system audio, provides chunks for WhisperKit.
+///
+/// Audio mixing: mic and system audio are summed sample-by-sample (not concatenated).
+/// Concatenating would give WhisperKit alternating windows of each source, making
+/// it impossible to transcribe both speakers. Summing produces a single waveform
+/// where both voices are simultaneously audible — the correct input for Whisper.
 final class AudioBufferManager {
     private let lock = NSLock()
     private var micSamples: [Float] = []
     private var systemSamples: [Float] = []
-    private var combinedSamples: [Float] = []
     private var audioFile: AVAudioFile?
     private let sampleRate: Double = 16000
 
@@ -22,6 +26,11 @@ final class AudioBufferManager {
 
     private var chunkSampleCount: Int { Int(chunkDuration * sampleRate) }
     private var overlapSampleCount: Int { Int(chunkOverlap * sampleRate) }
+
+    /// The longer of the two source buffers determines when a chunk is ready.
+    private var maxBufferCount: Int {
+        max(micSamples.count, systemSamples.count)
+    }
 
     func prepareForRecording(outputURL: URL) throws {
         let format = AVAudioFormat(
@@ -46,7 +55,6 @@ final class AudioBufferManager {
 
         lock.lock()
         micSamples.append(contentsOf: samples)
-        combinedSamples.append(contentsOf: samples)
         lock.unlock()
 
         writeToFile(buffer)
@@ -61,50 +69,56 @@ final class AudioBufferManager {
 
         lock.lock()
         systemSamples.append(contentsOf: samples)
-        combinedSamples.append(contentsOf: samples)
         lock.unlock()
 
         writeToFile(buffer)
     }
 
-    /// Returns the next chunk of audio for transcription, or nil if not enough data
+    /// Returns the next mixed audio chunk for transcription, or nil if not enough data.
+    ///
+    /// Mixing strategy: sum mic and system samples at each position, then scale by 0.5
+    /// to prevent clipping. If one source is shorter (still buffering), treat missing
+    /// samples as silence (zero). This means early chunks may be mic-only or system-only
+    /// until both streams are in sync — that's correct behaviour.
     func nextChunk() -> AudioChunk? {
         lock.lock()
         defer { lock.unlock() }
 
-        guard combinedSamples.count >= chunkSampleCount else { return nil }
+        guard maxBufferCount >= chunkSampleCount else { return nil }
 
-        let chunk = Array(combinedSamples.prefix(chunkSampleCount))
+        let count = chunkSampleCount
+        var mixed = [Float](repeating: 0, count: count)
 
-        // Determine source based on which buffer contributed more
-        let micCount = micSamples.count
-        let systemCount = systemSamples.count
-        let source: AudioSource = micCount > systemCount ? .microphone : .system
-
-        // Remove consumed samples, keeping overlap
-        let removeCount = chunkSampleCount - overlapSampleCount
-        if combinedSamples.count > removeCount {
-            combinedSamples.removeFirst(removeCount)
+        // Sum mic samples (zero-padded if shorter than chunk)
+        for i in 0..<count {
+            let mic: Float = i < micSamples.count ? micSamples[i] : 0
+            let sys: Float = i < systemSamples.count ? systemSamples[i] : 0
+            // Scale by 0.5 to prevent clipping when both sources are loud
+            mixed[i] = (mic + sys) * 0.5
         }
 
-        // Trim source-specific buffers proportionally
-        let micRemove = min(micSamples.count, removeCount / 2)
-        let sysRemove = min(systemSamples.count, removeCount / 2)
-        if micRemove > 0 { micSamples.removeFirst(micRemove) }
-        if sysRemove > 0 { systemSamples.removeFirst(sysRemove) }
+        // Determine primary source for metadata
+        let hasMic = micSamples.count >= count
+        let hasSys = systemSamples.count >= count
+        let source: AudioSource = (hasMic && hasSys) ? .microphone : (hasMic ? .microphone : .system)
+
+        // Remove consumed samples from each buffer, keeping the overlap window
+        let removeCount = chunkSampleCount - overlapSampleCount
+        if micSamples.count >= removeCount { micSamples.removeFirst(removeCount) }
+        if systemSamples.count >= removeCount { systemSamples.removeFirst(removeCount) }
 
         return AudioChunk(
-            samples: chunk,
+            samples: mixed,
             source: source,
             timestamp: Date()
         )
     }
 
-    /// Returns true if there's enough audio for a transcription chunk
+    /// Returns true if there's enough audio from either source for a transcription chunk.
     var hasChunkReady: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return combinedSamples.count >= chunkSampleCount
+        return maxBufferCount >= chunkSampleCount
     }
 
     func finishRecording() {
@@ -112,7 +126,6 @@ final class AudioBufferManager {
         audioFile = nil
         micSamples.removeAll()
         systemSamples.removeAll()
-        combinedSamples.removeAll()
         lock.unlock()
     }
 
