@@ -24,7 +24,8 @@ final class AudioCaptureService: ObservableObject {
     private let bufferManager = AudioBufferManager()
     private let sessionManager = AudioSessionManager()
 
-    private var audioFileURL: URL?
+    /// The URL of the current recording's WAV file. Used for batch transcription after meeting ends.
+    private(set) var currentAudioFileURL: URL?
 
     @available(macOS 14.2, *)
     private var systemAudioTap: SystemAudioTap? { systemTap as? SystemAudioTap }
@@ -41,7 +42,7 @@ final class AudioCaptureService: ObservableObject {
         // Set up audio file for recording
         let audioDir = try audioDirectory()
         let fileURL = audioDir.appendingPathComponent("\(meetingId).wav")
-        audioFileURL = fileURL
+        currentAudioFileURL = fileURL
 
         try bufferManager.prepareForRecording(outputURL: fileURL)
 
@@ -100,7 +101,7 @@ final class AudioCaptureService: ObservableObject {
             systemLevel = 0
         }
 
-        return audioFileURL
+        return currentAudioFileURL
     }
 
     /// Get the buffer manager for the transcription service

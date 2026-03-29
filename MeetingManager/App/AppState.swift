@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import Combine
 import Speech
@@ -141,7 +142,8 @@ final class AppState {
         return meeting
     }
 
-    /// Start recording — delegates to the state machine, then starts live transcription.
+    /// Start recording — delegates to the state machine. No live transcription needed —
+    /// we transcribe the complete recording after the meeting ends for much better accuracy.
     func startRecording(for meeting: Meeting) {
         Task {
             do {
@@ -150,11 +152,7 @@ final class AppState {
                 self.isRecording = self.stateMachine.isRecording
                 self.selectedMeetingId = self.stateMachine.currentMeeting?.id
                 loadMeetings()
-
-                // Start live transcription if model is loaded
-                if let meetingId = self.stateMachine.currentMeeting?.id {
-                    startTranscription(meetingId: meetingId)
-                }
+                fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
                 Logger.general.error("Failed to start recording: \(error.localizedDescription)")
                 self.lastUserError = error.localizedDescription
@@ -162,26 +160,33 @@ final class AppState {
         }
     }
 
-    /// Stop recording — stops transcription, delegates to the state machine, and marks complete.
+    /// Stop recording — then run batch transcription on the complete audio file.
+    /// Batch transcription is dramatically more accurate than live streaming because
+    /// Whisper can use the full audio context and sequential decoding.
     func stopRecording() {
         Task {
-            // Stop both transcribers
-            await streamingTranscriber.stop()
-            appleSpeechTranscriber.stop()
-
             do {
-                // Save the meeting reference before stopRecording clears it
+                // Save references before stopRecording clears them
                 let stoppedMeeting = stateMachine.currentMeeting
+                let audioURL = audioCaptureService.currentAudioFileURL
 
                 try await stateMachine.stopRecording()
                 self.activeMeeting = self.stateMachine.currentMeeting
                 self.isRecording = self.stateMachine.isRecording
 
-                // Transition directly to complete (skip summarizing — user can trigger AI later)
+                // Mark meeting as transcribing → then run batch transcription
                 if let stopped = stoppedMeeting {
                     if let refreshed = try? await meetingRepository.find(id: stopped.id),
                        refreshed.status == .transcribing {
-                        try await stateMachine.complete(meeting: refreshed)
+                        // Run batch transcription on the complete audio file
+                        fileLog("Meeting stopped. Starting batch transcription for \(stopped.id)...")
+                        await batchTranscribe(meetingId: stopped.id, audioURL: audioURL)
+
+                        // Mark complete after transcription finishes
+                        if let final_ = try? await meetingRepository.find(id: stopped.id),
+                           final_.status == .transcribing {
+                            try await stateMachine.complete(meeting: final_)
+                        }
                     }
                 }
 
@@ -193,6 +198,98 @@ final class AppState {
                 Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
                 self.lastUserError = error.localizedDescription
             }
+        }
+    }
+
+    /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
+    /// This gives dramatically better accuracy than streaming 30-second chunks because
+    /// Whisper carries context between windows and the full audio is available.
+    private func batchTranscribe(meetingId: String, audioURL: URL?) async {
+        guard let audioURL else {
+            fileLog("Batch transcribe: no audio file URL")
+            return
+        }
+
+        if !transcriptionService.isModelLoaded {
+            fileLog("Batch transcribe: model not loaded, waiting...")
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .seconds(1))
+                if transcriptionService.isModelLoaded { break }
+            }
+        }
+        guard transcriptionService.isModelLoaded else {
+            fileLog("Batch transcribe: model not loaded after 60s — skipping")
+            return
+        }
+
+        fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
+
+        do {
+            // Read the WAV file into Float32 samples
+            let audioFile = try AVAudioFile(forReading: audioURL)
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+
+            // If the file isn't 16kHz, we need to read in the file's format
+            let fileFormat = audioFile.processingFormat
+            let frameCount = AVAudioFrameCount(audioFile.length)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
+                fileLog("Batch transcribe: failed to create buffer")
+                return
+            }
+            try audioFile.read(into: buffer)
+
+            // Convert to [Float] array for WhisperKit
+            guard let channelData = buffer.floatChannelData else {
+                fileLog("Batch transcribe: no channel data")
+                return
+            }
+            let samples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
+
+            let duration = Double(samples.count) / 16000.0
+            fileLog("Batch transcribe: \(samples.count) samples (\(String(format: "%.0f", duration))s)")
+
+            // Transcribe the complete file
+            let segments = try await transcriptionService.transcribe(samples: samples)
+
+            fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
+
+            // Filter and save to database
+            var savedCount = 0
+            for seg in segments {
+                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // Skip noise/hallucination
+                if text.isEmpty || text.count <= 1 { continue }
+                if text.hasPrefix("[") && text.hasSuffix("]") { continue }
+                if text.hasPrefix("(") && text.hasSuffix(")") { continue }
+
+                // Skip repetitive hallucinations
+                if text.count > 50 {
+                    let words = text.components(separatedBy: .whitespaces)
+                    if words.count > 10 {
+                        let uniqueWords = Set(words)
+                        if Double(uniqueWords.count) / Double(words.count) < 0.2 { continue }
+                    }
+                }
+
+                let transcript = Transcript(
+                    meetingId: meetingId,
+                    speakerLabel: "mic",
+                    text: text,
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    confidence: seg.confidence
+                )
+                try await transcriptRepository.saveBatch([transcript])
+                savedCount += 1
+            }
+
+            fileLog("Batch transcribe: saved \(savedCount) transcript segments to DB")
+            Logger.transcription.info("Batch transcription complete: \(savedCount) segments for meeting \(meetingId)")
+
+        } catch {
+            fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
+            Logger.transcription.error("Batch transcription failed: \(error.localizedDescription)")
         }
     }
 
@@ -250,8 +347,7 @@ final class AppState {
                     self.isRecording = self.stateMachine.isRecording
                     self.selectedMeetingId = meeting.id
                     self.loadMeetings()
-                    self.fileLog("handleCallDetected: meeting created \(meeting.id), calling startTranscription")
-                    self.startTranscription(meetingId: meeting.id)
+                    self.fileLog("handleCallDetected: meeting created \(meeting.id) — transcription runs after meeting ends")
                 } catch {
                     self.fileLog("handleCallDetected: FAILED — \(error.localizedDescription)")
                     self.lastUserError = error.localizedDescription
@@ -287,38 +383,8 @@ final class AppState {
         }
     }
 
-    /// Start live transcription using WhisperKit with 30-second audio chunks.
-    private func startTranscription(meetingId: String) {
-        fileLog("startTranscription() called for \(meetingId) — using WhisperKit (30s chunks)")
-
-        Task {
-            if !transcriptionService.isModelLoaded {
-                fileLog("WhisperKit: waiting for model to load...")
-                for _ in 0..<90 {
-                    try? await Task.sleep(for: .seconds(1))
-                    if transcriptionService.isModelLoaded { break }
-                }
-            }
-
-            guard transcriptionService.isModelLoaded else {
-                fileLog("WhisperKit: model not loaded after 90s — no transcription")
-                await MainActor.run {
-                    self.lastUserError = "Transcription model could not load. Recording audio only."
-                }
-                return
-            }
-
-            fileLog("WhisperKit: model ready, starting StreamingTranscriber")
-            await MainActor.run {
-                self.streamingTranscriber.start(
-                    meetingId: meetingId,
-                    bufferManager: self.audioCaptureService.transcriptionBuffer,
-                    repository: self.transcriptRepository
-                )
-            }
-            fileLog("WhisperKit StreamingTranscriber STARTED (30s chunks, base-en model)")
-        }
-    }
+    // Live transcription removed — batch transcription after meeting ends is dramatically more accurate.
+    // See batchTranscribe() which runs WhisperKit's sequential long-form algorithm on the complete WAV.
 
     // MARK: - File Logging (for debugging with user)
 
@@ -400,12 +466,9 @@ final class AppState {
                             self.activeMeeting = self.stateMachine.currentMeeting
                             self.isRecording = self.stateMachine.isRecording
                             self.selectedMeetingId = meeting.id
-                            self.fileLog("Meeting created: \(meeting.id), starting transcription...")
+                            self.fileLog("Meeting created: \(meeting.id) — transcription runs after meeting ends")
                         }
                         self.loadMeetings()
-                        await MainActor.run {
-                            self.startTranscription(meetingId: meeting.id)
-                        }
                     } catch {
                         Logger.general.error("Failed to create ad-hoc meeting: \(error.localizedDescription)")
                         await MainActor.run { self.lastUserError = error.localizedDescription }
@@ -448,11 +511,7 @@ final class AppState {
                     self.isRecording = self.stateMachine.isRecording
                     self.loadMeetings()
 
-                    // If recording just started, start transcription
-                    if !wasRecording && self.isRecording,
-                       let meetingId = self.stateMachine.currentMeeting?.id {
-                        self.startTranscription(meetingId: meetingId)
-                    }
+                    // Transcription runs after meeting ends (batch mode for better accuracy)
                 }
             }
             .store(in: &cancellables)
