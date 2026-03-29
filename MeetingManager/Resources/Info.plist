@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.0.5</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>5</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
     <key>NSPrincipalClass</key>
@@ -36,6 +36,14 @@
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>com.meetingmanager</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Google OAuth Callback</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>com.googleusercontent.apps.168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu</string>
             </array>
         </dict>
     </array>

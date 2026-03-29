@@ -136,10 +136,12 @@ final class CalendarSyncManager {
             let from = Calendar.current.date(byAdding: .day, value: -lookBehindDays, to: now)!
             let to = Calendar.current.date(byAdding: .day, value: lookAheadDays, to: now)!
 
+            let calendarId = selectedCalendarId() ?? "primary"
             let events = try await calendarService.fetchEvents(
                 accessToken: accessToken,
                 from: from,
-                to: to
+                to: to,
+                calendarId: calendarId
             )
 
             var synced = 0
@@ -158,6 +160,13 @@ final class CalendarSyncManager {
         }
 
         isSyncing = false
+    }
+
+    /// Returns the user-selected calendar ID from settings, or nil for "primary".
+    private func selectedCalendarId() -> String? {
+        try? AppDatabase.shared.writer.read { db in
+            try AppSettings.fetchOne(db)?.selectedCalendarId
+        } ?? nil
     }
 
     /// Creates or updates a `Meeting` record from a calendar event.

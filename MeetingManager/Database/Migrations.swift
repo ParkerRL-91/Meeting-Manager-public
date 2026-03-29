@@ -334,5 +334,11 @@ enum Migrations {
                 t.add(column: "participants", .text)
             }
         }
+
+        migrator.registerMigration("v8-calendar-selection") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "selectedCalendarId", .text)
+            }
+        }
     }
 }

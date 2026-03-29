@@ -19,6 +19,9 @@ struct AppSettings: Codable, Equatable {
     /// Ignored if autoRecord is true (auto-record takes precedence).
     var autoInvite: Bool = true
 
+    /// The Google Calendar ID to sync. nil = use the primary calendar.
+    var selectedCalendarId: String? = nil
+
     static let `default` = AppSettings(
         whisperModel: "large-v3",
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -38,7 +41,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
     enum Columns: String, ColumnExpression {
         case id, whisperModel, summaryPromptTemplate, claudeModel
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
-        case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite
+        case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite, selectedCalendarId
     }
 }
 
