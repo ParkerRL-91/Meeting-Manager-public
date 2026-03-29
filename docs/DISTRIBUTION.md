@@ -1,144 +1,93 @@
-# Meeting Manager — Distribution Guide
+# Distribution Guide
 
-## Overview
+How to build and publish a Meeting Manager release.
 
-Meeting Manager is distributed as a signed & notarized DMG, with automatic updates via the Sparkle framework. Users download the DMG, drag the app to Applications, and receive automatic updates thereafter.
-
-## Prerequisites
-
-### Apple Developer Account
-- **Cost:** $99/year at [developer.apple.com](https://developer.apple.com)
-- **Required for:** Code signing (Developer ID), notarization, and Gatekeeper approval
-- You need a **Developer ID Application** certificate
-
-### Sparkle Framework
-Already integrated via SPM. Sparkle handles:
-- Checking for updates (appcast.xml)
-- Downloading new versions
-- EdDSA signature verification
-- Installing updates seamlessly
-
-### Tools
-- Xcode 15+ with command line tools
-- `generate_appcast` from [Sparkle releases](https://github.com/sparkle-project/Sparkle/releases)
-- `xcnotary` or Xcode's built-in `notarytool`
-
-## Setup (One-Time)
-
-### 1. Generate Sparkle EdDSA Keys
+## Quick Release
 
 ```bash
-# Download Sparkle and run the key generator
-./bin/generate_keys
+./Scripts/push-update.sh 1.2.0
 ```
 
-This outputs a public key. Add it to Info.plist:
-```xml
-<key>SUPublicEDKey</key>
-<string>YOUR_PUBLIC_KEY_HERE</string>
+This single command:
+1. Bumps `CFBundleShortVersionString` in Info.plist
+2. Runs `swift build -c release`
+3. Assembles a signed `.app` bundle (binary + Sparkle.framework + resources)
+4. Creates a DMG
+5. Generates a signed Sparkle appcast.xml
+6. Commits and pushes appcast.xml to GitHub Pages (`docs/`)
+7. Creates a GitHub Release with the DMG attached
+
+Add `NOTARIZE=1` to also notarize with Apple:
+```bash
+NOTARIZE=1 ./Scripts/push-update.sh 1.2.0
 ```
 
-Store the private key securely — it signs your updates.
-
-### 2. Set Up Notarization Credentials
-
+Notarization requires a keychain profile named `MeetingManager-Notarize`:
 ```bash
 xcrun notarytool store-credentials "MeetingManager-Notarize" \
     --apple-id "your@email.com" \
-    --team-id "YOUR_TEAM_ID" \
+    --team-id "YOURTEAMID" \
     --password "app-specific-password"
 ```
 
-### 3. Configure Appcast URL
+---
 
-In Info.plist, set where your appcast lives:
-```xml
-<key>SUFeedURL</key>
-<string>https://yourdomain.com/appcast.xml</string>
-```
+## Sparkle Update Infrastructure
 
-Options for hosting:
-- **GitHub Pages:** Free, reliable. Host appcast.xml in a `gh-pages` branch
-- **GitHub Releases:** Host DMGs as release assets, appcast.xml in repo
-- **Your own server/CDN:** Full control
+| Component | Location |
+|-----------|----------|
+| Appcast feed | `https://parkerrl-91.github.io/Meeting-Manager/appcast.xml` |
+| Appcast source | `docs/appcast.xml` (GitHub Pages, `main` branch `/docs` folder) |
+| EdDSA public key | `MeetingManager/Resources/Info.plist` → `SUPublicEDKey` |
+| EdDSA private key | macOS Keychain (stored by `generate_keys` at first setup) |
+| Sparkle tools | `.build/artifacts/sparkle/Sparkle/bin/` |
 
-### 4. Configure Info.plist for Updates
+### Enable GitHub Pages
 
-Required keys (already in our Info.plist):
-```xml
-<key>SUFeedURL</key>
-<string>https://yourdomain.com/appcast.xml</string>
-<key>SUPublicEDKey</key>
-<string>your-public-ed-key</string>
-<key>SUEnableAutomaticChecks</key>
-<true/>
-```
+Go to repo **Settings → Pages → Source**: `main` branch, `/docs` folder. The appcast URL goes live immediately.
 
-## Building a Release
+### Regenerate Keys (if needed)
 
 ```bash
-# Set your Apple Developer Team ID
-export TEAM_ID="YOUR_TEAM_ID"
-
-# Build, sign, notarize, create DMG, and update appcast
-./Scripts/build-release.sh 1.0.0
+.build/artifacts/sparkle/Sparkle/bin/generate_keys
 ```
 
-This produces:
-- `build/dmg/Meeting-Manager-1.0.0.dmg` — distributable disk image
-- `docs/appcast/appcast.xml` — update feed
+Update `SUPublicEDKey` in Info.plist with the new public key. The private key is saved in Keychain automatically.
 
-## Publishing a Release
+---
 
-### Option A: GitHub Releases (Recommended)
+## Manual DMG Build
 
-1. Tag the release:
-   ```bash
-   git tag -a v1.0.0 -m "Release 1.0.0"
-   git push origin v1.0.0
-   ```
+```bash
+# 1. Build release binary
+swift build -c release
 
-2. Create a GitHub Release and upload the DMG
+# 2. Assemble .app bundle
+mkdir -p build/app/Meeting\ Manager.app/Contents/{MacOS,Frameworks,Resources}
+cp .build/release/MeetingManager build/app/Meeting\ Manager.app/Contents/MacOS/
+cp MeetingManager/Resources/Info.plist build/app/Meeting\ Manager.app/Contents/
+rsync -a --exclude="Info.plist" MeetingManager/Resources/ \
+    build/app/Meeting\ Manager.app/Contents/Resources/
+SPARKLE=$(find .build/artifacts -name "Sparkle.framework" | head -1)
+cp -R "$SPARKLE" build/app/Meeting\ Manager.app/Contents/Frameworks/
+install_name_tool -add_rpath "@executable_path/../Frameworks" \
+    build/app/Meeting\ Manager.app/Contents/MacOS/MeetingManager
+codesign --force --deep --sign - build/app/Meeting\ Manager.app
 
-3. Host `appcast.xml` on GitHub Pages or in the repo
+# 3. Create DMG
+mkdir -p build/dmg-staging
+cp -R build/app/Meeting\ Manager.app build/dmg-staging/
+ln -sf /Applications build/dmg-staging/Applications
+hdiutil create -volname "Meeting Manager" \
+    -srcfolder build/dmg-staging \
+    -ov -format UDZO \
+    build/Meeting-Manager-1.0.5.dmg
+```
 
-### Option B: Direct Hosting
+---
 
-1. Upload DMG to your CDN
-2. Upload `appcast.xml` to your web server
-3. Ensure the `SUFeedURL` in Info.plist points to it
+## Version History
 
-## How Updates Work (User Perspective)
-
-1. User downloads DMG from your website/GitHub
-2. User drags "Meeting Manager.app" to Applications
-3. On launch, Sparkle checks appcast.xml for new versions
-4. If update available → shows native macOS update dialog
-5. User clicks "Install Update" → downloads, verifies signature, restarts app
-6. Fully automatic, no manual download needed
-
-## Versioning
-
-Use semantic versioning:
-- **Major** (2.0.0): Breaking changes, major redesign
-- **Minor** (1.1.0): New features, backward compatible
-- **Patch** (1.0.1): Bug fixes
-
-Update in two places:
-- `MARKETING_VERSION` in Xcode project (or pass to build script)
-- The build script auto-sets `CURRENT_PROJECT_VERSION` from timestamp
-
-## Troubleshooting
-
-### "App is damaged" warning
-- App wasn't notarized. Run `xcrun stapler staple "App.app"` after notarization
-- Or user downloaded from untrusted source — re-download from official link
-
-### Updates not showing
-- Check `SUFeedURL` is reachable
-- Verify appcast.xml has correct version numbers
-- Check Console.app for Sparkle logs
-
-### Code signing issues
-- Ensure "Developer ID Application" certificate is in Keychain
-- Run `codesign --verify --deep "App.app"` to check
+| Version | Date | Notes |
+|---------|------|-------|
+| 1.0.5 | 2026-03-29 | On-device AI (Ollama auto-install), sidebar redesign, Sparkle update pipeline |
