@@ -20,7 +20,7 @@ struct AppSettings: Codable, Equatable {
     var autoInvite: Bool = true
 
     static let `default` = AppSettings(
-        whisperModel: "base-en",
+        whisperModel: "large-v3",
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
         claudeModel: "claude-sonnet-4-20250514",
         calendarSyncIntervalMinutes: 15,

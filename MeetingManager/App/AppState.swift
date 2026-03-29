@@ -96,7 +96,16 @@ final class AppState {
                 let loaded = try await database.writer.read { db in
                     try AppSettings.fetchOne(db)
                 }
-                if let loaded {
+                if var loaded = loaded {
+                    // Migrate old model names to large-v3.
+                    // Settings predating Sprint 1 stored "base-en" or "tiny-en".
+                    let smallModels = ["tiny-en", "base-en", "small-en",
+                                       WhisperModel.tinyEn.rawValue,
+                                       WhisperModel.baseEn.rawValue,
+                                       WhisperModel.smallEn.rawValue]
+                    if smallModels.contains(loaded.whisperModel) {
+                        loaded.whisperModel = "large-v3"
+                    }
                     await MainActor.run { self.settings = loaded }
                 }
             } catch {
@@ -370,7 +379,8 @@ final class AppState {
             case "tiny-en", WhisperModel.tinyEn.rawValue: model = .tinyEn
             case "base-en", WhisperModel.baseEn.rawValue: model = .baseEn
             case "small-en", WhisperModel.smallEn.rawValue: model = .smallEn
-            default: model = .baseEn  // base-en is 2x more accurate than tiny-en
+            case "large-v3", WhisperModel.largev3.rawValue: model = .largev3
+            default: model = .largev3  // large-v3 for maximum accuracy
             }
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
