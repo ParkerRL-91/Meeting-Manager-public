@@ -7,9 +7,13 @@ struct GeneralSettingsView: View {
 
     // MARK: - State
 
+    @Environment(AppState.self) private var appState
     @State private var selectedTheme: String = AppSettings.default.theme
     @State private var launchAtLogin: Bool = AppSettings.default.launchAtLogin
     @State private var notificationLeadTime: Int = AppSettings.default.notificationLeadTimeMinutes
+    @State private var autoGenerateSummary: Bool = false
+    @State private var defaultRecipeId: String? = nil
+    @State private var recipes: [Recipe] = []
 
     // MARK: - Body
 
@@ -18,9 +22,16 @@ struct GeneralSettingsView: View {
             appearanceSection
             startupSection
             notificationSection
+            summaryAutomationSection
             aboutSection
         }
         .formStyle(.grouped)
+        .task {
+            autoGenerateSummary = appState.settings.autoGenerateSummary
+            defaultRecipeId = appState.settings.defaultRecipeId
+            let repo = RecipeRepository(database: appState.database)
+            recipes = (try? await repo.allRecipes()) ?? []
+        }
     }
 
     // MARK: - Sections
@@ -71,6 +82,36 @@ struct GeneralSettingsView: View {
             Text("Notifications")
         } footer: {
             Text("How many minutes before a scheduled meeting you would like to be notified.")
+        }
+    }
+
+    private var summaryAutomationSection: some View {
+        Section {
+            Toggle("Auto-generate summary after transcription", isOn: $autoGenerateSummary)
+                .onChange(of: autoGenerateSummary) { _, enabled in
+                    persistSetting { $0.autoGenerateSummary = enabled }
+                    appState.settings.autoGenerateSummary = enabled
+                }
+
+            if autoGenerateSummary {
+                Picker("Default prompt", selection: $defaultRecipeId) {
+                    Text("Meeting Summary (default)")
+                        .tag(nil as String?)
+
+                    ForEach(recipes) { recipe in
+                        Label(recipe.name, systemImage: recipe.category.icon)
+                            .tag(recipe.id as String?)
+                    }
+                }
+                .onChange(of: defaultRecipeId) { _, newValue in
+                    persistSetting { $0.defaultRecipeId = newValue }
+                    appState.settings.defaultRecipeId = newValue
+                }
+            }
+        } header: {
+            Text("Summary Automation")
+        } footer: {
+            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template.")
         }
     }
 

@@ -214,6 +214,11 @@ final class AppState {
                         if let final_ = try? await meetingRepository.find(id: stopped.id),
                            final_.status == .transcribing {
                             try await stateMachine.complete(meeting: final_)
+
+                            // Schedule auto-summary if enabled
+                            if settings.autoGenerateSummary {
+                                scheduleAutoSummary(meetingId: stopped.id)
+                            }
                         }
                     }
                 }
@@ -225,6 +230,91 @@ final class AppState {
             } catch {
                 Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
                 self.lastUserError = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: - Auto-Summary
+
+    /// Schedule automatic summary generation 10 minutes after transcription completes.
+    private func scheduleAutoSummary(meetingId: String) {
+        fileLog("Auto-summary: scheduled for meeting \(meetingId) in 10 minutes")
+        Logger.ai.info("Auto-summary scheduled for \(meetingId) — will fire in 10 minutes")
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(600)) // 10 minutes
+
+            // Verify the meeting still exists and doesn't already have a summary
+            guard let meeting = try? await meetingRepository.find(id: meetingId) else {
+                fileLog("Auto-summary: meeting \(meetingId) no longer exists — skipping")
+                return
+            }
+
+            if let existing = try? await summaryRepository.latestSummary(meetingId: meetingId), !existing.summaryText.isEmpty {
+                fileLog("Auto-summary: meeting \(meetingId) already has a summary — skipping")
+                return
+            }
+
+            fileLog("Auto-summary: generating for meeting \(meetingId)...")
+
+            // Determine AI backend (same routing as SummaryView)
+            let baseTextGenerator: (String, String) async throws -> String
+            let modelUsed: String
+
+            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+            await ollamaService.refreshStatus()
+            let ollamaReachable = ollamaService.isReachable
+
+            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+            if useOllama {
+                let service = ollamaService
+                let model = settings.ollamaModel
+                baseTextGenerator = { sys, usr in
+                    try await service.generate(systemPrompt: sys, userPrompt: usr, model: model)
+                }
+                modelUsed = "ollama/\(model)"
+            } else if hasClaudeKey {
+                let claude = ClaudeService()
+                let claudeModel = settings.claudeModel
+                baseTextGenerator = { sys, usr in
+                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+                }
+                modelUsed = claudeModel
+            } else {
+                fileLog("Auto-summary: no AI configured — skipping")
+                return
+            }
+
+            // If a default recipe is set, use its prompt template
+            let textGenerator: (String, String) async throws -> String
+            if let recipeId = settings.defaultRecipeId {
+                let repo = RecipeRepository(database: database)
+                if let recipe = try? await repo.find(id: recipeId) {
+                    textGenerator = { _, usr in try await baseTextGenerator(recipe.promptTemplate, usr) }
+                } else {
+                    textGenerator = baseTextGenerator
+                }
+            } else {
+                textGenerator = baseTextGenerator
+            }
+
+            do {
+                let generator = SummaryGenerator()
+                let summary = try await generator.generateSummary(
+                    for: meeting,
+                    transcriptRepo: transcriptRepository,
+                    noteRepo: noteRepository,
+                    summaryRepo: summaryRepository,
+                    textGenerator: textGenerator,
+                    modelUsed: modelUsed,
+                    settings: settings
+                )
+                fileLog("Auto-summary: completed for meeting \(meetingId) (\(summary.summaryText.count) chars)")
+                Logger.ai.info("Auto-summary generated for \(meetingId)")
+            } catch {
+                fileLog("Auto-summary: FAILED for meeting \(meetingId) — \(error.localizedDescription)")
+                Logger.ai.error("Auto-summary failed: \(error.localizedDescription)")
             }
         }
     }

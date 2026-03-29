@@ -347,5 +347,12 @@ enum Migrations {
                 t.add(column: "ollamaModel", .text).notNull().defaults(to: "llama3.2:3b")
             }
         }
+
+        migrator.registerMigration("v10-auto-generate-summary") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "autoGenerateSummary", .boolean).notNull().defaults(to: false)
+                t.add(column: "defaultRecipeId", .text)
+            }
+        }
     }
 }
