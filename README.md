@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**Meeting-Manager-1.0.5.dmg**](./Meeting-Manager-1.0.5.dmg) — macOS 14.4+
+[**Meeting-Manager-1.0.6.dmg**](./Meeting-Manager-1.0.6.dmg) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
