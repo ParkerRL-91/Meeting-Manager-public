@@ -8,6 +8,17 @@ final class AudioCaptureService: ObservableObject {
     @Published var micLevel: Float = 0
     @Published var systemLevel: Float = 0
 
+    /// Called when sustained silence is detected (no speech for `silenceTimeout` seconds).
+    /// The meeting should be auto-stopped.
+    var onSilenceDetected: (() -> Void)?
+
+    /// How many consecutive seconds of silence before triggering auto-stop.
+    var silenceTimeout: TimeInterval = 45
+
+    /// Tracks consecutive seconds of silence for auto-stop.
+    private var consecutiveSilentSeconds: Int = 0
+    private var silenceCheckTimer: Timer?
+
     let micCapture = MicrophoneCapture()
 
     /// Callback for raw (unconverted) mic buffers — used by SFSpeechRecognizer.
@@ -64,6 +75,23 @@ final class AudioCaptureService: ObservableObject {
             self?.bufferManager.appendMicBuffer(buffer, at: time)
             self?.updateMicLevel(buffer)
         }
+
+        // Start silence monitoring: check every second if audio energy is below threshold
+        consecutiveSilentSeconds = 0
+        silenceCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // micLevel is updated by updateMicLevel on every buffer
+            if self.micLevel < 0.005 {
+                self.consecutiveSilentSeconds += 1
+                if self.consecutiveSilentSeconds >= Int(self.silenceTimeout) {
+                    Logger.audio.info("Silence detected for \(self.consecutiveSilentSeconds)s — triggering auto-stop")
+                    self.onSilenceDetected?()
+                    self.consecutiveSilentSeconds = 0 // Reset so it doesn't fire repeatedly
+                }
+            } else {
+                self.consecutiveSilentSeconds = 0
+            }
+        }
         try micCapture.start()
 
         // Start system audio capture (for remote participant audio).
@@ -89,6 +117,9 @@ final class AudioCaptureService: ObservableObject {
 
     /// Stop all audio capture
     func stopCapture() -> URL? {
+        silenceCheckTimer?.invalidate()
+        silenceCheckTimer = nil
+        consecutiveSilentSeconds = 0
         micCapture.stop()
         if #available(macOS 14.2, *) {
             systemAudioTap?.stop()

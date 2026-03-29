@@ -66,6 +66,15 @@ final class AppState {
             audioCaptureService: audioCaptureService
         )
 
+        // Auto-stop recording after sustained silence (meeting ended)
+        audioCaptureService.onSilenceDetected = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.fileLog("Silence auto-stop: no speech for 45 seconds — ending meeting")
+                self.stopRecording()
+            }
+        }
+
         loadMeetings()
         loadSettings()
         observeNotifications()
@@ -240,12 +249,21 @@ final class AppState {
                 fileLog("Batch transcribe: no channel data")
                 return
             }
-            let samples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
+            let allSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
 
-            let duration = Double(samples.count) / Double(fileFormat.sampleRate)
-            fileLog("Batch transcribe: \(samples.count) samples (\(String(format: "%.0f", duration))s)")
+            let totalDuration = Double(allSamples.count) / Double(fileFormat.sampleRate)
+            fileLog("Batch transcribe: \(allSamples.count) samples (\(String(format: "%.0f", totalDuration))s raw)")
 
-            // Step 1: Transcribe the complete file with WhisperKit
+            // Trim leading and trailing silence to improve transcription quality.
+            // WhisperKit hallucinates on long silent sections.
+            let silenceThreshold: Float = 0.005
+            let windowSize = Int(fileFormat.sampleRate) // 1-second windows
+            let samples = trimSilence(allSamples, threshold: silenceThreshold, windowSize: windowSize)
+
+            let trimmedDuration = Double(samples.count) / Double(fileFormat.sampleRate)
+            fileLog("Batch transcribe: trimmed to \(samples.count) samples (\(String(format: "%.0f", trimmedDuration))s speech)")
+
+            // Step 1: Transcribe the trimmed audio with WhisperKit
             let segments = try await transcriptionService.transcribe(samples: samples)
             fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
 
@@ -434,6 +452,47 @@ final class AppState {
 
     // Live transcription removed — batch transcription after meeting ends is dramatically more accurate.
     // See batchTranscribe() which runs WhisperKit's sequential long-form algorithm on the complete WAV.
+
+    // MARK: - Audio Processing
+
+    /// Trim leading and trailing silence from audio samples.
+    /// Uses 1-second windows and checks if the RMS energy exceeds the threshold.
+    private func trimSilence(_ samples: [Float], threshold: Float, windowSize: Int) -> [Float] {
+        guard samples.count > windowSize else { return samples }
+
+        let windowCount = samples.count / windowSize
+
+        // Find first non-silent window
+        var firstNonSilent = 0
+        for i in 0..<windowCount {
+            let start = i * windowSize
+            let end = min(start + windowSize, samples.count)
+            let window = samples[start..<end]
+            let rms = sqrt(window.reduce(0.0) { $0 + $1 * $1 } / Float(window.count))
+            if rms > threshold {
+                // Start 2 seconds before speech to give context
+                firstNonSilent = max(0, (i - 2) * windowSize)
+                break
+            }
+        }
+
+        // Find last non-silent window
+        var lastNonSilent = samples.count
+        for i in stride(from: windowCount - 1, through: 0, by: -1) {
+            let start = i * windowSize
+            let end = min(start + windowSize, samples.count)
+            let window = samples[start..<end]
+            let rms = sqrt(window.reduce(0.0) { $0 + $1 * $1 } / Float(window.count))
+            if rms > threshold {
+                // End 2 seconds after last speech
+                lastNonSilent = min(samples.count, (i + 3) * windowSize)
+                break
+            }
+        }
+
+        guard firstNonSilent < lastNonSilent else { return samples }
+        return Array(samples[firstNonSilent..<lastNonSilent])
+    }
 
     // MARK: - File Logging (for debugging with user)
 
