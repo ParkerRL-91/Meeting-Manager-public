@@ -10,7 +10,7 @@ struct AppSettings: Codable, Equatable {
     var notificationLeadTimeMinutes: Int
     var launchAtLogin: Bool
     var theme: String
-    var aiEnabled: Bool = true
+    var aiEnabled: Bool = false
 
     /// When true, automatically start recording when a call app or browser meeting is detected.
     var autoRecord: Bool = false

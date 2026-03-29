@@ -17,8 +17,10 @@ struct ContentView: View {
         if let meetingId = appState.selectedMeetingId {
             if appState.isRecording, appState.activeMeeting?.id == meetingId {
                 LiveMeetingView(meetingId: meetingId)
+                    .id(meetingId)
             } else {
                 MeetingDetailView(meetingId: meetingId)
+                    .id(meetingId)   // force view recreation so .task re-fires on selection change
             }
         } else {
             EmptyStateView(

@@ -14,10 +14,12 @@ final class UpdateService: ObservableObject {
 
     init() {
         updaterController = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: false,   // don't auto-check on launch; no valid feed URL yet
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        // Ensure automatic checks are off until the user opts in
+        updaterController.updater.automaticallyChecksForUpdates = false
     }
 
     /// The underlying SPUUpdater for SwiftUI CheckForUpdatesView binding.

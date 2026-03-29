@@ -57,6 +57,12 @@ final class GoogleAuthManager {
     private(set) var isSignedIn = false
     private(set) var userEmail: String?
 
+    /// The OAuth client ID entered by the user. `nil` means not yet configured.
+    private(set) var oauthClientId: String?
+
+    /// Whether a client ID has been saved and sign-in is possible.
+    var isConfigured: Bool { !(oauthClientId?.isEmpty ?? true) }
+
     // MARK: - Keychain Keys
 
     private enum Keys {
@@ -67,10 +73,8 @@ final class GoogleAuthManager {
 
     // MARK: - OAuth Configuration
 
-    /// Replace these with your real Google Cloud OAuth credentials.
-    /// In production these would come from a plist or environment config.
+    /// Fixed OAuth endpoints and scopes; the client ID is user-supplied (see `oauthClientId`).
     private enum OAuthConfig {
-        static let clientId = "YOUR_CLIENT_ID.apps.googleusercontent.com"
         static let redirectURI = "com.meetingmanager:/oauth2callback"
         static let authURL = "https://accounts.google.com/o/oauth2/v2/auth"
         static let tokenURL = "https://oauth2.googleapis.com/token"
@@ -86,7 +90,37 @@ final class GoogleAuthManager {
 
     init(session: URLSession = .shared) {
         self.session = session
+        restoreClientId()
         restoreSession()
+    }
+
+    // MARK: - Client ID Management
+
+    /// Saves the user-provided OAuth client ID to the Keychain.
+    func saveClientId(_ clientId: String) throws {
+        let trimmed = clientId.trimmingCharacters(in: .whitespaces)
+        try KeychainHelper.save(trimmed, forKey: KeychainHelper.Key.googleOAuthClientId)
+        oauthClientId = trimmed.isEmpty ? nil : trimmed
+        Logger.calendar.info("Google OAuth client ID saved")
+    }
+
+    /// Removes the stored client ID and signs the user out.
+    func clearClientId() throws {
+        try KeychainHelper.delete(forKey: KeychainHelper.Key.googleOAuthClientId)
+        oauthClientId = nil
+        signOut()
+        Logger.calendar.info("Google OAuth client ID cleared")
+    }
+
+    private func restoreClientId() {
+        do {
+            if let stored = try KeychainHelper.loadString(forKey: KeychainHelper.Key.googleOAuthClientId),
+               !stored.isEmpty {
+                oauthClientId = stored
+            }
+        } catch {
+            Logger.calendar.warning("Could not restore Google client ID: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Public API
@@ -96,6 +130,9 @@ final class GoogleAuthManager {
     /// Opens the system browser sheet, exchanges the authorization code for
     /// tokens, and persists them in the Keychain.
     func signIn() async throws {
+        guard isConfigured else {
+            throw GoogleAuthError.notConfigured
+        }
         Logger.calendar.info("Starting Google sign-in flow")
 
         let authorizationCode = try await requestAuthorizationCode()
@@ -161,9 +198,10 @@ final class GoogleAuthManager {
 
     /// Opens `ASWebAuthenticationSession` to get an authorization code.
     private func requestAuthorizationCode() async throws -> String {
+        let clientId = oauthClientId ?? ""
         var components = URLComponents(string: OAuthConfig.authURL)!
         components.queryItems = [
-            URLQueryItem(name: "client_id", value: OAuthConfig.clientId),
+            URLQueryItem(name: "client_id", value: clientId),
             URLQueryItem(name: "redirect_uri", value: OAuthConfig.redirectURI),
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "scope", value: OAuthConfig.scopes),
@@ -210,7 +248,7 @@ final class GoogleAuthManager {
 
         let params = [
             "code": code,
-            "client_id": OAuthConfig.clientId,
+            "client_id": oauthClientId ?? "",
             "redirect_uri": OAuthConfig.redirectURI,
             "grant_type": "authorization_code",
         ]
@@ -239,7 +277,7 @@ final class GoogleAuthManager {
 
         let params = [
             "refresh_token": refreshToken,
-            "client_id": OAuthConfig.clientId,
+            "client_id": oauthClientId ?? "",
             "grant_type": "refresh_token",
         ]
         let body = params.map { key, value in

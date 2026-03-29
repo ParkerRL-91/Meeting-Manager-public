@@ -9,6 +9,7 @@ enum KeychainHelper {
     enum Key {
         static let claudeAPIKey = "claude-api-key"
         static let googleOAuthToken = "google-oauth-token"
+        static let googleOAuthClientId = "google-oauth-client-id"
     }
 
     /// The service identifier written into every keychain item.

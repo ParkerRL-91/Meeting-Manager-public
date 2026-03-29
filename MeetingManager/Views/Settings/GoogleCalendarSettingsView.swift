@@ -11,6 +11,9 @@ struct GoogleCalendarSettingsView: View {
 
     // MARK: - State
 
+    @State private var clientIdInput: String = ""
+    @State private var isEditingClientId = false
+    @State private var clientIdSaveError: String?
     @State private var selectedSyncInterval: Int = AppSettings.default.calendarSyncIntervalMinutes
     @State private var isSyncing = false
     @State private var syncError: String?
@@ -27,6 +30,7 @@ struct GoogleCalendarSettingsView: View {
 
     var body: some View {
         Form {
+            clientIdSection
             connectionSection
             if authManager.isSignedIn {
                 syncSection
@@ -35,8 +39,80 @@ struct GoogleCalendarSettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear {
+            clientIdInput = authManager.oauthClientId ?? ""
             selectedSyncInterval = AppSettings.default.calendarSyncIntervalMinutes
         }
+    }
+
+    // MARK: - Client ID Section
+
+    private var clientIdSection: some View {
+        Section {
+            if authManager.isConfigured && !isEditingClientId {
+                HStack {
+                    Label("Client ID configured", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Change") {
+                        clientIdInput = authManager.oauthClientId ?? ""
+                        isEditingClientId = true
+                    }
+                    .buttonStyle(.borderless)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Paste your OAuth Client ID here", text: $clientIdInput)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+
+                    if let error = clientIdSaveError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Save") {
+                            saveClientId()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(clientIdInput.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                        if isEditingClientId {
+                            Button("Cancel") {
+                                clientIdInput = authManager.oauthClientId ?? ""
+                                isEditingClientId = false
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text("OAuth Client ID")
+        } footer: {
+            if !authManager.isConfigured || isEditingClientId {
+                setupGuideFooter
+            } else {
+                Text("Your Client ID is saved securely in the macOS Keychain.")
+            }
+        }
+    }
+
+    private var setupGuideFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("To get a Client ID, follow these steps:")
+                .fontWeight(.medium)
+            Text("1. Go to console.cloud.google.com and create or select a project.")
+            Text("2. Enable the Google Calendar API under APIs & Services → Library.")
+            Text("3. Go to APIs & Services → Credentials → Create Credentials → OAuth client ID.")
+            Text("4. Choose Desktop app as the application type.")
+            Text("5. Under Authorized redirect URIs add: com.meetingmanager:/oauth2callback")
+            Text("6. Copy the Client ID (ends in .apps.googleusercontent.com) and paste it above.")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     // MARK: - Connection Section
@@ -67,9 +143,9 @@ struct GoogleCalendarSettingsView: View {
                 }
             } else {
                 HStack {
-                    Image(systemName: "xmark.circle")
+                    Image(systemName: authManager.isConfigured ? "xmark.circle" : "lock.circle")
                         .foregroundStyle(.secondary)
-                    Text("Not connected")
+                    Text(authManager.isConfigured ? "Not connected" : "Client ID required to sign in")
                         .foregroundStyle(.secondary)
 
                     Spacer()
@@ -83,6 +159,7 @@ struct GoogleCalendarSettingsView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!authManager.isConfigured)
                 }
 
                 if let error = signInError {
@@ -173,6 +250,17 @@ struct GoogleCalendarSettingsView: View {
 
     // MARK: - Actions
 
+    private func saveClientId() {
+        clientIdSaveError = nil
+        do {
+            try authManager.saveClientId(clientIdInput)
+            isEditingClientId = false
+        } catch {
+            clientIdSaveError = "Could not save to Keychain: \(error.localizedDescription)"
+            Logger.calendar.error("Failed to save Google client ID: \(error.localizedDescription)")
+        }
+    }
+
     private func signIn() {
         signInError = nil
         Task {
@@ -222,10 +310,3 @@ struct GoogleCalendarSettingsView: View {
         }
     }
 }
-
-// MARK: - Preview
-
-// #Preview("Google Calendar Settings") {
-//     GoogleCalendarSettingsView()
-//         .frame(width: 500, height: 400)
-// }
