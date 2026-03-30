@@ -17,6 +17,7 @@ struct MeetingManagerApp: App {
                     .frame(minWidth: 900, minHeight: 600)
             } else {
                 OnboardingView(onboardingManager: onboardingManager)
+                    .environment(appState)
                     .preferredColorScheme(.dark)
                     .frame(minWidth: 600, minHeight: 450)
             }

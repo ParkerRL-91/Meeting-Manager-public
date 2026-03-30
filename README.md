@@ -4,11 +4,21 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v1.1.dmg**](./MeetingManager-v1.1.dmg) — macOS 14.4+
+[**MeetingManager-v1.1.1.dmg**](./MeetingManager-v1.1.1.dmg) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
 ---
+
+## What's New in v1.1.1
+
+- **Model download progress bar** — first-launch model download now shows a real progress bar with percentage in the menu bar popover instead of a generic spinner
+- **Download error recovery** — if the model download fails, the popover shows the error and a "Retry Download" button
+- **Transcription readiness indicator** — green checkmark "Transcription ready" in the popover once the model is loaded
+- **No more silent failures** — if you stop a recording before the model is ready, an alert explains that audio was saved and will be transcribed when the download completes
+- **Model download notification** — macOS notification when the model finishes downloading on first launch
+- **Onboarding model status** — the onboarding Ready step now shows whether the transcription model is downloaded, downloading, or not ready
+- **Global error alerts** — all errors (recording, transcription, call detection) now surface as alerts in the main window
 
 ## What's New in v1.1
 

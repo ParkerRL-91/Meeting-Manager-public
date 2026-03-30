@@ -4,12 +4,15 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
+        @Bindable var appState = appState
+
         NavigationSplitView {
             SidebarView()
         } detail: {
             detailView
         }
         .navigationSplitViewStyle(.balanced)
+        .errorAlert($appState.lastUserError)
     }
 
     @ViewBuilder

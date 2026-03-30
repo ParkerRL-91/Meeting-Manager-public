@@ -60,6 +60,11 @@ final class AppState {
     /// True while the WhisperKit model is downloading/loading.
     private(set) var isLoadingModel = false
 
+    /// Synthetic model download progress (0.0–1.0) that combines real WhisperKit progress
+    /// with a time-based estimate so the UI shows continuous advancement.
+    var modelDownloadProgress: Double = 0
+    private var modelProgressTimer: Timer?
+
     /// User-visible error from the most recent operation (shown via alert).
     var lastUserError: String?
 
@@ -363,6 +368,11 @@ final class AppState {
     /// Batch transcription is dramatically more accurate than live streaming because
     /// Whisper can use the full audio context and sequential decoding.
     func stopRecording() {
+        // Warn user if transcription model isn't ready yet
+        if !transcriptionService.isModelLoaded {
+            lastUserError = "The transcription model is still downloading. Your audio has been saved and will be transcribed once the download completes."
+        }
+
         Task {
             do {
                 // Save references before stopRecording clears them
@@ -512,6 +522,7 @@ final class AppState {
         }
         guard transcriptionService.isModelLoaded else {
             fileLog("Batch transcribe: model not loaded after 60s — skipping")
+            lastUserError = "Transcription skipped — the model failed to load. Open the menu bar to retry the download."
             return
         }
 
@@ -697,15 +708,72 @@ final class AppState {
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
             fileLog("Model: loading \(model.rawValue)...")
             isLoadingModel = true
+            modelDownloadProgress = 0
+
+            // Start a synthetic progress timer — WhisperKit only reports 0.05 then 1.0,
+            // so we use an exponential curve to show continuous progress to the user.
+            let startTime = Date()
+            let estimatedDuration: TimeInterval = 180 // ~3 min estimate for first download
+            modelProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+                Task { @MainActor in
+                    guard let self, self.isLoadingModel else { timer.invalidate(); return }
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    // Asymptotically approach 0.9 — real completion snaps to 1.0
+                    let synthetic = 0.9 * (1.0 - exp(-elapsed / estimatedDuration))
+                    let real = self.transcriptionService.downloadProgress
+                    self.modelDownloadProgress = max(synthetic, real)
+                }
+            }
+
+            let loadStart = Date()
             do {
                 try await transcriptionService.loadModel(model)
+                modelProgressTimer?.invalidate()
+                modelProgressTimer = nil
+                modelDownloadProgress = 1.0
+
                 Logger.transcription.info("WhisperKit model loaded — transcription is ready")
                 fileLog("Model: LOADED successfully — ready for transcription")
+
+                // Notify user if this was a real download (not a cache load)
+                let loadDuration = Date().timeIntervalSince(loadStart)
+                if loadDuration > 30 {
+                    sendModelReadyNotification()
+                }
             } catch {
+                modelProgressTimer?.invalidate()
+                modelProgressTimer = nil
+                modelDownloadProgress = 0
+
                 Logger.transcription.error("Failed to auto-load WhisperKit model: \(error.localizedDescription)")
                 fileLog("Model: FAILED to load — \(error.localizedDescription)")
             }
             isLoadingModel = false
+        }
+    }
+
+    /// Retry loading the WhisperKit model after a failure.
+    func retryModelLoad() {
+        transcriptionService.clearError()
+        autoLoadTranscriptionModel()
+    }
+
+    /// Send a macOS notification that the transcription model is ready.
+    private func sendModelReadyNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = "Meeting Manager"
+        content.body = "Transcription model downloaded and ready. You can now record and transcribe meetings."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "model-download-complete",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send model-ready notification: \(error.localizedDescription)")
+            }
         }
     }
 

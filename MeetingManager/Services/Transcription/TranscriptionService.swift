@@ -276,6 +276,11 @@ final class TranscriptionService {
         }
     }
 
+    /// Clear any stored error so the UI can dismiss error state (e.g. before retry).
+    func clearError() {
+        lastError = nil
+    }
+
     /// Release the loaded model and free memory.
     func unloadModel() {
         engine.unload()

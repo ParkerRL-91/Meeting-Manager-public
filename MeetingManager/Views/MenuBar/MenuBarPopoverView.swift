@@ -149,11 +149,55 @@ struct MenuBarPopoverView: View {
                 Spacer()
             }
 
+            // Model status: downloading, error, or ready
             if appState.isLoadingModel {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("Downloading transcription model...")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                        Spacer()
+                        Text("\(Int(appState.modelDownloadProgress * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                    ProgressView(value: appState.modelDownloadProgress)
+                        .progressViewStyle(.linear)
+                        .tint(Color.appAccent)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let error = appState.transcriptionService.lastError, !appState.isLoadingModel {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.appWarning)
+                            .font(.caption)
+                        Text("Model download failed")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextPrimary)
+                    }
+                    Text(error.localizedDescription)
+                        .font(.caption2)
+                        .foregroundStyle(Color.appTextSecondary)
+                        .lineLimit(2)
+                    Button(action: { appState.retryModelLoad() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Retry Download")
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.appAccent)
+                    .controlSize(.small)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if appState.transcriptionService.isModelLoaded {
                 HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Loading transcription model...")
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.appSuccess)
+                        .font(.caption)
+                    Text("Transcription ready")
                         .font(.caption)
                         .foregroundStyle(Color.appTextSecondary)
                 }

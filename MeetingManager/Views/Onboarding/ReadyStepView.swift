@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 
 struct ReadyStepView: View {
+    @Environment(AppState.self) private var appState
     let onComplete: () -> Void
 
     var body: some View {
@@ -34,6 +35,11 @@ struct ReadyStepView: View {
                     granted: false,
                     label: "Google Calendar",
                     skippedText: "Not connected"
+                )
+                setupRow(
+                    granted: appState.transcriptionService.isModelLoaded,
+                    label: "Transcription model",
+                    skippedText: appState.isLoadingModel ? "Downloading..." : "Not ready"
                 )
             }
             .padding(20)
