@@ -365,6 +365,10 @@ struct GoogleCalendarSettingsView: View {
                 for event in events {
                     var meeting: Meeting
                     if var existing = try await repo.findByCalendarEventId(event.id) {
+                        // Never overwrite meetings that are recording or already completed
+                        guard existing.status == .scheduled || existing.status == .notified else {
+                            continue
+                        }
                         existing.title = event.title
                         existing.scheduledStartDate = event.startDate
                         existing.scheduledEndDate = event.endDate

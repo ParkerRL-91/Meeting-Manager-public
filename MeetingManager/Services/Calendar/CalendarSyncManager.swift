@@ -176,6 +176,12 @@ final class CalendarSyncManager {
     /// Otherwise a new meeting is created.
     private func upsertMeeting(from event: CalendarEvent) async throws {
         if var existing = try await meetingRepository.findByCalendarEventId(event.id) {
+            // Never overwrite meetings that are actively recording or already completed —
+            // a calendar sync must not clobber runtime state (startDate, endDate, status, etc.).
+            guard existing.status == .scheduled || existing.status == .notified else {
+                Logger.calendar.debug("Skipping sync for '\(event.title)' — status is \(existing.status.rawValue)")
+                return
+            }
             // Update scheduling details only; don't overwrite user-created data.
             existing.title = event.title
             existing.scheduledStartDate = event.startDate

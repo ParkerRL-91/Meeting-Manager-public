@@ -191,7 +191,6 @@ struct MeetingChatView: View {
         chatMessageRepo = repo
 
         let service = MeetingChatService(
-            claudeService: ClaudeService(),
             transcriptRepository: appState.transcriptRepository,
             chatMessageRepository: repo
         )
@@ -206,6 +205,32 @@ struct MeetingChatView: View {
         }
     }
 
+    /// Builds a textGenerator closure using the same AI routing as SummaryView.
+    private func buildTextGenerator() async -> ((String, String) async throws -> String)? {
+        let settings = appState.settings
+        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+        await appState.ollamaService.refreshStatus()
+        let ollamaReachable = appState.ollamaService.isReachable
+        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+        if useOllama {
+            let ollamaService = appState.ollamaService
+            let ollamaModel = settings.ollamaModel
+            return { sys, usr in
+                try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
+            }
+        } else if hasClaudeKey {
+            let claude = ClaudeService()
+            let claudeModel = settings.claudeModel
+            return { sys, usr in
+                try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+            }
+        } else {
+            chatService?.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+            return nil
+        }
+    }
+
     private func sendMessage() {
         let question = inputText.trimmingCharacters(in: .whitespaces)
         guard !question.isEmpty, let service = chatService, let repo = chatMessageRepo else { return }
@@ -214,8 +239,9 @@ struct MeetingChatView: View {
         lastFailedQuestion = question
 
         Task {
+            guard let textGenerator = await buildTextGenerator() else { return }
             do {
-                try await service.sendQuery(meetingId: meetingId, question: question)
+                try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
             } catch {
@@ -229,8 +255,9 @@ struct MeetingChatView: View {
         service.clearError()
 
         Task {
+            guard let textGenerator = await buildTextGenerator() else { return }
             do {
-                try await service.sendQuery(meetingId: meetingId, question: question)
+                try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
             } catch {

@@ -65,8 +65,15 @@ struct Meeting: Identifiable, Codable, Equatable {
         return "\(hours)h \(remainingMinutes)m"
     }
 
+    /// For completed/recorded meetings, prefer the actual start time over
+    /// the calendar-scheduled time (which may be midnight for all-day events).
     var effectiveDate: Date {
-        scheduledStartDate ?? startDate ?? createdAt
+        switch status {
+        case .recording, .transcribing, .summarizing, .complete, .archived:
+            return startDate ?? scheduledStartDate ?? createdAt
+        default:
+            return scheduledStartDate ?? startDate ?? createdAt
+        }
     }
 }
 

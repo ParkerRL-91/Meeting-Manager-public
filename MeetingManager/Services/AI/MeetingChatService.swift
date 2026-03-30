@@ -25,46 +25,38 @@ final class MeetingChatService {
     // MARK: - Public State
 
     private(set) var isProcessing = false
-    private(set) var lastError: String?
+    var lastError: String?
 
     // MARK: - Dependencies
 
-    private let claudeService: ClaudeService
     private let transcriptRepository: TranscriptRepository
     private let chatMessageRepository: ChatMessageRepository
 
     init(
-        claudeService: ClaudeService,
         transcriptRepository: TranscriptRepository,
         chatMessageRepository: ChatMessageRepository
     ) {
-        self.claudeService = claudeService
         self.transcriptRepository = transcriptRepository
         self.chatMessageRepository = chatMessageRepository
     }
 
     // MARK: - Public API
 
-    /// Sends a question about the current meeting to Claude, using recent transcript as context.
+    /// Sends a question about the current meeting to an AI, using recent transcript as context.
     ///
     /// - Parameters:
     ///   - meetingId: The meeting to query about.
     ///   - question: The user's question.
+    ///   - textGenerator: A closure that takes (systemPrompt, userPrompt) and returns generated text.
     ///   - recentTranscriptMinutes: How many minutes of recent transcript to include (default 10).
-    ///   - settings: The user's app settings.
     /// - Returns: The assistant's response text.
     @discardableResult
     func sendQuery(
         meetingId: String,
         question: String,
-        recentTranscriptMinutes: Double = 10,
-        settings: AppSettings = .default
+        textGenerator: (String, String) async throws -> String,
+        recentTranscriptMinutes: Double = 10
     ) async throws -> String {
-        guard settings.aiEnabled else {
-            Logger.ai.info("AI is disabled — skipping chat query for meeting \(meetingId)")
-            throw ClaudeServiceError.aiDisabled
-        }
-
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -105,15 +97,10 @@ final class MeetingChatService {
         )
         try await chatMessageRepository.save(&userMessage)
 
-        // 4. Call Claude
-        let model = settings.claudeModel
+        // 4. Call AI (Claude or Ollama via textGenerator closure)
         let response: String
         do {
-            response = try await claudeService.sendMessage(
-                systemPrompt: systemPrompt,
-                userPrompt: question,
-                model: model
-            )
+            response = try await textGenerator(systemPrompt, question)
         } catch {
             let chatError = MeetingChatError.chatFailed(error)
             lastError = chatError.localizedDescription

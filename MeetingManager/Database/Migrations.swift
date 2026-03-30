@@ -60,7 +60,7 @@ enum Migrations {
             // App settings (singleton row)
             try db.create(table: "appSettings") { t in
                 t.column("id", .integer).primaryKey().check { $0 == 1 }
-                t.column("whisperModel", .text).notNull().defaults(to: "tiny-en")
+                t.column("whisperModel", .text).notNull().defaults(to: "openai_whisper-large-v3")
                 t.column("summaryPromptTemplate", .text).notNull()
                 t.column("claudeModel", .text).notNull().defaults(to: "claude-sonnet-4-20250514")
                 t.column("calendarSyncIntervalMinutes", .integer).notNull().defaults(to: 15)

@@ -101,14 +101,9 @@ final class AppState {
                     try AppSettings.fetchOne(db)
                 }
                 if var loaded = loaded {
-                    // Migrate old model names to large-v3.
-                    // Settings predating Sprint 1 stored "base-en" or "tiny-en".
-                    let smallModels = ["tiny-en", "base-en", "small-en",
-                                       WhisperModel.tinyEn.rawValue,
-                                       WhisperModel.baseEn.rawValue,
-                                       WhisperModel.smallEn.rawValue]
-                    if smallModels.contains(loaded.whisperModel) {
-                        loaded.whisperModel = "large-v3"
+                    // Always enforce large-v3 — no other models are supported.
+                    if loaded.whisperModel != WhisperModel.largev3.rawValue {
+                        loaded.whisperModel = WhisperModel.largev3.rawValue
                     }
                     await MainActor.run { self.settings = loaded }
                 }
@@ -466,16 +461,8 @@ final class AppState {
         Task {
             guard !transcriptionService.isModelLoaded else { return }
 
-            // Map the stored settings string to a WhisperModel enum.
-            // AppSettings stores short names like "tiny-en"; WhisperModel uses full HuggingFace names.
-            let model: WhisperModel
-            switch settings.whisperModel {
-            case "tiny-en", WhisperModel.tinyEn.rawValue: model = .tinyEn
-            case "base-en", WhisperModel.baseEn.rawValue: model = .baseEn
-            case "small-en", WhisperModel.smallEn.rawValue: model = .smallEn
-            case "large-v3", WhisperModel.largev3.rawValue: model = .largev3
-            default: model = .largev3  // large-v3 for maximum accuracy
-            }
+            // Always use large-v3 — it's the only supported model.
+            let model = WhisperModel.largev3
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
             fileLog("Model: loading \(model.rawValue)...")

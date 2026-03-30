@@ -1,59 +1,21 @@
 import Foundation
 
-// MARK: - Whisper Model Selection
+// MARK: - Whisper Model
 
-/// Available WhisperKit model variants.
-/// Ordered from smallest/fastest to largest/most accurate.
-/// For Meeting Manager, accuracy is the only priority — use large-v3.
+/// The only supported WhisperKit model. Large v3 provides the best accuracy
+/// and is the only model Meeting Manager ships with.
 enum WhisperModel: String, CaseIterable, Identifiable, Codable {
-    case tinyEn    = "openai_whisper-tiny.en"
-    case baseEn    = "openai_whisper-base.en"
-    case smallEn   = "openai_whisper-small.en"
-    case largev3   = "openai_whisper-large-v3"
+    case largev3 = "openai_whisper-large-v3"
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .tinyEn:  return "Tiny (English)"
-        case .baseEn:  return "Base (English)"
-        case .smallEn: return "Small (English)"
-        case .largev3: return "Large v3 (Most Accurate)"
-        }
-    }
+    var displayName: String { "Large v3" }
 
     /// Estimated peak memory usage in megabytes.
-    var estimatedMemoryMB: Int {
-        switch self {
-        case .tinyEn:  return 75
-        case .baseEn:  return 150
-        case .smallEn: return 500
-        case .largev3: return 3_000
-        }
-    }
+    var estimatedMemoryMB: Int { 3_000 }
 
     /// Human-readable download size.
-    var downloadSizeDescription: String {
-        switch self {
-        case .tinyEn:  return "~40 MB"
-        case .baseEn:  return "~80 MB"
-        case .smallEn: return "~250 MB"
-        case .largev3: return "~1.5 GB"
-        }
-    }
-
-    var memoryWarning: String? {
-        switch self {
-        case .smallEn:
-            return "The Small model requires ~500 MB of memory. "
-                + "On 8 GB machines this may cause slowdowns during recording."
-        case .largev3:
-            return "The Large v3 model requires ~3 GB of memory and ~1.5 GB of disk. "
-                + "It provides the highest accuracy available."
-        default:
-            return nil
-        }
-    }
+    var downloadSizeDescription: String { "~1.5 GB" }
 }
 
 // MARK: - Transcription Configuration
@@ -63,7 +25,7 @@ struct TranscriptionConfiguration: Codable, Equatable {
 
     // MARK: Model
 
-    /// The WhisperKit model to use. large-v3 gives the best accuracy.
+    /// The WhisperKit model to use — always large-v3.
     var model: WhisperModel = .largev3
 
     // MARK: Language

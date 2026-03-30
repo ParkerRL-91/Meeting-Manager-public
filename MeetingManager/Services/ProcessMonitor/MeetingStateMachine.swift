@@ -87,7 +87,15 @@ final class MeetingStateMachine {
         var updated = meeting
         updated.status = .recording
         updated.startDate = Date()
+        Logger.general.info("startRecording: setting startDate=\(updated.startDate!) for meeting \(updated.id)")
         try await persist(&updated)
+
+        // Verify the persist actually wrote the correct startDate
+        if let verified = try? await meetingRepository.find(id: updated.id) {
+            if verified.startDate != updated.startDate {
+                Logger.general.error("startRecording: startDate MISMATCH after persist! expected=\(updated.startDate!), got=\(String(describing: verified.startDate))")
+            }
+        }
 
         // Start audio capture — rollback if it fails
         do {

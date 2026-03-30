@@ -9,7 +9,7 @@ final class RecipeEngine {
     // MARK: - Public State
 
     private(set) var isProcessing = false
-    private(set) var lastError: String?
+    var lastError: String?
 
     // MARK: - Dependencies
 
@@ -18,7 +18,7 @@ final class RecipeEngine {
     // MARK: - Recipe Execution
 
     /// Executes a recipe against a meeting, substituting template variables
-    /// with meeting data and calling the Claude API.
+    /// with meeting data and calling the provided text generator (Claude or Ollama).
     ///
     /// - Parameters:
     ///   - recipe: The recipe to execute.
@@ -26,8 +26,7 @@ final class RecipeEngine {
     ///   - transcriptRepo: Repository providing transcript text.
     ///   - noteRepo: Repository providing user notes.
     ///   - resultRepo: Repository for persisting the generated result.
-    ///   - claudeService: The Claude API service.
-    ///   - settings: The user's app settings.
+    ///   - textGenerator: A closure that takes (systemPrompt, userPrompt) and returns generated text.
     /// - Returns: The generated output text.
     @discardableResult
     func execute(
@@ -36,14 +35,8 @@ final class RecipeEngine {
         transcriptRepo: TranscriptRepository,
         noteRepo: NoteRepository,
         resultRepo: RecipeResultRepository,
-        claudeService: ClaudeService,
-        settings: AppSettings = .default
+        textGenerator: (String, String) async throws -> String
     ) async throws -> String {
-        guard settings.aiEnabled else {
-            Logger.ai.info("AI is disabled — skipping recipe '\(recipe.name)' for meeting \(meeting.id)")
-            throw ClaudeServiceError.aiDisabled
-        }
-
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -66,13 +59,8 @@ final class RecipeEngine {
             let systemPrompt = "You are a professional meeting assistant. "
                 + "Produce clear, well-structured output based on the meeting data provided."
 
-            // 3. Call Claude API
-            let model = settings.claudeModel
-            let outputText = try await claudeService.sendMessage(
-                systemPrompt: systemPrompt,
-                userPrompt: userPrompt,
-                model: model
-            )
+            // 3. Call AI (Claude or Ollama via textGenerator closure)
+            let outputText = try await textGenerator(systemPrompt, userPrompt)
 
             // 4. Save result
             var result = RecipeResult(

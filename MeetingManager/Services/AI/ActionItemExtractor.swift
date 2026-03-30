@@ -9,11 +9,7 @@ final class ActionItemExtractor {
     // MARK: - Public State
 
     private(set) var isProcessing = false
-    private(set) var lastError: String?
-
-    // MARK: - Dependencies
-
-    private let claudeService = ClaudeService()
+    var lastError: String?
 
     // MARK: - Extraction
 
@@ -23,20 +19,15 @@ final class ActionItemExtractor {
     ///   - meeting: The meeting to extract action items from.
     ///   - transcriptRepo: Repository providing transcript text.
     ///   - actionItemRepo: Repository for persisting extracted items.
-    ///   - settings: The user's app settings.
+    ///   - textGenerator: A closure that takes (systemPrompt, userPrompt) and returns generated text.
     /// - Returns: The extracted and saved action items.
     @discardableResult
     func extractActionItems(
         for meeting: Meeting,
         transcriptRepo: TranscriptRepository,
         actionItemRepo: ActionItemRepository,
-        settings: AppSettings = .default
+        textGenerator: (String, String) async throws -> String
     ) async throws -> [ActionItem] {
-        guard settings.aiEnabled else {
-            Logger.ai.info("AI is disabled — skipping action item extraction for meeting \(meeting.id)")
-            return []
-        }
-
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -64,13 +55,8 @@ final class ActionItemExtractor {
 
         let userPrompt = "Extract action items from this meeting transcript:\n\n\(transcript)"
 
-        // 3. Call Claude API
-        let model = settings.claudeModel
-        let responseText = try await claudeService.sendMessage(
-            systemPrompt: systemPrompt,
-            userPrompt: userPrompt,
-            model: model
-        )
+        // 3. Call AI (Claude or Ollama via textGenerator closure)
+        let responseText = try await textGenerator(systemPrompt, userPrompt)
 
         // 4. Parse JSON response
         let items = try parseActionItems(from: responseText, meetingId: meeting.id)

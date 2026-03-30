@@ -191,16 +191,40 @@ struct RecipeResultView: View {
         let transcriptRepo = appState.transcriptRepository
         let noteRepo = appState.noteRepository
         let resultRepo = RecipeResultRepository(database: appState.database)
-        let claudeService = ClaudeService()
 
+        // Build textGenerator with same AI routing as SummaryView
+        let textGenerator: (String, String) async throws -> String
         do {
+            let settings = appState.settings
+            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+            await appState.ollamaService.refreshStatus()
+            let ollamaReachable = appState.ollamaService.isReachable
+            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+            if useOllama {
+                let ollamaService = appState.ollamaService
+                let ollamaModel = settings.ollamaModel
+                textGenerator = { sys, usr in
+                    try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
+                }
+            } else if hasClaudeKey {
+                let claude = ClaudeService()
+                let claudeModel = settings.claudeModel
+                textGenerator = { sys, usr in
+                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+                }
+            } else {
+                engine.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+                return
+            }
+
             let result = try await engine.execute(
                 recipe: recipe,
                 meeting: meeting,
                 transcriptRepo: transcriptRepo,
                 noteRepo: noteRepo,
                 resultRepo: resultRepo,
-                claudeService: claudeService
+                textGenerator: textGenerator
             )
             outputText = result
             hasResult = true
