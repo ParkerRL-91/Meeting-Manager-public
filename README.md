@@ -8,6 +8,27 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
+### First Launch — Gatekeeper Notice
+
+Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may block the app on first launch with a message like *"Apple could not verify Meeting Manager."*
+
+**To open the app:**
+
+1. **Right-click** (or Control-click) on Meeting Manager in Applications
+2. Click **Open** from the context menu
+3. If you still see a warning with only "Done" and "Move to Trash":
+   - Click **Done**
+   - Go to **System Settings → Privacy & Security**
+   - Scroll down — you'll see *"Meeting Manager was blocked"*
+   - Click **Open Anyway**
+4. You only need to do this once — future launches will work normally
+
+**Alternative (Terminal):**
+```bash
+xattr -cr "/Applications/Meeting Manager.app"
+```
+This removes the quarantine flag so the app opens without warnings.
+
 ---
 
 ## What's New in v1.1.1
