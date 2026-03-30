@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import os
 
 /// Captures microphone input using AVAudioEngine.
@@ -17,6 +18,12 @@ final class MicrophoneCapture {
     let engine = AVAudioEngine()
     private var isRunning = false
     private(set) var preferredInputDeviceID: String?
+    /// Diagnostic: callback for logging raw buffer info (set by AudioCaptureService)
+    var onDiagnostic: ((String) -> Void)?
+    private var rawBufferCount: Int = 0
+
+    /// The actual AudioDeviceID being used (for diagnostics)
+    private(set) var activeDeviceID: AudioDeviceID = 0
 
     /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
@@ -33,6 +40,21 @@ final class MicrophoneCapture {
     func start() throws {
         guard !isRunning else { return }
 
+        // Set the input device on the engine's audio unit if a preferred device was configured.
+        // This is critical — without it, AVAudioEngine may capture from a device that
+        // delivers silence (e.g., when the browser has exclusive access to a USB mic).
+        if let deviceUID = preferredInputDeviceID {
+            setInputDevice(uid: deviceUID)
+        } else {
+            // Use the system default input device
+            let defaultID = getDefaultInputDeviceID()
+            if defaultID != kAudioObjectUnknown {
+                activeDeviceID = defaultID
+                setInputDeviceByID(defaultID)
+                onDiagnostic?("DIAG:mic_device using system default deviceID=\(defaultID) name=\(getDeviceName(defaultID))")
+            }
+        }
+
         let inputNode = engine.inputNode
         inputNode.removeTap(onBus: 0)
 
@@ -48,6 +70,28 @@ final class MicrophoneCapture {
         inputNode.installTap(onBus: 0, bufferSize: 8192, format: nil) {
             [weak self] buffer, time in
             guard let self else { return }
+
+            // Diagnostic: log raw hardware buffer info periodically
+            self.rawBufferCount += 1
+            if self.rawBufferCount <= 3 || self.rawBufferCount % 200 == 0 {
+                // Dump first few raw samples to diagnose zero-level issue
+                var sampleDump = ""
+                var rawRMS: Float = 0
+                if let fcd = buffer.floatChannelData, buffer.frameLength > 0 {
+                    let ptr = fcd[0]
+                    var sum: Float = 0
+                    let n = min(8192, Int(buffer.frameLength))
+                    for i in 0..<n {
+                        sum += ptr[i] * ptr[i]
+                    }
+                    rawRMS = sqrtf(sum / Float(n))
+                    // Show first 10 samples
+                    let samples = (0..<min(10, Int(buffer.frameLength))).map { String(format: "%.6f", ptr[$0]) }
+                    sampleDump = samples.joined(separator: ",")
+                }
+                let fmt = buffer.format
+                self.onDiagnostic?("DIAG:raw_mic #\(self.rawBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.6f", rawRMS)) fmt=\(fmt.sampleRate)/\(fmt.channelCount)ch samples=[\(sampleDump)]")
+            }
 
             // Send raw buffer for SFSpeechRecognizer
             self.onRawBuffer?(buffer)
@@ -109,5 +153,92 @@ final class MicrophoneCapture {
         engine.stop()
         isRunning = false
         Logger.audio.info("MicrophoneCapture stopped")
+    }
+
+    // MARK: - Core Audio Device Management
+
+    /// Set the input device on the engine's underlying audio unit by UID string.
+    private func setInputDevice(uid: String) {
+        // Find the AudioDeviceID for this UID
+        var deviceID = getDeviceIDForUID(uid)
+        if deviceID == kAudioObjectUnknown {
+            onDiagnostic?("DIAG:mic_device WARNING: could not find device for UID '\(uid)', using system default")
+            deviceID = getDefaultInputDeviceID()
+        }
+        guard deviceID != kAudioObjectUnknown else { return }
+        activeDeviceID = deviceID
+        setInputDeviceByID(deviceID)
+        onDiagnostic?("DIAG:mic_device set to '\(getDeviceName(deviceID))' (id=\(deviceID), uid=\(uid))")
+    }
+
+    /// Set the input device on the engine's audio unit by AudioDeviceID.
+    private func setInputDeviceByID(_ deviceID: AudioDeviceID) {
+        let inputNode = engine.inputNode
+        let audioUnit = inputNode.audioUnit!
+        var devID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &devID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status != noErr {
+            onDiagnostic?("DIAG:mic_device ERROR: AudioUnitSetProperty failed with status \(status)")
+        }
+    }
+
+    /// Get the system default input device ID.
+    private func getDefaultInputDeviceID() -> AudioDeviceID {
+        var deviceID: AudioDeviceID = kAudioObjectUnknown
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
+        return deviceID
+    }
+
+    /// Look up an AudioDeviceID from a UID string.
+    private func getDeviceIDForUID(_ uid: String) -> AudioDeviceID {
+        var deviceID: AudioDeviceID = kAudioObjectUnknown
+        var cfUID: CFString = uid as CFString
+        var translation = AudioValueTranslation(
+            mInputData: &cfUID,
+            mInputDataSize: UInt32(MemoryLayout<CFString>.size),
+            mOutputData: &deviceID,
+            mOutputDataSize: UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        var size = UInt32(MemoryLayout<AudioValueTranslation>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDeviceForUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &translation
+        )
+        return deviceID
+    }
+
+    /// Get the human-readable name of an AudioDeviceID.
+    private func getDeviceName(_ deviceID: AudioDeviceID) -> String {
+        var name: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &name)
+        return name as String
     }
 }

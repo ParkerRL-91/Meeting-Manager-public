@@ -3,6 +3,7 @@ import SwiftUI
 struct MeetingMetadataHeader: View {
     let meeting: Meeting
     var onEdit: (() -> Void)?
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -46,6 +47,28 @@ struct MeetingMetadataHeader: View {
             Spacer()
 
             StatusBadge(status: meeting.status)
+
+            // "Start Early" button — shown next to the Scheduled badge
+            if meeting.status == .scheduled || meeting.status == .notified {
+                Button {
+                    appState.startRecording(for: meeting)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.fill")
+                            .font(.caption2)
+                        Text("Start Early")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.appAccent)
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Start recording this meeting now")
+            }
 
             if meeting.duration != nil {
                 Text(meeting.formattedDuration)

@@ -28,13 +28,13 @@ struct RecordingControlBar: View {
             // Audio level meters
             AudioLevelIndicator(
                 label: "\u{1F3A4}",
-                level: appState.audioCaptureService.micLevel,
+                level: appState.micLevel,
                 color: .appAccent
             )
 
             AudioLevelIndicator(
                 label: "\u{1F50A}",
-                level: appState.audioCaptureService.systemLevel,
+                level: appState.systemLevel,
                 color: .appSuccess
             )
 

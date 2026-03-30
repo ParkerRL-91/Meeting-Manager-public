@@ -62,18 +62,48 @@ final class MeetingRepository {
         }
     }
 
+    /// Find scheduled/notified meetings near a date.
+    ///
+    /// Matches meetings whose scheduledStartDate is within ±windowMinutes of `date`,
+    /// OR meetings that are "currently running" — i.e. scheduledStartDate is in the past
+    /// but scheduledEndDate is still in the future (the meeting hasn't ended yet).
+    /// This ensures that clicking "New Meeting" during an ongoing scheduled meeting
+    /// correctly matches it rather than creating an ad-hoc duplicate.
+    ///
+    /// All-day events (duration ≥ 23 hours) are excluded — they're calendar blocks
+    /// like "Home", "Vacation", etc., not actual meetings you'd record.
     func meetingsNearDate(_ date: Date, windowMinutes: Int = 10) async throws -> [Meeting] {
         let windowStart = date.addingTimeInterval(-Double(windowMinutes * 60))
         let windowEnd = date.addingTimeInterval(Double(windowMinutes * 60))
 
+        // 23 hours in seconds — all-day events are 24h, use 23h as threshold
+        // to avoid matching them while still catching very long meetings (up to ~22h).
+        let allDayThreshold: Double = 23 * 3600
+
         return try await database.writer.read { db in
-            try Meeting
+            let results = try Meeting
                 .filter(
-                    Meeting.Columns.scheduledStartDate >= windowStart
-                    && Meeting.Columns.scheduledStartDate <= windowEnd
-                    && Meeting.Columns.status == MeetingStatus.scheduled.rawValue
+                    (Meeting.Columns.status == MeetingStatus.scheduled.rawValue
+                     || Meeting.Columns.status == MeetingStatus.notified.rawValue)
+                    && (
+                        // Case 1: starts within ±windowMinutes
+                        (Meeting.Columns.scheduledStartDate >= windowStart
+                         && Meeting.Columns.scheduledStartDate <= windowEnd)
+                        // Case 2: currently running (started in the past, ends in the future)
+                        || (Meeting.Columns.scheduledStartDate <= date
+                            && Meeting.Columns.scheduledEndDate != nil
+                            && Meeting.Columns.scheduledEndDate >= date)
+                    )
                 )
                 .fetchAll(db)
+
+            // Filter out all-day events in Swift (GRDB doesn't support date arithmetic in filters)
+            return results.filter { meeting in
+                guard let start = meeting.scheduledStartDate,
+                      let end = meeting.scheduledEndDate else { return true }
+                let duration = end.timeIntervalSince(start)
+                return duration < allDayThreshold
+            }
         }
     }
 

@@ -15,6 +15,17 @@ final class AudioBufferManager {
     private var audioFile: AVAudioFile?
     private let sampleRate: Double = 16000
 
+    /// Maximum recording duration in seconds. Prevents unbounded memory growth
+    /// from accidental multi-hour recordings. 2 hours = 7200s.
+    /// At 16kHz mono Float32, 2 hours ≈ 460 MB per source buffer.
+    let maxRecordingDurationSeconds: TimeInterval = 7200
+
+    /// Maximum sample count per source buffer, derived from maxRecordingDurationSeconds.
+    private var maxSampleCount: Int { Int(maxRecordingDurationSeconds * sampleRate) }
+
+    /// True when either buffer has hit the max duration limit.
+    private(set) var isAtCapacity = false
+
     /// Duration of audio chunks provided to the transcriber (seconds).
     /// Whisper is designed for 30-second windows — shorter chunks destroy context
     /// and produce [BLANK_AUDIO] / [inaudible] output.
@@ -54,7 +65,11 @@ final class AudioBufferManager {
         ))
 
         lock.lock()
-        micSamples.append(contentsOf: samples)
+        if micSamples.count < maxSampleCount {
+            micSamples.append(contentsOf: samples)
+        } else {
+            isAtCapacity = true
+        }
         lock.unlock()
 
         writeToFile(buffer)
@@ -68,7 +83,11 @@ final class AudioBufferManager {
         ))
 
         lock.lock()
-        systemSamples.append(contentsOf: samples)
+        if systemSamples.count < maxSampleCount {
+            systemSamples.append(contentsOf: samples)
+        } else {
+            isAtCapacity = true
+        }
         lock.unlock()
 
         writeToFile(buffer)

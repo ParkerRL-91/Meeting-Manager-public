@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import UserNotifications
 
 @MainActor
@@ -7,11 +8,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var callDetectionService: CallDetectionService?
     private var notificationService: NotificationService?
 
+    /// The popover shown from the menu bar status item.
+    private var popover: NSPopover?
+
+    /// Fallback menu for right-click or when popover isn't appropriate.
+    private var statusMenu: NSMenu?
+
     /// Observers for dynamic menu bar updates.
     private var statusObservers: [NSObjectProtocol] = []
 
+    /// Local recording state mirror — updated by .meetingStateChanged and .startRecording/.stopRecording.
+    private var _isRecording = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBarItem()
+        setupPopover()
         setupNotifications()
         startCallDetection()
         observeStatusChanges()
@@ -24,46 +35,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let button = statusItem?.button else { return }
         button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Meeting Manager")
         button.imagePosition = .imageLeading
-
-        rebuildMenu()
+        button.action = #selector(togglePopover)
+        button.target = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    /// Rebuild the dropdown menu. Called when state changes to update dynamic items.
-    private func rebuildMenu() {
+    // MARK: - Popover
+
+    private func setupPopover() {
+        let popover = NSPopover()
+        popover.contentSize = NSSize(width: 280, height: 300)
+        popover.behavior = .transient
+        popover.animates = true
+
+        // The SwiftUI view needs AppState from the environment.
+        // We'll set the content view lazily on first show so AppState is available.
+        self.popover = popover
+
+        // Listen for dismiss requests from the SwiftUI view
+        NotificationCenter.default.addObserver(
+            forName: .dismissMenuBarPopover,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.popover?.performClose(nil)
+            }
+        }
+    }
+
+    @objc private func togglePopover(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+
+        // Right-click shows the traditional menu as a fallback
+        if event?.type == .rightMouseUp {
+            showContextMenu()
+            return
+        }
+
+        guard let popover, let button = statusItem?.button else { return }
+
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            // Set the content view with current AppState each time
+            // This ensures the environment is fresh
+            if let appState = findAppState() {
+                let hostingView = NSHostingView(
+                    rootView: MenuBarPopoverView()
+                        .environment(appState)
+                )
+                popover.contentViewController = NSViewController()
+                popover.contentViewController?.view = hostingView
+
+                // Let SwiftUI size the popover naturally
+                let fittingSize = hostingView.fittingSize
+                popover.contentSize = NSSize(
+                    width: max(280, fittingSize.width),
+                    height: max(150, fittingSize.height)
+                )
+            }
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+    }
+
+    /// Show the popover automatically (e.g., when recording starts).
+    private func showPopoverIfNeeded() {
+        guard let popover, let button = statusItem?.button else { return }
+        guard !popover.isShown else { return }
+
+        if let appState = findAppState() {
+            let hostingView = NSHostingView(
+                rootView: MenuBarPopoverView()
+                    .environment(appState)
+            )
+            popover.contentViewController = NSViewController()
+            popover.contentViewController?.view = hostingView
+
+            let fittingSize = hostingView.fittingSize
+            popover.contentSize = NSSize(
+                width: max(280, fittingSize.width),
+                height: max(150, fittingSize.height)
+            )
+        }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    /// Find the AppState from the SwiftUI app's WindowGroup.
+    /// AppState is created as a singleton in the @main App struct.
+    private func findAppState() -> AppState? {
+        // Access the shared AppState instance via the app's scene storage
+        // The AppState is stored on the main window's rootView environment
+        guard let window = NSApplication.shared.windows.first,
+              let contentView = window.contentView else { return nil }
+
+        // Walk the view hierarchy to find AppState
+        // Since AppState is @Observable and set via .environment(), we can access it
+        // through the hosting view's environment
+        return findAppStateInView(contentView)
+    }
+
+    private func findAppStateInView(_ view: NSView) -> AppState? {
+        if let hosting = view as? NSHostingView<AnyView> {
+            // Can't directly extract from hosting view
+        }
+        // Fall back to the shared instance pattern
+        return AppState.shared
+    }
+
+    /// Right-click context menu (traditional NSMenu fallback).
+    private func showContextMenu() {
         let menu = NSMenu()
 
-        let isRecording = currentlyRecording()
-        let isCallActive = callDetectionService?.activeCallApp != nil
-        let callAppName = callDetectionService?.activeCallAppName
+        let isRecording = _isRecording
 
         if isRecording {
-            // ── Recording header ──
-            let header = NSMenuItem(title: "🔴  Recording in progress", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: "Recording in progress", action: nil, keyEquivalent: "")
             header.isEnabled = false
-            header.attributedTitle = NSAttributedString(
-                string: "🔴  Recording in progress",
-                attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
-            )
             menu.addItem(header)
-
-            let stopItem = NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: "")
-            stopItem.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop")
-            menu.addItem(stopItem)
-            menu.addItem(NSMenuItem.separator())
-
-        } else if isCallActive, let name = callAppName {
-            // ── Call detected, not recording ──
-            let header = NSMenuItem(title: "📞  \(name) detected", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            header.attributedTitle = NSAttributedString(
-                string: "📞  \(name) detected",
-                attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
-            )
-            menu.addItem(header)
-
-            let startItem = NSMenuItem(title: "Start Recording", action: #selector(startRecordingAction), keyEquivalent: "")
-            startItem.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Record")
-            menu.addItem(startItem)
+            menu.addItem(NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: ""))
             menu.addItem(NSMenuItem.separator())
         }
 
@@ -74,7 +164,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
         statusItem?.menu = menu
+        statusItem?.button?.performClick(nil)
+        // Clear menu so left-click goes back to popover
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem?.menu = nil
+        }
     }
 
     // MARK: - Dynamic Status Bar Updates
@@ -88,8 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ) { [weak self] notification in
             let status = notification.userInfo?["status"] as? String
             MainActor.assumeIsolated {
-                if status == "recording" { self?._isRecording = true }
-                else if status == "transcribing" || status == "complete" || status == "cancelled" {
+                if status == "recording" {
+                    self?._isRecording = true
+                    // Auto-show the popover dropdown when recording starts
+                    self?.showPopoverIfNeeded()
+                } else if status == "transcribing" || status == "complete" || status == "cancelled" {
                     self?._isRecording = false
                 }
                 self?.updateStatusBar()
@@ -155,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             MainActor.assumeIsolated {
                 self?._isRecording = true
                 self?.updateStatusBar()
+                self?.showPopoverIfNeeded()
             }
         })
 
@@ -177,16 +277,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     /// Update the status bar to reflect the current live state.
-    /// Called after transient messages expire to show the "real" current state.
     private func updateStatusBar() {
         guard let button = statusItem?.button else { return }
 
-        let isRecording = currentlyRecording()
+        let isRecording = _isRecording
         let isCallActive = callDetectionService?.activeCallApp != nil
         let callAppName = callDetectionService?.activeCallAppName
 
         if isRecording {
-            // Red pulsing indicator while recording
             button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")
             button.title = "  Recording"
             button.contentTintColor = .systemRed
@@ -196,13 +294,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             button.title = "  \(name)"
             button.contentTintColor = .systemGreen
         } else {
-            // Idle — waveform icon only, no text
             button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Meeting Manager")
             button.title = ""
             button.contentTintColor = nil
         }
-
-        rebuildMenu()
     }
 
     /// Show a transient message in the menu bar with an icon and text.
@@ -211,18 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         button.image = NSImage(systemSymbolName: icon, accessibilityDescription: text)
         button.title = "  \(text)"
         button.contentTintColor = tint
-        rebuildMenu()
     }
-
-    /// Whether a meeting is currently being recorded (checked via NSApplication shared state).
-    private func currentlyRecording() -> Bool {
-        // Derive recording state from the active .meetingStateChanged notification last value.
-        // We track this locally since AppDelegate doesn't hold AppState.
-        return _isRecording
-    }
-
-    /// Local recording state mirror — updated by .meetingStateChanged and .startRecording/.stopRecording.
-    private var _isRecording = false
 
     // MARK: - Actions
 
@@ -245,7 +329,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @objc private func checkForUpdates() {
-        // Open Settings > Updates tab where the user can manually check
         NSApplication.shared.activate(ignoringOtherApps: true)
         NotificationCenter.default.post(name: .openUpdateSettings, object: nil)
     }

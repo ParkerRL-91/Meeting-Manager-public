@@ -18,7 +18,8 @@ struct AudioLevelIndicator: View {
 
                 RoundedRectangle(cornerRadius: barHeight / 2)
                     .fill(color)
-                    .frame(width: CGFloat(min(max(level, 0), 1)) * maxWidth, height: barHeight)
+                    // Amplify level by 20x for visibility — raw RMS from USB mics is ~0.002-0.01
+                    .frame(width: CGFloat(min(max(level * 20, 0), 1)) * maxWidth, height: barHeight)
                     .animation(.linear(duration: 0.1), value: level)
             }
 
