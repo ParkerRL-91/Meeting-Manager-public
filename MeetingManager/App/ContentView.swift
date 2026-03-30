@@ -6,12 +6,42 @@ struct ContentView: View {
     var body: some View {
         @Bindable var appState = appState
 
-        NavigationSplitView {
-            SidebarView()
-        } detail: {
-            detailView
+        VStack(spacing: 0) {
+            // Model download banner — visible in the main window during first-launch download
+            if appState.isLoadingModel {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.small)
+
+                    Text("Downloading transcription model...")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextPrimary)
+
+                    ProgressView(value: appState.modelDownloadProgress)
+                        .progressViewStyle(.linear)
+                        .tint(Color.appAccent)
+                        .frame(maxWidth: 200)
+
+                    Text("\(Int(appState.modelDownloadProgress * 100))%")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(Color.appTextSecondary)
+
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.appAccent.opacity(0.08).background(Color.appSurface))
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            NavigationSplitView {
+                SidebarView()
+            } detail: {
+                detailView
+            }
+            .navigationSplitViewStyle(.balanced)
         }
-        .navigationSplitViewStyle(.balanced)
+        .animation(.easeInOut(duration: 0.3), value: appState.isLoadingModel)
         .errorAlert($appState.lastUserError)
     }
 

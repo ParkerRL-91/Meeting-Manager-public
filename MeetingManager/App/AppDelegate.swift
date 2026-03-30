@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Observers for dynamic menu bar updates.
     private var statusObservers: [NSObjectProtocol] = []
 
+    /// Timer that polls model download progress to update the menu bar.
+    private var modelProgressTimer: Timer?
+
     /// Local recording state mirror — updated by .meetingStateChanged and .startRecording/.stopRecording.
     private var _isRecording = false
 
@@ -26,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         setupNotifications()
         startCallDetection()
         observeStatusChanges()
+        startModelProgressPolling()
     }
 
     // MARK: - Menu Bar
@@ -288,6 +292,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")
             button.title = "  Recording"
             button.contentTintColor = .systemRed
+        } else if let appState = findAppState(), appState.isLoadingModel {
+            // Show download progress in the menu bar
+            let pct = Int(appState.modelDownloadProgress * 100)
+            button.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Downloading")
+            button.title = "  Downloading \(pct)%"
+            button.contentTintColor = .systemBlue
         } else if isCallActive {
             let name = callAppName ?? "Call"
             button.image = NSImage(systemSymbolName: "phone.fill", accessibilityDescription: name)
@@ -384,6 +394,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func startCallDetection() {
         callDetectionService = CallDetectionService()
         callDetectionService?.startMonitoring()
+    }
+
+    // MARK: - Model Download Progress Polling
+
+    /// Poll AppState.isLoadingModel so the menu bar shows download progress.
+    private func startModelProgressPolling() {
+        modelProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                guard let appState = self.findAppState() else { return }
+                if appState.isLoadingModel {
+                    self.updateStatusBar()
+                } else if timer.isValid, !appState.isLoadingModel, self.statusItem?.button?.title.contains("Downloading") == true {
+                    // Download just finished — update status bar one last time
+                    self.updateStatusBar()
+                    timer.invalidate()
+                    self.modelProgressTimer = nil
+                }
+            }
+        }
     }
 }
 
