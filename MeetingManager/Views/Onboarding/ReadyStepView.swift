@@ -28,13 +28,13 @@ struct ReadyStepView: View {
                     label: "Microphone access"
                 )
                 setupRow(
-                    granted: (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)).flatMap({ $0 }) != nil,
-                    label: "Claude API key"
-                )
-                setupRow(
-                    granted: false,
+                    granted: GoogleAuthManager().isSignedIn,
                     label: "Google Calendar",
                     skippedText: "Not connected"
+                )
+                setupRow(
+                    granted: (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)).flatMap({ $0 }) != nil,
+                    label: "Claude API key"
                 )
                 setupRow(
                     granted: appState.transcriptionService.isModelLoaded,
@@ -46,6 +46,10 @@ struct ReadyStepView: View {
             .background(Color.appSurface)
             .cornerRadius(12)
             .frame(maxWidth: 360)
+
+            Text("You can change any of these in Settings at any time.")
+                .font(.caption)
+                .foregroundStyle(Color.appTextTertiary)
 
             Spacer()
 
@@ -81,10 +85,3 @@ struct ReadyStepView: View {
         }
     }
 }
-
-// #Preview {
-//     ReadyStepView(onComplete: {})
-//         .frame(width: 600, height: 500)
-//         .background(Color.appBackground)
-//         .preferredColorScheme(.dark)
-// }

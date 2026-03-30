@@ -2,10 +2,7 @@ import SwiftUI
 
 struct OnboardingView: View {
     @Bindable var onboardingManager: OnboardingManager
-
-    private var steps: [OnboardingManager.OnboardingStep] {
-        OnboardingManager.OnboardingStep.allCases
-    }
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,8 +13,14 @@ struct OnboardingView: View {
                     WelcomeStepView(onNext: onboardingManager.nextStep)
                 case .permissions:
                     PermissionsStepView()
-                case .setup:
-                    SetupStepView()
+                case .calendar:
+                    CalendarStepView()
+                case .aiChoice:
+                    AIChoiceStepView(onboardingManager: onboardingManager)
+                case .localModel:
+                    LocalModelStepView()
+                case .prompts:
+                    PromptsStepView()
                 case .ready:
                     ReadyStepView(onComplete: onboardingManager.complete)
                 }
@@ -27,10 +30,42 @@ struct OnboardingView: View {
             // Bottom bar: navigation + dots
             bottomBar
                 .padding(.horizontal, 24)
-                .padding(.bottom, 20)
+                .padding(.bottom, 12)
+
+            // Persistent download progress bar at the very bottom
+            if appState.isLoadingModel {
+                downloadProgressBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        .animation(.easeInOut(duration: 0.3), value: appState.isLoadingModel)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
+    }
+
+    // MARK: - Download Progress Bar
+
+    private var downloadProgressBar: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+
+            Text("Downloading transcription model...")
+                .font(.caption)
+                .foregroundStyle(Color.appTextSecondary)
+
+            ProgressView(value: appState.modelDownloadProgress)
+                .progressViewStyle(.linear)
+                .tint(Color.appAccent)
+                .frame(maxWidth: 180)
+
+            Text("\(Int(appState.modelDownloadProgress * 100))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Color.appTextSecondary)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 8)
+        .background(Color.appAccent.opacity(0.08).background(Color.appSurface))
     }
 
     // MARK: - Bottom Bar
@@ -52,7 +87,7 @@ struct OnboardingView: View {
 
             // Dot indicator
             HStack(spacing: 8) {
-                ForEach(steps, id: \.rawValue) { step in
+                ForEach(onboardingManager.visibleSteps, id: \.rawValue) { step in
                     Circle()
                         .fill(step == onboardingManager.currentStep ? Color.appAccent : Color.appTextTertiary)
                         .frame(width: 8, height: 8)
@@ -63,24 +98,15 @@ struct OnboardingView: View {
 
             // Next / Skip
             if onboardingManager.currentStep == .welcome || onboardingManager.currentStep == .ready {
-                // Welcome uses its own Get Started button; Ready uses its own complete button
                 Spacer().frame(width: 80)
             } else {
                 Button(action: onboardingManager.nextStep) {
-                    Label(nextButtonTitle, systemImage: "chevron.right")
+                    Label("Next", systemImage: "chevron.right")
                         .labelStyle(TrailingIconLabelStyle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.appAccent)
             }
-        }
-    }
-
-    private var nextButtonTitle: String {
-        switch onboardingManager.currentStep {
-        case .permissions: return "Next"
-        case .setup: return "Skip"
-        default: return "Next"
         }
     }
 }
@@ -94,9 +120,3 @@ private struct TrailingIconLabelStyle: LabelStyle {
         }
     }
 }
-
-// #Preview {
-//     OnboardingView(onboardingManager: OnboardingManager())
-//         .frame(width: 700, height: 550)
-//         .preferredColorScheme(.dark)
-// }

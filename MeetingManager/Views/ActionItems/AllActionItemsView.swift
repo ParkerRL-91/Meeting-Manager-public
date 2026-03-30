@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AllActionItemsView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
     @State private var openItems: [ActionItem] = []
     @State private var meetings: [String: Meeting] = [:]
     @State private var isLoading = true
@@ -29,6 +30,13 @@ struct AllActionItemsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
         .navigationTitle("All Action Items")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") {
+                    dismiss()
+                }
+            }
+        }
         .task {
             await loadItems()
         }

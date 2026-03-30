@@ -29,6 +29,12 @@ struct MeetingManagerApp: App {
                 Button("Check for Updates...") {
                     updateService.checkForUpdates()
                 }
+
+                Divider()
+
+                Button("Reset Onboarding (Testing)") {
+                    onboardingManager.reset()
+                }
             }
 
             CommandGroup(replacing: .newItem) {

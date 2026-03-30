@@ -1,25 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 400">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 1400">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="bg" x1="0" y1="0" x2="0.5" y2="1">
       <stop offset="0%" stop-color="#1a1a2e"/>
       <stop offset="100%" stop-color="#16213e"/>
     </linearGradient>
+    <linearGradient id="arrow-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0A84FF" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#0A84FF" stop-opacity="0.8"/>
+    </linearGradient>
   </defs>
 
-  <!-- Background -->
-  <rect width="660" height="400" fill="url(#bg)"/>
+  <!-- Background fills entire oversized canvas so window resize never shows white -->
+  <rect width="2000" height="1400" fill="url(#bg)"/>
+
+  <!-- Subtle grid dots for texture -->
+  <pattern id="dots" x="0" y="0" width="30" height="30" patternUnits="userSpaceOnUse">
+    <circle cx="15" cy="15" r="0.5" fill="white" opacity="0.06"/>
+  </pattern>
+  <rect width="2000" height="1400" fill="url(#dots)"/>
+
+  <!-- Top instruction — centered at the default 600px window width -->
+  <text x="300" y="55" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="17" font-weight="600" fill="white" opacity="0.9">Drag to Applications to install</text>
 
   <!-- Arrow from app to Applications -->
-  <path d="M 230,200 L 410,200" stroke="#0A84FF" stroke-width="4" fill="none" stroke-dasharray="12,6" opacity="0.7"/>
-  <polygon points="420,200 405,190 405,210" fill="#0A84FF" opacity="0.7"/>
+  <line x1="215" y1="200" x2="370" y2="200" stroke="url(#arrow-grad)" stroke-width="3" stroke-dasharray="10,5"/>
+  <polygon points="380,200 367,193 367,207" fill="#0A84FF" opacity="0.7"/>
 
-  <!-- Top instruction -->
-  <text x="330" y="50" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="16" font-weight="600" fill="white" opacity="0.9">Drag Meeting Manager to Applications</text>
-
-  <!-- Bottom Gatekeeper instructions -->
-  <rect x="40" y="290" width="580" height="90" rx="10" fill="white" opacity="0.08"/>
-  <text x="330" y="318" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="13" font-weight="600" fill="#FF9F0A">If macOS blocks the app on first launch:</text>
-  <text x="330" y="340" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="12" fill="white" opacity="0.75">Right-click the app in Applications and select Open, or go to</text>
-  <text x="330" y="358" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="12" fill="white" opacity="0.75">System Settings → Privacy &amp; Security → Open Anyway</text>
-  <text x="330" y="376" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="11" fill="#0A84FF" opacity="0.8">Or run in Terminal:  xattr -cr "/Applications/Meeting Manager.app"</text>
+  <!-- Bottom hint -->
+  <text x="300" y="355" text-anchor="middle" font-family="-apple-system, Helvetica Neue, sans-serif" font-size="11" fill="white" opacity="0.35">If macOS blocks the app: Right-click → Open, or System Settings → Privacy &amp; Security → Open Anyway</text>
 </svg>

@@ -181,8 +181,24 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         if let bestDevice = sessionManager.bestInputDevice() {
             logToFile("Audio: re-setting mic to hardware device '\(bestDevice.localizedName)' after system tap setup")
             micCapture.configure(inputDeviceID: bestDevice.uniqueID)
+        } else {
+            // No preferred device found — clear any stale preference so MicrophoneCapture
+            // uses the system default, which is the safest fallback on an unfamiliar Mac.
+            micCapture.configure(inputDeviceID: "")
+            logToFile("Audio: no preferred input device found, will use system default")
         }
-        try micCapture.start()
+
+        do {
+            try micCapture.start()
+        } catch {
+            // Log the failure and try once more with a completely clean slate
+            logToFile("Audio: mic capture FAILED on first attempt: \(error.localizedDescription)")
+            Logger.audio.error("Mic capture failed: \(error.localizedDescription) — retrying with system default")
+
+            // Reset preference and let MicrophoneCapture pick the system default
+            micCapture.configure(inputDeviceID: "")
+            try micCapture.start()
+        }
         let engineRunning = micCapture.engine.isRunning
         let inputFormat = micCapture.engine.inputNode.outputFormat(forBus: 0)
         logToFile("Audio: mic capture STARTED (device: \(sessionManager.bestInputDevice()?.localizedName ?? "default"), engine.running=\(engineRunning), inputFormat=\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch)")

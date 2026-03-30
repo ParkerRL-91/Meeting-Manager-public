@@ -3,104 +3,156 @@ import AVFoundation
 
 struct PermissionsStepView: View {
     @State private var microphoneStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    @State private var screenRecordingGranted: Bool = false
+    private let sessionManager = AudioSessionManager()
 
     var body: some View {
         VStack(spacing: 32) {
             Spacer()
+
+            Image(systemName: "lock.shield")
+                .font(.system(size: 56))
+                .foregroundStyle(Color.appAccent)
 
             Text("Permissions")
                 .font(.largeTitle)
                 .fontWeight(.bold)
                 .foregroundStyle(Color.appTextPrimary)
 
-            Text("Meeting Manager needs access to audio to capture and transcribe your meetings.")
+            Text("Meeting Manager needs these permissions to capture and transcribe your meetings.")
                 .font(.body)
                 .foregroundStyle(Color.appTextSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
 
-            VStack(spacing: 16) {
+            VStack(spacing: 0) {
                 // Microphone permission
-                permissionRow(
-                    icon: "mic.fill",
-                    title: "Microphone",
-                    description: "Required to capture meeting audio",
-                    status: microphoneStatusText,
-                    statusColor: microphoneStatusColor,
-                    actionLabel: microphoneStatus == .notDetermined ? "Grant Access" : nil,
-                    action: requestMicrophoneAccess
-                )
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "mic.fill")
+                            .font(.title2)
+                            .foregroundStyle(Color.appAccent)
+                            .frame(width: 32)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Microphone")
+                                .font(.headline)
+                                .foregroundStyle(Color.appTextPrimary)
+                            Text("Required to capture meeting audio")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                        }
+
+                        Spacer()
+
+                        Text(microphoneStatusText)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundStyle(microphoneStatusColor)
+                    }
+
+                    if microphoneStatus == .notDetermined {
+                        Button("Grant Access") {
+                            requestMicrophoneAccess()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.appAccent)
+                        .controlSize(.small)
+                    } else if microphoneStatus == .denied || microphoneStatus == .restricted {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(Color.appWarning)
+                            Text("Microphone was denied. Open System Settings to allow it.")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                        }
+                        Button("Open Microphone Settings") {
+                            openMicrophoneSettings()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(16)
 
                 Divider()
                     .background(Color.appSeparator)
 
-                // Screen Recording note
-                permissionRow(
-                    icon: "rectangle.inset.filled.badge.record",
-                    title: "Screen Recording",
-                    description: "Needed for system audio capture. Enable in System Settings > Privacy & Security > Screen Recording.",
-                    status: "Manual Setup",
-                    statusColor: Color.appWarning,
-                    actionLabel: "Open System Settings",
-                    action: openScreenRecordingSettings
-                )
+                // Screen Recording
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "rectangle.inset.filled.badge.record")
+                            .font(.title2)
+                            .foregroundStyle(Color.appAccent)
+                            .frame(width: 32)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Screen Recording")
+                                .font(.headline)
+                                .foregroundStyle(Color.appTextPrimary)
+                            Text("Captures audio from Zoom, Teams, and other call apps so Meeting Manager can hear all participants.")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                        }
+
+                        Spacer()
+
+                        Text(screenRecordingGranted ? "Granted" : "Not Enabled")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundStyle(screenRecordingGranted ? Color.appSuccess : Color.appWarning)
+                    }
+
+                    if !screenRecordingGranted {
+                        Text("macOS requires you to enable this manually:")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            stepText("1. Click the button below to open System Settings")
+                            stepText("2. Find \"Meeting Manager\" in the list")
+                            stepText("3. Toggle it on, then come back here")
+                        }
+
+                        HStack(spacing: 12) {
+                            Button("Open Screen Recording Settings") {
+                                openScreenRecordingSettings()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Button("Check Again") {
+                                checkScreenRecordingPermission()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Color.appAccent)
+                        }
+                    }
+                }
+                .padding(16)
             }
-            .padding(20)
             .background(Color.appSurface)
             .cornerRadius(12)
-            .frame(maxWidth: 480)
+            .frame(maxWidth: 500)
 
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Permission Row
-
-    private func permissionRow(
-        icon: String,
-        title: String,
-        description: String,
-        status: String,
-        statusColor: Color,
-        actionLabel: String?,
-        action: @escaping () -> Void
-    ) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: icon)
-                .font(.title2)
-                .foregroundStyle(Color.appAccent)
-                .frame(width: 32)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundStyle(Color.appTextPrimary)
-
-                    Spacer()
-
-                    Text(status)
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundStyle(statusColor)
-                }
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextSecondary)
-
-                if let actionLabel {
-                    Button(actionLabel, action: action)
-                        .font(.caption)
-                        .buttonStyle(.link)
-                        .padding(.top, 4)
-                }
-            }
+        .onAppear {
+            microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+            checkScreenRecordingPermission()
         }
     }
 
-    // MARK: - Microphone Helpers
+    private func stepText(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(Color.appTextTertiary)
+    }
+
+    // MARK: - Status Helpers
 
     private var microphoneStatusText: String {
         switch microphoneStatus {
@@ -128,16 +180,19 @@ struct PermissionsStepView: View {
         }
     }
 
+    private func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func checkScreenRecordingPermission() {
+        screenRecordingGranted = sessionManager.hasScreenRecordingPermission()
+    }
+
     private func openScreenRecordingSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
     }
 }
-
-// #Preview {
-//     PermissionsStepView()
-//         .frame(width: 600, height: 500)
-//         .background(Color.appBackground)
-//         .preferredColorScheme(.dark)
-// }
