@@ -8,6 +8,8 @@
 	<string>Meeting Manager</string>
 	<key>CFBundleExecutable</key>
 	<string>MeetingManager</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.meetingmanager.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>
