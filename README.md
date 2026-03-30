@@ -12,10 +12,14 @@ Open the DMG, drag Meeting Manager to Applications, and launch.
 
 ## What's New in v1.1
 
-- **Large v3 transcription model** — dramatically improved transcription accuracy using WhisperKit's largest model (was previously falling back to base model in some cases)
-- **Unified AI routing** — Recipes, Action Items, and Live Chat now support both Ollama (on-device) and Claude, matching Summary's behavior
+- **Dual audio capture** — records both your microphone and system audio (remote participants) simultaneously using ScreenCaptureKit
+- **Live audio level meters** — real-time mic and system audio indicators in the menu bar popover and recording control bar
+- **Smart notifications** — macOS notifications when recording auto-starts, when a meeting is detected (with a "Start Recording" action), and when a meeting ends
+- **Large v3 transcription model** — dramatically improved transcription accuracy using WhisperKit's largest model
+- **Unified AI routing** — Recipes, Action Items, and Live Chat now support both Ollama (on-device) and Claude
 - **Calendar sync fix** — recording a calendar event no longer shows wrong start time or inflated duration
-- **Auto-generate summaries** — optionally generate a summary 10 minutes after recording ends, using your default prompt
+- **Auto-generate summaries** — optionally generate a summary after recording ends, using your default prompt
+- **Explicit mic device selection** — prevents aggregate device hijack from system audio tap; works with any USB/built-in microphone
 
 ---
 
