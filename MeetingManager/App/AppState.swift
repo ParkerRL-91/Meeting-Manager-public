@@ -167,6 +167,10 @@ final class AppState {
     /// Start recording — delegates to the state machine. No live transcription needed —
     /// we transcribe the complete recording after the meeting ends for much better accuracy.
     func startRecording(for meeting: Meeting) {
+        guard !isRecording else {
+            Logger.general.info("startRecording(for:) skipped — already recording")
+            return
+        }
         Task {
             do {
                 try await stateMachine.startRecording(meeting: meeting)
@@ -494,27 +498,42 @@ final class AppState {
         detectedCallApp = appName
 
         if settings.autoRecord {
-            // Auto-record: immediately create meeting and start recording
-            fileLog("handleCallDetected: autoRecord=true, creating meeting for \(appName)")
+            // Auto-record: immediately create meeting and start recording.
+            // First, check if there's a scheduled meeting within 5 minutes — use that instead of creating ad-hoc.
+            fileLog("handleCallDetected: autoRecord=true, looking for scheduled meeting for \(appName)")
             Task { @MainActor in
                 do {
-                    // Try to get meeting name from browser tab title
-                    let enriched = CalendarMeetingMatcher.enrichFromBrowserTitle(appName)
-                    let title = enriched?.title ?? "\(appName) Meeting"
-                    let meeting = try await self.stateMachine.createAndStartMeeting(title: title)
+                    // Look for a scheduled meeting within ±5 minutes
+                    let nearbyMeetings = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+                    let scheduledMatch = nearbyMeetings.first(where: { $0.status == .scheduled || $0.status == .notified })
 
-                    // Attach participant info if we got it from the browser title
-                    if let participants = enriched?.participants {
-                        var updated = meeting
-                        updated.participants = participants
-                        try? await self.meetingRepository.save(&updated)
+                    let meeting: Meeting
+                    if let scheduled = scheduledMatch {
+                        // Start the scheduled meeting instead of creating a new one
+                        fileLog("handleCallDetected: matched scheduled meeting '\(scheduled.title)' — starting it")
+                        try await self.stateMachine.startRecording(meeting: scheduled)
+                        meeting = self.stateMachine.currentMeeting ?? scheduled
+                    } else {
+                        // No nearby scheduled meeting — create ad-hoc
+                        let enriched = CalendarMeetingMatcher.enrichFromBrowserTitle(appName)
+                        let title = enriched?.title ?? "\(appName) Meeting"
+                        let created = try await self.stateMachine.createAndStartMeeting(title: title)
+
+                        // Attach participant info if we got it from the browser title
+                        if let participants = enriched?.participants {
+                            var updated = created
+                            updated.participants = participants
+                            try? await self.meetingRepository.save(&updated)
+                        }
+                        meeting = created
                     }
+
                     self.activeMeeting = self.stateMachine.currentMeeting
                     self.isRecording = self.stateMachine.isRecording
                     self.selectedMeetingId = meeting.id
                     self.detectedCallApp = nil
                     self.loadMeetings()
-                    self.fileLog("handleCallDetected: meeting created \(meeting.id) — transcription runs after meeting ends")
+                    self.fileLog("handleCallDetected: recording started for \(meeting.id) ('\(meeting.title)')")
                 } catch {
                     self.fileLog("handleCallDetected: FAILED — \(error.localizedDescription)")
                     self.lastUserError = error.localizedDescription
@@ -651,8 +670,9 @@ final class AppState {
                 Logger.general.info("Meeting '\(meeting.title)' starting in \(Int(timeUntilStart / 60)) minutes")
             }
 
-            // Auto-start: if meeting should have started (within 0-2 min past start) and we're not recording
-            if timeUntilStart >= -120 && timeUntilStart <= 0 && meeting.status == .scheduled && !isRecording {
+            // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
+            // The 5-minute window accommodates meetings that start slightly late.
+            if timeUntilStart >= -300 && timeUntilStart <= 0 && meeting.status == .scheduled && !isRecording {
                 Logger.general.info("Auto-starting recording for meeting: \(meeting.title)")
                 startRecording(for: meeting)
             }
@@ -662,23 +682,36 @@ final class AppState {
     // MARK: - Notification Observers
 
     private func observeNotifications() {
-        // Create ad-hoc meeting via state machine (manual "New Meeting" button)
+        // Create ad-hoc meeting via state machine (manual "New Meeting" button).
+        // If a scheduled meeting starts within 5 minutes, start that instead.
         NotificationCenter.default.publisher(for: .createNewMeeting)
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.fileLog("createNewMeeting notification received")
                 Task {
                     do {
-                        let meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                        // Check for a nearby scheduled meeting first
+                        let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+                        let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
+
+                        let meeting: Meeting
+                        if let scheduled = scheduledMatch {
+                            self.fileLog("New Meeting: matched scheduled '\(scheduled.title)' — starting it")
+                            try await self.stateMachine.startRecording(meeting: scheduled)
+                            meeting = self.stateMachine.currentMeeting ?? scheduled
+                        } else {
+                            meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                        }
+
                         await MainActor.run {
                             self.activeMeeting = self.stateMachine.currentMeeting
                             self.isRecording = self.stateMachine.isRecording
                             self.selectedMeetingId = meeting.id
-                            self.fileLog("Meeting created: \(meeting.id) — transcription runs after meeting ends")
+                            self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
                         }
                         self.loadMeetings()
                     } catch {
-                        Logger.general.error("Failed to create ad-hoc meeting: \(error.localizedDescription)")
+                        Logger.general.error("Failed to start meeting: \(error.localizedDescription)")
                         await MainActor.run { self.lastUserError = error.localizedDescription }
                     }
                 }

@@ -21,6 +21,13 @@ final class BrowserCallDetector {
     private(set) var detectedMeetingName: String?
     private var pollCount = 0
 
+    /// Number of consecutive "not in call" polls before we declare the call ended.
+    /// At 5s intervals, 3 misses = 15 seconds of no-call before stop fires.
+    /// This prevents false stops from transient detection glitches (tab switches,
+    /// brief mic pauses, AppleScript timeouts, etc.).
+    private let endedDebounceThreshold = 3
+    private var consecutiveNotInCall = 0
+
     // MARK: - Lifecycle
 
     func start(interval: TimeInterval = 5) {
@@ -29,12 +36,13 @@ final class BrowserCallDetector {
             MainActor.assumeIsolated { self?.poll() }
         }
         pollTimer?.fire()
-        fileLog("started (interval \(Int(interval))s)")
+        fileLog("started (interval \(Int(interval))s, endDebounce=\(endedDebounceThreshold) polls)")
     }
 
     func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
+        consecutiveNotInCall = 0
         if isInBrowserCall {
             isInBrowserCall = false
             postNotification(.callAppTerminated)
@@ -51,16 +59,31 @@ final class BrowserCallDetector {
             fileLog("poll #\(pollCount) — inCall=\(result.inCall), name=\(result.name ?? "nil"), method=\(result.method)")
         }
 
-        if result.inCall && !isInBrowserCall {
-            isInBrowserCall = true
-            detectedMeetingName = result.name
-            fileLog("DETECTED: \(result.name ?? "unknown") via \(result.method)")
-            postNotification(.callAppLaunched, meetingName: result.name)
-        } else if !result.inCall && isInBrowserCall {
-            isInBrowserCall = false
-            fileLog("ENDED: \(detectedMeetingName ?? "unknown")")
-            postNotification(.callAppTerminated, meetingName: detectedMeetingName)
-            detectedMeetingName = nil
+        if result.inCall {
+            // Reset the not-in-call counter whenever we see an active call
+            consecutiveNotInCall = 0
+
+            if !isInBrowserCall {
+                // Transition: not in call → in call (immediate — no debounce on start)
+                isInBrowserCall = true
+                detectedMeetingName = result.name
+                fileLog("DETECTED: \(result.name ?? "unknown") via \(result.method)")
+                postNotification(.callAppLaunched, meetingName: result.name)
+            }
+        } else if isInBrowserCall {
+            // Call was active but this poll says no call — increment debounce counter
+            consecutiveNotInCall += 1
+
+            if consecutiveNotInCall >= endedDebounceThreshold {
+                // Confirmed: call has truly ended (N consecutive polls with no call)
+                isInBrowserCall = false
+                consecutiveNotInCall = 0
+                fileLog("ENDED: \(detectedMeetingName ?? "unknown") (confirmed after \(endedDebounceThreshold) polls)")
+                postNotification(.callAppTerminated, meetingName: detectedMeetingName)
+                detectedMeetingName = nil
+            } else {
+                fileLog("Call may have ended — miss \(consecutiveNotInCall)/\(endedDebounceThreshold) (debouncing)")
+            }
         }
     }
 
