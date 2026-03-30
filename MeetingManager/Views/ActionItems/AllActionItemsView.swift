@@ -32,9 +32,15 @@ struct AllActionItemsView: View {
         .navigationTitle("All Action Items")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Close") {
+                Button {
                     dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.appTextSecondary)
                 }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
             }
         }
         .task {
