@@ -14,7 +14,18 @@ final class AppState {
     /// Set during init — there is exactly one AppState per app lifetime.
     static var shared: AppState!
 
-    var selectedMeetingId: String?
+    // MARK: - Sidebar Navigation
+
+    /// Which top-level section is active in the sidebar/detail area.
+    var sidebarDestination: SidebarDestination = .home
+
+    var selectedMeetingId: String? {
+        didSet {
+            if selectedMeetingId != nil {
+                sidebarDestination = .meetings
+            }
+        }
+    }
     var isRecording = false
     var activeMeeting: Meeting?
 
@@ -1159,4 +1170,53 @@ final class AppState {
             }
             .store(in: &cancellables)
     }
+
+    // MARK: - AI Text Generator Factory
+
+    /// Creates a text generator closure that routes to Claude or Ollama based on current settings.
+    /// Used by GlobalChatView and other global AI features.
+    func makeTextGenerator() async -> ((String, String) async throws -> String)? {
+        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+        await ollamaService.refreshStatus()
+        let ollamaReachable = ollamaService.isReachable
+        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+        if useOllama {
+            let service = ollamaService
+            let model = settings.ollamaModel
+            return { sys, usr in try await service.generate(systemPrompt: sys, userPrompt: usr, model: model) }
+        } else if hasClaudeKey {
+            let claude = ClaudeService()
+            let claudeModel = settings.claudeModel
+            return { sys, usr in try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel) }
+        }
+        return nil
+    }
+
+    /// Aggregates all unique participants across all meetings, returning (name, [Meeting]) pairs.
+    func allPeople() -> [(name: String, meetings: [Meeting])] {
+        var map: [String: [Meeting]] = [:]
+        for meeting in meetings {
+            for person in meeting.participantList {
+                let key = person.trimmingCharacters(in: .whitespaces)
+                guard !key.isEmpty else { continue }
+                map[key, default: []].append(meeting)
+            }
+        }
+        return map.map { (name: $0.key, meetings: $0.value) }
+            .sorted { a, b in
+                // Sort by most meetings, then alphabetically
+                if a.meetings.count != b.meetings.count { return a.meetings.count > b.meetings.count }
+                return a.name < b.name
+            }
+    }
+}
+
+// MARK: - Sidebar Navigation Destination
+
+enum SidebarDestination: Hashable {
+    case home
+    case chat
+    case people
+    case meetings
 }

@@ -6,20 +6,26 @@ struct MeetingManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var appState = AppState()
     @State private var onboardingManager = OnboardingManager()
+    @State private var permissionsReady = false
     @StateObject private var updateService = UpdateService()
 
     var body: some Scene {
         WindowGroup {
-            if onboardingManager.isCompleted {
-                ContentView()
-                    .environment(appState)
-                    .preferredColorScheme(.dark)
-                    .frame(minWidth: 900, minHeight: 600)
-            } else {
+            if !onboardingManager.isCompleted {
                 OnboardingView(onboardingManager: onboardingManager)
                     .environment(appState)
                     .preferredColorScheme(.dark)
                     .frame(minWidth: 600, minHeight: 450)
+            } else if !permissionsReady {
+                PermissionGateView(permissionsReady: $permissionsReady)
+                    .environment(appState)
+                    .preferredColorScheme(.dark)
+                    .frame(minWidth: 600, minHeight: 450)
+            } else {
+                ContentView()
+                    .environment(appState)
+                    .preferredColorScheme(.dark)
+                    .frame(minWidth: 900, minHeight: 600)
             }
         }
         .windowStyle(.titleBar)

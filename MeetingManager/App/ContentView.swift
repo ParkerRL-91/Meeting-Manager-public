@@ -7,7 +7,7 @@ struct ContentView: View {
         @Bindable var appState = appState
 
         VStack(spacing: 0) {
-            // Model download banner — visible in the main window during first-launch download
+            // Model download banner
             if appState.isLoadingModel {
                 HStack(spacing: 12) {
                     ProgressView()
@@ -30,7 +30,8 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Color.appAccent.opacity(0.08).background(Color.appSurface))
+                .background(Color.appSurface)
+                .background(Color.appAccent.opacity(0.08))
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
@@ -47,20 +48,33 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detailView: some View {
+        switch appState.sidebarDestination {
+        case .home:
+            HomeView()
+
+        case .chat:
+            GlobalChatView()
+
+        case .people:
+            PeopleView()
+
+        case .meetings:
+            meetingDetailView
+        }
+    }
+
+    @ViewBuilder
+    private var meetingDetailView: some View {
         if let meetingId = appState.selectedMeetingId {
             if appState.isRecording, appState.activeMeeting?.id == meetingId {
                 LiveMeetingView(meetingId: meetingId)
                     .id(meetingId)
             } else {
                 MeetingDetailView(meetingId: meetingId)
-                    .id(meetingId)   // force view recreation so .task re-fires on selection change
+                    .id(meetingId)
             }
         } else {
-            EmptyStateView(
-                icon: "waveform.badge.mic",
-                title: "No Meeting Selected",
-                subtitle: "Select a meeting from the sidebar or start a new one"
-            )
+            HomeView()
         }
     }
 }

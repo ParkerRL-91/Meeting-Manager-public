@@ -26,7 +26,38 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_NAME="Meeting Manager"
 EXECUTABLE="MeetingManager"
 BUNDLE_ID="com.meetingmanager.app"
-SIGN_IDENTITY="${SIGN_IDENTITY:--}"  # Ad-hoc by default; set env var for production
+
+# ──────────────────────────────────────────────────
+# Signing identity — MUST be stable to preserve macOS permissions (TCC).
+# Ad-hoc signing (--sign -) changes identity every build, which forces
+# the user to re-grant Screen Recording permission after each rebuild.
+# ──────────────────────────────────────────────────
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+    echo "Using explicit SIGN_IDENTITY: ${SIGN_IDENTITY}"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+    SIGN_IDENTITY="Developer ID Application"
+    echo "Auto-detected Developer ID Application certificate."
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "MeetingManager-Dev"; then
+    SIGN_IDENTITY="MeetingManager-Dev"
+    echo "Auto-detected MeetingManager-Dev certificate."
+else
+    echo ""
+    echo "ERROR: No stable code-signing identity found."
+    echo ""
+    echo "  Ad-hoc signing (--sign -) causes macOS to forget your Screen Recording"
+    echo "  and Microphone permissions every time you rebuild. This is why the app"
+    echo "  keeps asking for permissions."
+    echo ""
+    echo "  To fix this, run the setup script to create a free self-signed certificate:"
+    echo ""
+    echo "    ./Scripts/setup-signing.sh"
+    echo ""
+    echo "  This is a one-time setup. After that, permissions stick across rebuilds."
+    echo ""
+    echo "  To bypass this check (not recommended): SIGN_IDENTITY=- ./Scripts/clean-build-dmg.sh"
+    echo ""
+    exit 1
+fi
 
 # Read version from Info.plist
 PLIST="${REPO_DIR}/MeetingManager/Resources/Info.plist"
@@ -144,6 +175,8 @@ echo "  App bundle: ${APP_BUNDLE}"
 # ──────────────────────────────────────────────────
 echo "[6/8] Signing with '${SIGN_IDENTITY}'..."
 
+ENTITLEMENTS="${REPO_DIR}/MeetingManager/Resources/MeetingManager.entitlements"
+
 # Sign Sparkle components first
 if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
     codesign --force --deep --options runtime \
@@ -157,12 +190,20 @@ if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
         "${FRAMEWORKS_DIR}/Sparkle.framework" 2>/dev/null || true
 fi
 
-# Sign the app bundle
+# Sign the app bundle with entitlements
 codesign --force --deep --options runtime \
+    --entitlements "${ENTITLEMENTS}" \
     --sign "${SIGN_IDENTITY}" \
     "${APP_BUNDLE}"
 
-echo "  Signed."
+# Verify signing identity is stable (not ad-hoc)
+SIGNED_ID=$(codesign -dvv "${APP_BUNDLE}" 2>&1 | grep "Authority=" | head -1 || true)
+if [[ "${SIGN_IDENTITY}" != "-" ]]; then
+    echo "  Signed with: ${SIGNED_ID}"
+    echo "  ✓ Stable identity — macOS permissions will persist across rebuilds."
+else
+    echo "  ⚠ Ad-hoc signed — permissions will reset on next rebuild."
+fi
 
 # ──────────────────────────────────────────────────
 # Step 7: Install to ~/Applications
