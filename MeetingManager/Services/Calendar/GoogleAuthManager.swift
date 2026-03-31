@@ -236,6 +236,10 @@ final class GoogleAuthManager {
             webSession.prefersEphemeralWebBrowserSession = false
             self.authPresenter = presenter
             self.authSession = webSession
+
+            // Ensure the app is frontmost and has a visible window for the auth sheet
+            NSApp.activate(ignoringOtherApps: true)
+
             webSession.start()
         }
     }

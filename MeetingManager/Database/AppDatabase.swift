@@ -36,11 +36,6 @@ final class AppDatabase {
 
     private var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
-
-        #if DEBUG
-        migrator.eraseDatabaseOnSchemaChange = true
-        #endif
-
         Migrations.registerAll(&migrator)
         return migrator
     }

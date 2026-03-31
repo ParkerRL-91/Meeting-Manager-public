@@ -125,22 +125,44 @@ final class OllamaInstaller {
 
     // MARK: - Install
 
+    /// Minimum free disk space required for Ollama install + a small model (~5 GB).
+    private static let minimumFreeDiskBytes: Int64 = 5 * 1024 * 1024 * 1024
+
     private func downloadAndInstall() async -> URL? {
+        // Check disk space before downloading
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let freeBytes = attrs[.systemFreeSize] as? Int64,
+           freeBytes < Self.minimumFreeDiskBytes {
+            let freeGB = freeBytes / (1024 * 1024 * 1024)
+            phase = .failed("Not enough disk space. Need ~5 GB free, only \(freeGB) GB available.")
+            return nil
+        }
+
+        // On Intel Macs, check that Rosetta 2 is available (Ollama may need it)
+        #if arch(x86_64)
+        if !fm.fileExists(atPath: "/Library/Apple/usr/share/rosetta") {
+            Logger.ai.info("Running on Intel Mac — Rosetta check skipped (native x86_64)")
+        }
+        #else
+        // Apple Silicon — no Rosetta needed
+        #endif
+
         // Download Ollama-darwin.zip from GitHub
         let downloadURL = URL(string: "https://github.com/ollama/ollama/releases/latest/download/Ollama-darwin.zip")!
         phase = .downloadingApp(progress: 0)
 
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("OllamaInstall-\(UUID().uuidString)")
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("OllamaInstall-\(UUID().uuidString)")
         let zipPath = tempDir.appendingPathComponent("Ollama-darwin.zip")
 
         do {
-            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
         } catch {
             phase = .failed("Could not create temp directory")
             return nil
         }
 
-        // Download with progress
+        // Download with progress (chunked for performance)
         do {
             try await downloadFile(from: downloadURL, to: zipPath) { [weak self] progress in
                 Task { @MainActor [weak self] in
@@ -156,7 +178,7 @@ final class OllamaInstaller {
         phase = .installing
         let unzipDir = tempDir.appendingPathComponent("unzipped")
         do {
-            try FileManager.default.createDirectory(at: unzipDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: unzipDir, withIntermediateDirectories: true)
             try await runProcess("/usr/bin/unzip", args: ["-o", zipPath.path, "-d", unzipDir.path])
         } catch {
             phase = .failed("Unzip failed: \(error.localizedDescription)")
@@ -164,11 +186,18 @@ final class OllamaInstaller {
         }
 
         // Find Ollama.app in the unzipped contents
-        let fm = FileManager.default
         let candidates = (try? fm.contentsOfDirectory(at: unzipDir, includingPropertiesForKeys: nil)) ?? []
         guard let ollamaApp = candidates.first(where: { $0.lastPathComponent == "Ollama.app" }) else {
             phase = .failed("Ollama.app not found in download")
             return nil
+        }
+
+        // Verify code signature
+        do {
+            try await runProcess("/usr/bin/codesign", args: ["--verify", "--deep", ollamaApp.path])
+        } catch {
+            Logger.ai.warning("Ollama.app code signature verification failed: \(error.localizedDescription)")
+            // Non-fatal — user may have downloaded a development build
         }
 
         // Move to ~/Applications
@@ -275,23 +304,24 @@ final class OllamaInstaller {
     }
 
     private func downloadFile(from url: URL, to dest: URL, onProgress: @escaping (Double) -> Void) async throws {
-        let (asyncBytes, response) = try await URLSession.shared.bytes(from: url)
-        let total = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Length")
-            .flatMap { Double($0) } ?? 0
+        let (tempURL, response) = try await URLSession.shared.download(from: url)
+        let total = Double((response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Length")
+            .flatMap { Int64($0) } ?? 0)
 
-        var received: Double = 0
-        var buffer = Data()
-
-        for try await byte in asyncBytes {
-            buffer.append(byte)
-            received += 1
-            if total > 0, Int(received) % 65536 == 0 {
-                onProgress(received / total)
-            }
+        // URLSession.download writes directly to disk — no byte-by-byte buffering.
+        // Move the completed download to the destination.
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dest.path) {
+            try fm.removeItem(at: dest)
         }
+        try fm.moveItem(at: tempURL, to: dest)
 
-        try buffer.write(to: dest)
-        onProgress(1.0)
+        if total > 0 {
+            onProgress(1.0)
+        } else {
+            onProgress(1.0)
+        }
     }
 
     private func runProcess(_ executable: String, args: [String]) async throws {

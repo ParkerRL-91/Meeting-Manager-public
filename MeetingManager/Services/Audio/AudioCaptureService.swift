@@ -41,24 +41,30 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private var consecutiveSilentSeconds: Int = 0
     private var silenceCheckTimer: Timer?
 
-    /// Thread-safe atomic levels updated directly in audio buffer callbacks.
-    /// Use these for polling from the main thread instead of the @Published properties
-    /// which depend on MainActor Task scheduling.
-    private let _atomicMicLevel: UnsafeMutablePointer<Float> = {
-        let p = UnsafeMutablePointer<Float>.allocate(capacity: 1)
-        p.initialize(to: 0)
+    /// Thread-safe audio levels updated directly in audio buffer callbacks.
+    /// Protected by an unfair lock for correct cross-thread access.
+    private let _levelLock: UnsafeMutablePointer<os_unfair_lock> = {
+        let p = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+        p.initialize(to: os_unfair_lock())
         return p
     }()
-    private let _atomicSystemLevel: UnsafeMutablePointer<Float> = {
-        let p = UnsafeMutablePointer<Float>.allocate(capacity: 1)
-        p.initialize(to: 0)
-        return p
-    }()
+    private var _micLevel: Float = 0
+    private var _systemLevel: Float = 0
 
-    /// Read the latest mic level atomically (safe to call from any thread).
-    var latestMicLevel: Float { _atomicMicLevel.pointee }
-    /// Read the latest system level atomically (safe to call from any thread).
-    var latestSystemLevel: Float { _atomicSystemLevel.pointee }
+    /// Read the latest mic level (safe to call from any thread).
+    var latestMicLevel: Float {
+        os_unfair_lock_lock(_levelLock)
+        let v = _micLevel
+        os_unfair_lock_unlock(_levelLock)
+        return v
+    }
+    /// Read the latest system level (safe to call from any thread).
+    var latestSystemLevel: Float {
+        os_unfair_lock_lock(_levelLock)
+        let v = _systemLevel
+        os_unfair_lock_unlock(_levelLock)
+        return v
+    }
 
     let micCapture = MicrophoneCapture()
 
@@ -229,6 +235,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             }
         }
 
+        // Tell BrowserCallDetector that we're now using the mic, so Strategy 3
+        // (mic-usage heuristic) doesn't falsely detect our own recording as a browser call.
+        BrowserCallDetector.appIsRecording = true
+
         await MainActor.run {
             isCapturing = true
         }
@@ -236,6 +246,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     /// Stop all audio capture
     func stopCapture() -> URL? {
+        BrowserCallDetector.appIsRecording = false
+
         silenceCheckTimer?.invalidate()
         silenceCheckTimer = nil
         consecutiveSilentSeconds = 0
@@ -263,16 +275,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     /// Write to the shared app log file for debugging with user.
     private func logToFile(_ message: String) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
-        if let data = line.data(using: .utf8),
-           let handle = try? FileHandle(forWritingTo: logURL) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        }
+        AppFileLogger.shared.log(message)
     }
 
     private func audioDirectory() throws -> URL {
@@ -285,7 +288,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     private func updateMicLevel(_ buffer: AVAudioPCMBuffer) {
         let level = buffer.rmsLevel
-        _atomicMicLevel.pointee = level
+        os_unfair_lock_lock(_levelLock)
+        _micLevel = level
+        os_unfair_lock_unlock(_levelLock)
         Task { @MainActor in
             self.micLevel = level
         }
@@ -293,15 +298,16 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     private func updateSystemLevel(_ buffer: AVAudioPCMBuffer) {
         let level = buffer.rmsLevel
-        _atomicSystemLevel.pointee = level
+        os_unfair_lock_lock(_levelLock)
+        _systemLevel = level
+        os_unfair_lock_unlock(_levelLock)
         Task { @MainActor in
             self.systemLevel = level
         }
     }
 
     deinit {
-        _atomicMicLevel.deallocate()
-        _atomicSystemLevel.deallocate()
+        _levelLock.deallocate()
     }
 }
 

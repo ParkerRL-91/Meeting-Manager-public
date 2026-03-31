@@ -28,6 +28,11 @@ final class AppState {
     /// The name of a detected call app when a meeting is in progress but recording hasn't started.
     /// Cleared when recording begins or the call app exits.
     private(set) var detectedCallApp: String?
+
+    /// Timestamp of the last call detection event, used to deduplicate rapid-fire
+    /// notifications from CallDetectionService and BrowserCallDetector firing for
+    /// the same meeting (e.g., Zoom native app + Zoom in browser tab).
+    private var lastCallDetectionTime: Date?
     var meetings: [Meeting] = []
     var upcomingMeetings: [Meeting] = []
     var pastMeetings: [Meeting] = []
@@ -791,6 +796,15 @@ final class AppState {
             Logger.general.info("Call detected (\(appName)) but another start in progress — ignoring")
             return
         }
+
+        // Deduplicate rapid-fire detections within 10 seconds.
+        // Both CallDetectionService and BrowserCallDetector can fire for the same
+        // meeting (e.g., Zoom.app launches AND "Zoom Meeting" appears in a browser tab).
+        if let lastTime = lastCallDetectionTime, Date().timeIntervalSince(lastTime) < 10 {
+            Logger.general.info("Call detected (\(appName)) but duplicate within 10s — ignoring")
+            return
+        }
+        lastCallDetectionTime = Date()
 
         // Show the in-app indicator whenever a call is detected but we haven't started recording.
         detectedCallApp = appName

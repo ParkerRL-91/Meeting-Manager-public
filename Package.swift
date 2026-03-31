@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "MeetingManager",
     platforms: [
-        .macOS(.v14),
+        .macOS("14.4"),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "6.0.0"),

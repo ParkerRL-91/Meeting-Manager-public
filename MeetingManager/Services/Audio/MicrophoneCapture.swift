@@ -25,6 +25,11 @@ final class MicrophoneCapture {
     /// The actual AudioDeviceID being used (for diagnostics)
     private(set) var activeDeviceID: AudioDeviceID = 0
 
+    /// Listener block ID for default input device changes (hot-plug handling)
+    private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Queue for handling device change callbacks
+    private let deviceChangeQueue = DispatchQueue(label: "com.meetingmanager.devicechange", qos: .userInitiated)
+
     /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -88,15 +93,81 @@ final class MicrophoneCapture {
         }
 
         isRunning = true
+        startDeviceChangeListener()
         Logger.audio.info("MicrophoneCapture started (manual downsample to 16kHz)")
     }
 
     func stop() {
+        stopDeviceChangeListener()
         guard isRunning else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         isRunning = false
         Logger.audio.info("MicrophoneCapture stopped")
+    }
+
+    // MARK: - Device Hot-Plug
+
+    /// Listen for default input device changes (e.g., AirPods connecting/disconnecting).
+    /// When detected, seamlessly switch to the new device without dropping audio.
+    private func startDeviceChangeListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, self.isRunning else { return }
+            let newDefaultID = self.getDefaultInputDeviceID()
+            guard newDefaultID != kAudioObjectUnknown, newDefaultID != self.activeDeviceID else { return }
+
+            let oldName = self.getDeviceName(self.activeDeviceID)
+            let newName = self.getDeviceName(newDefaultID)
+            self.onDiagnostic?("DIAG:hotplug default input changed: '\(oldName)' → '\(newName)' (id \(self.activeDeviceID) → \(newDefaultID))")
+            Logger.audio.info("Audio device changed: \(oldName) → \(newName) — switching")
+
+            // Stop current tap, switch device, reinstall tap, restart
+            self.engine.inputNode.removeTap(onBus: 0)
+            self.engine.stop()
+
+            self.activeDeviceID = newDefaultID
+            _ = self.setInputDeviceByID(newDefaultID)
+            self.installTapOnInputNode()
+
+            do {
+                try self.engine.start()
+                self.onDiagnostic?("DIAG:hotplug engine restarted successfully on '\(newName)'")
+                Logger.audio.info("Engine restarted on new device: \(newName)")
+            } catch {
+                self.onDiagnostic?("DIAG:hotplug engine restart FAILED: \(error.localizedDescription)")
+                Logger.audio.error("Failed to restart engine after device change: \(error.localizedDescription)")
+            }
+        }
+
+        deviceChangeListenerBlock = block
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            deviceChangeQueue,
+            block
+        )
+    }
+
+    private func stopDeviceChangeListener() {
+        guard let block = deviceChangeListenerBlock else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            deviceChangeQueue,
+            block
+        )
+        deviceChangeListenerBlock = nil
     }
 
     // MARK: - Device Configuration
