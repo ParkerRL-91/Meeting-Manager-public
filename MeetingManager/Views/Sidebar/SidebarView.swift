@@ -10,28 +10,22 @@ struct SidebarView: View {
     @State private var scheduledExpanded = true
     @State private var historyExpanded = true
 
+    // MARK: - Filtered Meetings
+
     private var filteredUpcoming: [Meeting] {
         let base = showArchived
             ? appState.upcomingMeetings
             : appState.upcomingMeetings.filter { $0.status != .archived }
-        if searchQuery.isEmpty {
-            return base
-        }
-        return base.filter {
-            $0.title.localizedCaseInsensitiveContains(searchQuery)
-        }
+        if searchQuery.isEmpty { return base }
+        return base.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
     }
 
     private var filteredPast: [Meeting] {
         let base = showArchived
             ? appState.pastMeetings
             : appState.pastMeetings.filter { $0.status != .archived }
-        if searchQuery.isEmpty {
-            return base
-        }
-        return base.filter {
-            $0.title.localizedCaseInsensitiveContains(searchQuery)
-        }
+        if searchQuery.isEmpty { return base }
+        return base.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
     }
 
     private var hasNoResults: Bool {
@@ -42,13 +36,55 @@ struct SidebarView: View {
         searchQuery.isEmpty && appState.upcomingMeetings.isEmpty && appState.pastMeetings.isEmpty
     }
 
+    // MARK: - Body
+
     var body: some View {
         @Bindable var appState = appState
 
         VStack(spacing: 0) {
-            // MARK: - Header
 
-            VStack(spacing: 10) {
+            // MARK: - Top Nav Items (Granola-style)
+            VStack(spacing: 2) {
+                NavItem(
+                    icon: "house.fill",
+                    label: "Home",
+                    destination: .home,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .home
+                    appState.selectedMeetingId = nil
+                }
+
+                NavItem(
+                    icon: "sparkles",
+                    label: "Ask Anything",
+                    destination: .chat,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .chat
+                    appState.selectedMeetingId = nil
+                }
+
+                NavItem(
+                    icon: "person.2.fill",
+                    label: "People",
+                    destination: .people,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .people
+                    appState.selectedMeetingId = nil
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
+            Divider()
+                .background(Color.appSeparator)
+
+            // MARK: - Meetings Header
+
+            VStack(spacing: 8) {
                 Button {
                     createAdHocMeeting()
                 } label: {
@@ -184,7 +220,6 @@ struct SidebarView: View {
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
             isSearchFocused = true
         }
-        // .createNewMeeting is handled by AppState — no need to observe here
     }
 
     // MARK: - Actions
@@ -194,15 +229,46 @@ struct SidebarView: View {
     }
 
     private func createAdHocMeeting() {
-        // Post notification so AppState handles meeting creation + transcription start
         NotificationCenter.default.post(name: .createNewMeeting, object: nil)
+    }
+}
+
+// MARK: - Nav Item
+
+private struct NavItem: View {
+    let icon: String
+    let label: String
+    let destination: SidebarDestination
+    let current: SidebarDestination
+    let action: () -> Void
+
+    private var isSelected: Bool { current == destination }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.subheadline)
+                    .foregroundStyle(isSelected ? Color.appAccent : Color.appTextSecondary)
+                    .frame(width: 18)
+                Text(label)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.appTextPrimary : Color.appTextSecondary)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(isSelected ? Color.appAccent.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
     }
 }
 
 // MARK: - Sidebar Recording Bar
 
 /// Compact recording indicator shown in the sidebar when a meeting is being recorded.
-/// Visible even when the user navigates away from LiveMeetingView.
 private struct SidebarRecordingBar: View {
     let meeting: Meeting
     @Environment(AppState.self) private var appState
@@ -262,9 +328,7 @@ private struct SidebarRecordingBar: View {
 
     private func startTimer() {
         updateElapsed()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            updateElapsed()
-        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in updateElapsed() }
     }
 
     private func stopTimer() {
@@ -280,7 +344,6 @@ private struct SidebarRecordingBar: View {
 
 // MARK: - Detected Call Banner
 
-/// Shown when a call app is running but recording hasn't started (manual-start mode).
 private struct DetectedCallBanner: View {
     let appName: String
     @Environment(AppState.self) private var appState
@@ -314,17 +377,3 @@ private struct DetectedCallBanner: View {
         .background(Color.appAccent.opacity(0.08))
     }
 }
-
-// MARK: - Previews
-
-// #Preview("With Meetings") {
-//     SidebarView()
-//         .environment(AppState())
-//         .frame(width: 300, height: 600)
-// }
-
-// #Preview("Empty State") {
-//     SidebarView()
-//         .environment(AppState())
-//         .frame(width: 300, height: 600)
-// }
