@@ -9,6 +9,8 @@ enum KeychainHelper {
     enum Key {
         static let claudeAPIKey = "claude-api-key"
         static let googleOAuthToken = "google-oauth-token"
+        /// User-supplied Google OAuth client ID (not secret — PKCE native apps have no secret).
+        static let googleOAuthClientId = "google-oauth-client-id"
     }
 
     /// The service identifier written into every keychain item.

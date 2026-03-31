@@ -11,6 +11,9 @@ struct GoogleCalendarSettingsView: View {
 
     // MARK: - State
 
+    /// User-supplied OAuth client ID. Empty = use built-in.
+    @State private var oauthClientId: String = ""
+    @State private var clientIdSaved = false
     @State private var isSigningIn = false
     @State private var signInError: String?
 
@@ -41,6 +44,7 @@ struct GoogleCalendarSettingsView: View {
 
     var body: some View {
         Form {
+            clientIdSection
             connectionSection
             if authManager.isSignedIn {
                 calendarPickerSection
@@ -53,6 +57,87 @@ struct GoogleCalendarSettingsView: View {
         .onChange(of: authManager.isSignedIn) { _, signedIn in
             if signedIn { loadCalendars() }
         }
+    }
+
+    // MARK: - OAuth Client ID Section
+
+    private var clientIdSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                // Built-in vs custom explanation
+                if oauthClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Label("Using the built-in OAuth credentials.", systemImage: "checkmark.circle")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Using your custom OAuth client ID.", systemImage: "person.badge.key.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.green)
+                }
+
+                HStack(spacing: 8) {
+                    TextField("Custom OAuth Client ID (optional)", text: $oauthClientId)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.subheadline)
+                        .autocorrectionDisabled()
+
+                    Button(clientIdSaved ? "Saved ✓" : "Save") {
+                        saveClientId()
+                    }
+                    .disabled(clientIdSaved)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    if !oauthClientId.isEmpty {
+                        Button("Clear", role: .destructive) {
+                            oauthClientId = ""
+                            try? KeychainHelper.delete(forKey: KeychainHelper.Key.googleOAuthClientId)
+                            clientIdSaved = false
+                            // Force sign-out since the credentials changed
+                            authManager.signOut()
+                        }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                    }
+                }
+            }
+        } header: {
+            Text("OAuth Credentials")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Leave blank to use the built-in credentials. To use your own:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("1. Open")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Google Cloud Console") {
+                        NSWorkspace.shared.open(URL(string: "https://console.cloud.google.com/apis/credentials")!)
+                    }
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.appAccent)
+                }
+                Text("2. Create an OAuth 2.0 Client ID (Desktop app type)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("3. Paste the Client ID above and tap Save")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func saveClientId() {
+        let trimmed = oauthClientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try? KeychainHelper.delete(forKey: KeychainHelper.Key.googleOAuthClientId)
+        } else {
+            try? KeychainHelper.save(trimmed, forKey: KeychainHelper.Key.googleOAuthClientId)
+        }
+        // Sign out so next sign-in uses the new client ID
+        if authManager.isSignedIn { authManager.signOut() }
+        clientIdSaved = true
+        // Reset "Saved" indicator after 2s
+        Task { try? await Task.sleep(nanoseconds: 2_000_000_000); clientIdSaved = false }
     }
 
     // MARK: - Connection Section
@@ -290,8 +375,10 @@ struct GoogleCalendarSettingsView: View {
     // MARK: - Actions
 
     private func loadState() {
+        // Load saved client ID
+        oauthClientId = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.googleOAuthClientId)) ?? ""
+
         selectedSyncInterval = AppSettings.default.calendarSyncIntervalMinutes
-        // Load saved calendar selection and last sync metadata
         if let settings = try? AppDatabase.shared.writer.read({ db in
             try AppSettings.fetchOne(db)
         }) {

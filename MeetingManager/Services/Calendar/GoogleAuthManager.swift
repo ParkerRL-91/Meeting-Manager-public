@@ -60,16 +60,37 @@ private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationC
 @MainActor
 final class GoogleAuthManager {
 
-    // MARK: - Embedded Credentials (registered once by the developer)
+    // MARK: - OAuth Configuration
+
+    /// Built-in client ID — used when the user hasn't supplied their own.
+    /// Users can override this in Settings > Google Calendar.
+    private static let builtInClientId = "168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu.apps.googleusercontent.com"
 
     private enum OAuthConfig {
-        static let clientId     = "168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu.apps.googleusercontent.com"
-        /// Reversed client ID — used as the custom URL scheme for the OAuth callback.
-        static let redirectScheme = "com.googleusercontent.apps.168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu"
-        static let redirectURI  = redirectScheme + ":/"
-        static let authURL      = "https://accounts.google.com/o/oauth2/v2/auth"
-        static let tokenURL     = "https://oauth2.googleapis.com/token"
-        static let scopes       = "https://www.googleapis.com/auth/calendar.readonly email profile"
+        static let authURL  = "https://accounts.google.com/o/oauth2/v2/auth"
+        static let tokenURL = "https://oauth2.googleapis.com/token"
+        static let scopes   = "https://www.googleapis.com/auth/calendar.readonly email profile"
+    }
+
+    /// Resolves the active client ID: user-supplied (Keychain) → built-in fallback.
+    static func resolvedClientId() -> String {
+        let stored = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.googleOAuthClientId))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return stored.isEmpty ? builtInClientId : stored
+    }
+
+    /// True if the user has entered their own client ID (not using the built-in one).
+    static func hasCustomClientId() -> Bool {
+        guard let stored = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.googleOAuthClientId),
+              !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return true
+    }
+
+    /// Derives the redirect URI from a client ID (reversed + ":/" suffix).
+    private static func redirectURI(for clientId: String) -> String {
+        // Reverse the domain parts: "12345.apps.googleusercontent.com" → "com.googleusercontent.apps.12345"
+        let parts = clientId.components(separatedBy: ".").reversed()
+        return parts.joined(separator: ".") + ":/"
     }
 
     // MARK: - Keychain Keys
@@ -187,10 +208,15 @@ final class GoogleAuthManager {
     // MARK: - Authorization Code Flow
 
     private func requestAuthorizationCode(challenge: String) async throws -> String {
+        let clientId = GoogleAuthManager.resolvedClientId()
+        let redirectURI = GoogleAuthManager.redirectURI(for: clientId)
+        // Extract the scheme from the redirect URI (everything before ":/")
+        let redirectScheme = redirectURI.components(separatedBy: ":").first ?? ""
+
         var components = URLComponents(string: OAuthConfig.authURL)!
         components.queryItems = [
-            URLQueryItem(name: "client_id",             value: OAuthConfig.clientId),
-            URLQueryItem(name: "redirect_uri",          value: OAuthConfig.redirectURI),
+            URLQueryItem(name: "client_id",             value: clientId),
+            URLQueryItem(name: "redirect_uri",          value: redirectURI),
             URLQueryItem(name: "response_type",         value: "code"),
             URLQueryItem(name: "scope",                 value: OAuthConfig.scopes),
             URLQueryItem(name: "access_type",           value: "offline"),
@@ -207,7 +233,7 @@ final class GoogleAuthManager {
             let presenter = WebAuthPresenter()
             let webSession = ASWebAuthenticationSession(
                 url: authURL,
-                callbackURLScheme: OAuthConfig.redirectScheme
+                callbackURLScheme: redirectScheme
             ) { [weak self] callbackURL, error in
                 self?.authSession = nil
                 self?.authPresenter = nil
@@ -247,14 +273,15 @@ final class GoogleAuthManager {
     // MARK: - Token Exchange (PKCE — no client_secret needed)
 
     private func exchangeCodeForTokens(_ code: String, verifier: String) async throws -> OAuthTokens {
+        let clientId = GoogleAuthManager.resolvedClientId()
         var request = URLRequest(url: URL(string: OAuthConfig.tokenURL)!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let params: [String: String] = [
             "code":          code,
-            "client_id":     OAuthConfig.clientId,
-            "redirect_uri":  OAuthConfig.redirectURI,
+            "client_id":     clientId,
+            "redirect_uri":  GoogleAuthManager.redirectURI(for: clientId),
             "grant_type":    "authorization_code",
             "code_verifier": verifier,
         ]
@@ -278,7 +305,7 @@ final class GoogleAuthManager {
 
         let params: [String: String] = [
             "refresh_token": refreshToken,
-            "client_id":     OAuthConfig.clientId,
+            "client_id":     GoogleAuthManager.resolvedClientId(),
             "grant_type":    "refresh_token",
         ]
         request.httpBody = urlEncode(params)

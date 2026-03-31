@@ -161,8 +161,11 @@ if [[ -z "${SPARKLE_FRAMEWORK_SRC}" ]]; then
 fi
 if [[ -n "${SPARKLE_FRAMEWORK_SRC}" ]]; then
     cp -R "${SPARKLE_FRAMEWORK_SRC}" "${FRAMEWORKS_DIR}/"
-    install_name_tool -add_rpath "@executable_path/../Frameworks" \
-        "${MACOS_DIR}/${EXECUTABLE}" 2>/dev/null || true
+    # Ensure @executable_path/../Frameworks rpath exists — required for Sparkle to load.
+    # -add_rpath fails if it already exists, so check first.
+    if ! otool -l "${MACOS_DIR}/${EXECUTABLE}" | grep -q "@executable_path/../Frameworks"; then
+        install_name_tool -add_rpath "@executable_path/../Frameworks" "${MACOS_DIR}/${EXECUTABLE}"
+    fi
     echo "  Sparkle framework bundled."
 else
     echo "  WARNING: Sparkle.framework not found — update checks won't work."
