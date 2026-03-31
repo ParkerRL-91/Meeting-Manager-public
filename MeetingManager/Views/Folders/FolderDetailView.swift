@@ -1,0 +1,498 @@
+import SwiftUI
+
+/// Detail view for a recurring meeting series folder.
+/// Shows Notes (meeting history), People tabs, and a scoped "Ask about this folder" AI chat.
+struct FolderDetailView: View {
+    let folder: MeetingFolder
+    @Environment(AppState.self) private var appState
+
+    enum Tab { case notes, people, chat }
+    @State private var selectedTab: Tab = .notes
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // MARK: - Header
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 14) {
+                    // Folder icon with stacked-paper look
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.appAccent.opacity(0.18))
+                            .frame(width: 48, height: 48)
+                        Image(systemName: "folder.fill")
+                            .font(.title2)
+                            .foregroundStyle(Color.appAccent)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(folder.displayName)
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(Color.appTextPrimary)
+                            .lineLimit(1)
+
+                        HStack(spacing: 10) {
+                            Label("\(folder.meetingCount) meetings", systemImage: "calendar")
+                                .font(.subheadline)
+                                .foregroundStyle(Color.appTextSecondary)
+
+                            if let date = folder.lastMeetingDate {
+                                Label(date.formatted(date: .abbreviated, time: .omitted),
+                                      systemImage: "clock")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color.appTextSecondary)
+                            }
+                        }
+                    }
+
+                    Spacer()
+                }
+
+                // Participant avatars
+                if !folder.participants.isEmpty {
+                    HStack(spacing: -6) {
+                        ForEach(Array(folder.participants.prefix(5).enumerated()), id: \.offset) { idx, name in
+                            InitialsAvatar(name: name, size: 26, index: idx)
+                        }
+                        if folder.participants.count > 5 {
+                            Text("+\(folder.participants.count - 5)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.appTextSecondary)
+                                .padding(.leading, 10)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 16)
+
+            // MARK: - Tab Bar
+            HStack(spacing: 0) {
+                TabButton(label: "Notes", icon: "doc.text", tab: .notes, selected: selectedTab) { selectedTab = .notes }
+                TabButton(label: "People", icon: "person.2", tab: .people, selected: selectedTab) { selectedTab = .people }
+                TabButton(label: "Ask AI", icon: "sparkles", tab: .chat, selected: selectedTab) { selectedTab = .chat }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 2)
+
+            Divider().background(Color.appSeparator)
+
+            // MARK: - Tab Content
+            switch selectedTab {
+            case .notes:
+                FolderNotesTab(folder: folder)
+            case .people:
+                FolderPeopleTab(folder: folder)
+            case .chat:
+                FolderChatTab(folder: folder)
+            }
+        }
+        .background(Color.appBackground)
+    }
+}
+
+// MARK: - Tab Button
+
+private struct TabButton: View {
+    let label: String
+    let icon: String
+    let tab: FolderDetailView.Tab
+    let selected: FolderDetailView.Tab
+    let action: () -> Void
+
+    private var isSelected: Bool { tab == selected }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.caption)
+                Text(label)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+            }
+            .foregroundStyle(isSelected ? Color.appAccent : Color.appTextSecondary)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .overlay(
+                Rectangle()
+                    .fill(isSelected ? Color.appAccent : Color.clear)
+                    .frame(height: 2),
+                alignment: .bottom
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Notes Tab
+
+private struct FolderNotesTab: View {
+    let folder: MeetingFolder
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                ForEach(folder.meetings) { meeting in
+                    FolderMeetingRow(meeting: meeting)
+                        .onTapGesture {
+                            appState.selectedMeetingId = meeting.id
+                            appState.sidebarDestination = .meetings
+                        }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+    }
+}
+
+// MARK: - Folder Meeting Row
+
+private struct FolderMeetingRow: View {
+    let meeting: Meeting
+
+    var body: some View {
+        HStack(spacing: 14) {
+            // Date badge
+            VStack(spacing: 1) {
+                Text(meeting.effectiveDate.formatted(.dateTime.month(.abbreviated)))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.appTextSecondary)
+                    .textCase(.uppercase)
+                Text(meeting.effectiveDate.formatted(.dateTime.day()))
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.appTextPrimary)
+            }
+            .frame(width: 40)
+            .padding(.vertical, 8)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(meeting.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text(meeting.effectiveDate.formatted(.dateTime.hour().minute()))
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextSecondary)
+
+                    let dur = meeting.formattedDuration
+                    if dur != "--" {
+                        Text("·")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                        Text(dur)
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                }
+
+                // Participant avatars
+                if !meeting.participantList.isEmpty {
+                    HStack(spacing: -4) {
+                        ForEach(Array(meeting.participantList.prefix(4).enumerated()), id: \.offset) { idx, name in
+                            InitialsAvatar(name: name, size: 18, index: idx)
+                        }
+                    }
+                }
+            }
+
+            Spacer()
+
+            Image(systemName: meeting.status == .complete ? "checkmark.circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(meeting.status == .complete ? Color.appSuccess : Color.appTextTertiary)
+
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(Color.appTextTertiary)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(Color.appSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - People Tab
+
+private struct FolderPeopleTab: View {
+    let folder: MeetingFolder
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                if folder.participants.isEmpty {
+                    EmptyStateView(
+                        icon: "person.2.slash",
+                        title: "No Participants",
+                        subtitle: "No named participants found in this series."
+                    )
+                    .padding()
+                } else {
+                    ForEach(folder.participants, id: \.self) { name in
+                        let meetings = folder.meetings.filter { $0.participantList.contains(name) }
+                        Button {
+                            appState.sidebarDestination = .people
+                        } label: {
+                            HStack(spacing: 12) {
+                                InitialsAvatar(name: name, size: 36)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(name)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Color.appTextPrimary)
+                                    Text("\(meetings.count) meeting\(meetings.count == 1 ? "" : "s") in this series")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.appTextSecondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appTextTertiary)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.appSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .contentShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+    }
+}
+
+// MARK: - Chat Tab
+
+private struct FolderChatTab: View {
+    let folder: MeetingFolder
+    @Environment(AppState.self) private var appState
+
+    @State private var messages: [GlobalChatMessage] = []
+    @State private var inputText = ""
+    @State private var isProcessing = false
+    @State private var error: String?
+    @State private var currentTask: Task<Void, Never>?
+    @FocusState private var isInputFocused: Bool
+
+    private let folderRecipes: [(icon: String, label: String, prompt: String)] = [
+        ("checklist", "Action items", "What are all the action items from this meeting series?"),
+        ("lightbulb", "Key decisions", "What are the most important decisions made in this meeting series?"),
+        ("arrow.triangle.2.circlepath", "Recurring themes", "What topics keep coming up across these meetings?"),
+        ("exclamationmark.triangle", "Open issues", "What problems or blockers have been raised but not resolved?"),
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if messages.isEmpty {
+                // Empty state with recipe chips
+                FolderChatEmptyState(
+                    folderName: folder.displayName,
+                    recipes: folderRecipes,
+                    onSelect: { prompt in
+                        inputText = prompt
+                        currentTask = Task { await sendMessage() }
+                    }
+                )
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(messages) { message in
+                                GlobalChatBubble(message: message)
+                                    .id(message.id)
+                            }
+                            if isProcessing {
+                                ThinkingBubble()
+                                    .id("folder-thinking")
+                            }
+                        }
+                        .padding(.vertical, 12)
+                    }
+                    .onChange(of: messages.count) {
+                        if let last = messages.last {
+                            withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        }
+                    }
+                }
+            }
+
+            if let error {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(Color.appWarning)
+                    Text(error)
+                        .font(.caption).foregroundStyle(Color.appTextSecondary)
+                    Spacer()
+                    Button("Dismiss") { self.error = nil }
+                        .font(.caption).buttonStyle(.plain).foregroundStyle(Color.appAccent)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(Color.appWarning.opacity(0.08))
+            }
+
+            Divider().background(Color.appSeparator)
+
+            HStack(spacing: 10) {
+                TextField("Ask about \(folder.displayName)…", text: $inputText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.subheadline)
+                    .lineLimit(1...4)
+                    .focused($isInputFocused)
+                    .onSubmit {
+                        guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                        currentTask = Task { await sendMessage() }
+                    }
+
+                Button {
+                    if isProcessing {
+                        currentTask?.cancel()
+                        currentTask = nil
+                        isProcessing = false
+                    } else {
+                        currentTask = Task { await sendMessage() }
+                    }
+                } label: {
+                    Image(systemName: isProcessing ? "stop.circle.fill" : "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(
+                            inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                ? Color.appTextTertiary : Color.appAccent
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isProcessing)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+        }
+    }
+
+    @MainActor
+    private func sendMessage() async {
+        let query = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        inputText = ""
+        error = nil
+        withAnimation { messages.append(GlobalChatMessage(role: .user, content: query)) }
+
+        isProcessing = true
+        defer { isProcessing = false }
+
+        guard let textGen = await appState.makeTextGenerator() else {
+            error = "No AI configured. Add a Claude API key or start Ollama in Settings."
+            return
+        }
+
+        do {
+            let context = try await buildFolderContext()
+            let systemPrompt = """
+                You are a meeting assistant. Answer questions about the "\(folder.displayName)" meeting series. \
+                Use only the context below — if information isn't available, say so clearly.
+
+                \(context)
+                """
+            let response = try await textGen(systemPrompt, query)
+            withAnimation { messages.append(GlobalChatMessage(role: .assistant, content: response)) }
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func buildFolderContext() async throws -> String {
+        let txRepo = appState.transcriptRepository
+        let sumRepo = appState.summaryRepository
+        var parts: [String] = []
+
+        for meeting in folder.meetings.prefix(10) {
+            var lines: [String] = ["## \(meeting.title) — \(meeting.effectiveDate.formatted(date: .abbreviated, time: .shortened))"]
+            if !meeting.participantList.isEmpty {
+                lines.append("Participants: \(meeting.participantList.joined(separator: ", "))")
+            }
+            if let summary = try? await sumRepo.latestSummary(meetingId: meeting.id), !summary.summaryText.isEmpty {
+                lines.append("Notes: \(summary.summaryText.prefix(500))")
+            } else {
+                let segs = try await txRepo.transcriptsForMeeting(meeting.id)
+                if !segs.isEmpty {
+                    lines.append("Transcript: \(segs.map(\.text).joined(separator: " ").prefix(400))…")
+                }
+            }
+            parts.append(lines.joined(separator: "\n"))
+        }
+
+        return parts.isEmpty
+            ? "No recorded content available for this series yet."
+            : parts.joined(separator: "\n\n---\n\n")
+    }
+}
+
+// MARK: - Folder Chat Empty State
+
+private struct FolderChatEmptyState: View {
+    let folderName: String
+    let recipes: [(icon: String, label: String, prompt: String)]
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                Spacer().frame(height: 16)
+
+                VStack(spacing: 8) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.appAccent.opacity(0.12))
+                            .frame(width: 52, height: 52)
+                        Image(systemName: "sparkles")
+                            .font(.title2)
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    Text("Ask about \(folderName)")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(Color.appTextPrimary)
+                    Text("Questions are answered using notes and\ntranscripts from this meeting series only.")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextSecondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                VStack(spacing: 6) {
+                    ForEach(recipes, id: \.label) { recipe in
+                        Button { onSelect(recipe.prompt) } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: recipe.icon)
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color.appAccent)
+                                    .frame(width: 20)
+                                Text(recipe.label)
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color.appTextPrimary)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appTextTertiary)
+                            }
+                            .padding(.horizontal, 14).padding(.vertical, 10)
+                            .background(Color.appSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .contentShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+        }
+    }
+}

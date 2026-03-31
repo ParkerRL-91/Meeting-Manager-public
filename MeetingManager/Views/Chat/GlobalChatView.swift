@@ -318,7 +318,7 @@ private struct GlobalChatEmptyState: View {
 
 // MARK: - Chat Bubble
 
-private struct GlobalChatBubble: View {
+struct GlobalChatBubble: View {
     let message: GlobalChatMessage
 
     var body: some View {
@@ -361,7 +361,7 @@ private struct GlobalChatBubble: View {
     }
 }
 
-private struct ThinkingBubble: View {
+struct ThinkingBubble: View {
     @State private var dot = 0
     private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
 
@@ -401,7 +401,7 @@ private struct ThinkingBubble: View {
     }
 }
 
-private struct BubbleShape: Shape {
+struct BubbleShape: Shape {
     let isUser: Bool
     func path(in rect: CGRect) -> Path {
         let r: CGFloat = 14

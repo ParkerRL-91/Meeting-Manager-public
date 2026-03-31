@@ -58,6 +58,15 @@ struct ContentView: View {
         case .people:
             PeopleView()
 
+        case .folder(let key):
+            let folders = appState.meetingFolders()
+            if let folder = folders.first(where: { $0.key == key }) {
+                FolderDetailView(folder: folder)
+                    .id(key)
+            } else {
+                HomeView()
+            }
+
         case .meetings:
             meetingDetailView
         }

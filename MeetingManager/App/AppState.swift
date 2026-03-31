@@ -45,8 +45,11 @@ final class AppState {
     /// the same meeting (e.g., Zoom native app + Zoom in browser tab).
     private var lastCallDetectionTime: Date?
     var meetings: [Meeting] = []
-    var upcomingMeetings: [Meeting] = []
-    var pastMeetings: [Meeting] = []
+    var upcomingMeetings: [Meeting] = [] { didSet { _cachedFolders = nil } }
+    var pastMeetings: [Meeting] = []    { didSet { _cachedFolders = nil } }
+
+    /// Cached folder groupings — invalidated whenever meetings change.
+    private var _cachedFolders: [MeetingFolder]?
     var navigationPath = NavigationPath()
 
     /// The user's persisted settings. Changes are automatically written to the database.
@@ -1193,6 +1196,31 @@ final class AppState {
         return nil
     }
 
+    /// Groups all meetings (past + upcoming) into recurring-series "folders" by normalised base title.
+    /// Result is cached and invalidated whenever `upcomingMeetings` or `pastMeetings` change.
+    /// A folder is only created if 2+ meetings share the same base title.
+    func meetingFolders() -> [MeetingFolder] {
+        if let cached = _cachedFolders { return cached }
+        var map: [String: [Meeting]] = [:]
+        let allMeetings = (upcomingMeetings + pastMeetings).filter { $0.status != .archived }
+        for meeting in allMeetings {
+            let key = MeetingFolder.normaliseTitle(meeting.title)
+            map[key, default: []].append(meeting)
+        }
+        let result = map
+            .filter { $0.value.count >= 2 }
+            .map { key, meetings in
+                MeetingFolder(
+                    key: key,
+                    displayName: meetings.first.map { MeetingFolder.displayName(for: $0.title) } ?? key,
+                    meetings: meetings.sorted { ($0.effectiveDate) > ($1.effectiveDate) }
+                )
+            }
+            .sorted { $0.meetings.first?.effectiveDate ?? .distantPast > $1.meetings.first?.effectiveDate ?? .distantPast }
+        _cachedFolders = result
+        return result
+    }
+
     /// Aggregates all unique participants across all meetings, returning (name, [Meeting]) pairs.
     func allPeople() -> [(name: String, meetings: [Meeting])] {
         var map: [String: [Meeting]] = [:]
@@ -1219,4 +1247,5 @@ enum SidebarDestination: Hashable {
     case chat
     case people
     case meetings
+    case folder(String)  // folder key = normalised base title
 }

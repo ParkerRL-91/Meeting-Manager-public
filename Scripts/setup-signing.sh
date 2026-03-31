@@ -53,18 +53,20 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -config "${CONFIG}" \
     2>/dev/null
 
-# Convert to p12 for Keychain import (empty password)
+# Convert to p12 for Keychain import
+# macOS requires a non-empty password for PKCS12 import
+TMPPASS="meetingmanager-dev-import"
 openssl pkcs12 -export \
     -out "${TMPDIR_CERT}/cert.p12" \
     -inkey "${TMPDIR_CERT}/key.pem" \
     -in "${TMPDIR_CERT}/cert.pem" \
-    -passout pass: \
+    -passout "pass:${TMPPASS}" \
     2>/dev/null
 
 # Import into login keychain and trust for code signing
 security import "${TMPDIR_CERT}/cert.p12" \
     -k ~/Library/Keychains/login.keychain-db \
-    -P "" \
+    -P "${TMPPASS}" \
     -T /usr/bin/codesign \
     -T /usr/bin/security
 

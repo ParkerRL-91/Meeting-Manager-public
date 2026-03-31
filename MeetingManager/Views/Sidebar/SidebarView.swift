@@ -74,6 +74,19 @@ struct SidebarView: View {
                     appState.sidebarDestination = .people
                     appState.selectedMeetingId = nil
                 }
+
+                // MARK: - Spaces (auto-grouped meeting folders)
+                let folders = appState.meetingFolders()
+                if !folders.isEmpty {
+                    SpacesSidebarSection(
+                        folders: folders,
+                        currentDestination: appState.sidebarDestination,
+                        onSelect: { folder in
+                            appState.sidebarDestination = .folder(folder.key)
+                            appState.selectedMeetingId = nil
+                        }
+                    )
+                }
             }
             .padding(.horizontal, 8)
             .padding(.top, 10)
@@ -230,6 +243,106 @@ struct SidebarView: View {
 
     private func createAdHocMeeting() {
         NotificationCenter.default.post(name: .createNewMeeting, object: nil)
+    }
+}
+
+// MARK: - Spaces Sidebar Section (collapsible)
+
+private struct SpacesSidebarSection: View {
+    let folders: [MeetingFolder]
+    let currentDestination: SidebarDestination
+    let onSelect: (MeetingFolder) -> Void
+
+    @State private var isExpanded = true
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("My Notes")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.appTextTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.7)
+                    Spacer()
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+
+            if isExpanded {
+                ForEach(folders) { folder in
+                    FolderNavItem(
+                        folder: folder,
+                        current: currentDestination,
+                        action: { onSelect(folder) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Sidebar Section Header
+
+private struct SidebarSectionHeader: View {
+    let title: String
+    var body: some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Color.appTextTertiary)
+            .textCase(.uppercase)
+            .tracking(0.7)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Folder Nav Item
+
+private struct FolderNavItem: View {
+    let folder: MeetingFolder
+    let current: SidebarDestination
+    let action: () -> Void
+
+    private var isSelected: Bool { current == .folder(folder.key) }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(isSelected ? Color.appAccent : Color.appTextSecondary)
+                    .frame(width: 18)
+                Text(folder.displayName)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.appTextPrimary : Color.appTextSecondary)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(folder.meetingCount)")
+                    .font(.caption2)
+                    .foregroundStyle(Color.appTextTertiary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.appSurfaceSecondary)
+                    .clipShape(Capsule())
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(isSelected ? Color.appAccent.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
     }
 }
 
