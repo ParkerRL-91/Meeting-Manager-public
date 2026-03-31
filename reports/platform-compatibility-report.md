@@ -1,16 +1,26 @@
 # Platform Compatibility Report
 
-**Date:** 2026-03-31
+**Date:** 2026-03-31 (updated)
 **Auditor:** Platform Compatibility Audit Harness (Auditor + Validator agents)
 **App Version:** Meeting Manager 1.1.1
-**Min macOS:** 14.4 (Sonoma) | **Package.swift platform:** macOS 14.0
+**Min macOS:** 14.4 (Sonoma) | **Package.swift platform:** macOS 14.4 (aligned)
 
 ---
 
 ## Summary
 
-- **Total findings: 14**
-- **Critical: 2** | **High: 4** | **Medium: 5** | **Low: 3**
+- **Total findings: 18** (14 original + 4 follow-up)
+- **All 18 fixed.**
+- **Critical: 2** | **High: 8** | **Medium: 5** | **Low: 3**
+
+### Follow-Up Findings (Post-Audit)
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| 15 | HIGH | `bestInputDevice()` overrides user's System Settings mic choice | **FIXED** |
+| 16 | HIGH | Strategy 3 mic detection falsely fires when Meeting Manager is recording | **FIXED** |
+| 17 | HIGH | Teams/Zoom already open at startup falsely triggers call detection | **FIXED** |
+| 18 | MEDIUM | Duplicate notifications from native app + browser detector for same meeting | **FIXED** |
 
 ### Configuration Matrix Tested Against
 
