@@ -50,6 +50,8 @@ private struct ClaudeErrorResponse: Decodable {
 
 enum ClaudeServiceError: LocalizedError {
     case missingAPIKey
+    case invalidAPIKey
+    case rateLimited(retryAfterSeconds: Int?)
     case invalidURL
     case httpError(statusCode: Int, message: String)
     case emptyResponse
@@ -61,6 +63,13 @@ enum ClaudeServiceError: LocalizedError {
         switch self {
         case .missingAPIKey:
             return "Claude API key is not configured. Add your key in Settings."
+        case .invalidAPIKey:
+            return "Your Claude API key is invalid or expired. Please update it in Settings."
+        case .rateLimited(let retryAfter):
+            if let seconds = retryAfter {
+                return "Rate limited by Claude API. Try again in \(seconds) seconds."
+            }
+            return "Rate limited by Claude API. Please wait a moment and try again."
         case .invalidURL:
             return "Invalid API endpoint URL."
         case .httpError(let statusCode, let message):
@@ -166,10 +175,19 @@ final class ClaudeService {
             } else {
                 message = String(data: data, encoding: .utf8) ?? "Unknown error"
             }
-            let serviceError = ClaudeServiceError.httpError(
-                statusCode: httpResponse.statusCode,
-                message: message
-            )
+
+            let serviceError: ClaudeServiceError
+            switch httpResponse.statusCode {
+            case 401:
+                serviceError = .invalidAPIKey
+            case 429:
+                let retryAfter = httpResponse.value(forHTTPHeaderField: "retry-after")
+                    .flatMap { Int($0) }
+                serviceError = .rateLimited(retryAfterSeconds: retryAfter)
+            default:
+                serviceError = .httpError(statusCode: httpResponse.statusCode, message: message)
+            }
+
             lastError = serviceError.localizedDescription
             Logger.ai.error("API error \(httpResponse.statusCode): \(message)")
             throw serviceError

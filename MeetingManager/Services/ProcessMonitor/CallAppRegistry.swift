@@ -38,6 +38,8 @@ enum CallAppRegistry {
         "com.brave.Browser": "Brave Browser",
         "com.operasoftware.Opera": "Opera",
         "com.google.Chrome.canary": "Google Chrome Canary",
+        "company.thebrowser.Browser": "Arc",
+        "com.vivaldi.Vivaldi": "Vivaldi",
     ]
 
     /// Window title substrings that indicate an active browser-based meeting.

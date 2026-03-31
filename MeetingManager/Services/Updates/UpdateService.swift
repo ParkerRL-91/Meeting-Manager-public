@@ -36,6 +36,11 @@ final class UpdateService: ObservableObject {
         get { updaterController.updater.automaticallyChecksForUpdates }
         set { updaterController.updater.automaticallyChecksForUpdates = newValue }
     }
+
+    /// The date of the last successful update check, or nil if never checked.
+    var lastUpdateCheckDate: Date? {
+        updaterController.updater.lastUpdateCheckDate
+    }
 }
 
 // MARK: - Update Delegate

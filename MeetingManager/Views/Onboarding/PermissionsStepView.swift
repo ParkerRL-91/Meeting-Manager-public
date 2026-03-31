@@ -181,9 +181,10 @@ struct PermissionsStepView: View {
     }
 
     private func openMicrophoneSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-            NSWorkspace.shared.open(url)
-        }
+        openSystemSettings(
+            primary: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+            fallback: "x-apple.systempreferences:"
+        )
     }
 
     private func checkScreenRecordingPermission() {
@@ -191,8 +192,24 @@ struct PermissionsStepView: View {
     }
 
     private func openScreenRecordingSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
+        openSystemSettings(
+            primary: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            fallback: "x-apple.systempreferences:"
+        )
+    }
+
+    /// Open a System Settings URL with fallback to the top-level settings if the
+    /// specific deep link fails (URL schemes change across macOS versions).
+    private func openSystemSettings(primary: String, fallback: String) {
+        if let url = URL(string: primary) {
+            let config = NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.open(url, configuration: config) { _, error in
+                if error != nil, let fallbackURL = URL(string: fallback) {
+                    NSWorkspace.shared.open(fallbackURL)
+                }
+            }
+        } else if let fallbackURL = URL(string: fallback) {
+            NSWorkspace.shared.open(fallbackURL)
         }
     }
 }

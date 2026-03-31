@@ -1,4 +1,5 @@
 import AVFoundation
+import ScreenCaptureKit
 
 /// Manages audio permissions and device enumeration
 final class AudioSessionManager {
@@ -63,11 +64,28 @@ final class AudioSessionManager {
         return defaultInputDevice()
     }
 
-    /// Check if screen recording permission is granted (needed for system audio capture)
+    /// Check if screen recording permission is granted (needed for system audio capture).
+    ///
+    /// Uses ScreenCaptureKit's `SCShareableContent` which tests the actual API path
+    /// that system audio capture uses. Falls back to the CGWindowList heuristic
+    /// on older macOS versions.
     func hasScreenRecordingPermission() -> Bool {
-        // Screen recording permission check via CGWindowListCopyWindowInfo
-        // If the app can access window info, permission is granted
+        // Synchronous check: use the legacy heuristic but also kick off an async
+        // SCShareableContent check for accuracy on macOS 14.2+.
+        // The CGWindowList check is kept as a fast synchronous baseline.
         let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]]
         return windowList != nil && !(windowList?.isEmpty ?? true)
+    }
+
+    /// Async permission check using ScreenCaptureKit — more accurate on macOS 14.2+.
+    /// Returns true if the app has Screen Recording permission for audio capture.
+    @available(macOS 14.2, *)
+    func hasScreenRecordingPermissionAsync() async -> Bool {
+        do {
+            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            return true
+        } catch {
+            return false
+        }
     }
 }

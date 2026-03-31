@@ -214,6 +214,30 @@ final class TranscriptionService {
 
     // MARK: - Model Management
 
+    /// Checks available system memory and logs a warning if it may be tight for the model.
+    /// Returns true if memory is likely sufficient, false if critically low.
+    private func checkMemoryAvailability() -> Bool {
+        let available = os_proc_available_memory()
+        let availableMB = available / (1024 * 1024)
+        // WhisperKit large-v3 needs ~3 GB for inference
+        let requiredMB: UInt64 = 3072
+        let warningThresholdMB: UInt64 = 4096
+
+        if availableMB < requiredMB {
+            Logger.transcription.warning("Very low memory for WhisperKit: \(availableMB) MB available, ~\(requiredMB) MB needed. Transcription may be slow or fail.")
+            return false
+        } else if availableMB < warningThresholdMB {
+            Logger.transcription.info("Tight memory for WhisperKit: \(availableMB) MB available. Performance may be reduced.")
+        } else {
+            Logger.transcription.info("Memory check OK: \(availableMB) MB available for WhisperKit")
+        }
+        return true
+    }
+
+    /// True when available memory is critically low for the model.
+    /// UI can observe this to show a warning to the user.
+    private(set) var lowMemoryWarning = false
+
     /// Load the specified model, downloading it on first use.
     /// Progress is reported through `downloadProgress`.
     func loadModel(_ model: WhisperModel) async throws {
@@ -226,6 +250,9 @@ final class TranscriptionService {
         if isModelLoaded {
             unloadModel()
         }
+
+        // Check memory before loading — warn but don't block (user chose large-v3)
+        lowMemoryWarning = !checkMemoryAvailability()
 
         downloadProgress = 0
         lastError = nil
