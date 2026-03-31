@@ -26,3 +26,4 @@ xcuserdata/
 *.moved-aside
 *.hmap
 *.ipa
+.claude/worktrees/
