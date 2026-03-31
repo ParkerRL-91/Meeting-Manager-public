@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-03-29T19:35:00",
+  "version": "1.0.6",
+  "build": "6",
+  "phase": "TRIAGE",
+  "features_completed": ["F01","F02","F03","F04","F05","F06","F07","F08","F09","F10","F11","F12","F13","F14","F15","F16","F17","F18","F19","F20","F21","F22","F23","F24"],
+  "results": {
+    "F01": {"verdict": "PASS"},
+    "F02": {"verdict": "PASS"},
+    "F03": {"verdict": "PASS"},
+    "F04": {"verdict": "DEGRADED", "issues": ["ISSUE-001"]},
+    "F05": {"verdict": "PASS"},
+    "F06": {"verdict": "PASS"},
+    "F07": {"verdict": "PASS"},
+    "F08": {"verdict": "PASS"},
+    "F09": {"verdict": "PASS"},
+    "F10": {"verdict": "FAIL", "issues": ["ISSUE-002"]},
+    "F11": {"verdict": "PASS"},
+    "F12": {"verdict": "SILENT FAIL", "issues": ["ISSUE-003"]},
+    "F13": {"verdict": "FAIL", "issues": ["ISSUE-004"]},
+    "F14": {"verdict": "PASS"},
+    "F15": {"verdict": "PASS"},
+    "F16": {"verdict": "PASS"},
+    "F17": {"verdict": "PASS"},
+    "F18": {"verdict": "PASS"},
+    "F19": {"verdict": "PASS"},
+    "F20": {"verdict": "PASS"},
+    "F21": {"verdict": "PASS"},
+    "F22": {"verdict": "PASS"},
+    "F23": {"verdict": "PASS"},
+    "F24": {"verdict": "FAIL", "issues": ["ISSUE-005"]}
+  },
+  "issues": [
+    {"id": "ISSUE-001", "feature": "F04", "severity": "DEGRADED", "symptom": "No live transcript during recording, only batch after stop", "status": "open"},
+    {"id": "ISSUE-002", "feature": "F10", "severity": "BROKEN", "symptom": "RecipeEngine guard settings.aiEnabled blocks all execution; hardcoded Claude only", "status": "open"},
+    {"id": "ISSUE-003", "feature": "F12", "severity": "SILENT FAIL", "symptom": "ActionItemExtractor guard returns [] silently when aiEnabled=false; no Ollama fallback", "status": "open"},
+    {"id": "ISSUE-004", "feature": "F13", "severity": "BROKEN", "symptom": "MeetingChatService guard settings.aiEnabled blocks all chat; hardcoded Claude only", "status": "open"},
+    {"id": "ISSUE-005", "feature": "F24", "severity": "BROKEN", "symptom": "6+ print-only error handlers, 50+ try? silencing user-visible failures", "status": "open"}
+  ],
+  "repairs_applied": 0,
+  "repair_budget_remaining": 10
+}

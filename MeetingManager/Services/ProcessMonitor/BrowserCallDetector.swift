@@ -198,7 +198,7 @@ final class BrowserCallDetector {
 
     /// Set by AudioCaptureService when recording starts/stops, so this strategy
     /// can distinguish "we are using the mic" from "a browser is using the mic."
-    static var appIsRecording = false
+    nonisolated(unsafe) static var appIsRecording = false
 
     /// Check if any browser process is currently using the microphone.
     /// This works without any special permissions — if Chrome/Safari has an active

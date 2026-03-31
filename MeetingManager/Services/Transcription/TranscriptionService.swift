@@ -217,7 +217,7 @@ final class TranscriptionService {
     /// Checks available system memory and logs a warning if it may be tight for the model.
     /// Returns true if memory is likely sufficient, false if critically low.
     private func checkMemoryAvailability() -> Bool {
-        let available = os_proc_available_memory()
+        let available = ProcessInfo.processInfo.physicalMemory
         let availableMB = available / (1024 * 1024)
         // WhisperKit large-v3 needs ~3 GB for inference
         let requiredMB: UInt64 = 3072

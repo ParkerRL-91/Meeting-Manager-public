@@ -48,20 +48,20 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         p.initialize(to: os_unfair_lock())
         return p
     }()
-    private var _micLevel: Float = 0
-    private var _systemLevel: Float = 0
+    private var _atomicMicLevel: Float = 0
+    private var _atomicSystemLevel: Float = 0
 
     /// Read the latest mic level (safe to call from any thread).
     var latestMicLevel: Float {
         os_unfair_lock_lock(_levelLock)
-        let v = _micLevel
+        let v = _atomicMicLevel
         os_unfair_lock_unlock(_levelLock)
         return v
     }
     /// Read the latest system level (safe to call from any thread).
     var latestSystemLevel: Float {
         os_unfair_lock_lock(_levelLock)
-        let v = _systemLevel
+        let v = _atomicSystemLevel
         os_unfair_lock_unlock(_levelLock)
         return v
     }
@@ -289,7 +289,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private func updateMicLevel(_ buffer: AVAudioPCMBuffer) {
         let level = buffer.rmsLevel
         os_unfair_lock_lock(_levelLock)
-        _micLevel = level
+        _atomicMicLevel = level
         os_unfair_lock_unlock(_levelLock)
         Task { @MainActor in
             self.micLevel = level
@@ -299,7 +299,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private func updateSystemLevel(_ buffer: AVAudioPCMBuffer) {
         let level = buffer.rmsLevel
         os_unfair_lock_lock(_levelLock)
-        _systemLevel = level
+        _atomicSystemLevel = level
         os_unfair_lock_unlock(_levelLock)
         Task { @MainActor in
             self.systemLevel = level
