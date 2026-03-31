@@ -5,8 +5,9 @@ import SwiftUI
 struct HomeView: View {
     @Environment(AppState.self) private var appState
 
-    // Tick every minute to refresh countdowns
+    // Tick every 30 seconds to refresh countdowns
     @State private var now = Date()
+    @State private var showAllRecent = false
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -71,14 +72,15 @@ struct HomeView: View {
                 }
 
                 // MARK: - Recent Meetings
-                let recent = recentMeetings
-                if !recent.isEmpty {
+                let allRecent = appState.pastMeetings
+                let visibleRecent = showAllRecent ? allRecent : Array(allRecent.prefix(8))
+                if !visibleRecent.isEmpty {
                     SectionHeader(title: "Recent")
                         .padding(.horizontal, 24)
                         .padding(.bottom, 10)
 
                     VStack(spacing: 6) {
-                        ForEach(recent) { meeting in
+                        ForEach(visibleRecent) { meeting in
                             RecentMeetingRow(meeting: meeting)
                                 .onTapGesture {
                                     appState.selectedMeetingId = meeting.id
@@ -86,7 +88,18 @@ struct HomeView: View {
                         }
                     }
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 32)
+
+                    if allRecent.count > 8 {
+                        Button(showAllRecent ? "Show less" : "Show \(allRecent.count - 8) more") {
+                            withAnimation { showAllRecent.toggle() }
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appAccent)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 6)
+                    }
+                    Spacer().frame(height: 32)
                 }
             }
         }
@@ -122,9 +135,7 @@ struct HomeView: View {
             }
     }
 
-    private var recentMeetings: [Meeting] {
-        Array(appState.pastMeetings.prefix(8))
-    }
+    // recentMeetings no longer used directly — see showAllRecent logic in body
 }
 
 // MARK: - Section Header
@@ -256,18 +267,25 @@ private struct UpcomingMeetingCard: View {
                 .fill(isStartingSoon ? statusColor : Color.appAccent)
                 .frame(width: 3, height: 38)
 
-            // Title + participants
-            VStack(alignment: .leading, spacing: 3) {
+            // Title + participant avatars
+            VStack(alignment: .leading, spacing: 5) {
                 Text(meeting.title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Color.appTextPrimary)
                     .lineLimit(1)
 
                 if !meeting.participantList.isEmpty {
-                    Text(meeting.participantList.prefix(3).joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextSecondary)
-                        .lineLimit(1)
+                    HStack(spacing: -6) {
+                        ForEach(Array(meeting.participantList.prefix(3).enumerated()), id: \.offset) { idx, name in
+                            InitialsAvatar(name: name, size: 20, index: idx)
+                        }
+                        if meeting.participantList.count > 3 {
+                            Text("+\(meeting.participantList.count - 3)")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.appTextSecondary)
+                                .padding(.leading, 8)
+                        }
+                    }
                 }
             }
 
@@ -282,7 +300,7 @@ private struct UpcomingMeetingCard: View {
                 }
 
                 if isStartingSoon || isPast {
-                    Button("Start now") {
+                    Button(isPast ? "Record now" : "Start now") {
                         appState.startRecording(for: meeting)
                     }
                     .buttonStyle(.borderedProminent)

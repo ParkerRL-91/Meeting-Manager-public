@@ -233,8 +233,7 @@ private struct PersonDetailView: View {
                                 .foregroundStyle(Color.appTextSecondary)
 
                             if let date = person.lastMeetingDate {
-                                Label(date.formatted(date: .abbreviated, time: .omitted),
-                                      systemImage: "clock")
+                                Label(relativeDate(date), systemImage: "clock")
                                     .font(.subheadline)
                                     .foregroundStyle(Color.appTextSecondary)
                             }
@@ -258,7 +257,7 @@ private struct PersonDetailView: View {
                         .padding(.top, 20)
 
                     ForEach(person.meetings) { meeting in
-                        PersonMeetingRow(meeting: meeting)
+                        PersonMeetingRow(meeting: meeting, personName: person.name)
                             .onTapGesture {
                                 appState.selectedMeetingId = meeting.id
                             }
@@ -270,12 +269,23 @@ private struct PersonDetailView: View {
         }
         .background(Color.appBackground)
     }
+
+    private func relativeDate(_ date: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today" }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        let days = cal.dateComponents([.day], from: date, to: Date()).day ?? 0
+        if days < 7 { return "\(days)d ago" }
+        if days < 30 { return "\(days / 7)w ago" }
+        return date.formatted(.dateTime.month(.abbreviated).day())
+    }
 }
 
 // MARK: - Person Meeting Row
 
 private struct PersonMeetingRow: View {
     let meeting: Meeting
+    var personName: String = ""
 
     var body: some View {
         HStack(spacing: 12) {
@@ -315,13 +325,13 @@ private struct PersonMeetingRow: View {
                             .foregroundStyle(Color.appTextSecondary)
                     }
 
-                    // Other attendees
-                    let others = meeting.participantList.filter { $0 != /* current person; best-effort */ "" }
-                    if others.count > 1 {
+                    // Other attendees (exclude the person being shown)
+                    let others = meeting.participantList.filter { $0 != personName }
+                    if !others.isEmpty {
                         Text("·")
                             .font(.caption)
                             .foregroundStyle(Color.appTextTertiary)
-                        Text("+\(others.count - 1) others")
+                        Text("+\(others.count) others")
                             .font(.caption)
                             .foregroundStyle(Color.appTextSecondary)
                     }

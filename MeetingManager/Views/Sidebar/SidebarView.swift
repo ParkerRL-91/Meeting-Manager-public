@@ -313,9 +313,10 @@ private struct SidebarRecordingBar: View {
         .background(Color.appRecording.opacity(0.08))
         .onAppear(perform: startTimer)
         .onDisappear(perform: stopTimer)
+        .onReceive(tickTimer) { _ in updateElapsed() }
     }
 
-    @State private var timer: Timer?
+    private let tickTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var formattedElapsed: String {
         let h = elapsedSeconds / 3600
@@ -328,13 +329,9 @@ private struct SidebarRecordingBar: View {
 
     private func startTimer() {
         updateElapsed()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in updateElapsed() }
     }
 
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
+    private func stopTimer() {}
 
     private func updateElapsed() {
         guard let start = meeting.startDate else { elapsedSeconds = 0; return }

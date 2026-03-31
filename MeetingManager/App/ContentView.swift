@@ -30,7 +30,8 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Color.appAccent.opacity(0.08).background(Color.appSurface))
+                .background(Color.appSurface)
+                .background(Color.appAccent.opacity(0.08))
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 

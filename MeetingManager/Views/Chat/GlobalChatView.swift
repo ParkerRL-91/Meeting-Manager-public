@@ -9,6 +9,8 @@ struct GlobalChatView: View {
     @State private var inputText = ""
     @State private var isProcessing = false
     @State private var error: String?
+    @State private var showClearConfirm = false
+    @State private var currentTask: Task<Void, Never>?
     @FocusState private var isInputFocused: Bool
 
     var body: some View {
@@ -30,7 +32,7 @@ struct GlobalChatView: View {
                 Spacer()
                 if !messages.isEmpty {
                     Button {
-                        withAnimation { messages = [] }
+                        showClearConfirm = true
                     } label: {
                         Image(systemName: "trash")
                             .font(.caption)
@@ -38,6 +40,10 @@ struct GlobalChatView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Clear conversation")
+                    .confirmationDialog("Clear conversation?", isPresented: $showClearConfirm, titleVisibility: .visible) {
+                        Button("Clear", role: .destructive) { withAnimation { messages = [] } }
+                        Button("Cancel", role: .cancel) {}
+                    }
                 }
             }
             .padding(.horizontal, 20)
@@ -114,13 +120,19 @@ struct GlobalChatView: View {
                     .focused($isInputFocused)
                     .onSubmit {
                         if !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Task { await sendMessage() }
+                            currentTask = Task { await sendMessage() }
                         }
                     }
                     .submitLabel(.send)
 
                 Button {
-                    Task { await sendMessage() }
+                    if isProcessing {
+                        currentTask?.cancel()
+                        currentTask = nil
+                        isProcessing = false
+                    } else {
+                        currentTask = Task { await sendMessage() }
+                    }
                 } label: {
                     Image(systemName: isProcessing ? "stop.circle.fill" : "arrow.up.circle.fill")
                         .font(.title2)
@@ -230,7 +242,6 @@ struct GlobalChatView: View {
 
 private struct GlobalChatEmptyState: View {
     let onSuggest: (String) -> Void
-
     private let suggestions: [(icon: String, label: String, prompt: String)] = [
         ("checklist", "Recent action items", "What are all the action items from my recent meetings?"),
         ("lightbulb", "Key decisions", "What were the key decisions made in my meetings this week?"),
