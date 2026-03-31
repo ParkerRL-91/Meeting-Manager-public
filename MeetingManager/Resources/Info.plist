@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Meeting Manager</string>
+	<key>CFBundleExecutable</key>
+	<string>MeetingManager</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.meetingmanager.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Meeting Manager</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1.1</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.meetingmanager</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.meetingmanager</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Google OAuth Callback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>202603301502</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Meeting Manager needs access to your microphone to record and transcribe meetings.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Meeting Manager uses on-device speech recognition to transcribe your meetings in real-time.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://parkerrl-91.github.io/Meeting-Manager/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>87p6s92HRx5+UO39ogrrjkxnWdiLiAQiA8zABqV5mM4=</string>
+</dict>
+</plist>

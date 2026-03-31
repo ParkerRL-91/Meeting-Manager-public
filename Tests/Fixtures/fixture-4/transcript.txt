@@ -1,0 +1,1 @@
+Did the build pass? No, two tests are failing in the payment module. Which tests? The refund calculation and the currency conversion tests. I think I know what's wrong. I made a change to the decimal precision yesterday. That would do it. Can you fix it today? Yes, give me an hour. Perfect. Let me know when the build is green and I'll do the code review. Will do.

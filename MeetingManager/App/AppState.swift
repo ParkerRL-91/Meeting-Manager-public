@@ -1,0 +1,1148 @@
+import AVFoundation
+import SwiftUI
+import Combine
+import GRDB
+import Speech
+import SpeakerKit
+import UserNotifications
+import os
+
+@Observable
+@MainActor
+final class AppState {
+    /// Shared instance for access from AppDelegate (menu bar popover).
+    /// Set during init — there is exactly one AppState per app lifetime.
+    static var shared: AppState!
+
+    var selectedMeetingId: String?
+    var isRecording = false
+    var activeMeeting: Meeting?
+
+    /// Live audio levels mirrored from AudioCaptureService for SwiftUI views.
+    /// AudioCaptureService is @ObservableObject but nested inside @Observable AppState,
+    /// so SwiftUI can't see its @Published changes. These are updated on a 10Hz timer.
+    var micLevel: Float = 0
+    var systemLevel: Float = 0
+    private var audioLevelTimer: Timer?
+
+    /// The name of a detected call app when a meeting is in progress but recording hasn't started.
+    /// Cleared when recording begins or the call app exits.
+    private(set) var detectedCallApp: String?
+    var meetings: [Meeting] = []
+    var upcomingMeetings: [Meeting] = []
+    var pastMeetings: [Meeting] = []
+    var navigationPath = NavigationPath()
+
+    /// The user's persisted settings. Changes are automatically written to the database.
+    var settings: AppSettings = .default {
+        didSet {
+            guard settings != oldValue else { return }
+            persistSettings()
+        }
+    }
+
+    // Services
+    let database: AppDatabase
+    let ollamaService: OllamaService
+    let ollamaInstaller: OllamaInstaller
+    let meetingRepository: MeetingRepository
+    let transcriptRepository: TranscriptRepository
+    let noteRepository: NoteRepository
+    let summaryRepository: SummaryRepository
+    let audioCaptureService: AudioCaptureService
+    let transcriptionService: TranscriptionService
+    let streamingTranscriber: StreamingTranscriber
+    let appleSpeechTranscriber: AppleSpeechTranscriber
+
+    // State machine — single source of truth for meeting lifecycle
+    private(set) var stateMachine: MeetingStateMachine
+
+    /// True while the WhisperKit model is downloading/loading.
+    private(set) var isLoadingModel = false
+
+    /// Synthetic model download progress (0.0–1.0) that combines real WhisperKit progress
+    /// with a time-based estimate so the UI shows continuous advancement.
+    var modelDownloadProgress: Double = 0
+    private var modelProgressTimer: Timer?
+
+    /// User-visible error from the most recent operation (shown via alert).
+    var lastUserError: String?
+
+    private var cancellables = Set<AnyCancellable>()
+    private var proximityTimer: Timer?
+
+    init() {
+        self.database = AppDatabase.shared
+        self.ollamaService = OllamaService()
+        self.ollamaInstaller = OllamaInstaller()
+        self.meetingRepository = MeetingRepository(database: database)
+        self.transcriptRepository = TranscriptRepository(database: database)
+        self.noteRepository = NoteRepository(database: database)
+        self.summaryRepository = SummaryRepository(database: database)
+        self.audioCaptureService = AudioCaptureService()
+
+        let txService = TranscriptionService()
+        self.transcriptionService = txService
+        self.streamingTranscriber = StreamingTranscriber(transcriptionService: txService)
+        self.appleSpeechTranscriber = AppleSpeechTranscriber()
+
+        self.stateMachine = MeetingStateMachine(
+            meetingRepository: meetingRepository,
+            audioCaptureService: audioCaptureService
+        )
+
+        // Auto-stop recording after sustained silence (meeting ended)
+        audioCaptureService.onSilenceDetected = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.fileLog("Silence auto-stop: no speech for 45 seconds — ending meeting")
+                self.stopRecording()
+            }
+        }
+
+        // Auto-stop recording when buffer hits max duration (prevents OOM crash)
+        audioCaptureService.onCapacityReached = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.fileLog("Capacity auto-stop: buffer hit 2-hour limit — ending meeting to prevent crash")
+                self.stopRecording()
+            }
+        }
+
+        loadMeetings()
+        loadSettings()
+        observeNotifications()
+        startProximityCheck()
+        autoLoadTranscriptionModel()
+        cleanupStuckMeetings()
+
+        // Make this instance accessible to AppDelegate for the menu bar popover
+        AppState.shared = self
+
+        fileLog("AppState initialized — starting model download")
+    }
+
+    // MARK: - Settings
+
+    func loadSettings() {
+        Task {
+            do {
+                let loaded = try await database.writer.read { db in
+                    try AppSettings.fetchOne(db)
+                }
+                if var loaded = loaded {
+                    // Always enforce large-v3 — no other models are supported.
+                    if loaded.whisperModel != WhisperModel.largev3.rawValue {
+                        loaded.whisperModel = WhisperModel.largev3.rawValue
+                    }
+                    await MainActor.run { self.settings = loaded }
+                }
+            } catch {
+                print("Failed to load settings: \(error)")
+            }
+        }
+    }
+
+    private func persistSettings() {
+        let current = settings
+        Task {
+            do {
+                try await database.writer.write { db in
+                    if try AppSettings.fetchOne(db) != nil {
+                        try current.update(db)
+                    } else {
+                        var s = current
+                        try s.insert(db)
+                    }
+                }
+            } catch {
+                print("Failed to persist settings: \(error)")
+            }
+        }
+    }
+
+    func loadMeetings() {
+        Task {
+            do {
+                let upcoming = try await meetingRepository.upcomingMeetings()
+                let past = try await meetingRepository.pastMeetings(limit: 50)
+                await MainActor.run {
+                    self.upcomingMeetings = upcoming
+                    self.pastMeetings = past
+                    self.meetings = upcoming + past
+                }
+            } catch {
+                print("Failed to load meetings: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Startup Cleanup
+
+    /// On launch, recover meetings stuck in "recording" or "transcribing" from a prior crash.
+    ///
+    /// - Stuck recordings WITH audio files → set to transcribing and queue batch transcription
+    /// - Stuck recordings WITHOUT audio → cancel (nothing to transcribe)
+    /// - Stuck transcribing → re-run batch transcription if audio exists, else complete
+    private func cleanupStuckMeetings() {
+        Task {
+            do {
+                // Gather stuck meetings inside a write transaction
+                // Returns the UPDATED meeting objects (with corrected statuses)
+                let (recoveredForTranscription, stuckTranscribing) = try await database.writer.write { db -> ([Meeting], [Meeting]) in
+                    let recordings = try Meeting
+                        .filter(Meeting.Columns.status == MeetingStatus.recording.rawValue)
+                        .fetchAll(db)
+                    var toTranscribe: [Meeting] = []
+                    for var m in recordings {
+                        m.endDate = m.endDate ?? Date()
+                        if let path = m.audioFilePath,
+                           FileManager.default.fileExists(atPath: path) {
+                            // Has audio — transition to transcribing so we can batch-transcribe
+                            m.status = .transcribing
+                            try m.update(db)
+                            toTranscribe.append(m)
+                        } else {
+                            // No audio — cancel
+                            m.status = .cancelled
+                            try m.update(db)
+                        }
+                    }
+
+                    let transcribing = try Meeting
+                        .filter(Meeting.Columns.status == MeetingStatus.transcribing.rawValue)
+                        .fetchAll(db)
+
+                    return (toTranscribe, transcribing)
+                }
+
+                let total = recoveredForTranscription.count + stuckTranscribing.count
+                if total > 0 {
+                    fileLog("Startup cleanup: found \(total) stuck meetings — \(recoveredForTranscription.count) recovered recordings, \(stuckTranscribing.count) stuck transcribing")
+                    loadMeetings()
+                }
+
+                // Now batch-transcribe any meetings that have audio
+                // Deduplicate in case a meeting appears in both lists
+                var seen = Set<String>()
+                var toTranscribe: [Meeting] = []
+                for m in recoveredForTranscription + stuckTranscribing {
+                    if seen.insert(m.id).inserted {
+                        toTranscribe.append(m)
+                    }
+                }
+                fileLog("Startup cleanup: \(toTranscribe.count) meetings to transcribe")
+
+                if !toTranscribe.isEmpty {
+                    // Wait for the WhisperKit model to finish loading before transcribing.
+                    // autoLoadTranscriptionModel() runs concurrently — give it up to 120s.
+                    if !transcriptionService.isModelLoaded {
+                        fileLog("Startup cleanup: waiting for WhisperKit model to load...")
+                        for tick in 0..<120 {
+                            // Yield to let the model-loading Task make progress
+                            try? await Task.sleep(for: .seconds(1))
+                            if transcriptionService.isModelLoaded { break }
+                            if tick == 30 { fileLog("Startup cleanup: still waiting for model (30s)...") }
+                            if tick == 60 { fileLog("Startup cleanup: still waiting for model (60s)...") }
+                        }
+                        if transcriptionService.isModelLoaded {
+                            fileLog("Startup cleanup: model loaded — proceeding with transcription")
+                        } else {
+                            fileLog("Startup cleanup: model failed to load after 120s — marking meetings complete")
+                            for meeting in toTranscribe {
+                                try? await database.writer.write { db in
+                                    var m = meeting
+                                    m.status = .complete
+                                    try m.update(db)
+                                }
+                            }
+                            loadMeetings()
+                            return
+                        }
+                    }
+                }
+
+                for meeting in toTranscribe {
+                    fileLog("Startup cleanup: processing '\(meeting.title)' (status=\(meeting.status.rawValue), audio=\(meeting.audioFilePath ?? "nil"))")
+                    guard let path = meeting.audioFilePath else {
+                        // No audio path — just mark complete
+                        try await database.writer.write { db in
+                            var m = meeting
+                            m.status = .complete
+                            try m.update(db)
+                        }
+                        continue
+                    }
+                    let audioURL = URL(fileURLWithPath: path)
+                    guard FileManager.default.fileExists(atPath: path) else {
+                        fileLog("Startup cleanup: no audio file for \(meeting.id) — marking complete")
+                        try await database.writer.write { db in
+                            var m = meeting
+                            m.status = .complete
+                            try m.update(db)
+                        }
+                        continue
+                    }
+
+                    fileLog("Startup cleanup: batch transcribing '\(meeting.title)' (\(meeting.id))")
+                    await batchTranscribe(meetingId: meeting.id, audioURL: audioURL)
+
+                    // Mark complete after transcription
+                    try await database.writer.write { db in
+                        var m = meeting
+                        m.status = .complete
+                        try m.update(db)
+                    }
+                    fileLog("Startup cleanup: completed '\(meeting.title)'")
+
+                    // Auto-summary if enabled
+                    if settings.autoGenerateSummary {
+                        scheduleAutoSummary(meetingId: meeting.id)
+                    }
+                }
+
+                if !toTranscribe.isEmpty {
+                    loadMeetings()
+                }
+            } catch {
+                Logger.general.error("Startup cleanup failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Meeting Creation
+
+    /// Serialization flag — prevents concurrent meeting-start attempts from racing.
+    /// The state machine's `currentMeeting == nil` guard is necessary but not sufficient
+    /// because multiple async Tasks can read it as nil before any of them set it.
+    private var isStartingMeeting = false
+
+    func createMeeting(title: String, scheduledStart: Date? = nil, scheduledEnd: Date? = nil) async throws -> Meeting {
+        var meeting = Meeting(
+            title: title,
+            scheduledStartDate: scheduledStart,
+            scheduledEndDate: scheduledEnd,
+            status: scheduledStart != nil ? .scheduled : .recording
+        )
+
+        if scheduledStart == nil {
+            meeting.startDate = Date()
+        }
+
+        try await meetingRepository.save(&meeting)
+        loadMeetings()
+        return meeting
+    }
+
+    /// Start recording — delegates to the state machine. No live transcription needed —
+    /// we transcribe the complete recording after the meeting ends for much better accuracy.
+    func startRecording(for meeting: Meeting) {
+        guard !isRecording else {
+            Logger.general.info("startRecording(for:) skipped — already recording")
+            return
+        }
+        guard !isStartingMeeting else {
+            Logger.general.info("startRecording(for:) skipped — another start in progress")
+            return
+        }
+        isStartingMeeting = true
+        Task {
+            defer { self.isStartingMeeting = false }
+            do {
+                try await stateMachine.startRecording(meeting: meeting)
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                self.selectedMeetingId = self.stateMachine.currentMeeting?.id
+                self.detectedCallApp = nil
+                self.startAudioLevelPolling()
+                loadMeetings()
+                fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
+            } catch {
+                Logger.general.error("Failed to start recording: \(error.localizedDescription)")
+                self.lastUserError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Stop recording — then run batch transcription on the complete audio file.
+    /// Batch transcription is dramatically more accurate than live streaming because
+    /// Whisper can use the full audio context and sequential decoding.
+    func stopRecording() {
+        // Warn user if transcription model isn't ready yet
+        if !transcriptionService.isModelLoaded {
+            lastUserError = "The transcription model is still downloading. Your audio has been saved and will be transcribed once the download completes."
+        }
+
+        Task {
+            do {
+                // Save references before stopRecording clears them
+                let stoppedMeeting = stateMachine.currentMeeting
+                let audioURL = audioCaptureService.currentAudioFileURL
+
+                try await stateMachine.stopRecording()
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                self.stopAudioLevelPolling()
+
+                // Mark meeting as transcribing → then run batch transcription
+                if let stopped = stoppedMeeting {
+                    if let refreshed = try? await meetingRepository.find(id: stopped.id),
+                       refreshed.status == .transcribing {
+                        // Run batch transcription on the complete audio file
+                        fileLog("Meeting stopped. Starting batch transcription for \(stopped.id)...")
+                        await batchTranscribe(meetingId: stopped.id, audioURL: audioURL)
+
+                        // Mark complete after transcription finishes
+                        if let final_ = try? await meetingRepository.find(id: stopped.id),
+                           final_.status == .transcribing {
+                            try await stateMachine.complete(meeting: final_)
+
+                            // Schedule auto-summary if enabled
+                            if settings.autoGenerateSummary {
+                                scheduleAutoSummary(meetingId: stopped.id)
+                            }
+                        }
+                    }
+                }
+
+                // Notify the menu bar that recording has stopped
+                NotificationCenter.default.post(name: .stopRecording, object: nil)
+
+                // Send macOS notification that the meeting has ended
+                self.sendMeetingEndedNotification(meetingTitle: stoppedMeeting?.title)
+
+                loadMeetings()
+            } catch {
+                Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
+                self.lastUserError = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: - Auto-Summary
+
+    /// Schedule automatic summary generation 10 minutes after transcription completes.
+    private func scheduleAutoSummary(meetingId: String) {
+        fileLog("Auto-summary: scheduled for meeting \(meetingId) in 10 minutes")
+        Logger.ai.info("Auto-summary scheduled for \(meetingId) — will fire in 10 minutes")
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(600)) // 10 minutes
+
+            // Verify the meeting still exists and doesn't already have a summary
+            guard let meeting = try? await meetingRepository.find(id: meetingId) else {
+                fileLog("Auto-summary: meeting \(meetingId) no longer exists — skipping")
+                return
+            }
+
+            if let existing = try? await summaryRepository.latestSummary(meetingId: meetingId), !existing.summaryText.isEmpty {
+                fileLog("Auto-summary: meeting \(meetingId) already has a summary — skipping")
+                return
+            }
+
+            fileLog("Auto-summary: generating for meeting \(meetingId)...")
+
+            // Determine AI backend (same routing as SummaryView)
+            let baseTextGenerator: (String, String) async throws -> String
+            let modelUsed: String
+
+            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+            await ollamaService.refreshStatus()
+            let ollamaReachable = ollamaService.isReachable
+
+            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+            if useOllama {
+                let service = ollamaService
+                let model = settings.ollamaModel
+                baseTextGenerator = { sys, usr in
+                    try await service.generate(systemPrompt: sys, userPrompt: usr, model: model)
+                }
+                modelUsed = "ollama/\(model)"
+            } else if hasClaudeKey {
+                let claude = ClaudeService()
+                let claudeModel = settings.claudeModel
+                baseTextGenerator = { sys, usr in
+                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+                }
+                modelUsed = claudeModel
+            } else {
+                fileLog("Auto-summary: no AI configured — skipping")
+                return
+            }
+
+            // If a default recipe is set, use its prompt template
+            let textGenerator: (String, String) async throws -> String
+            if let recipeId = settings.defaultRecipeId {
+                let repo = RecipeRepository(database: database)
+                if let recipe = try? await repo.find(id: recipeId) {
+                    textGenerator = { _, usr in try await baseTextGenerator(recipe.promptTemplate, usr) }
+                } else {
+                    textGenerator = baseTextGenerator
+                }
+            } else {
+                textGenerator = baseTextGenerator
+            }
+
+            do {
+                let generator = SummaryGenerator()
+                let summary = try await generator.generateSummary(
+                    for: meeting,
+                    transcriptRepo: transcriptRepository,
+                    noteRepo: noteRepository,
+                    summaryRepo: summaryRepository,
+                    textGenerator: textGenerator,
+                    modelUsed: modelUsed,
+                    settings: settings
+                )
+                fileLog("Auto-summary: completed for meeting \(meetingId) (\(summary.summaryText.count) chars)")
+                Logger.ai.info("Auto-summary generated for \(meetingId)")
+            } catch {
+                fileLog("Auto-summary: FAILED for meeting \(meetingId) — \(error.localizedDescription)")
+                Logger.ai.error("Auto-summary failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
+    /// This gives dramatically better accuracy than streaming 30-second chunks because
+    /// Whisper carries context between windows and the full audio is available.
+    private func batchTranscribe(meetingId: String, audioURL: URL?) async {
+        guard let audioURL else {
+            fileLog("Batch transcribe: no audio file URL")
+            return
+        }
+
+        if !transcriptionService.isModelLoaded {
+            fileLog("Batch transcribe: model not loaded, waiting...")
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .seconds(1))
+                if transcriptionService.isModelLoaded { break }
+            }
+        }
+        guard transcriptionService.isModelLoaded else {
+            fileLog("Batch transcribe: model not loaded after 60s — skipping")
+            lastUserError = "Transcription skipped — the model failed to load. Open the menu bar to retry the download."
+            return
+        }
+
+        fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
+
+        do {
+            // Read the WAV file into Float32 samples
+            let audioFile = try AVAudioFile(forReading: audioURL)
+            let fileFormat = audioFile.processingFormat
+            let frameCount = AVAudioFrameCount(audioFile.length)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
+                fileLog("Batch transcribe: failed to create buffer")
+                return
+            }
+            try audioFile.read(into: buffer)
+
+            guard let channelData = buffer.floatChannelData else {
+                fileLog("Batch transcribe: no channel data")
+                return
+            }
+            let allSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
+
+            let totalDuration = Double(allSamples.count) / Double(fileFormat.sampleRate)
+            fileLog("Batch transcribe: \(allSamples.count) samples (\(String(format: "%.0f", totalDuration))s raw)")
+
+            // Trim leading and trailing silence to improve transcription quality.
+            // WhisperKit hallucinates on long silent sections.
+            let silenceThreshold: Float = 0.005
+            let windowSize = Int(fileFormat.sampleRate) // 1-second windows
+            let samples = trimSilence(allSamples, threshold: silenceThreshold, windowSize: windowSize)
+
+            let trimmedDuration = Double(samples.count) / Double(fileFormat.sampleRate)
+            fileLog("Batch transcribe: trimmed to \(samples.count) samples (\(String(format: "%.0f", trimmedDuration))s speech)")
+
+            // Step 1: Transcribe the trimmed audio with WhisperKit
+            let segments = try await transcriptionService.transcribe(samples: samples)
+            fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
+
+            // Step 2: Run speaker diarization with SpeakerKit
+            var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
+            do {
+                let config = PyannoteConfig()
+                let modelManager = SpeakerKitModelManager(config: config)
+                try await modelManager.loadModels()
+                fileLog("Diarization: SpeakerKit models loaded")
+
+                guard let models = modelManager.models as? PyannoteModels else {
+                    fileLog("Diarization: failed to cast models")
+                    throw SpeakerKitError.invalidConfiguration("Model cast failed")
+                }
+
+                let kit = try SpeakerKit(models: models)
+                let diarResult = try await kit.diarize(audioArray: samples)
+                fileLog("Diarization: \(diarResult.segments.count) speaker segments found")
+
+                // Build a lookup: for each second, which speaker is active
+                for seg in diarResult.segments {
+                    let sid = seg.speaker.speakerId ?? 0
+                    let label = "Speaker \(sid + 1)"
+                    var t = Int(seg.startTime)
+                    while t < Int(seg.endTime) + 1 {
+                        speakerMap[t] = label
+                        t += 1
+                    }
+                }
+
+                let uniqueSpeakers = Set(diarResult.segments.compactMap { $0.speaker.speakerId })
+                fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
+
+                // Update meeting participants
+                if uniqueSpeakers.count > 1 {
+                    let speakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
+                    if var meeting = try? await meetingRepository.find(id: meetingId) {
+                        let existing = meeting.participants ?? ""
+                        meeting.participants = existing.isEmpty ? speakerLabels : "\(existing) (\(speakerLabels))"
+                        try? await meetingRepository.save(&meeting)
+                    }
+                }
+            } catch {
+                fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
+            }
+
+            // Step 3: Filter hallucinations and save transcripts with speaker labels
+            //
+            // WhisperKit hallucinates on silent/noisy audio — common patterns:
+            // - Single word repeated across many segments ("you", "the", "I", "thank you")
+            // - Bracketed noise markers: [BLANK_AUDIO], [inaudible], (silence)
+            // - Very short segments with low confidence
+            // - Repetitive text within a single segment (same phrase 3+ times)
+
+            // Known hallucination phrases WhisperKit produces on silence
+            let hallucinationPhrases: Set<String> = [
+                "you", "the", "i", "a", "it", "so", "we", "he", "she", "they",
+                "thank you", "thanks", "bye", "okay", "ok", "um", "uh", "hmm",
+                "thank you for watching", "thanks for watching",
+                "subscribe", "like and subscribe",
+                "see you next time", "see you in the next video",
+                "please subscribe", "thanks for listening",
+            ]
+
+            // First pass: count how often each unique text appears across segments
+            var textCounts: [String: Int] = [:]
+            for seg in segments {
+                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                textCounts[text, default: 0] += 1
+            }
+
+            // If a single phrase accounts for >40% of all segments, it's hallucination
+            let hallucinationThreshold = max(3, Int(Double(segments.count) * 0.4))
+
+            var savedCount = 0
+            var skippedCount = 0
+            for seg in segments {
+                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = text.lowercased()
+
+                // Skip empty or single-character
+                if text.isEmpty || text.count <= 1 {
+                    skippedCount += 1; continue
+                }
+
+                // Skip bracketed/parenthesized noise markers
+                if text.hasPrefix("[") && text.hasSuffix("]") { skippedCount += 1; continue }
+                if text.hasPrefix("(") && text.hasSuffix(")") { skippedCount += 1; continue }
+
+                // Skip known hallucination phrases
+                if hallucinationPhrases.contains(lower) {
+                    skippedCount += 1; continue
+                }
+
+                // Skip if this exact text repeats too many times (cross-segment hallucination)
+                if let count = textCounts[lower], count >= hallucinationThreshold {
+                    skippedCount += 1; continue
+                }
+
+                // Skip very low confidence segments (< 0.4)
+                if seg.confidence < 0.4 {
+                    skippedCount += 1; continue
+                }
+
+                // Skip intra-segment repetition (same phrase repeated within one segment)
+                if text.count > 50 {
+                    let words = text.components(separatedBy: .whitespaces)
+                    if words.count > 10 && Double(Set(words).count) / Double(words.count) < 0.2 {
+                        skippedCount += 1; continue
+                    }
+                }
+
+                // Look up speaker for this segment's time
+                let speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+
+                let transcript = Transcript(
+                    meetingId: meetingId,
+                    speakerLabel: speaker,
+                    text: text,
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    confidence: seg.confidence
+                )
+                try await transcriptRepository.saveBatch([transcript])
+                savedCount += 1
+            }
+
+            fileLog("Batch transcribe: saved \(savedCount) segments, skipped \(skippedCount) hallucinations")
+            Logger.transcription.info("Batch transcription complete: \(savedCount) segments for meeting \(meetingId)")
+
+        } catch {
+            fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
+            Logger.transcription.error("Batch transcription failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Transcription Lifecycle
+
+    /// Automatically load the default WhisperKit model at app startup.
+    private func autoLoadTranscriptionModel() {
+        Task {
+            guard !transcriptionService.isModelLoaded else { return }
+
+            // Always use large-v3 — it's the only supported model.
+            let model = WhisperModel.largev3
+
+            Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
+            fileLog("Model: loading \(model.rawValue)...")
+            isLoadingModel = true
+            modelDownloadProgress = 0
+
+            // Start a synthetic progress timer — WhisperKit only reports 0.05 then 1.0,
+            // so we use an exponential curve to show continuous progress to the user.
+            let startTime = Date()
+            let estimatedDuration: TimeInterval = 180 // ~3 min estimate for first download
+            modelProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+                Task { @MainActor in
+                    guard let self, self.isLoadingModel else { timer.invalidate(); return }
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    // Asymptotically approach 0.9 — real completion snaps to 1.0
+                    let synthetic = 0.9 * (1.0 - exp(-elapsed / estimatedDuration))
+                    let real = self.transcriptionService.downloadProgress
+                    self.modelDownloadProgress = max(synthetic, real)
+                }
+            }
+
+            let loadStart = Date()
+            do {
+                try await transcriptionService.loadModel(model)
+                modelProgressTimer?.invalidate()
+                modelProgressTimer = nil
+                modelDownloadProgress = 1.0
+
+                Logger.transcription.info("WhisperKit model loaded — transcription is ready")
+                fileLog("Model: LOADED successfully — ready for transcription")
+
+                // Notify user if this was a real download (not a cache load)
+                let loadDuration = Date().timeIntervalSince(loadStart)
+                if loadDuration > 30 {
+                    sendModelReadyNotification()
+                }
+            } catch {
+                modelProgressTimer?.invalidate()
+                modelProgressTimer = nil
+                modelDownloadProgress = 0
+
+                Logger.transcription.error("Failed to auto-load WhisperKit model: \(error.localizedDescription)")
+                fileLog("Model: FAILED to load — \(error.localizedDescription)")
+            }
+            isLoadingModel = false
+        }
+    }
+
+    /// Retry loading the WhisperKit model after a failure.
+    func retryModelLoad() {
+        transcriptionService.clearError()
+        autoLoadTranscriptionModel()
+    }
+
+    /// Send a macOS notification that the transcription model is ready.
+    private func sendModelReadyNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = "Meeting Manager"
+        content.body = "Transcription model downloaded and ready. You can now record and transcribe meetings."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "model-download-complete",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send model-ready notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Call Detection Response
+
+    /// Called when a call app or browser meeting is detected.
+    /// Respects `autoRecord` and `autoInvite` settings.
+    @MainActor
+    private func handleCallDetected(appName: String) {
+        guard !isRecording else {
+            Logger.general.info("Call detected (\(appName)) but already recording — ignoring")
+            return
+        }
+        guard !isStartingMeeting else {
+            Logger.general.info("Call detected (\(appName)) but another start in progress — ignoring")
+            return
+        }
+
+        // Show the in-app indicator whenever a call is detected but we haven't started recording.
+        detectedCallApp = appName
+
+        if settings.autoRecord {
+            // Auto-record: immediately create meeting and start recording.
+            // First, check if there's a scheduled meeting within 5 minutes — use that instead of creating ad-hoc.
+            isStartingMeeting = true
+            fileLog("handleCallDetected: autoRecord=true, looking for scheduled meeting for \(appName)")
+            Task { @MainActor in
+                defer { self.isStartingMeeting = false }
+                do {
+                    // Look for a scheduled meeting within ±5 minutes
+                    let nearbyMeetings = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+                    let scheduledMatch = nearbyMeetings.first(where: { $0.status == .scheduled || $0.status == .notified })
+
+                    let meeting: Meeting
+                    if let scheduled = scheduledMatch {
+                        // Start the scheduled meeting instead of creating a new one
+                        fileLog("handleCallDetected: matched scheduled meeting '\(scheduled.title)' — starting it")
+                        try await self.stateMachine.startRecording(meeting: scheduled)
+                        meeting = self.stateMachine.currentMeeting ?? scheduled
+                    } else {
+                        // No nearby scheduled meeting — create ad-hoc
+                        let enriched = CalendarMeetingMatcher.enrichFromBrowserTitle(appName)
+                        let title = enriched?.title ?? "\(appName) Meeting"
+                        let created = try await self.stateMachine.createAndStartMeeting(title: title)
+
+                        // Attach participant info if we got it from the browser title
+                        if let participants = enriched?.participants {
+                            var updated = created
+                            updated.participants = participants
+                            try? await self.meetingRepository.save(&updated)
+                        }
+                        meeting = created
+                    }
+
+                    self.activeMeeting = self.stateMachine.currentMeeting
+                    self.isRecording = self.stateMachine.isRecording
+                    self.selectedMeetingId = meeting.id
+                    self.detectedCallApp = nil
+                    if self.isRecording { self.startAudioLevelPolling() }
+                    self.loadMeetings()
+                    self.fileLog("handleCallDetected: recording started for \(meeting.id) ('\(meeting.title)')")
+
+                    // Notify the user that auto-recording has started
+                    self.sendAutoRecordStartedNotification(meetingTitle: meeting.title)
+                } catch {
+                    self.fileLog("handleCallDetected: FAILED — \(error.localizedDescription)")
+                    self.lastUserError = error.localizedDescription
+                }
+            }
+        } else if settings.autoInvite {
+            // Auto-invite: show a notification asking the user to start recording
+            Logger.general.info("Sending recording invite for detected call: \(appName)")
+            fileLog("Detection: sending notification for \(appName) (autoInvite=true)")
+            sendMeetingDetectedNotification(appName: appName)
+        } else {
+            Logger.general.info("Call detected (\(appName)) but auto-invite and auto-record are both off")
+        }
+    }
+
+    /// Send a macOS notification inviting the user to start recording.
+    private func sendMeetingDetectedNotification(appName: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(appName) detected"
+        content.body = "Tap to start recording this meeting."
+        content.sound = .default
+        content.categoryIdentifier = NotificationActions.meetingDetectedCategory
+
+        let request = UNNotificationRequest(
+            identifier: "meeting-detected-\(UUID().uuidString)",
+            content: content,
+            trigger: nil  // deliver immediately
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send meeting notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Send a macOS notification that auto-recording has started.
+    private func sendAutoRecordStartedNotification(meetingTitle: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Recording Started"
+        content.body = "Now recording: \(meetingTitle)"
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "auto-record-started-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send auto-record notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Send a macOS notification that a meeting has ended.
+    private func sendMeetingEndedNotification(meetingTitle: String?) {
+        let content = UNMutableNotificationContent()
+        content.title = "Meeting Ended"
+        if let title = meetingTitle, !title.isEmpty {
+            content.body = "\(title) — recording saved. Transcribing..."
+        } else {
+            content.body = "Recording saved. Transcribing..."
+        }
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "meeting-ended-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send meeting-ended notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // Live transcription removed — batch transcription after meeting ends is dramatically more accurate.
+    // See batchTranscribe() which runs WhisperKit's sequential long-form algorithm on the complete WAV.
+
+    // MARK: - Audio Processing
+
+    /// Trim leading and trailing silence from audio samples.
+    /// Uses 1-second windows and checks if the RMS energy exceeds the threshold.
+    private func trimSilence(_ samples: [Float], threshold: Float, windowSize: Int) -> [Float] {
+        guard samples.count > windowSize else { return samples }
+
+        let windowCount = samples.count / windowSize
+
+        // Find first non-silent window
+        var firstNonSilent = 0
+        for i in 0..<windowCount {
+            let start = i * windowSize
+            let end = min(start + windowSize, samples.count)
+            let window = samples[start..<end]
+            let rms = sqrt(window.reduce(0.0) { $0 + $1 * $1 } / Float(window.count))
+            if rms > threshold {
+                // Start 2 seconds before speech to give context
+                firstNonSilent = max(0, (i - 2) * windowSize)
+                break
+            }
+        }
+
+        // Find last non-silent window
+        var lastNonSilent = samples.count
+        for i in stride(from: windowCount - 1, through: 0, by: -1) {
+            let start = i * windowSize
+            let end = min(start + windowSize, samples.count)
+            let window = samples[start..<end]
+            let rms = sqrt(window.reduce(0.0) { $0 + $1 * $1 } / Float(window.count))
+            if rms > threshold {
+                // End 2 seconds after last speech
+                lastNonSilent = min(samples.count, (i + 3) * windowSize)
+                break
+            }
+        }
+
+        guard firstNonSilent < lastNonSilent else { return samples }
+        return Array(samples[firstNonSilent..<lastNonSilent])
+    }
+
+    // MARK: - File Logging (for debugging with user)
+
+    /// Append a line to a shared log file that both the app and Claude can read.
+    static let logFile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
+
+    func fileLog(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: Self.logFile.path) {
+                if let handle = try? FileHandle(forWritingTo: Self.logFile) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                try? data.write(to: Self.logFile)
+            }
+        }
+    }
+
+    // MARK: - Audio Level Polling
+
+    /// Start a ~10Hz timer that copies audio levels from AudioCaptureService into
+    /// AppState properties so SwiftUI views can observe them through @Observable.
+    private func startAudioLevelPolling() {
+        stopAudioLevelPolling()
+        fileLog("Audio level polling: STARTING (isCapturing=\(audioCaptureService.isCapturing))")
+        var logCounter = 0
+        audioLevelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // Read directly from atomic storage — bypasses @Published / MainActor scheduling
+            let mic = self.audioCaptureService.latestMicLevel
+            let sys = self.audioCaptureService.latestSystemLevel
+            Task { @MainActor in
+                self.micLevel = mic
+                self.systemLevel = sys
+                // Log every ~5 seconds (50 ticks) for debugging
+                logCounter += 1
+                if logCounter % 50 == 1 {
+                    self.fileLog("Audio levels: mic=\(String(format: "%.4f", mic)) sys=\(String(format: "%.4f", sys)) engine.running=\(self.audioCaptureService.micCapture.engine.isRunning)")
+                }
+            }
+        }
+    }
+
+    private func stopAudioLevelPolling() {
+        audioLevelTimer?.invalidate()
+        audioLevelTimer = nil
+        micLevel = 0
+        systemLevel = 0
+    }
+
+    // MARK: - Meeting Proximity Detection
+
+    func startProximityCheck() {
+        proximityTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.checkUpcomingMeetings()
+            }
+        }
+        proximityTimer?.fire() // Run immediately
+    }
+
+    func stopProximityCheck() {
+        proximityTimer?.invalidate()
+        proximityTimer = nil
+    }
+
+    @MainActor
+    private func checkUpcomingMeetings() {
+        let now = Date()
+        let warningWindow: TimeInterval = Double(settings.notificationLeadTimeMinutes * 60)
+
+        for meeting in upcomingMeetings {
+            guard let startDate = meeting.scheduledStartDate else { continue }
+            let timeUntilStart = startDate.timeIntervalSince(now)
+
+            // Meeting starting within the notification window and not yet notified
+            if timeUntilStart > 0 && timeUntilStart <= warningWindow && meeting.status == .scheduled {
+                NotificationCenter.default.post(
+                    name: .meetingStartingSoon,
+                    object: nil,
+                    userInfo: ["meetingId": meeting.id, "minutesUntilStart": Int(timeUntilStart / 60)]
+                )
+                Logger.general.info("Meeting '\(meeting.title)' starting in \(Int(timeUntilStart / 60)) minutes")
+            }
+
+            // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
+            // The 5-minute window accommodates meetings that start slightly late.
+            if timeUntilStart >= -300 && timeUntilStart <= 0 && meeting.status == .scheduled && !isRecording && !isStartingMeeting {
+                Logger.general.info("Auto-starting recording for meeting: \(meeting.title)")
+                startRecording(for: meeting)
+            }
+        }
+    }
+
+    // MARK: - Notification Observers
+
+    private func observeNotifications() {
+        // Create ad-hoc meeting via state machine (manual "New Meeting" button).
+        // If a scheduled meeting starts within 5 minutes, start that instead.
+        NotificationCenter.default.publisher(for: .createNewMeeting)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                guard !self.isRecording else {
+                    self.fileLog("createNewMeeting: skipped — already recording")
+                    return
+                }
+                guard !self.isStartingMeeting else {
+                    self.fileLog("createNewMeeting: skipped — another start in progress (debounce)")
+                    return
+                }
+                self.isStartingMeeting = true
+                self.fileLog("createNewMeeting notification received")
+                Task { @MainActor in
+                    defer { self.isStartingMeeting = false }
+                    do {
+                        // Check for a nearby scheduled meeting first
+                        let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+                        let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
+
+                        let meeting: Meeting
+                        if let scheduled = scheduledMatch {
+                            self.fileLog("New Meeting: matched scheduled '\(scheduled.title)' — starting it")
+                            try await self.stateMachine.startRecording(meeting: scheduled)
+                            meeting = self.stateMachine.currentMeeting ?? scheduled
+                        } else {
+                            meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                        }
+
+                        self.activeMeeting = self.stateMachine.currentMeeting
+                        self.isRecording = self.stateMachine.isRecording
+                        self.selectedMeetingId = meeting.id
+                        if self.isRecording { self.startAudioLevelPolling() }
+                        self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
+                        self.loadMeetings()
+                    } catch {
+                        Logger.general.error("Failed to start meeting: \(error.localizedDescription)")
+                        self.lastUserError = error.localizedDescription
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // Call app detected — decide auto-record vs notification based on settings
+        NotificationCenter.default.publisher(for: .callAppLaunched)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                let appName = notification.userInfo?["appName"] as? String ?? "Meeting"
+                Task { @MainActor in
+                    self.handleCallDetected(appName: appName)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Call app closed — auto-stop recording if active, clear detected-call banner
+        NotificationCenter.default.publisher(for: .callAppTerminated)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.detectedCallApp = nil
+                    if self.isRecording {
+                        Logger.general.info("Call ended — auto-stopping recording")
+                        self.stopRecording()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // Sync local state when the state machine posts a change
+        NotificationCenter.default.publisher(for: .meetingStateChanged)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                Task { @MainActor in
+                    let wasRecording = self.isRecording
+                    self.activeMeeting = self.stateMachine.currentMeeting
+                    self.isRecording = self.stateMachine.isRecording
+                    self.loadMeetings()
+
+                    // Transcription runs after meeting ends (batch mode for better accuracy)
+                }
+            }
+            .store(in: &cancellables)
+    }
+}

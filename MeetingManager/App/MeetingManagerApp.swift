@@ -1,0 +1,106 @@
+import SwiftUI
+import Sparkle
+
+@main
+struct MeetingManagerApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @State private var appState = AppState()
+    @State private var onboardingManager = OnboardingManager()
+    @StateObject private var updateService = UpdateService()
+
+    var body: some Scene {
+        WindowGroup {
+            if onboardingManager.isCompleted {
+                ContentView()
+                    .environment(appState)
+                    .preferredColorScheme(.dark)
+                    .frame(minWidth: 900, minHeight: 600)
+            } else {
+                OnboardingView(onboardingManager: onboardingManager)
+                    .environment(appState)
+                    .preferredColorScheme(.dark)
+                    .frame(minWidth: 600, minHeight: 450)
+            }
+        }
+        .windowStyle(.titleBar)
+        .defaultSize(width: 1200, height: 800)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates...") {
+                    updateService.checkForUpdates()
+                }
+
+                Divider()
+
+                Button("Reset Onboarding (Testing)") {
+                    onboardingManager.reset()
+                }
+            }
+
+            CommandGroup(replacing: .newItem) {
+                Button("New Meeting") {
+                    NotificationCenter.default.post(name: .createNewMeeting, object: nil)
+                }
+                .keyboardShortcut(KeyboardShortcuts.newMeeting)
+            }
+
+            CommandMenu("Meeting") {
+                Button(appState.isRecording ? "Stop Recording" : "Start Recording") {
+                    if appState.isRecording {
+                        NotificationCenter.default.post(name: .stopRecording, object: nil)
+                    } else {
+                        NotificationCenter.default.post(name: .startRecording, object: nil)
+                    }
+                }
+                .keyboardShortcut(KeyboardShortcuts.toggleRecording)
+
+                Button("Export Meeting...") {
+                    NotificationCenter.default.post(name: .exportMeeting, object: nil)
+                }
+                .keyboardShortcut(KeyboardShortcuts.exportMeeting)
+
+                Divider()
+
+                Button("Copy Summary") {
+                    NotificationCenter.default.post(name: .copySummary, object: nil)
+                }
+                .keyboardShortcut(KeyboardShortcuts.copySummary)
+            }
+
+            CommandMenu("Navigate") {
+                Button("Summary") {
+                    NotificationCenter.default.post(name: .switchTab, object: "summary")
+                }
+                .keyboardShortcut(KeyboardShortcuts.tabSummary)
+
+                Button("Transcript") {
+                    NotificationCenter.default.post(name: .switchTab, object: "transcript")
+                }
+                .keyboardShortcut(KeyboardShortcuts.tabTranscript)
+
+                Button("Notes") {
+                    NotificationCenter.default.post(name: .switchTab, object: "notes")
+                }
+                .keyboardShortcut(KeyboardShortcuts.tabNotes)
+
+                Button("Action Items") {
+                    NotificationCenter.default.post(name: .switchTab, object: "actionItems")
+                }
+                .keyboardShortcut(KeyboardShortcuts.tabActionItems)
+
+                Divider()
+
+                Button("Find...") {
+                    NotificationCenter.default.post(name: .focusSearch, object: nil)
+                }
+                .keyboardShortcut(KeyboardShortcuts.search)
+            }
+        }
+
+        Settings {
+            SettingsView(updateService: updateService)
+                .environment(appState)
+                .preferredColorScheme(.dark)
+        }
+    }
+}

@@ -1,0 +1,10 @@
+A|The API is returning a five hundred error on roughly three percent of requests.
+B|Is that across all endpoints or just the search endpoint?
+A|Mostly the search endpoint. The P ninety-nine latency is around eight hundred milliseconds.
+B|That's too slow. We need to get it under two hundred milliseconds.
+A|We could add a Redis cache layer. That should cut latency by at least sixty percent.
+B|What's the estimated implementation time?
+A|About three days including testing and deployment.
+B|Let's do it. Can you also look at the database query performance?
+A|Yes. I noticed some queries are doing full table scans. We need better indexes.
+B|Okay. Let's target this for the next sprint. Put together a technical spec by Friday.

@@ -1,0 +1,14 @@
+A|Welcome everyone. Today we're discussing Q3 results and Q4 planning.
+B|Thanks. Revenue came in at four point two million, which is twelve percent above target.
+A|That's excellent. What drove the outperformance?
+B|Two things. The enterprise deals Sarah closed in August, and the self-serve growth in September.
+A|How many enterprise deals did Sarah close?
+B|Seven deals totaling one point eight million in annual recurring revenue.
+A|Impressive. What's the pipeline looking like for Q4?
+B|We have forty-two qualified opportunities worth approximately six million in potential ARR.
+A|If we close thirty percent of that we hit our Q4 target.
+B|Right. The key focus areas are the financial services vertical and expanding into Canada.
+A|Let's make sure the sales team has the resources they need. Any headcount requests?
+B|We need two more account executives and one solutions engineer by November first.
+A|I'll get that approved by end of week. Anything else on the agenda?
+B|Just the product roadmap update. The mobile app launch is confirmed for October fifteenth.
