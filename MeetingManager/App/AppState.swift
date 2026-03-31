@@ -29,6 +29,11 @@ final class AppState {
     var isRecording = false
     var activeMeeting: Meeting?
 
+    /// True only when the current recording was auto-started by BrowserCallDetector.
+    /// Used to gate `callAppTerminated` auto-stop — manually-started recordings
+    /// must not be stopped just because the browser-call heuristic loses signal.
+    private var recordingStartedByDetector = false
+
     /// Live audio levels mirrored from AudioCaptureService for SwiftUI views.
     /// AudioCaptureService is @ObservableObject but nested inside @Observable AppState,
     /// so SwiftUI can't see its @Published changes. These are updated on a 10Hz timer.
@@ -114,7 +119,7 @@ final class AppState {
         audioCaptureService.onSilenceDetected = { [weak self] in
             Task { @MainActor in
                 guard let self, self.isRecording else { return }
-                self.fileLog("Silence auto-stop: no speech for 45 seconds — ending meeting")
+                self.fileLog("Silence auto-stop: no audio on mic or speaker for 5 minutes — ending meeting")
                 self.stopRecording()
             }
         }
@@ -401,6 +406,7 @@ final class AppState {
                 try await stateMachine.stopRecording()
                 self.activeMeeting = self.stateMachine.currentMeeting
                 self.isRecording = self.stateMachine.isRecording
+                self.recordingStartedByDetector = false
                 self.stopAudioLevelPolling()
 
                 // Mark meeting as transcribing → then run batch transcription
@@ -860,6 +866,7 @@ final class AppState {
                     self.isRecording = self.stateMachine.isRecording
                     self.selectedMeetingId = meeting.id
                     self.detectedCallApp = nil
+                    self.recordingStartedByDetector = self.isRecording
                     if self.isRecording { self.startAudioLevelPolling() }
                     self.loadMeetings()
                     self.fileLog("handleCallDetected: recording started for \(meeting.id) ('\(meeting.title)')")
@@ -1144,15 +1151,19 @@ final class AppState {
             }
             .store(in: &cancellables)
 
-        // Call app closed — auto-stop recording if active, clear detected-call banner
+        // Call app closed — auto-stop recording only if it was detector-started.
+        // Manually-started recordings must never be stopped by the browser detector
+        // losing signal (e.g., when MicUsage is suppressed because we're recording).
         NotificationCenter.default.publisher(for: .callAppTerminated)
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
                     self.detectedCallApp = nil
-                    if self.isRecording {
-                        Logger.general.info("Call ended — auto-stopping recording")
+                    if self.isRecording && self.recordingStartedByDetector {
+                        Logger.general.info("Call ended — auto-stopping detector-started recording")
                         self.stopRecording()
+                    } else if self.isRecording {
+                        Logger.general.info("Call ended signal received — keeping recording alive (manually started)")
                     }
                 }
             }

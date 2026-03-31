@@ -30,8 +30,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// The meeting should be auto-stopped to prevent unbounded memory growth.
     var onCapacityReached: (() -> Void)?
 
-    /// How many consecutive seconds of silence before triggering auto-stop.
-    var silenceTimeout: TimeInterval = 45
+    /// How many consecutive seconds of silence (both mic + system audio silent)
+    /// before triggering auto-stop. 5 minutes = 300s.
+    var silenceTimeout: TimeInterval = 300
 
     /// Diagnostic counters for buffer callbacks (logged periodically by test harness)
     private var micBufferCount: Int = 0
@@ -221,12 +222,17 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 return
             }
 
-            // micLevel is updated by updateMicLevel on every buffer
-            // Threshold lowered from 0.005 — USB webcam mics have very low signal (~0.002-0.006)
-            if self.micLevel < 0.001 {
+            // Count silence only when BOTH mic and system audio are below threshold.
+            // If the remote participant is talking (sysLevel active) but the local
+            // user is muted/quiet, that is NOT silence — the meeting is still live.
+            let micSilent    = self.micLevel           < 0.001
+            let sysSilent    = self.latestSystemLevel  < 0.002
+            let bothSilent   = micSilent && sysSilent
+
+            if bothSilent {
                 self.consecutiveSilentSeconds += 1
                 if self.consecutiveSilentSeconds >= Int(self.silenceTimeout) {
-                    Logger.audio.info("Silence detected for \(self.consecutiveSilentSeconds)s — triggering auto-stop")
+                    Logger.audio.info("Silence detected for \(self.consecutiveSilentSeconds)s (mic+sys both silent) — triggering auto-stop")
                     self.onSilenceDetected?()
                     self.consecutiveSilentSeconds = 0 // Reset so it doesn't fire repeatedly
                 }

@@ -71,6 +71,14 @@ final class BrowserCallDetector {
                 postNotification(.callAppLaunched, meetingName: result.name)
             }
         } else if isInBrowserCall {
+            // If we're actively recording, MicUsage (Strategy 3) is intentionally
+            // suppressed to avoid false self-detection. Don't count those polls
+            // as evidence the call ended — the recording IS the call.
+            if Self.appIsRecording {
+                consecutiveNotInCall = 0
+                return
+            }
+
             // Call was active but this poll says no call — increment debounce counter
             consecutiveNotInCall += 1
 
