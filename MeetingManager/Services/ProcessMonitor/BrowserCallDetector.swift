@@ -196,13 +196,23 @@ final class BrowserCallDetector {
 
     // MARK: - Strategy 3: Browser Microphone Usage
 
+    /// Set by AudioCaptureService when recording starts/stops, so this strategy
+    /// can distinguish "we are using the mic" from "a browser is using the mic."
+    static var appIsRecording = false
+
     /// Check if any browser process is currently using the microphone.
     /// This works without any special permissions — if Chrome/Safari has an active
     /// audio input stream, the user is likely in a call.
+    ///
+    /// **Important:** This heuristic only fires when Meeting Manager is NOT already
+    /// recording. Once we're recording, our own mic usage makes
+    /// `kAudioDevicePropertyDeviceIsRunningSomewhere` always true, which would
+    /// falsely detect a "browser call" whenever any browser is open.
     private func isBrowserUsingMicrophone() -> Bool {
-        // Check if the default input device is being "hogged" or has active streams
-        // from a browser process. A simpler heuristic: if a browser is running AND
-        // the system's default input device is in use, the user is probably in a call.
+        // If we're already recording, our own mic usage makes this check unreliable.
+        // Strategies 1 & 2 still work — they look at tab/window titles, not mic state.
+        guard !Self.appIsRecording else { return false }
+
         let browserBundleIDs = Set(CallAppRegistry.knownBrowsers.keys)
 
         let browserIsRunning = NSWorkspace.shared.runningApplications.contains {

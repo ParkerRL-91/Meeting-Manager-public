@@ -35,15 +35,35 @@ final class AudioSessionManager {
         AVCaptureDevice.default(for: .audio)
     }
 
-    /// Returns the best available input device, preferring external/USB devices over built-in
+    /// Returns the best available input device.
+    ///
+    /// Priority: system default (user's explicit choice in System Settings) first.
+    /// Only prefers an external device over built-in if the system default IS the
+    /// built-in mic — this respects the user's choice while still upgrading to a
+    /// connected USB/Thunderbolt mic when the user hasn't configured one.
     func bestInputDevice() -> AVCaptureDevice? {
         let devices = availableInputDevices()
+        guard !devices.isEmpty else { return defaultInputDevice() }
 
-        // Priority order: external/USB > headset > built-in default
-        let externalKeywords = ["headset", "headphone", "external", "usb", "thunderbolt", "interface", "yeti", "blue", "focusrite", "scarlett"]
-        let builtInKeywords = ["built-in", "macbook", "macpro", "mac mini", "imac"]
+        // The system default reflects what the user chose in System Settings > Sound > Input.
+        // Respect it unless it's the built-in mic and a better external device is available.
+        let systemDefault = defaultInputDevice()
 
-        // First try to find a high-quality external device
+        if let systemDefault, !isBuiltInDevice(systemDefault) {
+            // User explicitly chose a non-built-in device — respect their choice.
+            return systemDefault
+        }
+
+        // System default is built-in (or nil). Check if there's an external device connected.
+        let externalKeywords = [
+            // Connection types
+            "headset", "headphone", "external", "usb", "thunderbolt", "interface",
+            // Popular mic brands
+            "yeti", "blue", "focusrite", "scarlett", "rode", "elgato", "hyperx",
+            "shure", "audio-technica", "at2020", "logitech", "jabra", "poly",
+            "sennheiser", "samson", "presonus", "behringer", "motu",
+        ]
+
         for device in devices {
             let name = device.localizedName.lowercased()
             if externalKeywords.contains(where: { name.contains($0) }) {
@@ -51,17 +71,21 @@ final class AudioSessionManager {
             }
         }
 
-        // Avoid built-in if possible, return first non-built-in
-        let nonBuiltIn = devices.filter { device in
-            let name = device.localizedName.lowercased()
-            return !builtInKeywords.contains(where: { name.contains($0) })
-        }
-        if let first = nonBuiltIn.first {
-            return first
+        // No recognized external device — check for any non-built-in device
+        let nonBuiltIn = devices.first(where: { !isBuiltInDevice($0) })
+        if let nonBuiltIn {
+            return nonBuiltIn
         }
 
-        // Fall back to system default
-        return defaultInputDevice()
+        // Everything is built-in — return system default
+        return systemDefault ?? devices.first
+    }
+
+    /// Returns true if the device appears to be a built-in Mac microphone.
+    private func isBuiltInDevice(_ device: AVCaptureDevice) -> Bool {
+        let name = device.localizedName.lowercased()
+        let builtInKeywords = ["built-in", "macbook", "macpro", "mac mini", "imac", "mac studio"]
+        return builtInKeywords.contains(where: { name.contains($0) })
     }
 
     /// Check if screen recording permission is granted (needed for system audio capture).

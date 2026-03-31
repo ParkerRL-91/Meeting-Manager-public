@@ -235,6 +235,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             }
         }
 
+        // Tell BrowserCallDetector that we're now using the mic, so Strategy 3
+        // (mic-usage heuristic) doesn't falsely detect our own recording as a browser call.
+        BrowserCallDetector.appIsRecording = true
+
         await MainActor.run {
             isCapturing = true
         }
@@ -242,6 +246,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     /// Stop all audio capture
     func stopCapture() -> URL? {
+        BrowserCallDetector.appIsRecording = false
+
         silenceCheckTimer?.invalidate()
         silenceCheckTimer = nil
         consecutiveSilentSeconds = 0

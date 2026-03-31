@@ -24,6 +24,12 @@ final class CallDetectionService {
     /// Detects browser-based meetings (Google Meet, etc.) via window title polling.
     private var browserDetector: BrowserCallDetector?
 
+    /// Apps that were already running when we started monitoring.
+    /// These are NOT treated as "call started" events because they may have been
+    /// open before Meeting Manager launched (e.g., Teams auto-launches at login).
+    /// We track them so we can detect when they *terminate* (call ended).
+    private var preExistingApps: Set<pid_t> = []
+
     // MARK: - Lifecycle
 
     init(startImmediately: Bool = true) {
@@ -47,13 +53,19 @@ final class CallDetectionService {
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter
 
-        // Scan for call apps that are already running and treat them as new detections.
+        // Scan for call apps that are already running. Track them so we detect
+        // termination, but do NOT fire callAppLaunched — they were open before
+        // Meeting Manager started, so they're not evidence of a new call.
+        // (e.g., Teams auto-launches at login, Zoom left open from earlier)
         let alreadyRunning = NSWorkspace.shared.runningApplications.filter {
             guard let bundleID = $0.bundleIdentifier else { return false }
             return CallAppRegistry.isCallApp(bundleIdentifier: bundleID)
         }
         for app in alreadyRunning {
-            handleAppLaunched(app)
+            preExistingApps.insert(app.processIdentifier)
+            if !runningCallApps.contains(app) {
+                runningCallApps.append(app)
+            }
         }
 
         launchObserver = workspaceCenter.addObserver(
@@ -93,6 +105,7 @@ final class CallDetectionService {
             terminateObserver = nil
         }
         runningCallApps.removeAll()
+        preExistingApps.removeAll()
         activeCallApp = nil
         activeCallAppName = nil
     }
