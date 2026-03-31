@@ -180,21 +180,33 @@ echo "[6/8] Signing with '${SIGN_IDENTITY}'..."
 
 ENTITLEMENTS="${REPO_DIR}/MeetingManager/Resources/MeetingManager.entitlements"
 
-# Sign Sparkle components first
+# Sign Sparkle components inside-out (each nested component must be signed
+# individually with the SAME identity, otherwise macOS library validation
+# rejects the framework at launch due to Team ID mismatch).
 if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
-    codesign --force --deep --options runtime \
-        --sign "${SIGN_IDENTITY}" \
-        "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" 2>/dev/null || true
+    # XPC services
+    for xpc in "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/XPCServices"/*.xpc; do
+        [[ -d "$xpc" ]] && codesign --force --options runtime \
+            --sign "${SIGN_IDENTITY}" "$xpc" 2>/dev/null || true
+    done
+    # Updater.app
+    [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Updater.app" ]] && \
+        codesign --force --options runtime \
+            --sign "${SIGN_IDENTITY}" \
+            "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Updater.app"
+    # Autoupdate
+    [[ -f "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Autoupdate" ]] && \
+        codesign --force --options runtime \
+            --sign "${SIGN_IDENTITY}" \
+            "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Autoupdate"
+    # Framework itself (NOT --deep — components already signed above)
     codesign --force --options runtime \
         --sign "${SIGN_IDENTITY}" \
-        "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Autoupdate" 2>/dev/null || true
-    codesign --force --options runtime \
-        --sign "${SIGN_IDENTITY}" \
-        "${FRAMEWORKS_DIR}/Sparkle.framework" 2>/dev/null || true
+        "${FRAMEWORKS_DIR}/Sparkle.framework"
 fi
 
-# Sign the app bundle with entitlements
-codesign --force --deep --options runtime \
+# Sign the app bundle with entitlements (NOT --deep — framework already signed)
+codesign --force --options runtime \
     --entitlements "${ENTITLEMENTS}" \
     --sign "${SIGN_IDENTITY}" \
     "${APP_BUNDLE}"
