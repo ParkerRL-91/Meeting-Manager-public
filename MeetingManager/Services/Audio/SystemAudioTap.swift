@@ -20,6 +20,10 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     private var isRunning = false
     private var bufferCount: Int = 0
 
+    /// Lock protecting `isRunning`, `stream`, and `bufferCount` against
+    /// races between the audio callback queue and callers of start/stop.
+    private let lock = NSLock()
+
     /// Target output format: 16kHz mono Float32 (matches mic capture pipeline)
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -31,7 +35,9 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     /// Start capturing system audio via ScreenCaptureKit.
     /// This captures all system audio output except our own app's audio.
     func start(processID: pid_t? = nil) async throws {
-        guard !isRunning else { return }
+        lock.lock()
+        guard !isRunning else { lock.unlock(); return }
+        lock.unlock()
 
         // Get available content for filtering
         let content: SCShareableContent
@@ -79,9 +85,11 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         // Start capture
         do {
             try await stream.startCapture()
+            lock.lock()
             self.stream = stream
             self.isRunning = true
             self.bufferCount = 0
+            lock.unlock()
             onDiagnostic?("DIAG:sys_tap SCStream started successfully")
         } catch {
             onDiagnostic?("DIAG:sys_tap SCStream start FAILED: \(error.localizedDescription)")
@@ -91,12 +99,15 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
 
     /// Stop system audio capture
     func stop() {
-        guard isRunning else { return }
+        lock.lock()
+        guard isRunning else { lock.unlock(); return }
         isRunning = false
+        let capturedStream = stream
+        stream = nil
+        lock.unlock()
 
         Task {
-            try? await stream?.stopCapture()
-            stream = nil
+            try? await capturedStream?.stopCapture()
         }
     }
 
@@ -111,12 +122,16 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         guard type == .audio else { return }
         guard sampleBuffer.isValid else { return }
 
+        lock.lock()
+        guard isRunning else { lock.unlock(); return }
         bufferCount += 1
+        let currentBufferCount = bufferCount
+        lock.unlock()
 
         // Extract audio data from CMSampleBuffer
         guard let formatDesc = sampleBuffer.formatDescription else {
-            if bufferCount <= 3 {
-                onDiagnostic?("DIAG:sys_sckit #\(bufferCount) no format description")
+            if currentBufferCount <= 3 {
+                onDiagnostic?("DIAG:sys_sckit #\(currentBufferCount) no format description")
             }
             return
         }
@@ -141,7 +156,7 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
                 let srcPtr = data.assumingMemoryBound(to: Float.self)
 
                 // Diagnostic: log periodically
-                if bufferCount <= 3 || bufferCount % 200 == 0 {
+                if currentBufferCount <= 3 || currentBufferCount % 200 == 0 {
                     var sum: Float = 0
                     let checkN = min(100, totalFloats)
                     for i in 0..<checkN {
@@ -149,7 +164,7 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
                     }
                     let rawRMS = checkN > 0 ? sqrtf(sum / Float(checkN)) : 0
                     let samples = (0..<min(5, totalFloats)).map { String(format: "%.6f", srcPtr[$0]) }.joined(separator: ",")
-                    onDiagnostic?("DIAG:sys_sckit #\(bufferCount) frames=\(frameCount) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", rawRMS)) samples=[\(samples)]")
+                    onDiagnostic?("DIAG:sys_sckit #\(currentBufferCount) frames=\(frameCount) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", rawRMS)) samples=[\(samples)]")
                 }
 
                 // Mix to mono
@@ -196,8 +211,8 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
                 onBuffer?(pcmBuffer, time)
             }
         } catch {
-            if bufferCount <= 3 {
-                onDiagnostic?("DIAG:sys_sckit #\(bufferCount) buffer extraction error: \(error.localizedDescription)")
+            if currentBufferCount <= 3 {
+                onDiagnostic?("DIAG:sys_sckit #\(currentBufferCount) buffer extraction error: \(error.localizedDescription)")
             }
         }
     }
@@ -207,6 +222,8 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onDiagnostic?("DIAG:sys_tap SCStream stopped with error: \(error.localizedDescription)")
         Logger.audio.error("System audio stream stopped: \(error.localizedDescription)")
+        lock.lock()
         isRunning = false
+        lock.unlock()
     }
 }

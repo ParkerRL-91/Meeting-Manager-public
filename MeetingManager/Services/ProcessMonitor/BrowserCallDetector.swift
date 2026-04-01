@@ -75,14 +75,6 @@ final class BrowserCallDetector {
                 postNotification(.callAppLaunched, meetingName: result.name)
             }
         } else if isInBrowserCall {
-            // If we're actively recording, MicUsage (Strategy 3) is intentionally
-            // suppressed to avoid false self-detection. Don't count those polls
-            // as evidence the call ended — the recording IS the call.
-            if Self.appIsRecording {
-                consecutiveNotInCall = 0
-                return
-            }
-
             // Call was active but this poll says no call — increment debounce counter
             consecutiveNotInCall += 1
 
@@ -129,51 +121,21 @@ final class BrowserCallDetector {
     // MARK: - Strategy 1: AppleScript
 
     private func checkChromeTabsViaAppleScript() -> String? {
-        // Check Chrome
-        if let match = checkBrowserTabsViaAppleScript(
-            bundleID: "com.google.Chrome",
-            script: """
-            tell application "Google Chrome"
-                set tabTitles to {}
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        set end of tabTitles to title of t
-                    end repeat
-                end repeat
-                return tabTitles
-            end tell
-            """
-        ) {
-            return match
-        }
-
-        // Check Safari
-        if let match = checkBrowserTabsViaAppleScript(
-            bundleID: "com.apple.Safari",
-            script: """
-            tell application "Safari"
-                set tabTitles to {}
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        set end of tabTitles to name of t
-                    end repeat
-                end repeat
-                return tabTitles
-            end tell
-            """
-        ) {
-            return match
-        }
-
-        return nil
-    }
-
-    /// Run an AppleScript to get tab titles from a browser and check for meeting keywords.
-    private func checkBrowserTabsViaAppleScript(bundleID: String, script: String) -> String? {
         guard NSWorkspace.shared.runningApplications.contains(where: {
-            $0.bundleIdentifier == bundleID
+            $0.bundleIdentifier == "com.google.Chrome"
         }) else { return nil }
 
+        let script = """
+        tell application "Google Chrome"
+            set tabTitles to {}
+            repeat with w in windows
+                repeat with t in tabs of w
+                    set end of tabTitles to title of t
+                end repeat
+            end repeat
+            return tabTitles
+        end tell
+        """
         guard let appleScript = NSAppleScript(source: script) else { return nil }
         var errorInfo: NSDictionary?
         let result = appleScript.executeAndReturnError(&errorInfo)
@@ -192,7 +154,7 @@ final class BrowserCallDetector {
     // MARK: - Strategy 2: CGWindowList
 
     private func checkViaCGWindowList() -> String? {
-        let browserNames = Set(CallAppRegistry.knownBrowsers.values)
+        let browserNames: Set<String> = ["Google Chrome", "Safari", "Firefox", "Microsoft Edge", "Brave Browser"]
         let options = CGWindowListOption([.optionOnScreenOnly, .excludeDesktopElements])
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
 
@@ -208,24 +170,20 @@ final class BrowserCallDetector {
 
     // MARK: - Strategy 3: Browser Microphone Usage
 
-    /// Set by AudioCaptureService when recording starts/stops, so this strategy
-    /// can distinguish "we are using the mic" from "a browser is using the mic."
-    nonisolated(unsafe) static var appIsRecording = false
-
     /// Check if any browser process is currently using the microphone.
     /// This works without any special permissions — if Chrome/Safari has an active
     /// audio input stream, the user is likely in a call.
-    ///
-    /// **Important:** This heuristic only fires when Meeting Manager is NOT already
-    /// recording. Once we're recording, our own mic usage makes
-    /// `kAudioDevicePropertyDeviceIsRunningSomewhere` always true, which would
-    /// falsely detect a "browser call" whenever any browser is open.
     private func isBrowserUsingMicrophone() -> Bool {
-        // If we're already recording, our own mic usage makes this check unreliable.
-        // Strategies 1 & 2 still work — they look at tab/window titles, not mic state.
-        guard !Self.appIsRecording else { return false }
-
-        let browserBundleIDs = Set(CallAppRegistry.knownBrowsers.keys)
+        // Check if the default input device is being "hogged" or has active streams
+        // from a browser process. A simpler heuristic: if a browser is running AND
+        // the system's default input device is in use, the user is probably in a call.
+        let browserBundleIDs: Set<String> = [
+            "com.google.Chrome",
+            "com.apple.Safari",
+            "org.mozilla.firefox",
+            "com.microsoft.edgemac",
+            "com.brave.Browser",
+        ]
 
         let browserIsRunning = NSWorkspace.shared.runningApplications.contains {
             guard let bid = $0.bundleIdentifier else { return false }
@@ -294,6 +252,16 @@ final class BrowserCallDetector {
     // MARK: - File Logging
 
     private func fileLog(_ message: String) {
-        AppFileLogger.shared.log("BrowserDetector: \(message)")
+        let timestamp = DateFormatting.iso8601Formatter.string(from: Date())
+        let line = "[\(timestamp)] BrowserDetector: \(message)\n"
+        let logURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
+        if let data = line.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            }
+        }
     }
 }

@@ -29,6 +29,10 @@ final class StreamingTranscriber {
     /// Interval between polls when no chunk is ready (seconds).
     private let pollInterval: Duration = .milliseconds(500)
 
+    /// Maximum number of transcript segments kept in the in-memory array.
+    /// Older segments are already persisted to the database via TranscriptRepository.
+    private let maxInMemorySegments = 500
+
     // MARK: - Init
 
     init(transcriptionService: TranscriptionService) {
@@ -171,10 +175,18 @@ final class StreamingTranscriber {
                     // Persist to database
                     try await repository.saveBatch(filteredTranscripts)
 
-                    // Update local state on the main actor
+                    // Batch all @Observable property updates in a single MainActor
+                    // dispatch to avoid triggering multiple SwiftUI render passes.
+                    let maxSegments = self.maxInMemorySegments
                     await MainActor.run {
                         self.segments.append(contentsOf: filteredTranscripts)
-                        self.segmentCount = self.segments.count
+                        // Cap in-memory segments to prevent unbounded growth
+                        // during long meetings. Older segments are already persisted
+                        // to the database via TranscriptRepository.
+                        if self.segments.count > maxSegments {
+                            self.segments.removeFirst(self.segments.count - maxSegments)
+                        }
+                        self.segmentCount += filteredTranscripts.count
                     }
 
                     Logger.transcription.info(

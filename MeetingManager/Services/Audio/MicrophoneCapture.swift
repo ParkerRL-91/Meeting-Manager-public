@@ -2,6 +2,24 @@ import AVFoundation
 import CoreAudio
 import os
 
+/// Error surfaced when the microphone device is disconnected mid-recording.
+enum MicrophoneCaptureError: LocalizedError {
+    case deviceDisconnected(String)
+    case permissionDenied
+    case permissionRestricted
+
+    var errorDescription: String? {
+        switch self {
+        case .deviceDisconnected(let detail):
+            return "Microphone disconnected: \(detail)"
+        case .permissionDenied:
+            return "Microphone permission denied. Please grant access in System Settings > Privacy & Security > Microphone."
+        case .permissionRestricted:
+            return "Microphone access is restricted on this device."
+        }
+    }
+}
+
 /// Captures microphone input using AVAudioEngine.
 ///
 /// Feeds raw hardware-format audio to onRawBuffer (for SFSpeechRecognizer),
@@ -15,6 +33,9 @@ final class MicrophoneCapture {
     /// Raw hardware-format buffers for SFSpeechRecognizer.
     var onRawBuffer: ((AVAudioPCMBuffer) -> Void)?
 
+    /// Called when the microphone device is disconnected mid-recording.
+    var onDeviceDisconnected: ((Error) -> Void)?
+
     let engine = AVAudioEngine()
     private var isRunning = false
     private(set) var preferredInputDeviceID: String?
@@ -22,13 +43,15 @@ final class MicrophoneCapture {
     var onDiagnostic: ((String) -> Void)?
     private var rawBufferCount: Int = 0
 
+    /// Lock protecting mutable state (`isRunning`, `rawBufferCount`) accessed
+    /// from both the main thread and the audio callback queue.
+    private let lock = NSLock()
+
+    /// Observer token for audio engine configuration change notifications.
+    private var configChangeObserver: NSObjectProtocol?
+
     /// The actual AudioDeviceID being used (for diagnostics)
     private(set) var activeDeviceID: AudioDeviceID = 0
-
-    /// Listener block ID for default input device changes (hot-plug handling)
-    private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
-    /// Queue for handling device change callbacks
-    private let deviceChangeQueue = DispatchQueue(label: "com.meetingmanager.devicechange", qos: .userInitiated)
 
     /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
@@ -43,7 +66,27 @@ final class MicrophoneCapture {
     }
 
     func start() throws {
-        guard !isRunning else { return }
+        lock.lock()
+        guard !isRunning else { lock.unlock(); return }
+        lock.unlock()
+
+        // Task 7: Check microphone permission before attempting capture
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch authStatus {
+        case .denied:
+            throw MicrophoneCaptureError.permissionDenied
+        case .restricted:
+            throw MicrophoneCaptureError.permissionRestricted
+        case .notDetermined:
+            // Permission not yet requested — the caller (AudioCaptureService) should
+            // have requested it before reaching here, but handle it defensively.
+            // We cannot await here (sync func), so throw a clear error.
+            throw MicrophoneCaptureError.permissionDenied
+        case .authorized:
+            break
+        @unknown default:
+            break
+        }
 
         // Try to set the preferred device; fall back to system default on failure.
         configureInputDevice()
@@ -92,82 +135,36 @@ final class MicrophoneCapture {
             }
         }
 
+        lock.lock()
         isRunning = true
-        startDeviceChangeListener()
+        lock.unlock()
+
+        // Task 6: Register for audio engine configuration changes (device disconnect/reconnect)
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.handleEngineConfigurationChange()
+        }
+
         Logger.audio.info("MicrophoneCapture started (manual downsample to 16kHz)")
     }
 
     func stop() {
-        stopDeviceChangeListener()
-        guard isRunning else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        lock.lock()
+        guard isRunning else { lock.unlock(); return }
         isRunning = false
-        Logger.audio.info("MicrophoneCapture stopped")
-    }
+        lock.unlock()
 
-    // MARK: - Device Hot-Plug
-
-    /// Listen for default input device changes (e.g., AirPods connecting/disconnecting).
-    /// When detected, seamlessly switch to the new device without dropping audio.
-    private func startDeviceChangeListener() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self, self.isRunning else { return }
-            let newDefaultID = self.getDefaultInputDeviceID()
-            guard newDefaultID != kAudioObjectUnknown, newDefaultID != self.activeDeviceID else { return }
-
-            let oldName = self.getDeviceName(self.activeDeviceID)
-            let newName = self.getDeviceName(newDefaultID)
-            self.onDiagnostic?("DIAG:hotplug default input changed: '\(oldName)' → '\(newName)' (id \(self.activeDeviceID) → \(newDefaultID))")
-            Logger.audio.info("Audio device changed: \(oldName) → \(newName) — switching")
-
-            // Stop current tap, switch device, reinstall tap, restart
-            self.engine.inputNode.removeTap(onBus: 0)
-            self.engine.stop()
-
-            self.activeDeviceID = newDefaultID
-            _ = self.setInputDeviceByID(newDefaultID)
-            self.installTapOnInputNode()
-
-            do {
-                try self.engine.start()
-                self.onDiagnostic?("DIAG:hotplug engine restarted successfully on '\(newName)'")
-                Logger.audio.info("Engine restarted on new device: \(newName)")
-            } catch {
-                self.onDiagnostic?("DIAG:hotplug engine restart FAILED: \(error.localizedDescription)")
-                Logger.audio.error("Failed to restart engine after device change: \(error.localizedDescription)")
-            }
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
         }
 
-        deviceChangeListenerBlock = block
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            deviceChangeQueue,
-            block
-        )
-    }
-
-    private func stopDeviceChangeListener() {
-        guard let block = deviceChangeListenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            deviceChangeQueue,
-            block
-        )
-        deviceChangeListenerBlock = nil
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        Logger.audio.info("MicrophoneCapture stopped")
     }
 
     // MARK: - Device Configuration
@@ -213,9 +210,15 @@ final class MicrophoneCapture {
             [weak self] buffer, time in
             guard let self else { return }
 
-            // Diagnostic: log raw hardware buffer info periodically
+            // Check if still running under lock
+            self.lock.lock()
+            guard self.isRunning else { self.lock.unlock(); return }
             self.rawBufferCount += 1
-            if self.rawBufferCount <= 3 || self.rawBufferCount % 200 == 0 {
+            let currentRawBufferCount = self.rawBufferCount
+            self.lock.unlock()
+
+            // Diagnostic: log raw hardware buffer info periodically
+            if currentRawBufferCount <= 3 || currentRawBufferCount % 200 == 0 {
                 var rawRMS: Float = 0
                 var sampleDump = ""
                 if let fcd = buffer.floatChannelData, buffer.frameLength > 0 {
@@ -228,7 +231,7 @@ final class MicrophoneCapture {
                     sampleDump = samples.joined(separator: ",")
                 }
                 let fmt = buffer.format
-                self.onDiagnostic?("DIAG:raw_mic #\(self.rawBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.6f", rawRMS)) fmt=\(fmt.sampleRate)/\(fmt.channelCount)ch samples=[\(sampleDump)]")
+                self.onDiagnostic?("DIAG:raw_mic #\(currentRawBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.6f", rawRMS)) fmt=\(fmt.sampleRate)/\(fmt.channelCount)ch samples=[\(sampleDump)]")
             }
 
             // Send raw buffer for SFSpeechRecognizer
@@ -388,5 +391,47 @@ final class MicrophoneCapture {
         )
         AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &name)
         return name as String
+    }
+
+    // MARK: - Device Disconnection Handling
+
+    /// Called when the AVAudioEngine configuration changes (e.g., device disconnected/reconnected).
+    private func handleEngineConfigurationChange() {
+        lock.lock()
+        let wasRunning = isRunning
+        lock.unlock()
+
+        guard wasRunning else { return }
+
+        onDiagnostic?("DIAG:mic_device AVAudioEngine configuration changed — device may have disconnected")
+        Logger.audio.warning("AVAudioEngine configuration changed mid-recording")
+
+        // Check if the engine's input node still has a valid format
+        let inputFormat = engine.inputNode.outputFormat(forBus: 0)
+        if inputFormat.sampleRate == 0 || inputFormat.channelCount == 0 {
+            // Device is gone — stop gracefully and notify
+            Logger.audio.error("Microphone device disconnected mid-recording — stopping capture")
+            onDiagnostic?("DIAG:mic_device DISCONNECTED — stopping capture gracefully")
+            stop()
+            let error = MicrophoneCaptureError.deviceDisconnected(
+                "The microphone was disconnected during recording. Please reconnect and restart."
+            )
+            onDeviceDisconnected?(error)
+        } else {
+            // Device changed but still valid — try to restart the engine
+            onDiagnostic?("DIAG:mic_device config changed but format still valid (\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch), attempting restart")
+            do {
+                try engine.start()
+                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change")
+            } catch {
+                Logger.audio.error("Failed to restart engine after config change: \(error.localizedDescription)")
+                onDiagnostic?("DIAG:mic_device engine restart FAILED: \(error.localizedDescription)")
+                stop()
+                let disconnectError = MicrophoneCaptureError.deviceDisconnected(
+                    "Microphone configuration changed and engine could not restart: \(error.localizedDescription)"
+                )
+                onDeviceDisconnected?(disconnectError)
+            }
+        }
     }
 }

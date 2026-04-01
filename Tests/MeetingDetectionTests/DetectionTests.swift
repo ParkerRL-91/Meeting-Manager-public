@@ -5,6 +5,7 @@ import Foundation
 // MARK: - Mock Audio Capture
 
 /// No-op audio capture for tests — lets MeetingStateMachine run without real hardware.
+@MainActor
 final class MockAudioCapture: AudioCapturing {
     var micLevel: Float = 0
     var systemLevel: Float = 0

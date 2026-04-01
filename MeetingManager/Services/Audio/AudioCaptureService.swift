@@ -5,6 +5,7 @@ import os
 // MARK: - AudioCapturing Protocol
 
 /// Abstraction over audio capture so MeetingStateMachine can be tested without hardware.
+@MainActor
 protocol AudioCapturing: AnyObject {
     var micLevel: Float { get }
     var systemLevel: Float { get }
@@ -17,6 +18,7 @@ protocol AudioCapturing: AnyObject {
 // MARK: - AudioCaptureService
 
 /// Orchestrates mic + system audio capture for meeting recording
+@MainActor
 final class AudioCaptureService: ObservableObject, AudioCapturing {
     @Published var isCapturing = false
     @Published var micLevel: Float = 0
@@ -30,42 +32,63 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// The meeting should be auto-stopped to prevent unbounded memory growth.
     var onCapacityReached: (() -> Void)?
 
-    /// How many consecutive seconds of silence (both mic + system audio silent)
-    /// before triggering auto-stop. 5 minutes = 300s.
-    var silenceTimeout: TimeInterval = 300
+    /// How many consecutive seconds of silence before triggering auto-stop.
+    var silenceTimeout: TimeInterval = 45
 
-    /// Diagnostic counters for buffer callbacks (logged periodically by test harness)
-    private var micBufferCount: Int = 0
-    private var sysBufferCount: Int = 0
+    /// Diagnostic counters for buffer callbacks (logged periodically by test harness).
+    /// Accessed from audio callback queues, so protected by a lock.
+    private let _counterLock = NSLock()
+    private var _micBufferCount: Int = 0
+    private var _sysBufferCount: Int = 0
+
+    /// Thread-safe increment and return of mic buffer count.
+    nonisolated private func incrementMicBufferCount() -> Int {
+        _counterLock.lock()
+        _micBufferCount += 1
+        let count = _micBufferCount
+        _counterLock.unlock()
+        return count
+    }
+
+    /// Thread-safe increment and return of sys buffer count.
+    nonisolated private func incrementSysBufferCount() -> Int {
+        _counterLock.lock()
+        _sysBufferCount += 1
+        let count = _sysBufferCount
+        _counterLock.unlock()
+        return count
+    }
+
+    /// Thread-safe reset of buffer counters.
+    private func resetBufferCounts() {
+        _counterLock.lock()
+        _micBufferCount = 0
+        _sysBufferCount = 0
+        _counterLock.unlock()
+    }
 
     /// Tracks consecutive seconds of silence for auto-stop.
     private var consecutiveSilentSeconds: Int = 0
     private var silenceCheckTimer: Timer?
 
-    /// Thread-safe audio levels updated directly in audio buffer callbacks.
-    /// Protected by an unfair lock for correct cross-thread access.
-    private let _levelLock: UnsafeMutablePointer<os_unfair_lock> = {
-        let p = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
-        p.initialize(to: os_unfair_lock())
+    /// Thread-safe atomic levels updated directly in audio buffer callbacks.
+    /// Use these for polling from the main thread instead of the @Published properties
+    /// which depend on MainActor Task scheduling.
+    private let _atomicMicLevel: UnsafeMutablePointer<Float> = {
+        let p = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        p.initialize(to: 0)
         return p
     }()
-    private var _atomicMicLevel: Float = 0
-    private var _atomicSystemLevel: Float = 0
+    private let _atomicSystemLevel: UnsafeMutablePointer<Float> = {
+        let p = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        p.initialize(to: 0)
+        return p
+    }()
 
-    /// Read the latest mic level (safe to call from any thread).
-    var latestMicLevel: Float {
-        os_unfair_lock_lock(_levelLock)
-        let v = _atomicMicLevel
-        os_unfair_lock_unlock(_levelLock)
-        return v
-    }
-    /// Read the latest system level (safe to call from any thread).
-    var latestSystemLevel: Float {
-        os_unfair_lock_lock(_levelLock)
-        let v = _atomicSystemLevel
-        os_unfair_lock_unlock(_levelLock)
-        return v
-    }
+    /// Read the latest mic level atomically (safe to call from any thread).
+    nonisolated var latestMicLevel: Float { _atomicMicLevel.pointee }
+    /// Read the latest system level atomically (safe to call from any thread).
+    nonisolated var latestSystemLevel: Float { _atomicSystemLevel.pointee }
 
     let micCapture = MicrophoneCapture()
 
@@ -113,14 +136,26 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             Logger.audio.info("No preferred input device found; using system default")
         }
 
-        // Wire raw buffer callback for speech recognizer
-        micCapture.onRawBuffer = { [weak self] buffer in
-            self?.onRawMicBuffer?(buffer)
+        // Wire raw buffer callback for speech recognizer.
+        // Capture the callback value on MainActor to avoid cross-actor access in the closure.
+        let rawMicCallback = self.onRawMicBuffer
+        micCapture.onRawBuffer = { buffer in
+            rawMicCallback?(buffer)
         }
 
         // Wire diagnostic logging from mic capture
         micCapture.onDiagnostic = { [weak self] msg in
             self?.logToFile(msg)
+        }
+
+        // Wire device disconnection handler (Task 6)
+        micCapture.onDeviceDisconnected = { [weak self] error in
+            guard let self else { return }
+            Logger.audio.error("Mic device disconnected: \(error.localizedDescription)")
+            self.logToFile("Audio: mic device DISCONNECTED — \(error.localizedDescription)")
+            Task { @MainActor in
+                _ = self.stopCapture()
+            }
         }
 
         // Start mic capture — converted 16kHz buffers to buffer manager
@@ -129,10 +164,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             self.bufferManager.appendMicBuffer(buffer, at: time)
             self.updateMicLevel(buffer)
             // Diagnostic: log every ~2 seconds (16kHz / 8192 ≈ 2 buffers/sec for converted)
-            self.micBufferCount += 1
-            if self.micBufferCount % 20 == 1 {
+            let count = self.incrementMicBufferCount()
+            if count % 20 == 1 {
                 let rms = buffer.rmsLevel
-                self.logToFile("DIAG:mic_buffer count=\(self.micBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.4f", rms))")
+                self.logToFile("DIAG:mic_buffer count=\(count) frames=\(buffer.frameLength) rms=\(String(format: "%.4f", rms))")
             }
         }
 
@@ -148,8 +183,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // This captures what comes out of your speakers/headphones — i.e. the other
         // people on the call. Requires Screen Recording permission in System Settings.
         // Failure here is non-fatal — mic-only recording is still useful.
-        micBufferCount = 0
-        sysBufferCount = 0
+        resetBufferCounts()
         if #available(macOS 14.2, *) {
             if let tap = systemAudioTap {
                 // Wire diagnostic logging for system audio tap
@@ -161,10 +195,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                     self.bufferManager.appendSystemBuffer(buffer, at: time)
                     self.updateSystemLevel(buffer)
                     // Diagnostic: log system buffer periodically
-                    self.sysBufferCount += 1
-                    if self.sysBufferCount % 20 == 1 {
+                    let sysCount = self.incrementSysBufferCount()
+                    if sysCount % 20 == 1 {
                         let rms = buffer.rmsLevel
-                        self.logToFile("DIAG:sys_buffer count=\(self.sysBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.4f", rms))")
+                        self.logToFile("DIAG:sys_buffer count=\(sysCount) frames=\(buffer.frameLength) rms=\(String(format: "%.4f", rms))")
                     }
                 }
                 do {
@@ -222,17 +256,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 return
             }
 
-            // Count silence only when BOTH mic and system audio are below threshold.
-            // If the remote participant is talking (sysLevel active) but the local
-            // user is muted/quiet, that is NOT silence — the meeting is still live.
-            let micSilent    = self.micLevel           < 0.001
-            let sysSilent    = self.latestSystemLevel  < 0.002
-            let bothSilent   = micSilent && sysSilent
-
-            if bothSilent {
+            // micLevel is updated by updateMicLevel on every buffer
+            // Threshold lowered from 0.005 — USB webcam mics have very low signal (~0.002-0.006)
+            if self.micLevel < 0.001 {
                 self.consecutiveSilentSeconds += 1
                 if self.consecutiveSilentSeconds >= Int(self.silenceTimeout) {
-                    Logger.audio.info("Silence detected for \(self.consecutiveSilentSeconds)s (mic+sys both silent) — triggering auto-stop")
+                    Logger.audio.info("Silence detected for \(self.consecutiveSilentSeconds)s — triggering auto-stop")
                     self.onSilenceDetected?()
                     self.consecutiveSilentSeconds = 0 // Reset so it doesn't fire repeatedly
                 }
@@ -241,19 +270,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             }
         }
 
-        // Tell BrowserCallDetector that we're now using the mic, so Strategy 3
-        // (mic-usage heuristic) doesn't falsely detect our own recording as a browser call.
-        BrowserCallDetector.appIsRecording = true
-
-        await MainActor.run {
-            isCapturing = true
-        }
+        isCapturing = true
     }
 
     /// Stop all audio capture
     func stopCapture() -> URL? {
-        BrowserCallDetector.appIsRecording = false
-
         silenceCheckTimer?.invalidate()
         silenceCheckTimer = nil
         consecutiveSilentSeconds = 0
@@ -263,11 +284,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         bufferManager.finishRecording()
 
-        Task { @MainActor in
-            isCapturing = false
-            micLevel = 0
-            systemLevel = 0
-        }
+        isCapturing = false
+        micLevel = 0
+        systemLevel = 0
 
         return currentAudioFileURL
     }
@@ -280,7 +299,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     // MARK: - Private
 
     /// Write to the shared app log file for debugging with user.
-    private func logToFile(_ message: String) {
+    /// Marked nonisolated because it is called from audio callback queues.
+    nonisolated private func logToFile(_ message: String) {
         AppFileLogger.shared.log(message)
     }
 
@@ -292,28 +312,28 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         return url
     }
 
-    private func updateMicLevel(_ buffer: AVAudioPCMBuffer) {
+    /// Called from audio callback queues — must be nonisolated to avoid MainActor hop.
+    /// Uses atomic pointer for thread-safe write, then dispatches UI update to MainActor.
+    nonisolated private func updateMicLevel(_ buffer: AVAudioPCMBuffer) {
         let level = buffer.rmsLevel
-        os_unfair_lock_lock(_levelLock)
-        _atomicMicLevel = level
-        os_unfair_lock_unlock(_levelLock)
+        _atomicMicLevel.pointee = level
         Task { @MainActor in
             self.micLevel = level
         }
     }
 
-    private func updateSystemLevel(_ buffer: AVAudioPCMBuffer) {
+    /// Called from audio callback queues — must be nonisolated to avoid MainActor hop.
+    nonisolated private func updateSystemLevel(_ buffer: AVAudioPCMBuffer) {
         let level = buffer.rmsLevel
-        os_unfair_lock_lock(_levelLock)
-        _atomicSystemLevel = level
-        os_unfair_lock_unlock(_levelLock)
+        _atomicSystemLevel.pointee = level
         Task { @MainActor in
             self.systemLevel = level
         }
     }
 
     deinit {
-        _levelLock.deallocate()
+        _atomicMicLevel.deallocate()
+        _atomicSystemLevel.deallocate()
     }
 }
 

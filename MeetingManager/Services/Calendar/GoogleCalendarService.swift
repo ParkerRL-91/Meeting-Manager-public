@@ -107,14 +107,11 @@ final class GoogleCalendarService {
         to: Date,
         calendarId: String = "primary"
     ) async throws -> [CalendarEvent] {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-
         let encodedCalendarId = calendarId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? calendarId
         var components = URLComponents(string: "\(Self.baseURL)/calendars/\(encodedCalendarId)/events")!
         components.queryItems = [
-            URLQueryItem(name: "timeMin", value: formatter.string(from: from)),
-            URLQueryItem(name: "timeMax", value: formatter.string(from: to)),
+            URLQueryItem(name: "timeMin", value: DateFormatting.iso8601FormatterNoFraction.string(from: from)),
+            URLQueryItem(name: "timeMax", value: DateFormatting.iso8601FormatterNoFraction.string(from: to)),
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy", value: "startTime"),
             URLQueryItem(name: "maxResults", value: "250"),
@@ -290,14 +287,11 @@ final class GoogleCalendarService {
         guard let eventDate else { return nil }
 
         if let dateTimeString = eventDate.dateTime {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = formatter.date(from: dateTimeString) {
+            // Try with fractional seconds first, then without
+            if let date = DateFormatting.iso8601Formatter.date(from: dateTimeString) {
                 return date
             }
-            // Retry without fractional seconds
-            formatter.formatOptions = [.withInternetDateTime]
-            return formatter.date(from: dateTimeString)
+            return DateFormatting.iso8601FormatterNoFraction.date(from: dateTimeString)
         }
 
         if let dateString = eventDate.date {

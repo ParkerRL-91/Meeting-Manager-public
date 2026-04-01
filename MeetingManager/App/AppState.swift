@@ -1166,7 +1166,7 @@ final class AppState {
     private static let maxLogFileSize: UInt64 = 5 * 1024 * 1024
 
     func fileLog(_ message: String) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let timestamp = DateFormatting.iso8601Formatter.string(from: Date())
         let line = "[\(timestamp)] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }
 

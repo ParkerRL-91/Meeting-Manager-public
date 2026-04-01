@@ -38,10 +38,17 @@ enum DateFormatting {
         return formatter
     }()
 
-    /// ISO 8601 formatter for API interchange.
+    /// ISO 8601 formatter for API interchange (with fractional seconds).
     static let iso8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// ISO 8601 formatter without fractional seconds (for Google Calendar API, etc.).
+    static let iso8601FormatterNoFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
         return formatter
     }()
 
