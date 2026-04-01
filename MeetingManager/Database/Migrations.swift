@@ -1,3 +1,4 @@
+import Foundation
 import GRDB
 
 enum Migrations {
@@ -352,6 +353,25 @@ enum Migrations {
             try db.alter(table: "appSettings") { t in
                 t.add(column: "autoGenerateSummary", .boolean).notNull().defaults(to: false)
                 t.add(column: "defaultRecipeId", .text)
+            }
+        }
+
+        migrator.registerMigration("v11-reopen") { db in
+            // Add audioFilePaths (JSON-encoded array) and isAllDay flag.
+            try db.alter(table: "meeting") { t in
+                t.add(column: "audioFilePaths", .text).notNull().defaults(to: "[]")
+                t.add(column: "isAllDay", .boolean).notNull().defaults(to: false)
+            }
+            // Migrate existing single audioFilePath value into the array column.
+            let rows = try Row.fetchAll(db, sql: "SELECT id, audioFilePath FROM meeting WHERE audioFilePath IS NOT NULL")
+            for row in rows {
+                let id: String = row["id"]
+                let path: String = row["audioFilePath"]
+                if let jsonData = try? JSONEncoder().encode([path]),
+                   let jsonString = String(data: jsonData, encoding: .utf8) {
+                    try db.execute(sql: "UPDATE meeting SET audioFilePaths = ? WHERE id = ?",
+                                   arguments: [jsonString, id])
+                }
             }
         }
     }

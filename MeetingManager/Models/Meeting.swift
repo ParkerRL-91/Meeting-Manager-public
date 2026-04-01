@@ -10,7 +10,10 @@ struct Meeting: Identifiable, Codable, Equatable {
     var scheduledEndDate: Date?
     var status: MeetingStatus
     var calendarEventId: String?
-    var audioFilePath: String?
+    /// All audio files recorded for this meeting. Each reopen session appends a new file.
+    var audioFilePaths: [String]
+    /// True for all-day calendar events — reopen and recording CTAs are suppressed.
+    var isAllDay: Bool
     /// Comma-separated list of participant names/emails detected from calendar or speaker diarization.
     var participants: String?
     var createdAt: Date
@@ -25,7 +28,8 @@ struct Meeting: Identifiable, Codable, Equatable {
         scheduledEndDate: Date? = nil,
         status: MeetingStatus = .scheduled,
         calendarEventId: String? = nil,
-        audioFilePath: String? = nil,
+        audioFilePaths: [String] = [],
+        isAllDay: Bool = false,
         participants: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -38,11 +42,41 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.scheduledEndDate = scheduledEndDate
         self.status = status
         self.calendarEventId = calendarEventId
-        self.audioFilePath = audioFilePath
+        self.audioFilePaths = audioFilePaths
+        self.isAllDay = isAllDay
         self.participants = participants
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+
+    // MARK: - Backward Compat
+
+    /// First recorded audio file path. Nil if no recording exists yet.
+    var audioFilePath: String? { audioFilePaths.first }
+
+    // MARK: - Reopen Logic
+
+    /// Whether this meeting can be re-opened to append more audio.
+    ///
+    /// True when:
+    /// - status is `.complete`
+    /// - not an all-day meeting
+    /// - current time is within the scheduled window OR within 60 min after scheduled end
+    var isReopenable: Bool {
+        guard !isAllDay else { return false }
+        guard status == .complete else { return false }
+        let now = Date()
+        if let start = scheduledStartDate, let end = scheduledEndDate {
+            return now >= start && now <= end.addingTimeInterval(3600)
+        }
+        // No scheduled times — allow within 60 min of actual end
+        if let end = endDate {
+            return now <= end.addingTimeInterval(3600)
+        }
+        return false
+    }
+
+    // MARK: - Derived
 
     /// Parsed list of participant names.
     var participantList: [String] {
@@ -84,7 +118,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePath, participants, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

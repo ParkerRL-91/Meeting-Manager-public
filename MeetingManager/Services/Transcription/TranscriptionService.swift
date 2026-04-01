@@ -73,6 +73,19 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
     private var whisperKit: WhisperKit?
     private var isLoaded = false
 
+    /// The default HuggingFace cache path where WhisperKit stores downloaded CoreML models.
+    private static var cachedModelFolder: String? {
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/huggingface/models/argmaxinc/whisperkit-coreml")
+        // Check if the model directory exists with required files
+        let modelDir = base.appendingPathComponent("openai_whisper-large-v3")
+        let required = ["AudioEncoder.mlmodelc", "MelSpectrogram.mlmodelc", "TextDecoder.mlmodelc"]
+        let allExist = required.allSatisfy {
+            FileManager.default.fileExists(atPath: modelDir.appendingPathComponent($0).path)
+        }
+        return allExist ? modelDir.path : nil
+    }
+
     func loadModel(
         named model: WhisperModel,
         progressHandler: @escaping @Sendable (Double) -> Void
@@ -80,15 +93,33 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         Logger.transcription.info("Downloading/loading WhisperKit model: \(model.rawValue)")
         progressHandler(0.05)
 
-        let config = WhisperKitConfig(
-            model: model.rawValue,
-            verbose: false,
-            logLevel: .error,
-            prewarm: true,
-            load: true,
-            download: true,
-            useBackgroundDownloadSession: false
-        )
+        // Use cached model folder if available — avoids network check on HuggingFace
+        // which can intermittently fail and cause "Model not found" errors.
+        let cachedFolder = Self.cachedModelFolder
+        let config: WhisperKitConfig
+        if let cachedFolder {
+            Logger.transcription.info("Using cached model at: \(cachedFolder)")
+            config = WhisperKitConfig(
+                model: model.rawValue,
+                modelFolder: cachedFolder,
+                verbose: false,
+                logLevel: .error,
+                prewarm: true,
+                load: true,
+                download: false
+            )
+        } else {
+            Logger.transcription.info("No cached model found — downloading from HuggingFace")
+            config = WhisperKitConfig(
+                model: model.rawValue,
+                verbose: false,
+                logLevel: .error,
+                prewarm: true,
+                load: true,
+                download: true,
+                useBackgroundDownloadSession: false
+            )
+        }
 
         let kit = try await WhisperKit(config)
         progressHandler(1.0)

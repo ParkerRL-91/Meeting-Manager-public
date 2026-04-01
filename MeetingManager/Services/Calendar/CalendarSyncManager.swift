@@ -186,6 +186,7 @@ final class CalendarSyncManager {
             existing.title = event.title
             existing.scheduledStartDate = event.startDate
             existing.scheduledEndDate = event.endDate
+            existing.isAllDay = event.isAllDay
             try await meetingRepository.save(&existing)
             Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
         } else {
@@ -194,7 +195,8 @@ final class CalendarSyncManager {
                 scheduledStartDate: event.startDate,
                 scheduledEndDate: event.endDate,
                 status: .scheduled,
-                calendarEventId: event.id
+                calendarEventId: event.id,
+                isAllDay: event.isAllDay
             )
             try await meetingRepository.save(&meeting)
             Logger.calendar.debug("Created new meeting '\(event.title)' from calendar")

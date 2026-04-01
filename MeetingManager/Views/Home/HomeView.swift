@@ -47,10 +47,10 @@ struct HomeView: View {
                         .padding(.bottom, 16)
                 }
 
-                // MARK: - Coming Up Today
-                let todayMeetings = upcomingToday
+                // MARK: - Today's Meetings
+                let todayMeetings = allToday
                 if !todayMeetings.isEmpty {
-                    SectionHeader(title: "Coming Up")
+                    SectionHeader(title: "Today")
                         .padding(.horizontal, 24)
                         .padding(.bottom, 10)
 
@@ -71,8 +71,8 @@ struct HomeView: View {
                         .padding(.bottom, 24)
                 }
 
-                // MARK: - Recent Meetings
-                let allRecent = appState.pastMeetings
+                // MARK: - Recent Meetings (exclude today — already shown above)
+                let allRecent = recentMeetings
                 let visibleRecent = showAllRecent ? allRecent : Array(allRecent.prefix(8))
                 if !visibleRecent.isEmpty {
                     SectionHeader(title: "Recent")
@@ -121,21 +121,33 @@ struct HomeView: View {
         now.formatted(date: .complete, time: .omitted)
     }
 
-    private var upcomingToday: [Meeting] {
+    /// All meetings for today: upcoming + past, deduped and sorted by scheduled start.
+    private var allToday: [Meeting] {
         let cal = Calendar.current
-        return appState.upcomingMeetings
-            .filter { meeting in
-                guard let date = meeting.scheduledStartDate ?? meeting.startDate else { return false }
-                return cal.isDateInToday(date) || (date > now && date < now.addingTimeInterval(86400))
-            }
-            .sorted { a, b in
-                let da = a.scheduledStartDate ?? a.startDate ?? .distantFuture
-                let db = b.scheduledStartDate ?? b.startDate ?? .distantFuture
+        func isToday(_ meeting: Meeting) -> Bool {
+            guard let date = meeting.scheduledStartDate ?? meeting.startDate else { return false }
+            return cal.isDateInToday(date)
+        }
+        let upcoming = appState.upcomingMeetings.filter(isToday)
+        let past = appState.pastMeetings.filter(isToday)
+        var seen = Set<String>()
+        return (upcoming + past)
+            .filter { seen.insert($0.id).inserted }
+            .sorted {
+                let da = $0.scheduledStartDate ?? $0.startDate ?? .distantFuture
+                let db = $1.scheduledStartDate ?? $1.startDate ?? .distantFuture
                 return da < db
             }
     }
 
-    // recentMeetings no longer used directly — see showAllRecent logic in body
+    /// Past meetings excluding today (today's are shown in the Today section).
+    private var recentMeetings: [Meeting] {
+        let cal = Calendar.current
+        return appState.pastMeetings.filter { meeting in
+            guard let date = meeting.scheduledStartDate ?? meeting.startDate else { return true }
+            return !cal.isDateInToday(date)
+        }
+    }
 }
 
 // MARK: - Section Header
@@ -168,7 +180,7 @@ private struct ActiveRecordingBanner: View {
                 .onAppear { pulse = true }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Recording in progress")
+                Text(appState.isReopening ? "Appending to recording" : "Recording in progress")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color.appTextPrimary)
                 Text(meeting.title)
@@ -214,9 +226,10 @@ private struct UpcomingMeetingCard: View {
         return Int(diff / 60)
     }
 
-    private var isStartingSoon: Bool {
-        guard let mins = minutesUntil else { return false }
-        return mins <= 15
+    private var isWithinHour: Bool {
+        guard let date = scheduledDate else { return false }
+        let diff = date.timeIntervalSince(now)
+        return diff <= 3600
     }
 
     private var isPast: Bool {
@@ -225,6 +238,9 @@ private struct UpcomingMeetingCard: View {
     }
 
     private var statusLabel: String {
+        if meeting.isReopenable { return "Ended" }
+        if meeting.status == .complete { return "Complete" }
+        if meeting.status == .cancelled { return "Cancelled" }
         if let mins = minutesUntil {
             if mins == 0 { return "Starting now" }
             if mins < 60 { return "In \(mins) min" }
@@ -237,12 +253,25 @@ private struct UpcomingMeetingCard: View {
     }
 
     private var statusColor: Color {
+        if meeting.isReopenable { return Color.appSuccess }
+        if meeting.status == .complete { return Color.appTextTertiary }
         if let mins = minutesUntil {
             if mins <= 5 { return Color.appRecording }
-            if mins <= 15 { return Color.appWarning }
+            if mins <= 60 { return Color.appWarning }
             return Color.appTextSecondary
         }
         return Color.appSuccess
+    }
+
+    /// Returns (label, tint) for the CTA button, or nil if no CTA should be shown.
+    private var ctaInfo: (label: String, tint: Color)? {
+        guard !meeting.isAllDay else { return nil }
+        if meeting.isReopenable { return ("Re-open recording", Color.appAccent) }
+        guard meeting.status != .complete, meeting.status != .cancelled else { return nil }
+        guard let start = scheduledDate else { return nil }
+        let diff = start.timeIntervalSince(now)
+        if diff > 3600 { return ("Start now", Color.appAccent) }
+        return ("Record now", isWithinHour && !isPast ? Color.appWarning : Color.appRecording)
     }
 
     var body: some View {
@@ -264,7 +293,7 @@ private struct UpcomingMeetingCard: View {
 
             // Left accent bar
             RoundedRectangle(cornerRadius: 2)
-                .fill(isStartingSoon ? statusColor : Color.appAccent)
+                .fill(isWithinHour ? statusColor : Color.appAccent)
                 .frame(width: 3, height: 38)
 
             // Title + participant avatars
@@ -299,12 +328,16 @@ private struct UpcomingMeetingCard: View {
                         .foregroundStyle(statusColor)
                 }
 
-                if isStartingSoon || isPast {
-                    Button(isPast ? "Record now" : "Start now") {
-                        appState.startRecording(for: meeting)
+                if let cta = ctaInfo {
+                    Button(cta.label) {
+                        if meeting.isReopenable {
+                            appState.startOrReopenRecording(for: meeting)
+                        } else {
+                            appState.startRecording(for: meeting)
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(isStartingSoon ? statusColor : Color.appAccent)
+                    .tint(cta.tint)
                     .controlSize(.mini)
                 }
             }

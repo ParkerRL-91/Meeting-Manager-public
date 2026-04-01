@@ -34,6 +34,9 @@ final class AppState {
     /// must not be stopped just because the browser-call heuristic loses signal.
     private var recordingStartedByDetector = false
 
+    /// True when the current recording is a reopen session appending to an existing meeting.
+    private(set) var isReopening = false
+
     /// Live audio levels mirrored from AudioCaptureService for SwiftUI views.
     /// AudioCaptureService is @ObservableObject but nested inside @Observable AppState,
     /// so SwiftUI can't see its @Published changes. These are updated on a 10Hz timer.
@@ -92,10 +95,48 @@ final class AppState {
     /// User-visible error from the most recent operation (shown via alert).
     var lastUserError: String?
 
+    /// Meetings queued for transcription when model wasn't available.
+    /// Persisted via UserDefaults so they survive app restarts.
+    private static let pendingTranscriptionKey = "pendingTranscriptions"
+
     private var cancellables = Set<AnyCancellable>()
     private var proximityTimer: Timer?
 
+    /// Whether this instance has been fully initialized (guards against SwiftUI re-creating @State).
+    private static var isInitialized = false
+
     init() {
+        // Guard: if an AppState already exists (SwiftUI @State re-creation), reuse its services.
+        // This prevents the model-loaded state from being lost when SwiftUI re-creates the App struct.
+        if let existing = AppState.shared, AppState.isInitialized {
+            self.database = existing.database
+            self.ollamaService = existing.ollamaService
+            self.ollamaInstaller = existing.ollamaInstaller
+            self.meetingRepository = existing.meetingRepository
+            self.transcriptRepository = existing.transcriptRepository
+            self.noteRepository = existing.noteRepository
+            self.summaryRepository = existing.summaryRepository
+            self.audioCaptureService = existing.audioCaptureService
+            self.transcriptionService = existing.transcriptionService
+            self.streamingTranscriber = existing.streamingTranscriber
+            self.appleSpeechTranscriber = existing.appleSpeechTranscriber
+            self.stateMachine = existing.stateMachine
+
+            // Copy mutable state from existing instance
+            self.isRecording = existing.isRecording
+            self.activeMeeting = existing.activeMeeting
+            self.isLoadingModel = existing.isLoadingModel
+            self.modelDownloadProgress = existing.modelDownloadProgress
+            self.meetings = existing.meetings
+            self.upcomingMeetings = existing.upcomingMeetings
+            self.pastMeetings = existing.pastMeetings
+            self.settings = existing.settings
+
+            AppState.shared = self
+            fileLog("AppState re-created by SwiftUI — reusing existing services (model loaded: \(transcriptionService.isModelLoaded))")
+            return
+        }
+
         self.database = AppDatabase.shared
         self.ollamaService = OllamaService()
         self.ollamaInstaller = OllamaInstaller()
@@ -142,6 +183,7 @@ final class AppState {
 
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
+        AppState.isInitialized = true
 
         fileLog("AppState initialized — starting model download")
     }
@@ -388,6 +430,51 @@ final class AppState {
         }
     }
 
+    /// Re-open a completed meeting to append more audio.
+    ///
+    /// Creates a new audio capture session; the resulting audio file is appended
+    /// to `meeting.audioFilePaths`. Transcript segments from this session are
+    /// saved with the same `meetingId` and appended to the existing transcript.
+    func reopenRecording(for meeting: Meeting) {
+        guard !isRecording else {
+            Logger.general.info("reopenRecording(for:) skipped — already recording")
+            return
+        }
+        guard !isStartingMeeting else {
+            Logger.general.info("reopenRecording(for:) skipped — another start in progress")
+            return
+        }
+        isStartingMeeting = true
+        Task {
+            defer { self.isStartingMeeting = false }
+            do {
+                try await stateMachine.reopenRecording(meeting: meeting)
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                self.isReopening = true
+                self.selectedMeetingId = self.stateMachine.currentMeeting?.id
+                self.startAudioLevelPolling()
+                loadMeetings()
+                fileLog("Reopen recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
+            } catch {
+                Logger.general.error("Failed to reopen recording: \(error.localizedDescription)")
+                self.lastUserError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Start or reopen a meeting depending on its current state and the time window.
+    ///
+    /// - If the meeting is complete and `isReopenable`, appends (no confirmation needed).
+    /// - Otherwise starts a fresh recording.
+    func startOrReopenRecording(for meeting: Meeting) {
+        if meeting.isReopenable {
+            reopenRecording(for: meeting)
+        } else {
+            startRecording(for: meeting)
+        }
+    }
+
     /// Stop recording — then run batch transcription on the complete audio file.
     /// Batch transcription is dramatically more accurate than live streaming because
     /// Whisper can use the full audio context and sequential decoding.
@@ -407,6 +494,7 @@ final class AppState {
                 self.activeMeeting = self.stateMachine.currentMeeting
                 self.isRecording = self.stateMachine.isRecording
                 self.recordingStartedByDetector = false
+                self.isReopening = false
                 self.stopAudioLevelPolling()
 
                 // Mark meeting as transcribing → then run batch transcription
@@ -539,15 +627,16 @@ final class AppState {
         }
 
         if !transcriptionService.isModelLoaded {
-            fileLog("Batch transcribe: model not loaded, waiting...")
-            for _ in 0..<60 {
+            fileLog("Batch transcribe: model not loaded, waiting up to 5 min...")
+            for _ in 0..<300 {
                 try? await Task.sleep(for: .seconds(1))
                 if transcriptionService.isModelLoaded { break }
             }
         }
         guard transcriptionService.isModelLoaded else {
-            fileLog("Batch transcribe: model not loaded after 60s — skipping")
-            lastUserError = "Transcription skipped — the model failed to load. Open the menu bar to retry the download."
+            fileLog("Batch transcribe: model not loaded after 5 min — queuing for later")
+            addPendingTranscription(meetingId: meetingId, audioURL: audioURL)
+            lastUserError = "Transcription queued — will process when model loads."
             return
         }
 
@@ -723,12 +812,14 @@ final class AppState {
     // MARK: - Transcription Lifecycle
 
     /// Automatically load the default WhisperKit model at app startup.
+    /// Retries up to 3 times with 10s delay between attempts.
     private func autoLoadTranscriptionModel() {
         Task {
             guard !transcriptionService.isModelLoaded else { return }
 
             // Always use large-v3 — it's the only supported model.
             let model = WhisperModel.largev3
+            let maxRetries = 3
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
             fileLog("Model: loading \(model.rawValue)...")
@@ -751,27 +842,54 @@ final class AppState {
             }
 
             let loadStart = Date()
-            do {
-                try await transcriptionService.loadModel(model)
-                modelProgressTimer?.invalidate()
-                modelProgressTimer = nil
-                modelDownloadProgress = 1.0
+            var lastError: Error?
+            for attempt in 1...maxRetries {
+                do {
+                    try await transcriptionService.loadModel(model)
+                    modelProgressTimer?.invalidate()
+                    modelProgressTimer = nil
+                    modelDownloadProgress = 1.0
 
-                Logger.transcription.info("WhisperKit model loaded — transcription is ready")
-                fileLog("Model: LOADED successfully — ready for transcription")
+                    Logger.transcription.info("WhisperKit model loaded — transcription is ready")
+                    fileLog("Model: LOADED successfully — ready for transcription")
 
-                // Notify user if this was a real download (not a cache load)
-                let loadDuration = Date().timeIntervalSince(loadStart)
-                if loadDuration > 30 {
-                    sendModelReadyNotification()
+                    // Notify user if this was a real download (not a cache load)
+                    let loadDuration = Date().timeIntervalSince(loadStart)
+                    if loadDuration > 30 {
+                        sendModelReadyNotification()
+                    }
+
+                    // Process any pending transcription jobs
+                    await processPendingTranscriptions()
+
+                    lastError = nil
+                    break
+                } catch {
+                    lastError = error
+                    if attempt < maxRetries {
+                        fileLog("Model: retry \(attempt)/\(maxRetries) failed — \(error.localizedDescription). Retrying in 10s...")
+                        try? await Task.sleep(for: .seconds(10))
+                        modelDownloadProgress = 0
+                    }
                 }
-            } catch {
+            }
+
+            if let lastError {
                 modelProgressTimer?.invalidate()
                 modelProgressTimer = nil
                 modelDownloadProgress = 0
 
-                Logger.transcription.error("Failed to auto-load WhisperKit model: \(error.localizedDescription)")
-                fileLog("Model: FAILED to load — \(error.localizedDescription)")
+                Logger.transcription.error("Failed to auto-load WhisperKit model after \(maxRetries) attempts: \(lastError.localizedDescription)")
+                fileLog("Model: FAILED to load after \(maxRetries) attempts — \(lastError.localizedDescription)")
+
+                // Schedule a background retry in 5 minutes
+                Task {
+                    try? await Task.sleep(for: .seconds(300))
+                    if !self.transcriptionService.isModelLoaded {
+                        fileLog("Model: background retry after 5 min...")
+                        self.autoLoadTranscriptionModel()
+                    }
+                }
             }
             isLoadingModel = false
         }
@@ -781,6 +899,38 @@ final class AppState {
     func retryModelLoad() {
         transcriptionService.clearError()
         autoLoadTranscriptionModel()
+    }
+
+    // MARK: - Pending Transcription Queue
+
+    /// Queue a meeting for transcription when the model becomes available.
+    private func addPendingTranscription(meetingId: String, audioURL: URL) {
+        var pending = UserDefaults.standard.dictionary(forKey: Self.pendingTranscriptionKey) as? [String: String] ?? [:]
+        pending[meetingId] = audioURL.path
+        UserDefaults.standard.set(pending, forKey: Self.pendingTranscriptionKey)
+        fileLog("Pending transcription queued: \(meetingId)")
+    }
+
+    /// Process any meetings queued for transcription.
+    private func processPendingTranscriptions() async {
+        guard transcriptionService.isModelLoaded else { return }
+        guard let pending = UserDefaults.standard.dictionary(forKey: Self.pendingTranscriptionKey) as? [String: String],
+              !pending.isEmpty else { return }
+
+        fileLog("Processing \(pending.count) pending transcription(s)...")
+
+        for (meetingId, path) in pending {
+            let audioURL = URL(fileURLWithPath: path)
+            guard FileManager.default.fileExists(atPath: path) else {
+                fileLog("Pending transcription: audio file missing for \(meetingId), removing from queue")
+                continue
+            }
+            await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+        }
+
+        // Clear the queue
+        UserDefaults.standard.removeObject(forKey: Self.pendingTranscriptionKey)
+        fileLog("Pending transcription queue cleared")
     }
 
     /// Send a macOS notification that the transcription model is ready.

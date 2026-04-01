@@ -54,7 +54,7 @@ final class MeetingStateMachine {
         .recording:    [.transcribing, .cancelled],
         .transcribing: [.summarizing, .complete, .cancelled],
         .summarizing:  [.complete, .cancelled],
-        .complete:     [],
+        .complete:     [.recording],   // allows reopen to append audio
         .cancelled:    [],
     ]
 
@@ -121,9 +121,11 @@ final class MeetingStateMachine {
         }
         try validateTransition(from: meeting.status, to: .transcribing)
 
-        // Stop audio capture and store file path
+        // Stop audio capture and append the new file path to the array.
         let audioURL = audioCaptureService.stopCapture()
-        meeting.audioFilePath = audioURL?.path
+        if let path = audioURL?.path, !meeting.audioFilePaths.contains(path) {
+            meeting.audioFilePaths.append(path)
+        }
         meeting.status = .transcribing
         meeting.endDate = Date()
         try await persist(&meeting)
@@ -133,6 +135,37 @@ final class MeetingStateMachine {
         isRecording = false
 
         postStateChanged(meeting: meeting)
+    }
+
+    /// Re-open a completed meeting to append more audio to the same transcript.
+    ///
+    /// Transitions: complete → recording. The new audio file is appended to
+    /// `audioFilePaths` when `stopRecording()` is called.
+    func reopenRecording(meeting: Meeting) async throws {
+        guard currentMeeting == nil else {
+            throw MeetingStateMachineError.alreadyRecording
+        }
+        try validateTransition(from: meeting.status, to: .recording)
+
+        var updated = meeting
+        updated.status = .recording
+        // Don't overwrite startDate — keep the original recording start time.
+        // endDate will be updated when this session stops.
+        try await persist(&updated)
+
+        do {
+            try await audioCaptureService.startCapture(meetingId: updated.id)
+        } catch {
+            updated.status = .complete
+            try? await persist(&updated)
+            throw error
+        }
+
+        currentMeeting = updated
+        currentState = .recording
+        isRecording = true
+
+        postStateChanged(meeting: updated)
     }
 
     /// Transition a meeting from transcribing to summarizing.

@@ -230,6 +230,9 @@ final class GoogleCalendarService {
             return nil
         }
 
+        // All-day events use a `date` field instead of `dateTime` in the API response.
+        let isAllDay = resource.start?.date != nil
+
         let attendees = (resource.attendees ?? []).compactMap { attendee in
             attendee.displayName ?? attendee.email
         }
@@ -244,6 +247,7 @@ final class GoogleCalendarService {
             title: resource.summary ?? "Untitled Event",
             startDate: startDate,
             endDate: endDate,
+            isAllDay: isAllDay,
             attendees: attendees,
             meetLink: meetLink,
             description: resource.description,

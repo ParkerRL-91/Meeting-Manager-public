@@ -5,6 +5,7 @@ struct CalendarEvent: Identifiable, Codable {
     let title: String
     let startDate: Date
     let endDate: Date
+    let isAllDay: Bool
     let attendees: [String]
     let meetLink: String?
     let description: String?
