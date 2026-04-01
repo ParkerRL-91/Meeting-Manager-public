@@ -24,20 +24,29 @@ final class TranscriptRepository {
         }
     }
 
-    func transcriptsForMeeting(_ meetingId: String) async throws -> [Transcript] {
+    func transcriptsForMeeting(_ meetingId: String, limit: Int = 200, offset: Int = 0) async throws -> [Transcript] {
         try await database.writer.read { db in
             try Transcript
                 .filter(Transcript.Columns.meetingId == meetingId)
                 .order(Transcript.Columns.startTime.asc)
+                .limit(limit, offset: offset)
                 .fetchAll(db)
         }
     }
 
     func fullText(meetingId: String) async throws -> String {
-        let segments = try await transcriptsForMeeting(meetingId)
-        return segments.map { segment in
-            "[\(segment.formattedTimestamp)] \(segment.speakerDisplayName): \(segment.text)"
-        }.joined(separator: "\n")
+        try await database.writer.read { db in
+            var result = ""
+            let cursor = try Transcript
+                .filter(Transcript.Columns.meetingId == meetingId)
+                .order(Transcript.Columns.startTime.asc)
+                .fetchCursor(db)
+            while let segment = try cursor.next() {
+                if !result.isEmpty { result += "\n" }
+                result += "[\(segment.formattedTimestamp)] \(segment.speakerDisplayName): \(segment.text)"
+            }
+            return result
+        }
     }
 
     func search(meetingId: String, query: String) async throws -> [Transcript] {

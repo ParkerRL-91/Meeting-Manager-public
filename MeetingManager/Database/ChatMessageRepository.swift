@@ -16,11 +16,12 @@ final class ChatMessageRepository {
         message = copy
     }
 
-    func messagesForMeeting(_ meetingId: String) async throws -> [ChatMessage] {
+    func messagesForMeeting(_ meetingId: String, limit: Int = 200) async throws -> [ChatMessage] {
         try await database.writer.read { db in
             try ChatMessage
                 .filter(ChatMessage.Columns.meetingId == meetingId)
                 .order(ChatMessage.Columns.createdAt.asc)
+                .limit(limit)
                 .fetchAll(db)
         }
     }

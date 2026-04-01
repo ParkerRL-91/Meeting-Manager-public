@@ -33,11 +33,12 @@ final class ActionItemRepository {
         }
     }
 
-    func allOpenItems() async throws -> [ActionItem] {
+    func allOpenItems(limit: Int = 100) async throws -> [ActionItem] {
         try await database.writer.read { db in
             try ActionItem
                 .filter(ActionItem.Columns.isCompleted == false)
                 .order(ActionItem.Columns.extractedAt.asc)
+                .limit(limit)
                 .fetchAll(db)
         }
     }

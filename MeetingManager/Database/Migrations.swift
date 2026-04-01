@@ -374,5 +374,14 @@ enum Migrations {
                 }
             }
         }
+
+        migrator.registerMigration("v12-performance-indexes") { db in
+            try db.create(index: "idx_meetingSummary_meeting", on: "meetingSummary", columns: ["meetingId"])
+            try db.create(index: "idx_chatMessage_meeting", on: "chatMessage", columns: ["meetingId"])
+            try db.create(index: "idx_meetingNote_meeting", on: "meetingNote", columns: ["meetingId"])
+            try db.create(index: "idx_meeting_calendarEventId", on: "meeting", columns: ["calendarEventId"])
+            try db.create(index: "idx_meeting_status", on: "meeting", columns: ["status"])
+            try db.create(index: "idx_actionItem_meeting_extracted", on: "actionItem", columns: ["meetingId", "extractedAt"])
+        }
     }
 }

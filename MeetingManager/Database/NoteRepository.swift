@@ -16,11 +16,12 @@ final class NoteRepository {
         note = copy
     }
 
-    func notesForMeeting(_ meetingId: String) async throws -> [MeetingNote] {
+    func notesForMeeting(_ meetingId: String, limit: Int = 100) async throws -> [MeetingNote] {
         try await database.writer.read { db in
             try MeetingNote
                 .filter(MeetingNote.Columns.meetingId == meetingId)
                 .order(MeetingNote.Columns.createdAt.asc)
+                .limit(limit)
                 .fetchAll(db)
         }
     }

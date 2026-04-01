@@ -25,11 +25,12 @@ final class SummaryRepository {
         }
     }
 
-    func allSummaries(meetingId: String) async throws -> [MeetingSummary] {
+    func allSummaries(meetingId: String, limit: Int = 50) async throws -> [MeetingSummary] {
         try await database.writer.read { db in
             try MeetingSummary
                 .filter(MeetingSummary.Columns.meetingId == meetingId)
                 .order(MeetingSummary.Columns.generatedAt.desc)
+                .limit(limit)
                 .fetchAll(db)
         }
     }

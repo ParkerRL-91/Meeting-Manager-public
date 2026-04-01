@@ -45,6 +45,7 @@ final class MeetingRepository {
                     || Meeting.Columns.status == MeetingStatus.recording.rawValue
                 )
                 .order(Meeting.Columns.scheduledStartDate.asc)
+                .limit(100)
                 .fetchAll(db)
         }
     }

@@ -16,11 +16,12 @@ final class RecipeResultRepository {
         result = copy
     }
 
-    func resultsForMeeting(_ meetingId: String) async throws -> [RecipeResult] {
+    func resultsForMeeting(_ meetingId: String, limit: Int = 50) async throws -> [RecipeResult] {
         try await database.writer.read { db in
             try RecipeResult
                 .filter(RecipeResult.Columns.meetingId == meetingId)
                 .order(RecipeResult.Columns.generatedAt.desc)
+                .limit(limit)
                 .fetchAll(db)
         }
     }
