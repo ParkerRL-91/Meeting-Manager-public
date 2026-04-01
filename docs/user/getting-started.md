@@ -2,7 +2,7 @@
 
 ## Installation
 
-1. Download **Meeting-Manager-1.0.5.dmg** from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases)
+1. Download **MeetingManager-v1.3.0.dmg** from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases)
 2. Open the DMG and drag **Meeting Manager** to your Applications folder
 3. Launch Meeting Manager from Applications or Spotlight
 
@@ -26,15 +26,11 @@ Paste your Anthropic API key. Meeting Manager uses Claude to generate summaries,
 
 Get an API key at [console.anthropic.com](https://console.anthropic.com).
 
-### 3. Choose a Transcription Model
+### 3. Transcription Model
 
-**Settings → Transcription → Whisper Model**
+Meeting Manager uses WhisperKit's **Large v3** model by default — the most accurate on-device speech recognition available. The model downloads automatically on first launch (~1.5 GB) with a progress bar in the menu bar popover.
 
-- **Tiny** — fastest, lowest accuracy, good for quick notes
-- **Base** — balanced (recommended for most users)
-- **Small / Medium** — slower but significantly more accurate
-
-The model downloads on first use (~70MB–500MB depending on size).
+If WhisperKit fails to load on your hardware, the app automatically falls back to Apple's built-in Speech Recognition.
 
 ---
 

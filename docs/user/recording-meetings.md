@@ -70,6 +70,8 @@ Ad-hoc meetings (created with **+ New Meeting**) are not linked to calendar even
 
 ## Tips
 
-- **Long meetings:** WhisperKit processes audio in chunks. For meetings over 2 hours, transcription may take several minutes after recording stops.
-- **Poor transcript quality:** Try a larger Whisper model in **Settings → Transcription**. Base is the default; Small or Medium are significantly more accurate.
+- **Long meetings:** WhisperKit processes audio in chunks. For meetings over 2 hours, transcription may take several minutes after recording stops. Audio buffers are capped at 30 seconds (ring buffer) to prevent unbounded memory growth.
+- **Poor transcript quality:** Meeting Manager uses WhisperKit Large v3 by default — the highest-accuracy on-device model. If WhisperKit fails to load, Apple Speech Recognition is used as an automatic fallback.
 - **Overlapping speakers:** The transcript shows speaker labels when the model can distinguish voices. Quality varies by recording conditions.
+- **Microphone disconnected:** If your mic is unplugged during recording, Meeting Manager gracefully stops capture and shows an error instead of crashing.
+- **Memory pressure:** Under heavy system memory load, Meeting Manager automatically flushes audio buffers and can auto-stop recording to prevent the system from becoming unresponsive.

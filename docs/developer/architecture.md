@@ -140,19 +140,23 @@ GRDB manages a single SQLite file at `~/Library/Application Support/MeetingManag
 | `appSettings` | Single-row user preferences |
 | `chatMessage` | Chat history per meeting (if applicable) |
 
-All migrations are additive — columns are added, never dropped or renamed. The current schema is at v9.
+All migrations are additive — columns are added, never dropped or renamed. The current schema is at v11 (v11-performance-indexes).
 
 All DB writes happen off the main thread using `dbQueue.write { ... }` in async contexts. Never write to the DB on the main actor.
+
+All repository queries use `LIMIT` clauses (50–200 depending on table) with offset support for pagination.
 
 ---
 
 ## Concurrency Model
 
-- `@MainActor` on `AppState` and all services — UI-touching state lives on the main actor
+- `@MainActor` on `AppState`, `AudioCaptureService`, and UI-facing services — UI-touching state lives on the main actor
 - DB operations run on GRDB's internal dispatch queue
-- WhisperKit inference runs on a background actor
-- Audio capture callbacks arrive on a dedicated audio thread and are bridged to async/await via continuation
-- `Task { }` blocks in SwiftUI views are implicitly main-actor isolated
+- `WhisperEngine` is a Swift `actor` — eliminates data races on the internal WhisperKit instance without manual locking
+- `SystemAudioTap` and `MicrophoneCapture` use `NSLock` to protect shared state accessed from audio callbacks
+- Audio capture callbacks arrive on a dedicated audio thread; shared counters use lock-protected nonisolated methods
+- `Task { }` blocks in SwiftUI views are implicitly main-actor isolated and are cancelled in `.onDisappear`
+- `StreamingTranscriber` batches multiple property updates into a single `MainActor.run {}` block to reduce render cycles
 
 ---
 
@@ -190,3 +194,6 @@ if settings.useLocalLLM {
 - **[ADR-001](../../knowledge/decisions/ADR-001-ollama-over-mlx-for-local-llm.md):** Ollama API over embedded MLX — avoids unresolvable SPM dependency conflict with WhisperKit
 - **No sandbox** — app requires microphone, filesystem access, and the ability to install/launch other apps (Ollama)
 - **SwiftPM only** — no Xcode project file; build with `swift build`
+- **Retry with backoff** — all HTTP clients (Claude, Google Calendar, Google Auth) use exponential backoff + jitter, skipping retries on 400/401/403
+- **CircularBuffer for audio** — fixed-capacity ring buffer prevents unbounded memory growth during long recordings
+- **Memory pressure monitoring** — `DispatchSource.makeMemoryPressureSource` triggers buffer flush on warning and auto-stop on critical

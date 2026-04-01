@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v1.1.1.dmg**](./MeetingManager-v1.1.1.dmg) — macOS 14.4+
+[**MeetingManager-v1.3.0.dmg**](./MeetingManager-v1.3.0.dmg) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -31,26 +31,68 @@ This removes the quarantine flag so the app opens without warnings.
 
 ---
 
-## What's New in v1.1.1
+## What's New in v1.3.0 — Stability & Efficiency
 
-- **Model download progress bar** — first-launch model download now shows a real progress bar with percentage in the menu bar popover instead of a generic spinner
-- **Download error recovery** — if the model download fails, the popover shows the error and a "Retry Download" button
-- **Transcription readiness indicator** — green checkmark "Transcription ready" in the popover once the model is loaded
-- **No more silent failures** — if you stop a recording before the model is ready, an alert explains that audio was saved and will be transcribed when the download completes
-- **Model download notification** — macOS notification when the model finishes downloading on first launch
-- **Onboarding model status** — the onboarding Ready step now shows whether the transcription model is downloaded, downloading, or not ready
-- **Global error alerts** — all errors (recording, transcription, call detection) now surface as alerts in the main window
+A comprehensive stability and performance sprint touching 30+ areas across the entire codebase.
 
-## What's New in v1.1
+### Crash Prevention & Data Integrity
+- **Thread-safe audio pipeline** — `SystemAudioTap`, `MicrophoneCapture`, and `AudioCaptureService` now use proper locking to eliminate data races during recording start/stop
+- **Actor-isolated WhisperEngine** — replaced `@unchecked Sendable` + NSLock with Swift actor isolation
+- **Atomic calendar upserts** — `CalendarSyncManager` wraps fetch-then-insert/update in a single GRDB transaction
+- **Microphone permission flow** — checks authorization before starting capture; surfaces clear errors for denied/restricted states
+- **Mic disconnect handling** — listens for audio engine config changes and gracefully stops capture when a device is unplugged
+- **Write error propagation** — `AudioBufferManager` reports file write errors via callback and auto-stops after 5 consecutive failures
 
-- **Dual audio capture** — records both your microphone and system audio (remote participants) simultaneously using ScreenCaptureKit
-- **Live audio level meters** — real-time mic and system audio indicators in the menu bar popover and recording control bar
-- **Smart notifications** — macOS notifications when recording auto-starts, when a meeting is detected (with a "Start Recording" action), and when a meeting ends
-- **Large v3 transcription model** — dramatically improved transcription accuracy using WhisperKit's largest model
-- **Unified AI routing** — Recipes, Action Items, and Live Chat now support both Ollama (on-device) and Claude
-- **Calendar sync fix** — recording a calendar event no longer shows wrong start time or inflated duration
-- **Auto-generate summaries** — optionally generate a summary after recording ends, using your default prompt
-- **Explicit mic device selection** — prevents aggregate device hijack from system audio tap; works with any USB/built-in microphone
+### Memory & Performance
+- **Circular audio buffers** — fixed-capacity ring buffer (480K samples / 30s at 16kHz) replaces growable arrays
+- **Memory pressure monitoring** — flushes audio buffers on warning, triggers auto-stop on critical memory pressure
+- **Segment capping** — in-memory transcript segments capped at 500; older segments persist in SQLite
+- **Batched MainActor updates** — coalesces segment updates into single render passes
+- **Pooled ISO8601DateFormatter** — shared static instances replace 6 inline instantiations
+- **Database indexes** — 6 new performance indexes for foreign keys and common query patterns
+- **Pagination on all repositories** — every query has `LIMIT` clauses (50–200) with offset support
+- **Debounced meeting loads** — rapid-fire `loadMeetings()` calls coalesce with 150ms debounce
+
+### API Resilience
+- **Exponential backoff retry** — Claude, Google Calendar, and Google Auth retry on network errors / 429 / 5xx with jitter
+- **Client-side rate limiting** — 1-second minimum interval between Claude API requests
+- **Response size limits** — rejects responses over 1MB before JSON decode
+- **HTTP timeouts** — all outbound requests use 120-second timeout
+- **Apple Speech fallback** — automatic fallback to `SFSpeechRecognizer` when WhisperKit fails to load
+
+### UI Polish
+- **Memoized sidebar filters** — filtered lists computed via `@State` + `onChange`, not on every render
+- **Scroll performance** — transcript auto-scroll triggers on last segment ID change, not count
+- **Task cancellation** — all views cancel in-flight async tasks on disappear
+- **Timer/observer cleanup** — services invalidate timers and remove observers in `deinit`
+- **Log rotation** — `app.log` rotates at 5MB
+
+### Infrastructure
+- **Comprehensive test suite** — 22 test files covering models, repositories, and services
+- **Error alert system** — reusable `ErrorAlertModifier` with error hoisting from list rows
+
+---
+
+<details>
+<summary><strong>Previous Releases</strong></summary>
+
+#### v1.1.1
+- Model download progress bar in menu bar popover
+- Download error recovery with retry button
+- Transcription readiness indicator
+- Onboarding model status display
+- Global error alerts for recording, transcription, and detection
+
+#### v1.1
+- Dual audio capture (mic + system audio via ScreenCaptureKit)
+- Live audio level meters
+- Smart macOS notifications for meeting events
+- Large v3 transcription model
+- Unified AI routing (Ollama + Claude)
+- Calendar sync fix, auto-generate summaries
+- Explicit mic device selection
+
+</details>
 
 ---
 

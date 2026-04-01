@@ -114,12 +114,25 @@ migrator.registerMigration("v10-new-feature") { db in
 }
 ```
 
-Current version: **v9** (`v9-local-llm` — added `useLocalLLM`, `ollamaModel` to `appSettings`)
+Current version: **v11** (`v11-performance-indexes`)
 
 Migration history:
 - v1: initial schema
 - v2–v8: incremental feature additions
-- v9: Ollama settings columns
+- v9: Ollama settings columns (`useLocalLLM`, `ollamaModel`)
+- v10: onboarding and audio device settings
+- v11: performance indexes on foreign keys and common query patterns
+
+### v11 Indexes
+
+| Index | Columns | Purpose |
+|-------|---------|---------|
+| `idx_meetingSummary_meeting` | `meetingSummary(meetingId)` | Fast summary lookups by meeting |
+| `idx_chatMessage_meeting` | `chatMessage(meetingId)` | Fast chat history loads |
+| `idx_meetingNote_meeting` | `meetingNote(meetingId)` | Fast note lookups |
+| `idx_meeting_calendarEventId` | `meeting(calendarEventId)` | Calendar sync upsert matching |
+| `idx_meeting_status` | `meeting(status)` | Filtered meeting lists |
+| `idx_actionItem_meeting_extracted` | `actionItem(meetingId, extractedAt)` | Action item queries with sort |
 
 ---
 
