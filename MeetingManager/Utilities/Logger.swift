@@ -3,6 +3,10 @@ import os
 
 /// Centralized logging categories built on top of `os.Logger`.
 /// Each category maps to a functional area of the app for easy filtering in Console.app.
+///
+/// Log rotation note: These loggers use Apple's unified logging (OSLog), which is
+/// managed by the system — rotation and storage limits are handled automatically.
+/// The only custom file log (AppState.fileLog) has its own rotation logic.
 extension Logger {
 
     /// The subsystem used for all loggers, derived from the app bundle identifier.

@@ -65,7 +65,8 @@ final class CalendarSyncManager {
     }
 
     deinit {
-        // Timer is invalidated when the object is deallocated
+        syncTimer?.invalidate()
+        syncTask?.cancel()
     }
 
     // MARK: - Periodic Sync
@@ -171,35 +172,38 @@ final class CalendarSyncManager {
 
     /// Creates or updates a `Meeting` record from a calendar event.
     ///
-    /// Matching is done by `calendarEventId`. If a meeting with the same
-    /// calendar event ID already exists, its scheduling metadata is updated.
-    /// Otherwise a new meeting is created.
+    /// Matching is done by `calendarEventId`. The fetch-and-insert/update is
+    /// wrapped in a single GRDB write transaction to prevent races where two
+    /// concurrent syncs could both see "no existing row" and double-insert.
     private func upsertMeeting(from event: CalendarEvent) async throws {
-        if var existing = try await meetingRepository.findByCalendarEventId(event.id) {
-            // Never overwrite meetings that are actively recording or already completed —
-            // a calendar sync must not clobber runtime state (startDate, endDate, status, etc.).
-            guard existing.status == .scheduled || existing.status == .notified else {
-                Logger.calendar.debug("Skipping sync for '\(event.title)' — status is \(existing.status.rawValue)")
-                return
+        try await AppDatabase.shared.writer.write { db in
+            if var existing = try Meeting
+                .filter(Meeting.Columns.calendarEventId == event.id)
+                .fetchOne(db)
+            {
+                // Never overwrite meetings that are actively recording or already completed —
+                // a calendar sync must not clobber runtime state (startDate, endDate, status, etc.).
+                guard existing.status == .scheduled || existing.status == .notified else {
+                    Logger.calendar.debug("Skipping sync for '\(event.title)' — status is \(existing.status.rawValue)")
+                    return
+                }
+                // Update scheduling details only; don't overwrite user-created data.
+                existing.title = event.title
+                existing.scheduledStartDate = event.startDate
+                existing.scheduledEndDate = event.endDate
+                try existing.update(db)
+                Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
+            } else {
+                var meeting = Meeting(
+                    title: event.title,
+                    scheduledStartDate: event.startDate,
+                    scheduledEndDate: event.endDate,
+                    status: .scheduled,
+                    calendarEventId: event.id
+                )
+                try meeting.insert(db)
+                Logger.calendar.debug("Created new meeting '\(event.title)' from calendar")
             }
-            // Update scheduling details only; don't overwrite user-created data.
-            existing.title = event.title
-            existing.scheduledStartDate = event.startDate
-            existing.scheduledEndDate = event.endDate
-            existing.isAllDay = event.isAllDay
-            try await meetingRepository.save(&existing)
-            Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
-        } else {
-            var meeting = Meeting(
-                title: event.title,
-                scheduledStartDate: event.startDate,
-                scheduledEndDate: event.endDate,
-                status: .scheduled,
-                calendarEventId: event.id,
-                isAllDay: event.isAllDay
-            )
-            try await meetingRepository.save(&meeting)
-            Logger.calendar.debug("Created new meeting '\(event.title)' from calendar")
         }
     }
 }

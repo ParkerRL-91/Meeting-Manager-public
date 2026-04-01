@@ -101,6 +101,7 @@ final class AppState {
 
     private var cancellables = Set<AnyCancellable>()
     private var proximityTimer: Timer?
+    private var loadMeetingsTask: Task<Void, Never>?
 
     /// Whether this instance has been fully initialized (guards against SwiftUI re-creating @State).
     private static var isInitialized = false
@@ -228,17 +229,25 @@ final class AppState {
     }
 
     func loadMeetings() {
-        Task {
+        loadMeetingsTask?.cancel()
+        loadMeetingsTask = Task {
+            // Debounce: wait 150ms before actually loading to coalesce rapid calls
+            // (e.g., multiple database change notifications firing in quick succession).
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
             do {
                 let upcoming = try await meetingRepository.upcomingMeetings()
                 let past = try await meetingRepository.pastMeetings(limit: 50)
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.upcomingMeetings = upcoming
                     self.pastMeetings = past
                     self.meetings = upcoming + past
                 }
             } catch {
-                print("Failed to load meetings: \(error)")
+                if !Task.isCancelled {
+                    print("Failed to load meetings: \(error)")
+                }
             }
         }
     }
@@ -1147,22 +1156,45 @@ final class AppState {
     // MARK: - File Logging (for debugging with user)
 
     /// Append a line to a shared log file that both the app and Claude can read.
+    /// Log rotation: when the file exceeds `maxLogFileSize`, the current log is
+    /// renamed to `app.log.1` (overwriting any previous backup) and a fresh file
+    /// is started.  This prevents unbounded disk growth.
     static let logFile = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
+
+    /// Maximum log file size before rotation (5 MB).
+    private static let maxLogFileSize: UInt64 = 5 * 1024 * 1024
 
     func fileLog(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let line = "[\(timestamp)] \(message)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: Self.logFile.path) {
-                if let handle = try? FileHandle(forWritingTo: Self.logFile) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    handle.closeFile()
-                }
-            } else {
+        guard let data = line.data(using: .utf8) else { return }
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: Self.logFile.path) {
+            // Rotate if the file is too large
+            if let attrs = try? fm.attributesOfItem(atPath: Self.logFile.path),
+               let size = attrs[.size] as? UInt64,
+               size > Self.maxLogFileSize {
+                let backupURL = Self.logFile.deletingPathExtension()
+                    .appendingPathExtension("log.1")
+                try? fm.removeItem(at: backupURL)
+                try? fm.moveItem(at: Self.logFile, to: backupURL)
+                // Start fresh
                 try? data.write(to: Self.logFile)
+                return
             }
+
+            if let handle = try? FileHandle(forWritingTo: Self.logFile) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            }
+        } else {
+            // Ensure directory exists
+            let dir = Self.logFile.deletingLastPathComponent()
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? data.write(to: Self.logFile)
         }
     }
 

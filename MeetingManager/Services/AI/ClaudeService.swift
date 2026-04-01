@@ -58,6 +58,7 @@ enum ClaudeServiceError: LocalizedError {
     case networkError(Error)
     case decodingError(Error)
     case aiDisabled
+    case responseTooLarge(Int)
 
     var errorDescription: String? {
         switch self {
@@ -82,6 +83,8 @@ enum ClaudeServiceError: LocalizedError {
             return "Failed to parse API response: \(error.localizedDescription)"
         case .aiDisabled:
             return "AI features are disabled. Enable them in Settings under Claude."
+        case .responseTooLarge(let bytes):
+            return "API response too large (\(bytes / 1024)KB). Maximum allowed is 1MB."
         }
     }
 }
@@ -104,8 +107,27 @@ final class ClaudeService {
     private static let apiVersion = "2023-06-01"
     private let session: URLSession
 
+    /// Client-side rate limiting: minimum interval between consecutive API requests.
+    private var lastRequestTime: Date?
+    private let minimumRequestInterval: TimeInterval = 1.0
+
+    /// Maximum response body size we'll accept before decoding (1 MB).
+    private static let maxResponseBytes = 1_048_576
+
     init(session: URLSession = .shared) {
         self.session = session
+    }
+
+    /// Waits if necessary to enforce the minimum interval between requests,
+    /// preventing the client from hammering the API during rapid-fire operations.
+    private func waitForRateLimit() async {
+        if let last = lastRequestTime {
+            let elapsed = Date().timeIntervalSince(last)
+            if elapsed < minimumRequestInterval {
+                try? await Task.sleep(for: .seconds(minimumRequestInterval - elapsed))
+            }
+        }
+        lastRequestTime = Date()
     }
 
     // MARK: - Public API
@@ -121,6 +143,9 @@ final class ClaudeService {
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
+
+        // 0. Rate limit — wait if we sent a request too recently
+        await waitForRateLimit()
 
         // 1. Load API key
         guard let apiKey = try KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
@@ -160,6 +185,11 @@ final class ClaudeService {
                 (data, response) = try await session.data(for: request)
             } catch {
                 throw ClaudeServiceError.networkError(error)
+            }
+
+            // 3b. Reject unexpectedly large responses before attempting to decode
+            if data.count > Self.maxResponseBytes {
+                throw ClaudeServiceError.responseTooLarge(data.count)
             }
 
             // 4. Check HTTP status

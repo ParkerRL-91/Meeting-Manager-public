@@ -28,6 +28,10 @@ final class BrowserCallDetector {
     private let endedDebounceThreshold = 3
     private var consecutiveNotInCall = 0
 
+    deinit {
+        pollTimer?.invalidate()
+    }
+
     // MARK: - Lifecycle
 
     func start(interval: TimeInterval = 5) {

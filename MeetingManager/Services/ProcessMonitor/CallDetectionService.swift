@@ -39,7 +39,17 @@ final class CallDetectionService {
     }
 
     deinit {
-        // Observers use [weak self] so they're safe when object is deallocated
+        // Remove workspace notification observers to avoid dangling references.
+        // While the closures use [weak self], the observer tokens themselves hold
+        // a registration in NotificationCenter that should be cleaned up.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        if let observer = launchObserver {
+            workspaceCenter.removeObserver(observer)
+        }
+        if let observer = terminateObserver {
+            workspaceCenter.removeObserver(observer)
+        }
+        browserDetector?.stop()
     }
 
     // MARK: - Monitoring
