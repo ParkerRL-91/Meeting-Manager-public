@@ -21,6 +21,7 @@ struct SummaryView: View {
     // Regeneration state
     @State private var isRegenerating = false
     @State private var regenerateError: String?
+    @State private var activeTask: Task<Void, Never>?
 
     // History
     @State private var showHistory = false
@@ -46,6 +47,7 @@ struct SummaryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .errorAlert($errorMessage)
+        .onDisappear { activeTask?.cancel() }
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             async let summaryLoad: () = loadSummary()
@@ -399,7 +401,7 @@ struct SummaryView: View {
         updatedSummary.summaryText = editedText
         updatedSummary.isEdited = true
 
-        Task {
+        activeTask = Task {
             do {
                 try await appState.summaryRepository.update(updatedSummary)
                 summary = updatedSummary
@@ -418,7 +420,7 @@ struct SummaryView: View {
         isRegenerating = true
         regenerateError = nil
 
-        Task {
+        activeTask = Task {
             do {
                 let settings = appState.settings
                 let baseTextGenerator: (String, String) async throws -> String

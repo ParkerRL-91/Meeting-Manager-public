@@ -7,6 +7,7 @@ struct ActionItemsView: View {
     @State private var items: [ActionItem] = []
     @State private var isLoading = true
     @State private var extractor = ActionItemExtractor()
+    @State private var extractTask: Task<Void, Never>?
 
     private let actionItemRepo = ActionItemRepository()
 
@@ -35,7 +36,7 @@ struct ActionItemsView: View {
                     )
 
                     Button {
-                        Task { await extractItems() }
+                        extractTask = Task { await extractItems() }
                     } label: {
                         Label("Extract Action Items", systemImage: "sparkles")
                             .font(.body)
@@ -58,6 +59,7 @@ struct ActionItemsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onDisappear { extractTask?.cancel() }
         .task {
             await loadItems()
         }

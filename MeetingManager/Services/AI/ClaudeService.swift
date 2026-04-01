@@ -133,6 +133,7 @@ final class ClaudeService {
         // 2. Build request
         var request = URLRequest(url: Self.apiURL)
         request.httpMethod = "POST"
+        request.timeoutInterval = 120
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -149,72 +150,85 @@ final class ClaudeService {
 
         Logger.ai.info("Sending request to Claude API (model: \(model))")
 
-        // 3. Execute request
-        let data: Data
-        let response: URLResponse
+        // 3. Execute request with retry (retries on network errors, 429, 5xx)
+        let text: String
         do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            let serviceError = ClaudeServiceError.networkError(error)
-            lastError = serviceError.localizedDescription
-            Logger.ai.error("Network error: \(error.localizedDescription)")
-            throw serviceError
-        }
-
-        // 4. Check HTTP status
-        guard let httpResponse = response as? HTTPURLResponse else {
-            let serviceError = ClaudeServiceError.httpError(statusCode: 0, message: "Invalid response type")
-            lastError = serviceError.localizedDescription
-            throw serviceError
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            let message: String
-            if let errorResponse = try? JSONDecoder().decode(ClaudeErrorResponse.self, from: data) {
-                message = errorResponse.error.message
-            } else {
-                message = String(data: data, encoding: .utf8) ?? "Unknown error"
+        text = try await withRetry { [session] in
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                throw ClaudeServiceError.networkError(error)
             }
 
-            let serviceError: ClaudeServiceError
-            switch httpResponse.statusCode {
-            case 401:
-                serviceError = .invalidAPIKey
-            case 429:
-                let retryAfter = httpResponse.value(forHTTPHeaderField: "retry-after")
-                    .flatMap { Int($0) }
-                serviceError = .rateLimited(retryAfterSeconds: retryAfter)
-            default:
-                serviceError = .httpError(statusCode: httpResponse.statusCode, message: message)
+            // 4. Check HTTP status
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw ClaudeServiceError.httpError(statusCode: 0, message: "Invalid response type")
             }
 
-            lastError = serviceError.localizedDescription
-            Logger.ai.error("API error \(httpResponse.statusCode): \(message)")
-            throw serviceError
-        }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                let message: String
+                if let errorResponse = try? JSONDecoder().decode(ClaudeErrorResponse.self, from: data) {
+                    message = errorResponse.error.message
+                } else {
+                    message = String(data: data, encoding: .utf8) ?? "Unknown error"
+                }
+                throw ClaudeServiceError.httpError(
+                    statusCode: httpResponse.statusCode,
+                    message: message
+                )
+            }
 
-        // 5. Decode response
-        let claudeResponse: ClaudeResponse
-        do {
-            claudeResponse = try JSONDecoder().decode(ClaudeResponse.self, from: data)
+            // 5. Decode response
+            let claudeResponse: ClaudeResponse
+            do {
+                claudeResponse = try JSONDecoder().decode(ClaudeResponse.self, from: data)
+            } catch {
+                throw ClaudeServiceError.decodingError(error)
+            }
+
+            // 6. Extract text
+            guard let responseText = claudeResponse.content.first(where: { $0.type == "text" })?.text,
+                  !responseText.isEmpty else {
+                throw ClaudeServiceError.emptyResponse
+            }
+
+            Logger.ai.info("Received response: \(claudeResponse.usage.input_tokens) input tokens, \(claudeResponse.usage.output_tokens) output tokens")
+
+            return responseText
+        }
         } catch {
-            let serviceError = ClaudeServiceError.decodingError(error)
-            lastError = serviceError.localizedDescription
-            Logger.ai.error("Decoding error: \(error.localizedDescription)")
-            throw serviceError
+            lastError = error.localizedDescription
+            Logger.ai.error("Claude API error: \(error.localizedDescription)")
+            throw error
         }
-
-        // 6. Extract text
-        guard let text = claudeResponse.content.first(where: { $0.type == "text" })?.text,
-              !text.isEmpty else {
-            let serviceError = ClaudeServiceError.emptyResponse
-            lastError = serviceError.localizedDescription
-            throw serviceError
-        }
-
-        Logger.ai.info("Received response: \(claudeResponse.usage.input_tokens) input tokens, \(claudeResponse.usage.output_tokens) output tokens")
 
         return text
+    }
+
+    // MARK: - Retry Helper
+
+    /// Retries an operation with exponential backoff. Does NOT retry on 400/401/403 client errors.
+    private func withRetry<T>(maxAttempts: Int = 3, operation: () async throws -> T) async throws -> T {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                // Don't retry on client errors (400, 401, 403)
+                if case ClaudeServiceError.httpError(let statusCode, _) = error,
+                   [400, 401, 403].contains(statusCode) {
+                    throw error
+                }
+                if attempt < maxAttempts - 1 {
+                    let delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+            }
+        }
+        throw lastError!
     }
 
     /// Performs a lightweight request to verify the API key and connectivity.

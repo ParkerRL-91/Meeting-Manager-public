@@ -126,38 +126,42 @@ final class GoogleCalendarService {
 
         Logger.calendar.info("Fetching events from \(from) to \(to)")
 
-        var allEvents: [CalendarEvent] = []
-        var nextPageToken: String?
-        var currentURL = url
+        let allEvents: [CalendarEvent] = try await withRetry {
+            var events: [CalendarEvent] = []
+            var nextPageToken: String?
+            var currentURL = url
 
-        // Page through all results
-        repeat {
-            if let token = nextPageToken {
-                var paged = URLComponents(url: currentURL, resolvingAgainstBaseURL: false)!
-                var items = paged.queryItems ?? []
-                items.removeAll { $0.name == "pageToken" }
-                items.append(URLQueryItem(name: "pageToken", value: token))
-                paged.queryItems = items
-                currentURL = paged.url!
-            }
+            // Page through all results
+            repeat {
+                if let token = nextPageToken {
+                    var paged = URLComponents(url: currentURL, resolvingAgainstBaseURL: false)!
+                    var items = paged.queryItems ?? []
+                    items.removeAll { $0.name == "pageToken" }
+                    items.append(URLQueryItem(name: "pageToken", value: token))
+                    paged.queryItems = items
+                    currentURL = paged.url!
+                }
 
-            let request = authorizedRequest(url: currentURL, accessToken: accessToken)
-            let (data, response) = try await performRequest(request)
-            try validateHTTPResponse(response, data: data)
+                let request = self.authorizedRequest(url: currentURL, accessToken: accessToken)
+                let (data, response) = try await self.performRequest(request)
+                try self.validateHTTPResponse(response, data: data)
 
-            let decoded: EventListResponse
-            do {
-                decoded = try JSONDecoder().decode(EventListResponse.self, from: data)
-            } catch {
-                throw GoogleCalendarError.decodingError(error)
-            }
+                let decoded: EventListResponse
+                do {
+                    decoded = try JSONDecoder().decode(EventListResponse.self, from: data)
+                } catch {
+                    throw GoogleCalendarError.decodingError(error)
+                }
 
-            let events = (decoded.items ?? []).compactMap { resource in
-                mapToCalendarEvent(resource, calendarId: calendarId)
-            }
-            allEvents.append(contentsOf: events)
-            nextPageToken = decoded.nextPageToken
-        } while nextPageToken != nil
+                let pageEvents = (decoded.items ?? []).compactMap { resource in
+                    self.mapToCalendarEvent(resource, calendarId: calendarId)
+                }
+                events.append(contentsOf: pageEvents)
+                nextPageToken = decoded.nextPageToken
+            } while nextPageToken != nil
+
+            return events
+        }
 
         Logger.calendar.info("Fetched \(allEvents.count) events")
         return allEvents
@@ -196,6 +200,7 @@ final class GoogleCalendarService {
     private func authorizedRequest(url: URL, accessToken: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.timeoutInterval = 120
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
@@ -253,6 +258,30 @@ final class GoogleCalendarService {
             description: resource.description,
             calendarId: calendarId
         )
+    }
+
+    // MARK: - Retry Helper
+
+    /// Retries an operation with exponential backoff. Does NOT retry on 400/401/403 client errors.
+    private func withRetry<T>(maxAttempts: Int = 3, operation: () async throws -> T) async throws -> T {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                // Don't retry on client errors (400, 401, 403)
+                if case GoogleCalendarError.httpError(let statusCode, _) = error,
+                   [400, 401, 403].contains(statusCode) {
+                    throw error
+                }
+                if attempt < maxAttempts - 1 {
+                    let delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+            }
+        }
+        throw lastError!
     }
 
     /// Parses a Google Calendar `EventDateTime` into a `Date`.

@@ -276,6 +276,7 @@ final class GoogleAuthManager {
         let clientId = GoogleAuthManager.resolvedClientId()
         var request = URLRequest(url: URL(string: OAuthConfig.tokenURL)!)
         request.httpMethod = "POST"
+        request.timeoutInterval = 120
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let params: [String: String] = [
@@ -301,6 +302,7 @@ final class GoogleAuthManager {
 
         var request = URLRequest(url: URL(string: OAuthConfig.tokenURL)!)
         request.httpMethod = "POST"
+        request.timeoutInterval = 120
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let params: [String: String] = [
@@ -310,10 +312,30 @@ final class GoogleAuthManager {
         ]
         request.httpBody = urlEncode(params)
 
-        let (data, response) = try await performRequest(request)
-        try validateHTTPResponse(response, data: data)
+        let newTokens: OAuthTokens = try await withRetry { [session] in
+            let (data, response): (Data, URLResponse)
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                throw GoogleAuthError.networkError(error)
+            }
 
-        let newTokens = try parseTokenResponse(data, existingRefreshToken: refreshToken)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw GoogleAuthError.invalidResponse
+            }
+            // Don't retry on 400/401/403
+            if [400, 401, 403].contains(httpResponse.statusCode) {
+                let message = String(data: data, encoding: .utf8) ?? "Unknown error"
+                throw GoogleAuthError.tokenRefreshFailed("HTTP \(httpResponse.statusCode): \(message)")
+            }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                let message = String(data: data, encoding: .utf8) ?? "Unknown error"
+                throw GoogleAuthError.tokenRefreshFailed("HTTP \(httpResponse.statusCode): \(message)")
+            }
+
+            return try self.parseTokenResponse(data, existingRefreshToken: refreshToken)
+        }
+
         try persistTokens(newTokens)
         cachedTokens = newTokens
 

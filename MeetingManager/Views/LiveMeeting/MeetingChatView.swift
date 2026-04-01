@@ -10,6 +10,8 @@ struct MeetingChatView: View {
     @State private var chatService: MeetingChatService?
     @State private var chatMessageRepo: ChatMessageRepository?
     @State private var lastFailedQuestion: String?
+    @State private var loadTask: Task<Void, Never>?
+    @State private var sendTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -49,6 +51,10 @@ struct MeetingChatView: View {
         }
         .background(Color.appBackground)
         .onAppear(perform: setup)
+        .onDisappear {
+            loadTask?.cancel()
+            sendTask?.cancel()
+        }
     }
 
     // MARK: - Subviews
@@ -196,7 +202,7 @@ struct MeetingChatView: View {
         )
         chatService = service
 
-        Task {
+        loadTask = Task {
             do {
                 messages = try await repo.messagesForMeeting(meetingId)
             } catch {
@@ -238,7 +244,7 @@ struct MeetingChatView: View {
         inputText = ""
         lastFailedQuestion = question
 
-        Task {
+        sendTask = Task {
             guard let textGenerator = await buildTextGenerator() else { return }
             do {
                 try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)
@@ -254,7 +260,7 @@ struct MeetingChatView: View {
         guard let question = lastFailedQuestion, let service = chatService, let repo = chatMessageRepo else { return }
         service.clearError()
 
-        Task {
+        sendTask = Task {
             guard let textGenerator = await buildTextGenerator() else { return }
             do {
                 try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)

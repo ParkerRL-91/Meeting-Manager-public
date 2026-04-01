@@ -71,7 +71,7 @@ struct TranscriptPaneView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .onChange(of: transcripts.count) { _, _ in
+            .onChange(of: transcripts.last?.id) { _, _ in
                 guard autoScrollEnabled, let lastId = transcripts.last?.id else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(lastId, anchor: .bottom)

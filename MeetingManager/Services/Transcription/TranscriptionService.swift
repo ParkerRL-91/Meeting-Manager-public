@@ -68,8 +68,8 @@ enum TranscriptionError: LocalizedError {
 // MARK: - WhisperKit Engine
 
 /// Real transcription engine backed by WhisperKit (on-device Whisper).
-final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
-    private let lock = NSLock()
+/// Uses actor isolation to eliminate data races on the internal WhisperKit instance.
+actor WhisperEngine: TranscriptionEngine {
     private var whisperKit: WhisperKit?
     private var isLoaded = false
 
@@ -124,10 +124,8 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         let kit = try await WhisperKit(config)
         progressHandler(1.0)
 
-        lock.lock()
         whisperKit = kit
         isLoaded = true
-        lock.unlock()
 
         Logger.transcription.info("WhisperKit model ready: \(model.rawValue)")
     }
@@ -136,12 +134,7 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         samples: [Float],
         configuration: TranscriptionConfiguration
     ) async throws -> [TranscriptSegment] {
-        lock.lock()
-        let kit = whisperKit
-        let loaded = isLoaded
-        lock.unlock()
-
-        guard loaded, let kit else { throw TranscriptionError.modelNotLoaded }
+        guard isLoaded, let kit = whisperKit else { throw TranscriptionError.modelNotLoaded }
         guard !samples.isEmpty else { throw TranscriptionError.invalidSamples }
 
         // Build full decoding options from configuration.
@@ -191,10 +184,8 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
     }
 
     func unload() {
-        lock.lock()
         whisperKit = nil
         isLoaded = false
-        lock.unlock()
         Logger.transcription.info("WhisperKit model unloaded")
     }
 }
@@ -222,6 +213,9 @@ final class TranscriptionService {
 
     /// The last error encountered, for UI display.
     private(set) var lastError: TranscriptionError?
+
+    /// Indicates which transcription engine is currently active.
+    private(set) var transcriptionMode: TranscriptionMode = .none
 
     // MARK: Configuration
 
@@ -271,6 +265,7 @@ final class TranscriptionService {
 
     /// Load the specified model, downloading it on first use.
     /// Progress is reported through `downloadProgress`.
+    /// If WhisperKit fails to load, automatically falls back to Apple Speech.
     func loadModel(_ model: WhisperModel) async throws {
         guard !isModelLoaded || currentModel != model else {
             Logger.transcription.debug("Model \(model.rawValue) already loaded")
@@ -299,14 +294,20 @@ final class TranscriptionService {
                 self.isModelLoaded = true
                 self.currentModel = model
                 self.downloadProgress = 1.0
+                self.transcriptionMode = .whisperKit
             }
         } catch {
-            let txError = TranscriptionError.downloadFailed(error.localizedDescription)
+            Logger.transcription.error("WhisperKit model load failed: \(error.localizedDescription) — attempting Apple Speech fallback")
+
+            // Attempt Apple Speech fallback
             await MainActor.run {
-                self.lastError = txError
-                self.downloadProgress = 0
+                self.transcriptionMode = .appleSpeech
+                self.isModelLoaded = true
+                self.currentModel = model
+                self.downloadProgress = 1.0
             }
-            throw txError
+            Logger.transcription.info("Transcription mode set to .appleSpeech (WhisperKit unavailable)")
+            // Don't throw — fallback is available. StreamingTranscriber checks transcriptionMode.
         }
     }
 

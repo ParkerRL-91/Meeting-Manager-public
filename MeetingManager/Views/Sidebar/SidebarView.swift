@@ -9,24 +9,8 @@ struct SidebarView: View {
     @FocusState private var isSearchFocused: Bool
     @State private var scheduledExpanded = true
     @State private var historyExpanded = true
-
-    // MARK: - Filtered Meetings
-
-    private var filteredUpcoming: [Meeting] {
-        let base = showArchived
-            ? appState.upcomingMeetings
-            : appState.upcomingMeetings.filter { $0.status != .archived }
-        if searchQuery.isEmpty { return base }
-        return base.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
-    }
-
-    private var filteredPast: [Meeting] {
-        let base = showArchived
-            ? appState.pastMeetings
-            : appState.pastMeetings.filter { $0.status != .archived }
-        if searchQuery.isEmpty { return base }
-        return base.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
-    }
+    @State private var filteredUpcoming: [Meeting] = []
+    @State private var filteredPast: [Meeting] = []
 
     private var hasNoResults: Bool {
         !searchQuery.isEmpty && filteredUpcoming.isEmpty && filteredPast.isEmpty
@@ -229,9 +213,37 @@ struct SidebarView: View {
         }
         .onAppear {
             appState.loadMeetings()
+            updateFilteredLists()
         }
+        .onChange(of: searchQuery) { _, _ in updateFilteredLists() }
+        .onChange(of: showArchived) { _, _ in updateFilteredLists() }
+        .onChange(of: appState.upcomingMeetings) { _, _ in updateFilteredLists() }
+        .onChange(of: appState.pastMeetings) { _, _ in updateFilteredLists() }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
             isSearchFocused = true
+        }
+    }
+
+    // MARK: - Filtering
+
+    private func updateFilteredLists() {
+        let upcomingBase = showArchived
+            ? appState.upcomingMeetings
+            : appState.upcomingMeetings.filter { $0.status != .archived }
+        let pastBase = showArchived
+            ? appState.pastMeetings
+            : appState.pastMeetings.filter { $0.status != .archived }
+
+        if searchQuery.isEmpty {
+            filteredUpcoming = upcomingBase
+            filteredPast = pastBase
+        } else {
+            filteredUpcoming = upcomingBase.filter {
+                $0.title.localizedCaseInsensitiveContains(searchQuery)
+            }
+            filteredPast = pastBase.filter {
+                $0.title.localizedCaseInsensitiveContains(searchQuery)
+            }
         }
     }
 

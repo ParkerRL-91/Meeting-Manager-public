@@ -11,18 +11,9 @@ struct FullTranscriptView: View {
     @State private var meeting: Meeting?
     @State private var searchQuery: String = ""
     @State private var isLoading = true
+    @State private var filteredTranscripts: [Transcript] = []
 
     private let exportService = ExportService()
-
-    private var filteredTranscripts: [Transcript] {
-        if searchQuery.isEmpty {
-            return transcripts
-        }
-        return transcripts.filter {
-            $0.text.localizedCaseInsensitiveContains(searchQuery)
-            || $0.speakerDisplayName.localizedCaseInsensitiveContains(searchQuery)
-        }
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,7 +78,10 @@ struct FullTranscriptView: View {
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadTranscripts()
+            updateFilteredTranscripts()
         }
+        .onChange(of: searchQuery) { _, _ in updateFilteredTranscripts() }
+        .onChange(of: transcripts) { _, _ in updateFilteredTranscripts() }
     }
 
     // MARK: - Transcript List
@@ -106,6 +100,19 @@ struct FullTranscriptView: View {
                 }
             }
             .padding(.vertical, 8)
+        }
+    }
+
+    // MARK: - Filtering
+
+    private func updateFilteredTranscripts() {
+        if searchQuery.isEmpty {
+            filteredTranscripts = transcripts
+        } else {
+            filteredTranscripts = transcripts.filter {
+                $0.text.localizedCaseInsensitiveContains(searchQuery)
+                || $0.speakerDisplayName.localizedCaseInsensitiveContains(searchQuery)
+            }
         }
     }
 

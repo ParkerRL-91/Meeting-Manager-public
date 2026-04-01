@@ -1,5 +1,66 @@
 import AVFoundation
+import Dispatch
 import Foundation
+
+// MARK: - CircularBuffer
+
+/// A fixed-capacity ring buffer for Float samples.
+/// Uses contiguous storage for efficient bulk reads.
+struct CircularBuffer<Element> {
+    private var storage: [Element]
+    private var head: Int = 0  // next write position
+    private var _count: Int = 0
+    let capacity: Int
+
+    init(capacity: Int, defaultValue: Element) {
+        self.capacity = capacity
+        self.storage = [Element](repeating: defaultValue, count: capacity)
+    }
+
+    var count: Int { _count }
+
+    mutating func append(contentsOf elements: some Collection<Element>) {
+        for element in elements {
+            storage[head] = element
+            head = (head + 1) % capacity
+            if _count < capacity {
+                _count += 1
+            }
+        }
+    }
+
+    /// Read the first `n` elements (oldest) into a contiguous array.
+    func prefix(_ n: Int) -> [Element] {
+        let n = min(n, _count)
+        guard n > 0 else { return [] }
+        let start = (head - _count + capacity) % capacity
+        var result = [Element]()
+        result.reserveCapacity(n)
+        for i in 0..<n {
+            result.append(storage[(start + i) % capacity])
+        }
+        return result
+    }
+
+    /// Drop the oldest `n` elements.
+    mutating func removeFirst(_ n: Int) {
+        let n = min(n, _count)
+        _count -= n
+    }
+
+    mutating func removeAll() {
+        _count = 0
+        head = 0
+    }
+
+    /// Read element at logical index (0 = oldest).
+    subscript(index: Int) -> Element {
+        let start = (head - _count + capacity) % capacity
+        return storage[(start + index) % capacity]
+    }
+}
+
+// MARK: - AudioBufferManager
 
 /// Thread-safe ring buffer that bridges audio capture to transcription.
 /// Receives buffers from mic and system audio, provides chunks for WhisperKit.
@@ -7,17 +68,19 @@ import Foundation
 /// Audio mixing: mic and system audio are summed sample-by-sample (not concatenated).
 /// Concatenating would give WhisperKit alternating windows of each source, making
 /// it impossible to transcribe both speakers. Summing produces a single waveform
-/// where both voices are simultaneously audible — the correct input for Whisper.
+/// where both voices are simultaneously audible -- the correct input for Whisper.
 final class AudioBufferManager {
     private let lock = NSLock()
-    private var micSamples: [Float] = []
-    private var systemSamples: [Float] = []
+
+    /// Circular buffers: 30 seconds at 16kHz = 480,000 samples capacity.
+    private var micSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
+    private var systemSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
     private var audioFile: AVAudioFile?
     private let sampleRate: Double = 16000
 
     /// Maximum recording duration in seconds. Prevents unbounded memory growth
     /// from accidental multi-hour recordings. 2 hours = 7200s.
-    /// At 16kHz mono Float32, 2 hours ≈ 460 MB per source buffer.
+    /// At 16kHz mono Float32, 2 hours ~ 460 MB per source buffer.
     let maxRecordingDurationSeconds: TimeInterval = 7200
 
     /// Maximum sample count per source buffer, derived from maxRecordingDurationSeconds.
@@ -27,7 +90,7 @@ final class AudioBufferManager {
     private(set) var isAtCapacity = false
 
     /// Duration of audio chunks provided to the transcriber (seconds).
-    /// Whisper is designed for 30-second windows — shorter chunks destroy context
+    /// Whisper is designed for 30-second windows -- shorter chunks destroy context
     /// and produce [BLANK_AUDIO] / [inaudible] output.
     let chunkDuration: TimeInterval = 30.0
 
@@ -43,6 +106,59 @@ final class AudioBufferManager {
         max(micSamples.count, systemSamples.count)
     }
 
+    // MARK: - Error Handling (Task 4)
+
+    /// Called when a file write error occurs. Wire this to surface errors to the UI.
+    var onWriteError: ((Error) -> Void)?
+
+    /// Number of consecutive write failures. Auto-stops after 5.
+    private var consecutiveWriteFailures: Int = 0
+    private let maxConsecutiveWriteFailures = 5
+
+    // MARK: - Memory Pressure Monitoring (Task 12)
+
+    /// Called on critical memory pressure so the caller (e.g. AppState) can auto-stop.
+    var onMemoryPressure: (() -> Void)?
+
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+
+    /// Begin monitoring system memory pressure.
+    func startMemoryPressureMonitoring() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .global(qos: .utility)
+        )
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let event = source.data
+            if event.contains(.critical) {
+                // Critical: flush everything and notify caller to auto-stop
+                self.lock.lock()
+                self.micSamples.removeAll()
+                self.systemSamples.removeAll()
+                self.lock.unlock()
+                self.onMemoryPressure?()
+            } else if event.contains(.warning) {
+                // Warning: flush older buffers (keep only overlap worth of samples)
+                self.lock.lock()
+                let keepCount = self.overlapSampleCount
+                if self.micSamples.count > keepCount {
+                    self.micSamples.removeFirst(self.micSamples.count - keepCount)
+                }
+                if self.systemSamples.count > keepCount {
+                    self.systemSamples.removeFirst(self.systemSamples.count - keepCount)
+                }
+                self.lock.unlock()
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    /// Total samples appended (for capacity tracking, since circular buffer wraps).
+    private var totalMicSamplesAppended: Int = 0
+    private var totalSystemSamplesAppended: Int = 0
+
     func prepareForRecording(outputURL: URL) throws {
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -55,6 +171,8 @@ final class AudioBufferManager {
             forWriting: outputURL,
             settings: format.settings
         )
+        consecutiveWriteFailures = 0
+        startMemoryPressureMonitoring()
     }
 
     func appendMicBuffer(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
@@ -65,7 +183,8 @@ final class AudioBufferManager {
         ))
 
         lock.lock()
-        if micSamples.count < maxSampleCount {
+        totalMicSamplesAppended += samples.count
+        if totalMicSamplesAppended < maxSampleCount {
             micSamples.append(contentsOf: samples)
         } else {
             isAtCapacity = true
@@ -83,7 +202,8 @@ final class AudioBufferManager {
         ))
 
         lock.lock()
-        if systemSamples.count < maxSampleCount {
+        totalSystemSamplesAppended += samples.count
+        if totalSystemSamplesAppended < maxSampleCount {
             systemSamples.append(contentsOf: samples)
         } else {
             isAtCapacity = true
@@ -98,7 +218,7 @@ final class AudioBufferManager {
     /// Mixing strategy: sum mic and system samples at each position, then scale by 0.5
     /// to prevent clipping. If one source is shorter (still buffering), treat missing
     /// samples as silence (zero). This means early chunks may be mic-only or system-only
-    /// until both streams are in sync — that's correct behaviour.
+    /// until both streams are in sync -- that's correct behaviour.
     func nextChunk() -> AudioChunk? {
         lock.lock()
         defer { lock.unlock() }
@@ -145,7 +265,13 @@ final class AudioBufferManager {
         audioFile = nil
         micSamples.removeAll()
         systemSamples.removeAll()
+        totalMicSamplesAppended = 0
+        totalSystemSamplesAppended = 0
+        consecutiveWriteFailures = 0
         lock.unlock()
+
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
     }
 
     // MARK: - Private
@@ -158,8 +284,23 @@ final class AudioBufferManager {
         guard let file else { return }
         do {
             try file.write(from: buffer)
+            lock.lock()
+            consecutiveWriteFailures = 0
+            lock.unlock()
         } catch {
-            print("Failed to write audio to file: \(error)")
+            lock.lock()
+            consecutiveWriteFailures += 1
+            let failures = consecutiveWriteFailures
+            lock.unlock()
+
+            onWriteError?(error)
+
+            if failures >= maxConsecutiveWriteFailures {
+                // Auto-stop writing to prevent repeated failures
+                lock.lock()
+                audioFile = nil
+                lock.unlock()
+            }
         }
     }
 }

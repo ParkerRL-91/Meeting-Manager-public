@@ -18,6 +18,18 @@ enum WhisperModel: String, CaseIterable, Identifiable, Codable {
     var downloadSizeDescription: String { "~1.5 GB" }
 }
 
+// MARK: - Transcription Mode
+
+/// Indicates which transcription engine is active.
+enum TranscriptionMode: String, Codable, Sendable {
+    /// WhisperKit on-device model (preferred, highest accuracy).
+    case whisperKit
+    /// Apple SFSpeechRecognizer fallback (used when WhisperKit fails to load).
+    case appleSpeech
+    /// No transcription engine available.
+    case none
+}
+
 // MARK: - Transcription Configuration
 
 /// User-configurable settings for the transcription pipeline.
@@ -25,7 +37,7 @@ struct TranscriptionConfiguration: Codable, Equatable {
 
     // MARK: Model
 
-    /// The WhisperKit model to use — always large-v3.
+    /// The WhisperKit model to use -- always large-v3.
     var model: WhisperModel = .largev3
 
     // MARK: Language
@@ -33,7 +45,7 @@ struct TranscriptionConfiguration: Codable, Equatable {
     /// BCP-47 language code. WhisperKit uses this as a hint.
     var language: String = "en"
 
-    // MARK: Decoding — accuracy controls
+    // MARK: Decoding -- accuracy controls
 
     /// Greedy decoding at temperature 0 is most accurate and deterministic.
     /// Falls back to sampling only when model confidence is very low.
@@ -42,7 +54,7 @@ struct TranscriptionConfiguration: Codable, Equatable {
     /// Number of times to retry with higher temperature before giving up.
     var temperatureFallbackCount: Int = 3
 
-    // MARK: Decoding — hallucination guards
+    // MARK: Decoding -- hallucination guards
 
     /// Suppress the blank token. Eliminates long stretches of empty output.
     var suppressBlank: Bool = true
@@ -66,14 +78,14 @@ struct TranscriptionConfiguration: Codable, Equatable {
 
     // MARK: VAD
 
-    /// Voice Activity Detection energy threshold (0.0 – 1.0).
+    /// Voice Activity Detection energy threshold (0.0 -- 1.0).
     /// Chunks whose RMS energy is below this value are skipped before
     /// hitting the model, saving inference time.
     var vadEnergyThreshold: Float = 0.001
 
     // MARK: Post-processing
 
-    /// Minimum per-segment confidence to keep (0.0 – 1.0).
+    /// Minimum per-segment confidence to keep (0.0 -- 1.0).
     var minimumConfidence: Double = 0.3
 
     // MARK: Defaults
