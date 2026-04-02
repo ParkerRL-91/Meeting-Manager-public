@@ -8,6 +8,8 @@ struct HomeView: View {
     // Tick every 30 seconds to refresh countdowns
     @State private var now = Date()
     @State private var showAllRecent = false
+    @State private var cachedAllToday: [Meeting] = []
+    @State private var cachedRecentMeetings: [Meeting] = []
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -48,7 +50,7 @@ struct HomeView: View {
                 }
 
                 // MARK: - Today's Meetings
-                let todayMeetings = allToday
+                let todayMeetings = cachedAllToday
                 if !todayMeetings.isEmpty {
                     SectionHeader(title: "Today")
                         .padding(.horizontal, 24)
@@ -72,7 +74,7 @@ struct HomeView: View {
                 }
 
                 // MARK: - Recent Meetings (exclude today — already shown above)
-                let allRecent = recentMeetings
+                let allRecent = cachedRecentMeetings
                 let visibleRecent = showAllRecent ? allRecent : Array(allRecent.prefix(8))
                 if !visibleRecent.isEmpty {
                     SectionHeader(title: "Recent")
@@ -107,6 +109,9 @@ struct HomeView: View {
         .onReceive(timer) { date in
             now = date
         }
+        .onAppear { rebuildCache() }
+        .onChange(of: appState.upcomingMeetings) { _, _ in rebuildCache() }
+        .onChange(of: appState.pastMeetings) { _, _ in rebuildCache() }
     }
 
     // MARK: - Computed
@@ -121,32 +126,24 @@ struct HomeView: View {
         now.formatted(date: .complete, time: .omitted)
     }
 
-    /// All meetings for today: upcoming + past, deduped and sorted by scheduled start.
-    private var allToday: [Meeting] {
+    // MARK: - Cache
+
+    private func rebuildCache() {
         let cal = Calendar.current
-        func isToday(_ meeting: Meeting) -> Bool {
+        let isToday: (Meeting) -> Bool = { meeting in
             guard let date = meeting.scheduledStartDate ?? meeting.startDate else { return false }
             return cal.isDateInToday(date)
         }
-        let upcoming = appState.upcomingMeetings.filter(isToday)
-        let past = appState.pastMeetings.filter(isToday)
         var seen = Set<String>()
-        return (upcoming + past)
+        cachedAllToday = (appState.upcomingMeetings.filter(isToday)
+                         + appState.pastMeetings.filter(isToday))
             .filter { seen.insert($0.id).inserted }
             .sorted {
                 let da = $0.scheduledStartDate ?? $0.startDate ?? .distantFuture
                 let db = $1.scheduledStartDate ?? $1.startDate ?? .distantFuture
                 return da < db
             }
-    }
-
-    /// Past meetings excluding today (today's are shown in the Today section).
-    private var recentMeetings: [Meeting] {
-        let cal = Calendar.current
-        return appState.pastMeetings.filter { meeting in
-            guard let date = meeting.scheduledStartDate ?? meeting.startDate else { return true }
-            return !cal.isDateInToday(date)
-        }
+        cachedRecentMeetings = appState.pastMeetings.filter { !isToday($0) }
     }
 }
 

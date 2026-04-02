@@ -34,7 +34,7 @@ final class BrowserCallDetector {
 
     // MARK: - Lifecycle
 
-    func start(interval: TimeInterval = 5) {
+    func start(interval: TimeInterval = 10) {
         guard pollTimer == nil else { return }
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
@@ -100,19 +100,21 @@ final class BrowserCallDetector {
     }
 
     private func detectBrowserCall() -> DetectionResult {
-        // Strategy 1: AppleScript (best — gives tab titles)
-        if let match = checkChromeTabsViaAppleScript() {
+        // Strategy 1: Check if a browser is using the microphone (cheapest, no permissions needed)
+        if isBrowserUsingMicrophone() {
+            return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage")
+        }
+
+        // Strategy 2: AppleScript (gives tab titles — only runs if Chrome is actually running)
+        let chromeRunning = NSWorkspace.shared.runningApplications
+            .contains { $0.bundleIdentifier == "com.google.Chrome" }
+        if chromeRunning, let match = checkChromeTabsViaAppleScript() {
             return DetectionResult(inCall: true, name: match, method: "AppleScript")
         }
 
-        // Strategy 2: CGWindowList (needs Screen Recording permission)
+        // Strategy 3: CGWindowList (last resort — requires Screen Recording permission)
         if let match = checkViaCGWindowList() {
             return DetectionResult(inCall: true, name: match, method: "CGWindowList")
-        }
-
-        // Strategy 3: Check if a browser is using the microphone (no permissions needed)
-        if isBrowserUsingMicrophone() {
-            return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage")
         }
 
         return DetectionResult(inCall: false, name: nil, method: "none")

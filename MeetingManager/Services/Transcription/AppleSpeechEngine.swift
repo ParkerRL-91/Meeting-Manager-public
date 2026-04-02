@@ -23,8 +23,10 @@ final class AppleSpeechTranscriber {
     // MARK: - Private
 
     private let speechRecognizer: SFSpeechRecognizer?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    /// Protected by `requestLock` for nonisolated access from audio callbacks.
+    nonisolated(unsafe) private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private let requestLock = NSLock()
 
     /// The meeting ID currently being transcribed.
     private var currentMeetingId: String?
@@ -77,7 +79,7 @@ final class AppleSpeechTranscriber {
         request.requiresOnDeviceRecognition = true  // Force on-device — no network needed
         // request.addsPunctuation = true  // Available on newer macOS
 
-        self.recognitionRequest = request
+        requestLock.withLock { self.recognitionRequest = request }
 
         // Install a tap on the audio engine's input node to feed audio to the recognizer.
         // The engine is already running (started by AudioCaptureService).
@@ -107,19 +109,65 @@ final class AppleSpeechTranscriber {
         fileLog("AppleSpeechTranscriber STARTED")
     }
 
+    /// Start real-time transcription without an audio engine.
+    /// AppState feeds buffers via `audioCaptureService.onRawMicBuffer → appendBuffer(_:)`.
+    /// This avoids conflicting audio engine taps and keeps all wiring in AppState.
+    func start(meetingId: String, repository: TranscriptRepository) {
+        guard !isActive else {
+            Logger.transcription.warning("AppleSpeechTranscriber already active")
+            return
+        }
+
+        guard let speechRecognizer, speechRecognizer.isAvailable else {
+            Logger.transcription.error("SFSpeechRecognizer not available")
+            fileLog("SFSpeechRecognizer not available on this system")
+            return
+        }
+
+        self.currentMeetingId = meetingId
+        self.repository = repository
+        self.lastSavedTranscriptLength = 0
+        self.savedSegmentTexts = []
+        self.segmentCount = 0
+        self.lastError = nil
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = true
+
+        requestLock.withLock { self.recognitionRequest = request }
+
+        fileLog("Starting SFSpeechRecognizer for meeting \(meetingId) (buffer-feed mode)")
+
+        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
+            Task { @MainActor in
+                self?.handleRecognitionResult(result: result, error: error)
+            }
+        }
+
+        isActive = true
+        Logger.transcription.info("AppleSpeechTranscriber started (buffer-feed) for meeting \(meetingId)")
+        fileLog("AppleSpeechTranscriber STARTED (buffer-feed)")
+    }
+
     /// Feed an audio buffer to the speech recognizer.
-    /// Called from MicrophoneCapture's onBuffer callback.
-    func appendBuffer(_ buffer: AVAudioPCMBuffer) {
-        recognitionRequest?.append(buffer)
+    /// Marked nonisolated so it can be called directly from the audio callback queue
+    /// without allocating a Task per buffer (~100 calls/sec on the hot audio path).
+    nonisolated func appendBuffer(_ buffer: AVAudioPCMBuffer) {
+        requestLock.withLock { recognitionRequest }?.append(buffer)
     }
 
     /// Stop transcription.
     func stop() {
         guard isActive else { return }
 
-        recognitionRequest?.endAudio()
+        let req = requestLock.withLock { () -> SFSpeechAudioBufferRecognitionRequest? in
+            let r = recognitionRequest
+            recognitionRequest = nil
+            return r
+        }
+        req?.endAudio()
         recognitionTask?.cancel()
-        recognitionRequest = nil
         recognitionTask = nil
         isActive = false
         currentMeetingId = nil

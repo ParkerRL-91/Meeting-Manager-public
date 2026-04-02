@@ -32,6 +32,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// The meeting should be auto-stopped to prevent unbounded memory growth.
     var onCapacityReached: (() -> Void)?
 
+    /// Called when the AudioBufferManager encounters a write error (e.g., disk full).
+    /// The error is surfaced to the user via AppState.lastUserError.
+    var onWriteError: ((Error) -> Void)?
+
     /// How many consecutive seconds of silence before triggering auto-stop.
     var silenceTimeout: TimeInterval = 45
 
@@ -127,6 +131,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
         try bufferManager.prepareForRecording(outputURL: fileURL)
 
+        // Surface write errors (e.g. disk full) to the caller via onWriteError
+        bufferManager.onWriteError = { [weak self] error in
+            self?.onWriteError?(error)
+        }
+
         // Select the best available input device and configure mic capture
         if let bestDevice = sessionManager.bestInputDevice() {
             Logger.audio.info("Selected input device: \(bestDevice.localizedName) (id: \(bestDevice.uniqueID))")
@@ -136,10 +145,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         // Wire raw buffer callback for speech recognizer.
-        // Capture the callback value on MainActor to avoid cross-actor access in the closure.
-        let rawMicCallback = self.onRawMicBuffer
-        micCapture.onRawBuffer = { buffer in
-            rawMicCallback?(buffer)
+        // Read the property dynamically so late-set callbacks are captured correctly.
+        micCapture.onRawBuffer = { [weak self] buffer in
+            self?.onRawMicBuffer?(buffer)
         }
 
         // Wire diagnostic logging from mic capture

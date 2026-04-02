@@ -51,11 +51,14 @@ final class TranscriptRepository {
 
     func search(meetingId: String, query: String) async throws -> [Transcript] {
         try await database.writer.read { db in
-            try Transcript
-                .filter(Transcript.Columns.meetingId == meetingId)
-                .filter(Transcript.Columns.text.like("%\(query)%"))
-                .order(Transcript.Columns.startTime.asc)
-                .fetchAll(db)
+            let sql = """
+                SELECT transcript.* FROM transcript
+                JOIN transcript_fts ON transcript.rowid = transcript_fts.rowid
+                WHERE transcript_fts MATCH ? AND transcript.meetingId = ?
+                ORDER BY transcript.startTime
+                """
+            let pattern = FTS5Pattern(matchingAllTokensIn: query)?.rawPattern ?? query
+            return try Transcript.fetchAll(db, sql: sql, arguments: [pattern, meetingId])
         }
     }
 

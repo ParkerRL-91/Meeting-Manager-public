@@ -122,12 +122,25 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
             )
         }
 
-        let kit = try await WhisperKit(config)
-        progressHandler(1.0)
-
-        lock.withLock {
-            whisperKit = kit
-            isLoaded = true
+        // Wrap with a 5-minute timeout — WhisperKit(config) can hang indefinitely
+        // on network issues or corrupt model caches. withThrowingTaskGroup cancels
+        // the hung task when the timeout fires (unlike a naive Task.sleep race).
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                let kit = try await WhisperKit(config)
+                self.lock.withLock {
+                    self.whisperKit = kit
+                    self.isLoaded = true
+                }
+                progressHandler(1.0)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(300))
+                throw TranscriptionError.transcriptionFailed("Model load timed out after 5 minutes")
+            }
+            // First task to finish wins; cancel the other
+            try await group.next()!
+            group.cancelAll()
         }
 
         Logger.transcription.info("WhisperKit model ready: \(model.rawValue)")

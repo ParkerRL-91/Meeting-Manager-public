@@ -20,9 +20,16 @@ final class AppDatabase {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
 
             let dbPath = url.appendingPathComponent("db.sqlite").path
-            let dbQueue = try DatabaseQueue(path: dbPath)
+            var config = Configuration()
+            config.prepareDatabase { db in
+                try db.execute(sql: "PRAGMA journal_mode=WAL")
+                try db.execute(sql: "PRAGMA synchronous=NORMAL")
+                try db.execute(sql: "PRAGMA cache_size=-8000")
+            }
+            config.maximumReaderCount = 5
+            let dbPool = try DatabasePool(path: dbPath, configuration: config)
 
-            return try AppDatabase(writer: dbQueue)
+            return try AppDatabase(writer: dbPool)
         } catch {
             fatalError("Failed to initialize database: \(error)")
         }

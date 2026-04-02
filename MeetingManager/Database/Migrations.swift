@@ -383,5 +383,13 @@ enum Migrations {
             try db.create(index: "idx_meeting_status", on: "meeting", columns: ["status"])
             try db.create(index: "idx_actionItem_meeting_extracted", on: "actionItem", columns: ["meetingId", "extractedAt"])
         }
+
+        migrator.registerMigration("v13-transcript-fts") { db in
+            try db.create(virtualTable: "transcript_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "transcript")
+                t.column("text")
+                t.column("meetingId").notIndexed()
+            }
+        }
     }
 }

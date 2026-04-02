@@ -42,7 +42,7 @@ final class AppState {
     /// so SwiftUI can't see its @Published changes. These are updated on a 10Hz timer.
     var micLevel: Float = 0
     var systemLevel: Float = 0
-    private var audioLevelTimer: Timer?
+    private var levelPollingCancellable: AnyCancellable?
 
     /// The name of a detected call app when a meeting is in progress but recording hasn't started.
     /// Cleared when recording begins or the call app exits.
@@ -90,7 +90,7 @@ final class AppState {
     /// Synthetic model download progress (0.0–1.0) that combines real WhisperKit progress
     /// with a time-based estimate so the UI shows continuous advancement.
     var modelDownloadProgress: Double = 0
-    private var modelProgressTimer: Timer?
+    private var modelProgressCancellable: AnyCancellable?
 
     /// User-visible error from the most recent operation (shown via alert).
     var lastUserError: String?
@@ -100,7 +100,16 @@ final class AppState {
     private static let pendingTranscriptionKey = "pendingTranscriptions"
 
     private var cancellables = Set<AnyCancellable>()
-    private var proximityTimer: Timer?
+    private var proximityPollingCancellable: AnyCancellable?
+
+    /// Tracks meetings for which a `meetingStartingSoon` notification has already been posted.
+    /// Prevents posting 4+ duplicates across timer ticks for the same meeting.
+    private var notifiedMeetingIds: Set<String> = []
+
+    /// Cumulative model load attempt count across initial attempts and background retries.
+    /// Hard-capped at `modelLoadHardMax` to prevent infinite retry loops on permanent failures.
+    private var modelLoadTotalAttempts = 0
+    private let modelLoadHardMax = 9  // 3 initial + up to 2 background retry rounds of 3
     private var loadMeetingsTask: Task<Void, Never>?
 
     /// Whether this instance has been fully initialized (guards against SwiftUI re-creating @State).
@@ -241,6 +250,8 @@ final class AppState {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.upcomingMeetings = upcoming
+                    let currentIds = Set(upcoming.map(\.id))
+                    self.notifiedMeetingIds = self.notifiedMeetingIds.intersection(currentIds)
                     self.pastMeetings = past
                     self.meetings = upcoming + past
                 }
@@ -271,14 +282,16 @@ final class AppState {
                     var toTranscribe: [Meeting] = []
                     for var m in recordings {
                         m.endDate = m.endDate ?? Date()
-                        if let path = m.audioFilePath,
-                           FileManager.default.fileExists(atPath: path) {
-                            // Has audio — transition to transcribing so we can batch-transcribe
+                        if let path = m.audioFilePaths.last,
+                           FileManager.default.fileExists(atPath: path),
+                           let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                           (attrs[.size] as? Int ?? 0) > 44 {
+                            // Has audio with real content — transition to transcribing
                             m.status = .transcribing
                             try m.update(db)
                             toTranscribe.append(m)
                         } else {
-                            // No audio — cancel
+                            // No audio or only WAV header — cancel
                             m.status = .cancelled
                             try m.update(db)
                         }
@@ -379,6 +392,15 @@ final class AppState {
                 if !toTranscribe.isEmpty {
                     loadMeetings()
                 }
+
+                // Drain pending transcription queue if model is already cached —
+                // processPendingTranscriptions() is also called in autoLoadTranscriptionModel()
+                // success path, but that only covers the case where the model had to download.
+                // If the model was already on disk and loaded instantly, this path ensures
+                // any UserDefaults-queued jobs from a prior crash are not abandoned.
+                if transcriptionService.isModelLoaded {
+                    await processPendingTranscriptions()
+                }
             } catch {
                 Logger.general.error("Startup cleanup failed: \(error.localizedDescription)")
             }
@@ -430,6 +452,24 @@ final class AppState {
                 self.selectedMeetingId = self.stateMachine.currentMeeting?.id
                 self.detectedCallApp = nil
                 self.startAudioLevelPolling()
+
+                // Surface audio write errors to the user (e.g. disk full)
+                self.audioCaptureService.onWriteError = { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        self?.lastUserError = "Audio write error: \(error.localizedDescription). Recording may be incomplete."
+                    }
+                }
+
+                // Wire Apple Speech fallback if WhisperKit is unavailable
+                if self.transcriptionService.transcriptionMode == .appleSpeech,
+                   let meetingId = self.stateMachine.currentMeeting?.id {
+                    self.audioCaptureService.onRawMicBuffer = { [weak self] buffer in
+                        self?.appleSpeechTranscriber.appendBuffer(buffer)
+                    }
+                    self.appleSpeechTranscriber.start(meetingId: meetingId, repository: self.transcriptRepository)
+                    self.fileLog("Apple Speech fallback wired for meeting \(meetingId)")
+                }
+
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
@@ -506,6 +546,12 @@ final class AppState {
                 self.isReopening = false
                 self.stopAudioLevelPolling()
 
+                // Teardown Apple Speech fallback if it was active
+                self.audioCaptureService.onRawMicBuffer = nil
+                if self.appleSpeechTranscriber.isActive {
+                    self.appleSpeechTranscriber.stop()
+                }
+
                 // Mark meeting as transcribing → then run batch transcription
                 if let stopped = stoppedMeeting {
                     if let refreshed = try? await meetingRepository.find(id: stopped.id),
@@ -513,6 +559,14 @@ final class AppState {
                         // Run batch transcription on the complete audio file
                         fileLog("Meeting stopped. Starting batch transcription for \(stopped.id)...")
                         await batchTranscribe(meetingId: stopped.id, audioURL: audioURL)
+
+                        // Checkpoint the WAL to reclaim disk space after transcription completes.
+                        // PASSIVE mode is non-blocking — skips frames held by active readers.
+                        Task.detached(priority: .background) {
+                            try? AppDatabase.shared.writer.writeWithoutTransaction { db in
+                                try db.checkpoint(.passive)
+                            }
+                        }
 
                         // Mark complete after transcription finishes
                         if let final_ = try? await meetingRepository.find(id: stopped.id),
@@ -756,7 +810,7 @@ final class AppState {
             // If a single phrase accounts for >40% of all segments, it's hallucination
             let hallucinationThreshold = max(3, Int(Double(segments.count) * 0.4))
 
-            var savedCount = 0
+            var toSave: [Transcript] = []
             var skippedCount = 0
             for seg in segments {
                 let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -797,17 +851,17 @@ final class AppState {
                 // Look up speaker for this segment's time
                 let speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
 
-                let transcript = Transcript(
+                toSave.append(Transcript(
                     meetingId: meetingId,
                     speakerLabel: speaker,
                     text: text,
                     startTime: seg.startTime,
                     endTime: seg.endTime,
                     confidence: seg.confidence
-                )
-                try await transcriptRepository.saveBatch([transcript])
-                savedCount += 1
+                ))
             }
+            try await transcriptRepository.saveBatch(toSave)
+            let savedCount = toSave.count
 
             fileLog("Batch transcribe: saved \(savedCount) segments, skipped \(skippedCount) hallucinations")
             Logger.transcription.info("Batch transcription complete: \(savedCount) segments for meeting \(meetingId)")
@@ -822,9 +876,15 @@ final class AppState {
 
     /// Automatically load the default WhisperKit model at app startup.
     /// Retries up to 3 times with 10s delay between attempts.
+    /// Hard-stopped after `modelLoadHardMax` total attempts to prevent infinite background retries.
     private func autoLoadTranscriptionModel() {
         Task {
             guard !transcriptionService.isModelLoaded else { return }
+            guard modelLoadTotalAttempts < modelLoadHardMax else {
+                fileLog("Model: hard stop after \(modelLoadHardMax) total attempts — use retryModelLoad() to try again")
+                lastUserError = "Transcription model failed to load. Tap to retry."
+                return
+            }
 
             // Always use large-v3 — it's the only supported model.
             let model = WhisperModel.largev3
@@ -839,24 +899,27 @@ final class AppState {
             // so we use an exponential curve to show continuous progress to the user.
             let startTime = Date()
             let estimatedDuration: TimeInterval = 180 // ~3 min estimate for first download
-            modelProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
-                Task { @MainActor in
-                    guard let self, self.isLoadingModel else { timer.invalidate(); return }
+            modelProgressCancellable = Timer.publish(every: 0.5, on: .main, in: .common)
+                .autoconnect()
+                .sink { [weak self] _ in
+                    guard let self, self.isLoadingModel else {
+                        self?.modelProgressCancellable = nil
+                        return
+                    }
                     let elapsed = Date().timeIntervalSince(startTime)
                     // Asymptotically approach 0.9 — real completion snaps to 1.0
                     let synthetic = 0.9 * (1.0 - exp(-elapsed / estimatedDuration))
                     let real = self.transcriptionService.downloadProgress
                     self.modelDownloadProgress = max(synthetic, real)
                 }
-            }
 
             let loadStart = Date()
             var lastError: Error?
             for attempt in 1...maxRetries {
+                modelLoadTotalAttempts += 1
                 do {
                     try await transcriptionService.loadModel(model)
-                    modelProgressTimer?.invalidate()
-                    modelProgressTimer = nil
+                    modelProgressCancellable = nil
                     modelDownloadProgress = 1.0
 
                     Logger.transcription.info("WhisperKit model loaded — transcription is ready")
@@ -884,8 +947,7 @@ final class AppState {
             }
 
             if let lastError {
-                modelProgressTimer?.invalidate()
-                modelProgressTimer = nil
+                modelProgressCancellable = nil
                 modelDownloadProgress = 0
 
                 Logger.transcription.error("Failed to auto-load WhisperKit model after \(maxRetries) attempts: \(lastError.localizedDescription)")
@@ -905,7 +967,9 @@ final class AppState {
     }
 
     /// Retry loading the WhisperKit model after a failure.
+    /// Resets the hard-stop counter so the user can trigger fresh attempts.
     func retryModelLoad() {
+        modelLoadTotalAttempts = 0
         transcriptionService.clearError()
         autoLoadTranscriptionModel()
     }
@@ -1200,32 +1264,30 @@ final class AppState {
 
     // MARK: - Audio Level Polling
 
-    /// Start a ~10Hz timer that copies audio levels from AudioCaptureService into
+    /// Start a ~10Hz Combine timer that copies audio levels from AudioCaptureService into
     /// AppState properties so SwiftUI views can observe them through @Observable.
+    /// AppState is @MainActor so the sink fires directly on the main queue — no Task hop needed.
     private func startAudioLevelPolling() {
         stopAudioLevelPolling()
         fileLog("Audio level polling: STARTING (isCapturing=\(audioCaptureService.isCapturing))")
         var logCounter = 0
-        audioLevelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            // Read directly from atomic storage — bypasses @Published / MainActor scheduling
-            let mic = self.audioCaptureService.latestMicLevel
-            let sys = self.audioCaptureService.latestSystemLevel
-            Task { @MainActor in
-                self.micLevel = mic
-                self.systemLevel = sys
+        levelPollingCancellable = Timer.publish(every: 0.1, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // Read directly from atomic storage — bypasses @Published / MainActor scheduling
+                self.micLevel = self.audioCaptureService.latestMicLevel
+                self.systemLevel = self.audioCaptureService.latestSystemLevel
                 // Log every ~5 seconds (50 ticks) for debugging
                 logCounter += 1
                 if logCounter % 50 == 1 {
-                    self.fileLog("Audio levels: mic=\(String(format: "%.4f", mic)) sys=\(String(format: "%.4f", sys)) engine.running=\(self.audioCaptureService.micCapture.engine.isRunning)")
+                    self.fileLog("Audio levels: mic=\(String(format: "%.4f", self.micLevel)) sys=\(String(format: "%.4f", self.systemLevel)) engine.running=\(self.audioCaptureService.micCapture.engine.isRunning)")
                 }
             }
-        }
     }
 
     private func stopAudioLevelPolling() {
-        audioLevelTimer?.invalidate()
-        audioLevelTimer = nil
+        levelPollingCancellable = nil
         micLevel = 0
         systemLevel = 0
     }
@@ -1233,17 +1295,16 @@ final class AppState {
     // MARK: - Meeting Proximity Detection
 
     func startProximityCheck() {
-        proximityTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        checkUpcomingMeetings() // Run immediately
+        proximityPollingCancellable = Timer.publish(every: 30, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
                 self?.checkUpcomingMeetings()
             }
-        }
-        proximityTimer?.fire() // Run immediately
     }
 
     func stopProximityCheck() {
-        proximityTimer?.invalidate()
-        proximityTimer = nil
+        proximityPollingCancellable = nil
     }
 
     @MainActor
@@ -1251,12 +1312,18 @@ final class AppState {
         let now = Date()
         let warningWindow: TimeInterval = Double(settings.notificationLeadTimeMinutes * 60)
 
+        // Prune IDs that are no longer in the upcoming list
+        let currentIds = Set(upcomingMeetings.map(\.id))
+        notifiedMeetingIds = notifiedMeetingIds.intersection(currentIds)
+
         for meeting in upcomingMeetings {
             guard let startDate = meeting.scheduledStartDate else { continue }
             let timeUntilStart = startDate.timeIntervalSince(now)
 
-            // Meeting starting within the notification window and not yet notified
-            if timeUntilStart > 0 && timeUntilStart <= warningWindow && meeting.status == .scheduled {
+            // Meeting starting within the notification window — post only once per meeting
+            if timeUntilStart > 0, timeUntilStart <= warningWindow,
+               meeting.status == .scheduled,
+               notifiedMeetingIds.insert(meeting.id).inserted {
                 NotificationCenter.default.post(
                     name: .meetingStartingSoon,
                     object: nil,
