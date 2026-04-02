@@ -245,14 +245,10 @@ final class MeetingStateMachine {
             }
             .store(in: &cancellables)
 
-        // When a call app terminates, stop recording if active
-        NotificationCenter.default.publisher(for: .callAppTerminated)
-            .sink { [weak self] _ in
-                Task { [weak self] in
-                    await self?.handleCallAppTerminated()
-                }
-            }
-            .store(in: &cancellables)
+        // NOTE: .callAppTerminated is handled by AppState, which checks
+        // recordingStartedByDetector before stopping. The state machine must
+        // NOT auto-stop here — doing so kills manually-started recordings
+        // when the BrowserCallDetector's mic-usage heuristic loses signal.
 
         // External start recording request (e.g., from notification action)
         NotificationCenter.default.publisher(for: .startRecording)
@@ -296,15 +292,6 @@ final class MeetingStateMachine {
         }
     }
 
-    private func handleCallAppTerminated() async {
-        guard isRecording else { return }
-        Logger.general.info("Call app terminated — stopping recording")
-        do {
-            try await stopRecording()
-        } catch {
-            Logger.general.error("Failed to stop recording on call app termination: \(error.localizedDescription)")
-        }
-    }
 
     private func handleStartRecordingNotification(_ notification: Notification) async {
         // If a meeting ID is provided, look it up; otherwise create ad-hoc
