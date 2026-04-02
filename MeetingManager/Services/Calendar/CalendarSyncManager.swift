@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import os
 
 // MARK: - CalendarSyncError
@@ -43,8 +44,8 @@ final class CalendarSyncManager {
 
     // MARK: - Private
 
-    private var syncTimer: Timer?
-    private var syncTask: Task<Void, Never>?
+    nonisolated(unsafe) private var syncTimer: Timer?
+    nonisolated(unsafe) private var syncTask: Task<Void, Never>?
 
     /// How far into the future to fetch events during sync.
     private let lookAheadDays: Int = 7
@@ -178,7 +179,7 @@ final class CalendarSyncManager {
     private func upsertMeeting(from event: CalendarEvent) async throws {
         try await AppDatabase.shared.writer.write { db in
             if var existing = try Meeting
-                .filter(Meeting.Columns.calendarEventId == event.id)
+                .filter(Column("calendarEventId") == event.id)
                 .fetchOne(db)
             {
                 // Never overwrite meetings that are actively recording or already completed —

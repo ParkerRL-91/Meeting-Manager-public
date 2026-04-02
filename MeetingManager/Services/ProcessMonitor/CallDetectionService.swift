@@ -18,11 +18,11 @@ final class CallDetectionService {
 
     /// All currently-running call apps, ordered by detection time (most recent last).
     private var runningCallApps: [NSRunningApplication] = []
-    private var launchObserver: NSObjectProtocol?
-    private var terminateObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var launchObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var terminateObserver: NSObjectProtocol?
 
     /// Detects browser-based meetings (Google Meet, etc.) via window title polling.
-    private var browserDetector: BrowserCallDetector?
+    nonisolated(unsafe) private var browserDetector: BrowserCallDetector?
 
     /// Apps that were already running when we started monitoring.
     /// These are NOT treated as "call started" events because they may have been
@@ -39,17 +39,11 @@ final class CallDetectionService {
     }
 
     deinit {
-        // Remove workspace notification observers to avoid dangling references.
-        // While the closures use [weak self], the observer tokens themselves hold
-        // a registration in NotificationCenter that should be cleaned up.
         let workspaceCenter = NSWorkspace.shared.notificationCenter
-        if let observer = launchObserver {
-            workspaceCenter.removeObserver(observer)
-        }
-        if let observer = terminateObserver {
-            workspaceCenter.removeObserver(observer)
-        }
-        browserDetector?.stop()
+        if let observer = launchObserver { workspaceCenter.removeObserver(observer) }
+        if let observer = terminateObserver { workspaceCenter.removeObserver(observer) }
+        let detector = browserDetector
+        Task { @MainActor in detector?.stop() }
     }
 
     // MARK: - Monitoring

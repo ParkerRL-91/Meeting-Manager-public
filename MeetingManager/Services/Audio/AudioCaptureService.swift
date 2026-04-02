@@ -36,35 +36,34 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     var silenceTimeout: TimeInterval = 45
 
     /// Diagnostic counters for buffer callbacks (logged periodically by test harness).
-    /// Accessed from audio callback queues, so protected by a lock.
+    /// Accessed from audio callback queues via lock — stored as nonisolated to allow
+    /// mutation from nonisolated contexts (audio thread callbacks).
     private let _counterLock = NSLock()
-    private var _micBufferCount: Int = 0
-    private var _sysBufferCount: Int = 0
+    nonisolated(unsafe) private var _micBufferCount: Int = 0
+    nonisolated(unsafe) private var _sysBufferCount: Int = 0
 
     /// Thread-safe increment and return of mic buffer count.
     nonisolated private func incrementMicBufferCount() -> Int {
-        _counterLock.lock()
-        _micBufferCount += 1
-        let count = _micBufferCount
-        _counterLock.unlock()
-        return count
+        _counterLock.withLock {
+            _micBufferCount += 1
+            return _micBufferCount
+        }
     }
 
     /// Thread-safe increment and return of sys buffer count.
     nonisolated private func incrementSysBufferCount() -> Int {
-        _counterLock.lock()
-        _sysBufferCount += 1
-        let count = _sysBufferCount
-        _counterLock.unlock()
-        return count
+        _counterLock.withLock {
+            _sysBufferCount += 1
+            return _sysBufferCount
+        }
     }
 
     /// Thread-safe reset of buffer counters.
-    private func resetBufferCounts() {
-        _counterLock.lock()
-        _micBufferCount = 0
-        _sysBufferCount = 0
-        _counterLock.unlock()
+    nonisolated private func resetBufferCounts() {
+        _counterLock.withLock {
+            _micBufferCount = 0
+            _sysBufferCount = 0
+        }
     }
 
     /// Tracks consecutive seconds of silence for auto-stop.

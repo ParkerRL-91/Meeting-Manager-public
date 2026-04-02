@@ -413,5 +413,22 @@ final class GoogleAuthManager {
         try KeychainHelper.save(tokens, forKey: Keys.oauthTokens)
         Logger.calendar.debug("OAuth tokens persisted to Keychain")
     }
+
+    /// Retry an async operation up to `maxAttempts` times with exponential backoff.
+    private func withRetry<T>(maxAttempts: Int = 3, operation: () async throws -> T) async throws -> T {
+        var lastError: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                if attempt < maxAttempts {
+                    let delay = Double(attempt) * 1.0
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+            }
+        }
+        throw lastError!
+    }
 }
 

@@ -21,7 +21,7 @@ struct TranscriptSegment: Sendable {
 
 /// Abstraction over the speech-to-text engine so the real WhisperKit
 /// implementation can be swapped in without touching call sites.
-protocol TranscriptionEngine: Sendable {
+@preconcurrency protocol TranscriptionEngine: Sendable {
     /// Load the model from disk or download it. Report progress via the callback.
     func loadModel(
         named model: WhisperModel,
@@ -68,10 +68,11 @@ enum TranscriptionError: LocalizedError {
 // MARK: - WhisperKit Engine
 
 /// Real transcription engine backed by WhisperKit (on-device Whisper).
-/// Uses actor isolation to eliminate data races on the internal WhisperKit instance.
-actor WhisperEngine: TranscriptionEngine {
+/// Uses NSLock to protect the internal WhisperKit instance across concurrent callers.
+final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
     private var whisperKit: WhisperKit?
     private var isLoaded = false
+    private let lock = NSLock()
 
     /// The default HuggingFace cache path where WhisperKit stores downloaded CoreML models.
     private static var cachedModelFolder: String? {
@@ -124,8 +125,10 @@ actor WhisperEngine: TranscriptionEngine {
         let kit = try await WhisperKit(config)
         progressHandler(1.0)
 
-        whisperKit = kit
-        isLoaded = true
+        lock.withLock {
+            whisperKit = kit
+            isLoaded = true
+        }
 
         Logger.transcription.info("WhisperKit model ready: \(model.rawValue)")
     }
@@ -134,7 +137,8 @@ actor WhisperEngine: TranscriptionEngine {
         samples: [Float],
         configuration: TranscriptionConfiguration
     ) async throws -> [TranscriptSegment] {
-        guard isLoaded, let kit = whisperKit else { throw TranscriptionError.modelNotLoaded }
+        let (loaded, kit) = lock.withLock { (isLoaded, whisperKit) }
+        guard loaded, let kit else { throw TranscriptionError.modelNotLoaded }
         guard !samples.isEmpty else { throw TranscriptionError.invalidSamples }
 
         // Build full decoding options from configuration.
@@ -184,8 +188,10 @@ actor WhisperEngine: TranscriptionEngine {
     }
 
     func unload() {
-        whisperKit = nil
-        isLoaded = false
+        lock.withLock {
+            whisperKit = nil
+            isLoaded = false
+        }
         Logger.transcription.info("WhisperKit model unloaded")
     }
 }
