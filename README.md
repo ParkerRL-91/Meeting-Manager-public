@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v1.3.0.dmg**](./MeetingManager-v1.3.0.dmg) — macOS 14.4+
+[**MeetingManager-v1.6.0.dmg**](./MeetingManager-v1.6.0.dmg) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -31,7 +31,7 @@ This removes the quarantine flag so the app opens without warnings.
 
 ---
 
-## What's New in v1.3.0 — Stability & Efficiency
+## What's New in v1.6.0 — Stability & Efficiency
 
 A comprehensive stability and performance sprint touching 30+ areas across the entire codebase.
 
@@ -76,21 +76,26 @@ A comprehensive stability and performance sprint touching 30+ areas across the e
 <details>
 <summary><strong>Previous Releases</strong></summary>
 
+#### v1.5.0 — Stability & Efficiency Sprint
+- Timer leaks & 36k Task spawns eliminated
+- Duplicate meeting notifications fixed, model retry loop capped
+- WhisperKit load timeout (5 min), Apple Speech fallback wired
+- Batch database writes, browser detection optimized, FTS5 search
+- Crash recovery for orphaned recordings, WAL checkpoints, DatabasePool
+
+#### v1.4.0 — Swift 6 & Reliability
+- All Swift 6 strict concurrency errors resolved
+- WhisperKit cache-first loading, model load retries
+- AppState singleton fix, pending transcription queue
+
 #### v1.1.1
-- Model download progress bar in menu bar popover
-- Download error recovery with retry button
-- Transcription readiness indicator
-- Onboarding model status display
+- Model download progress bar, error recovery, readiness indicator
 - Global error alerts for recording, transcription, and detection
 
 #### v1.1
 - Dual audio capture (mic + system audio via ScreenCaptureKit)
-- Live audio level meters
-- Smart macOS notifications for meeting events
-- Large v3 transcription model
-- Unified AI routing (Ollama + Claude)
-- Calendar sync fix, auto-generate summaries
-- Explicit mic device selection
+- Live audio level meters, smart notifications
+- Large v3 transcription model, unified AI routing (Ollama + Claude)
 
 </details>
 

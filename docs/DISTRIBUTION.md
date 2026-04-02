@@ -5,7 +5,7 @@ How to build and publish a Meeting Manager release.
 ## Quick Release
 
 ```bash
-./Scripts/push-update.sh 1.3.0
+./Scripts/push-update.sh 1.6.0
 ```
 
 This single command:
@@ -19,7 +19,7 @@ This single command:
 
 Add `NOTARIZE=1` to also notarize with Apple:
 ```bash
-NOTARIZE=1 ./Scripts/push-update.sh 1.3.0
+NOTARIZE=1 ./Scripts/push-update.sh 1.6.0
 ```
 
 Notarization requires a keychain profile named `MeetingManager-Notarize`:

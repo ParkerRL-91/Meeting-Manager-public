@@ -114,16 +114,17 @@ migrator.registerMigration("v10-new-feature") { db in
 }
 ```
 
-Current version: **v11** (`v11-performance-indexes`)
+Current version: **v12** (`v12-performance-indexes`)
 
 Migration history:
 - v1: initial schema
 - v2–v8: incremental feature additions
 - v9: Ollama settings columns (`useLocalLLM`, `ollamaModel`)
 - v10: onboarding and audio device settings
-- v11: performance indexes on foreign keys and common query patterns
+- v11: audioFilePaths array, isAllDay flag on meeting table
+- v12: performance indexes on foreign keys and common query patterns
 
-### v11 Indexes
+### v12 Indexes
 
 | Index | Columns | Purpose |
 |-------|---------|---------|

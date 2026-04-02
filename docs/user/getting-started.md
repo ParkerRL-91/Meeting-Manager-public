@@ -2,7 +2,7 @@
 
 ## Installation
 
-1. Download **MeetingManager-v1.3.0.dmg** from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases)
+1. Download **MeetingManager-v1.6.0.dmg** from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases)
 2. Open the DMG and drag **Meeting Manager** to your Applications folder
 3. Launch Meeting Manager from Applications or Spotlight
 
