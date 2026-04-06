@@ -37,7 +37,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     var onWriteError: ((Error) -> Void)?
 
     /// How many consecutive seconds of silence before triggering auto-stop.
-    var silenceTimeout: TimeInterval = 45
+    /// 5 minutes — meetings often have long pauses (presentations, screen sharing, muted mic).
+    var silenceTimeout: TimeInterval = 300
 
     /// Diagnostic counters for buffer callbacks (logged periodically by test harness).
     /// Accessed from audio callback queues via lock — stored as nonisolated to allow

@@ -527,6 +527,10 @@ final class AppState {
     /// Stop recording — then run batch transcription on the complete audio file.
     /// Batch transcription is dramatically more accurate than live streaming because
     /// Whisper can use the full audio context and sequential decoding.
+    ///
+    /// IMPORTANT: State updates and notifications fire IMMEDIATELY so the UI and
+    /// menu bar reflect the correct state. Batch transcription runs in a separate
+    /// detached task so it never interferes with a subsequent recording.
     func stopRecording() {
         // Warn user if transcription model isn't ready yet
         if !transcriptionService.isModelLoaded {
@@ -537,6 +541,7 @@ final class AppState {
             do {
                 // Save references before stopRecording clears them
                 let stoppedMeeting = stateMachine.currentMeeting
+                let stoppedMeetingId = stoppedMeeting?.id
                 let audioURL = audioCaptureService.currentAudioFileURL
 
                 try await stateMachine.stopRecording()
@@ -552,42 +557,58 @@ final class AppState {
                     self.appleSpeechTranscriber.stop()
                 }
 
-                // Mark meeting as transcribing → then run batch transcription
-                if let stopped = stoppedMeeting {
-                    if let refreshed = try? await meetingRepository.find(id: stopped.id),
-                       refreshed.status == .transcribing {
-                        // Run batch transcription on the complete audio file
-                        fileLog("Meeting stopped. Starting batch transcription for \(stopped.id)...")
-                        await batchTranscribe(meetingId: stopped.id, audioURL: audioURL)
+                // ── Immediate: UI + notifications (fire NOW, not after transcription) ──
 
-                        // Checkpoint the WAL to reclaim disk space after transcription completes.
-                        // PASSIVE mode is non-blocking — skips frames held by active readers.
-                        Task.detached(priority: .background) {
-                            try? AppDatabase.shared.writer.writeWithoutTransaction { db in
-                                try db.checkpoint(.passive)
+                NotificationCenter.default.post(name: .stopRecording, object: nil)
+                self.sendMeetingEndedNotification(meetingTitle: stoppedMeeting?.title)
+                loadMeetings()
+
+                // ── Deferred: batch transcription in a separate task ──
+                // This MUST NOT block the current task. If the user starts a new
+                // recording while transcription is running, nothing is affected.
+
+                if let meetingId = stoppedMeetingId {
+                    let repo = self.meetingRepository
+                    let sm = self.stateMachine
+                    let settings = self.settings
+
+                    Task.detached(priority: .userInitiated) { [weak self] in
+                        guard let self else { return }
+
+                        // Verify meeting is still in transcribing state before starting
+                        guard let refreshed = try? await repo.find(id: meetingId),
+                              refreshed.status == .transcribing else {
+                            return
+                        }
+
+                        await MainActor.run {
+                            self.fileLog("Meeting stopped. Starting batch transcription for \(meetingId)...")
+                        }
+                        await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+
+                        // Checkpoint WAL to reclaim disk space
+                        try? await AppDatabase.shared.writer.writeWithoutTransaction { db in
+                            try db.checkpoint(.passive)
+                        }
+
+                        // Mark complete — but only if it's still transcribing
+                        // (user might have re-opened or cancelled it in the meantime)
+                        if let final_ = try? await repo.find(id: meetingId),
+                           final_.status == .transcribing {
+                            try? await sm.complete(meeting: final_)
+
+                            if settings.autoGenerateSummary {
+                                await MainActor.run {
+                                    self.scheduleAutoSummary(meetingId: meetingId)
+                                }
                             }
                         }
 
-                        // Mark complete after transcription finishes
-                        if let final_ = try? await meetingRepository.find(id: stopped.id),
-                           final_.status == .transcribing {
-                            try await stateMachine.complete(meeting: final_)
-
-                            // Schedule auto-summary if enabled
-                            if settings.autoGenerateSummary {
-                                scheduleAutoSummary(meetingId: stopped.id)
-                            }
+                        await MainActor.run {
+                            self.loadMeetings()
                         }
                     }
                 }
-
-                // Notify the menu bar that recording has stopped
-                NotificationCenter.default.post(name: .stopRecording, object: nil)
-
-                // Send macOS notification that the meeting has ended
-                self.sendMeetingEndedNotification(meetingTitle: stoppedMeeting?.title)
-
-                loadMeetings()
             } catch {
                 Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
                 self.lastUserError = error.localizedDescription

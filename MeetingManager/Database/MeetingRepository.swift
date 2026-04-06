@@ -43,6 +43,8 @@ final class MeetingRepository {
                     Meeting.Columns.status == MeetingStatus.scheduled.rawValue
                     || Meeting.Columns.status == MeetingStatus.notified.rawValue
                     || Meeting.Columns.status == MeetingStatus.recording.rawValue
+                    || Meeting.Columns.status == MeetingStatus.transcribing.rawValue
+                    || Meeting.Columns.status == MeetingStatus.summarizing.rawValue
                 )
                 .order(Meeting.Columns.scheduledStartDate.asc)
                 .limit(100)
@@ -56,8 +58,10 @@ final class MeetingRepository {
                 .filter(
                     Meeting.Columns.status == MeetingStatus.complete.rawValue
                     || Meeting.Columns.status == MeetingStatus.cancelled.rawValue
+                    || Meeting.Columns.status == MeetingStatus.transcribing.rawValue
+                    || Meeting.Columns.status == MeetingStatus.summarizing.rawValue
                 )
-                .order(Meeting.Columns.endDate.desc)
+                .order(sql: "COALESCE(endDate, startDate, scheduledStartDate) DESC")
                 .limit(limit, offset: offset)
                 .fetchAll(db)
         }
