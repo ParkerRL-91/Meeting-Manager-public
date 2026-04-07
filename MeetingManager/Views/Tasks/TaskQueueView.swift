@@ -61,9 +61,12 @@ struct TaskQueueView: View {
                 if !failed.isEmpty {
                     sectionHeader("Failed")
                     ForEach(failed) { task in
-                        TaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId)) {
-                            Task { await qm.retry(taskId: task.id) }
-                        }
+                        TaskRow(
+                            task: task,
+                            meetingTitle: meetingTitle(for: task.meetingId),
+                            onRetry: { Task { await qm.retry(taskId: task.id) } },
+                            onClear: { Task { await qm.cancel(taskId: task.id) } }
+                        )
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 16)
@@ -130,6 +133,7 @@ private struct TaskRow: View {
     let task: TaskQueueItem
     let meetingTitle: String
     var onRetry: (() -> Void)? = nil
+    var onClear: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -178,10 +182,20 @@ private struct TaskRow: View {
             Spacer()
 
             // Actions
-            if let onRetry, task.status == .failed {
-                Button("Retry") { onRetry() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.mini)
+            if task.status == .failed {
+                VStack(spacing: 4) {
+                    if let onRetry {
+                        Button("Retry") { onRetry() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.mini)
+                    }
+                    if let onClear {
+                        Button("Clear") { onClear() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .padding(.horizontal, 14)

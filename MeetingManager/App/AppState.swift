@@ -315,7 +315,7 @@ final class AppState {
         // Load transcript
         let segments = try await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)
         guard !segments.isEmpty else {
-            throw TaskQueueError.noHandler("No transcript segments for meeting \(meetingId)")
+            throw TaskQueueError.noHandler("This meeting has no transcript yet. Record a meeting with audio first, then the summary can be generated.")
         }
 
         let transcript = segments.map { $0.text }.joined(separator: "\n")

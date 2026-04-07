@@ -251,8 +251,16 @@ final class TaskQueueManager {
                 await markCompleted(next)
                 Logger.general.info("TaskQueue: completed \(next.type.rawValue) for \(next.meetingId)")
 
+                // Auto-enqueue summary after transcription — but only if segments exist
                 if next.type == .transcription {
-                    await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
+                    let hasSegments = (try? await database.writer.read { db in
+                        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript WHERE meetingId = ?", arguments: [next.meetingId])
+                    } ?? 0) ?? 0
+                    if hasSegments > 0 {
+                        await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
+                    } else {
+                        Logger.general.info("TaskQueue: transcription produced 0 segments for \(next.meetingId) — skipping summary")
+                    }
                 }
             } catch {
                 let shouldRetry = next.retryCount + 1 < next.maxRetries
