@@ -170,7 +170,15 @@ final class OllamaService {
             finalUser = selection.userPrompt
         } else {
             selectedModel = model
-            numCtx = 0  // let Ollama use its default
+            // Compute a tight context window even for explicit models —
+            // Ollama's default (131K) is too large and causes multi-minute stalls.
+            let estimatedTokens = (systemPrompt.count + userPrompt.count) / 4
+            let needed = estimatedTokens + 2048 // input + output reserve
+            // Round up to nearest power-of-2 bucket: 8K, 16K, 32K, 64K
+            if needed <= 8192       { numCtx = 8192 }
+            else if needed <= 16384 { numCtx = 16384 }
+            else if needed <= 32768 { numCtx = 32768 }
+            else                    { numCtx = 65536 }
             finalSystem = systemPrompt
             finalUser = userPrompt
         }
