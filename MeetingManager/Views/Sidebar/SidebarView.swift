@@ -59,6 +59,17 @@ struct SidebarView: View {
                     appState.selectedMeetingId = nil
                 }
 
+                NavItem(
+                    icon: "checklist",
+                    label: "Tasks",
+                    badge: appState.taskQueueManager.pendingCount,
+                    destination: .tasks,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .tasks
+                    appState.selectedMeetingId = nil
+                }
+
                 // MARK: - Spaces (auto-grouped meeting folders)
                 let folders = appState.meetingFolders()
                 if !folders.isEmpty {
@@ -363,6 +374,7 @@ private struct FolderNavItem: View {
 private struct NavItem: View {
     let icon: String
     let label: String
+    var badge: Int = 0
     let destination: SidebarDestination
     let current: SidebarDestination
     let action: () -> Void
@@ -380,6 +392,15 @@ private struct NavItem: View {
                     .font(.subheadline.weight(isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? Color.appTextPrimary : Color.appTextSecondary)
                 Spacer()
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.appAccent)
+                        .clipShape(Capsule())
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)

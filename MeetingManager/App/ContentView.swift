@@ -58,6 +58,9 @@ struct ContentView: View {
         case .people:
             PeopleView()
 
+        case .tasks:
+            TaskQueueView()
+
         case .folder(let key):
             let folders = appState.meetingFolders()
             if let folder = folders.first(where: { $0.key == key }) {
