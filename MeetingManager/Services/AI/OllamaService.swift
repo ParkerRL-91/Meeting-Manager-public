@@ -18,6 +18,13 @@ private struct OllamaChatRequest: Encodable {
 private struct OllamaOptions: Encodable {
     let temperature: Double
     let num_predict: Int
+    let num_ctx: Int?
+
+    init(temperature: Double, num_predict: Int, num_ctx: Int? = nil) {
+        self.temperature = temperature
+        self.num_predict = num_predict
+        self.num_ctx = num_ctx
+    }
 }
 
 private struct OllamaChatResponse: Decodable {
@@ -73,33 +80,126 @@ final class OllamaService {
     static let baseURL = URL(string: "http://localhost:11434")!
     static let defaultModel = "llama3.2:3b"
 
+    /// Model tiers ranked by capability. The adaptive selector picks the best
+    /// installed model that can handle the input size.
+    static let modelTiers: [(name: String, maxInputTokens: Int, contextWindow: Int)] = [
+        ("llama3.2:3b",  4000,   8192),   // Fast — short 1:1s
+        ("llama3.2:3b",  8000,  16384),   // Medium — standard meetings
+        ("llama3.1:8b", 20000,  32768),   // Large — long group meetings
+        ("llama3.1:8b", 40000,  65536),   // XL — marathon sessions
+    ]
+
     // MARK: - Status
 
     private(set) var isReachable = false
     private(set) var availableModels: [String] = []
     private(set) var isCheckingStatus = false
 
+    // MARK: - Adaptive Model Selection
+
+    /// Selects the best model and context window for the given input.
+    /// Returns (model, contextWindow, truncatedPrompt) — the prompt is
+    /// truncated only if no installed model can fit the full input.
+    func adaptiveSelect(
+        systemPrompt: String,
+        userPrompt: String
+    ) -> (model: String, numCtx: Int, systemPrompt: String, userPrompt: String) {
+        let totalChars = systemPrompt.count + userPrompt.count
+        // Rough token estimate: ~4 chars per token for English
+        let estimatedTokens = totalChars / 4
+        let outputReserve = 2048 // tokens reserved for the summary output
+
+        let models = self.availableModels
+        Logger.ai.info("Adaptive select: ~\(estimatedTokens) input tokens, \(models.count) models available")
+
+        // Walk tiers from smallest to largest, pick the first that fits AND is installed
+        for tier in Self.modelTiers {
+            guard models.contains(where: { $0.hasPrefix(tier.name.components(separatedBy: ":").first ?? tier.name) && $0.contains(tier.name.components(separatedBy: ":").last ?? "") }) || models.contains(tier.name) else {
+                continue
+            }
+            if estimatedTokens + outputReserve <= tier.contextWindow {
+                Logger.ai.info("Adaptive: selected \(tier.name) ctx=\(tier.contextWindow) for ~\(estimatedTokens) tokens")
+                return (tier.name, tier.contextWindow, systemPrompt, userPrompt)
+            }
+        }
+
+        // No tier fits — use the largest available model with truncation
+        let bestModel: String
+        let bestCtx: Int
+        if models.contains("llama3.1:8b") {
+            bestModel = "llama3.1:8b"
+            bestCtx = 65536
+        } else {
+            bestModel = models.first ?? Self.defaultModel
+            bestCtx = 16384
+        }
+
+        // Truncate: keep system prompt + first 10% of user prompt (intro/agenda) + last 90% (decisions/actions)
+        let maxUserChars = (bestCtx - outputReserve) * 4 - systemPrompt.count
+        let truncatedUser: String
+        if userPrompt.count > maxUserChars && maxUserChars > 0 {
+            let keepStart = maxUserChars / 10
+            let keepEnd = maxUserChars - keepStart - 100 // 100 chars for the truncation notice
+            let start = String(userPrompt.prefix(keepStart))
+            let end = String(userPrompt.suffix(keepEnd))
+            truncatedUser = start + "\n\n[... transcript truncated for length ...]\n\n" + end
+            Logger.ai.info("Adaptive: truncated \(userPrompt.count) → \(truncatedUser.count) chars for \(bestModel) ctx=\(bestCtx)")
+        } else {
+            truncatedUser = userPrompt
+        }
+
+        Logger.ai.info("Adaptive: selected \(bestModel) ctx=\(bestCtx) (truncated) for ~\(estimatedTokens) tokens")
+        return (bestModel, bestCtx, systemPrompt, truncatedUser)
+    }
+
     // MARK: - Text Generation
 
     /// Generate a response given a system prompt and user message using the specified model.
+    /// When `model` is `"auto"`, adaptive selection picks the best model for the input size.
     func generate(systemPrompt: String, userPrompt: String, model: String) async throws -> String {
+        let selectedModel: String
+        let numCtx: Int
+        let finalSystem: String
+        let finalUser: String
+
+        if model == "auto" {
+            let selection = adaptiveSelect(systemPrompt: systemPrompt, userPrompt: userPrompt)
+            selectedModel = selection.model
+            numCtx = selection.numCtx
+            finalSystem = selection.systemPrompt
+            finalUser = selection.userPrompt
+        } else {
+            selectedModel = model
+            numCtx = 0  // let Ollama use its default
+            finalSystem = systemPrompt
+            finalUser = userPrompt
+        }
+
+        // Dynamic timeout: ~1 min per 2K input tokens, minimum 120s, max 900s
+        let inputChars = finalSystem.count + finalUser.count
+        let estimatedSeconds = max(120, min(900, Double(inputChars / 4) / 2000.0 * 60.0))
+
         let url = Self.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 300  // LLM generation can be slow
+        request.timeoutInterval = estimatedSeconds
 
         let body = OllamaChatRequest(
-            model: model,
+            model: selectedModel,
             messages: [
-                OllamaMessage(role: "system", content: systemPrompt),
-                OllamaMessage(role: "user", content: userPrompt),
+                OllamaMessage(role: "system", content: finalSystem),
+                OllamaMessage(role: "user", content: finalUser),
             ],
-            options: OllamaOptions(temperature: 0.3, num_predict: 1024)
+            options: OllamaOptions(
+                temperature: 0.3,
+                num_predict: 2048,
+                num_ctx: numCtx > 0 ? numCtx : nil
+            )
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        Logger.ai.info("Sending request to Ollama (model: \(model))")
+        Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"))")
 
         let data: Data
         let response: URLResponse
@@ -130,7 +230,7 @@ final class OllamaService {
             throw OllamaServiceError.emptyResponse
         }
 
-        Logger.ai.info("Ollama response received (\(text.count) chars)")
+        Logger.ai.info("Ollama response received (\(text.count) chars, model: \(selectedModel))")
         return text
     }
 

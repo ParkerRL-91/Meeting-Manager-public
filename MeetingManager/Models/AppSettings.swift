@@ -25,8 +25,10 @@ struct AppSettings: Codable, Equatable {
     /// When true, meeting summaries are generated on-device using a local LLM instead of the Claude API.
     var useLocalLLM: Bool = false
 
-    /// The Ollama model name to use for on-device summarization (e.g. "llama3.2:3b").
-    var ollamaModel: String = OllamaService.defaultModel
+    /// The Ollama model name to use for on-device summarization.
+    /// `"auto"` enables adaptive selection — picks the best model for each transcript's size.
+    /// `"llama3.2:3b"` forces the 3B model only (recommended for slower Macs).
+    var ollamaModel: String = "auto"
 
     /// When true, automatically generate a summary ~10 minutes after transcription completes.
     var autoGenerateSummary: Bool = false

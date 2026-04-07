@@ -651,11 +651,11 @@ final class AppState {
 
             if useOllama {
                 let service = ollamaService
-                let model = settings.ollamaModel
+                let ollamaModel = settings.ollamaModel  // "auto" or explicit
                 baseTextGenerator = { sys, usr in
-                    try await service.generate(systemPrompt: sys, userPrompt: usr, model: model)
+                    try await service.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
                 }
-                modelUsed = "ollama/\(model)"
+                modelUsed = "ollama/\(ollamaModel)"
             } else if hasClaudeKey {
                 let claude = ClaudeService()
                 let claudeModel = settings.claudeModel
@@ -1467,8 +1467,8 @@ final class AppState {
 
         if useOllama {
             let service = ollamaService
-            let model = settings.ollamaModel
-            return { sys, usr in try await service.generate(systemPrompt: sys, userPrompt: usr, model: model) }
+            let ollamaModel = settings.ollamaModel
+            return { sys, usr in try await service.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel) }
         } else if hasClaudeKey {
             let claude = ClaudeService()
             let claudeModel = settings.claudeModel

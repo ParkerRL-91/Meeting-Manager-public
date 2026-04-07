@@ -213,12 +213,31 @@ struct OnDeviceSettingsView: View {
     private var modelPickerRow: some View {
         @Bindable var appState = appState
         let models = appState.ollamaService.availableModels
-        return Picker("Model", selection: $appState.settings.ollamaModel) {
-            ForEach(models, id: \.self) { model in
-                Text(model).tag(model)
+        return VStack(alignment: .leading, spacing: 8) {
+            Picker("Model", selection: $appState.settings.ollamaModel) {
+                Text("Auto (Dynamic)").tag("auto")
+                Divider()
+                ForEach(models, id: \.self) { model in
+                    Text(model).tag(model)
+                }
+                // If the saved model is not "auto" and not in the list, still show it
+                if appState.settings.ollamaModel != "auto" && !models.contains(appState.settings.ollamaModel) {
+                    Text(appState.settings.ollamaModel).tag(appState.settings.ollamaModel)
+                }
             }
-            if !models.contains(appState.settings.ollamaModel) {
-                Text(appState.settings.ollamaModel).tag(appState.settings.ollamaModel)
+
+            if appState.settings.ollamaModel == "auto" {
+                Label("Automatically picks the best model for each meeting's size. Uses 8B for long meetings if installed, 3B for shorter ones.", systemImage: "wand.and.stars")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("3b") {
+                Label("Using 3B model only — slower but works on any Mac. Good for Macs with ≤16GB RAM.", systemImage: "desktopcomputer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("8b") {
+                Label("Using 8B model — better quality for long meetings. Needs ~6GB free RAM.", systemImage: "bolt.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -231,7 +250,13 @@ struct OnDeviceSettingsView: View {
                 Text("On-device summarization uses Ollama, a free local AI runtime. When enabled, Meeting Manager installs Ollama automatically — nothing leaves your Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Summary quality depends on the model. llama3.2:3b is a good balance of speed and quality.")
+                Text("**Auto (Dynamic)** picks the best model based on transcript length — 3B for quick meetings, 8B for long group calls. Timeouts adjust automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("**llama3.2:3b** — works on any Mac, slower on large transcripts. Recommended for Macs with ≤16GB RAM.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("**llama3.1:8b** — better quality for meetings over 30 min. Needs ~6GB free RAM.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

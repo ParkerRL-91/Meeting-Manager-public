@@ -435,7 +435,7 @@ struct SummaryView: View {
 
                 if useOllama {
                     let ollamaService = appState.ollamaService
-                    let ollamaModel = settings.ollamaModel
+                    let ollamaModel = settings.ollamaModel  // "auto" or explicit e.g. "llama3.2:3b"
                     baseTextGenerator = { sys, usr in
                         try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
                     }
