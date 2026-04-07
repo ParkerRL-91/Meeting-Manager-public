@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v1.6.0.dmg**](./MeetingManager-v1.6.0.dmg) — macOS 14.4+
+[**MeetingManager-v1.7.0.dmg**](./MeetingManager-v1.7.0.dmg) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -28,6 +28,30 @@ Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may 
 xattr -cr "/Applications/Meeting Manager.app"
 ```
 This removes the quarantine flag so the app opens without warnings.
+
+---
+
+## What's New in v1.7.0 — Dynamic Model Selection & Recording Fixes
+
+### Adaptive On-Device Summarization
+- **Dynamic model selection** — when set to **Auto (Dynamic)** in Settings → On-Device, the app automatically picks the best Ollama model for each meeting's transcript size:
+  - Short 1:1s (≤4K tokens) → `llama3.2:3b` with 8K context — fast
+  - Standard meetings (≤9K tokens) → `llama3.2:3b` with 16K context
+  - Long group meetings (>9K tokens) → `llama3.1:8b` with 32K context — better quality
+- **Dynamic timeouts** — scales from 2 min (short meetings) to 15 min (marathon sessions) so large transcripts don't time out
+- **Explicit context windows** — no more sending 15K tokens into a 131K default context that chokes the 3B model
+- **Smart truncation** — if no installed model fits the full transcript, keeps the first 10% (intro/agenda) + last 90% (decisions/actions)
+- **Force 3B mode** — select `llama3.2:3b` explicitly in Settings for slower Macs with ≤16GB RAM
+
+### Recording Reliability
+- **Batch transcription decoupled** — transcription of a stopped meeting now runs in a separate background task. Previously it blocked the stop-recording flow, causing the next recording to be silently killed when the previous transcription completed.
+- **Meetings no longer vanish** — meetings in `transcribing` or `summarizing` status now appear in the Today view and sidebar (previously they fell through both query filters and disappeared)
+- **Silence auto-stop raised to 5 min** — was 45 seconds, which stopped recordings during normal meeting pauses (presentations, screen sharing, muted periods)
+
+### Google Calendar
+- **Calendar selection** — choose which Google Calendar to sync from a picker in Settings
+- **Meetings preview** — Settings shows 7 upcoming and 7 recent synced meetings
+- **Sync feedback** — success count, error messages, and last-sync timestamp shown in real time
 
 ---
 
@@ -75,6 +99,12 @@ A comprehensive stability and performance sprint touching 30+ areas across the e
 
 <details>
 <summary><strong>Previous Releases</strong></summary>
+
+#### v1.6.0 — Stability & Efficiency
+- Thread-safe audio pipeline, actor-isolated WhisperEngine
+- Circular audio buffers, memory pressure monitoring
+- Exponential backoff retry for Claude/Google APIs
+- 22 test files, DatabasePool, log rotation
 
 #### v1.5.0 — Stability & Efficiency Sprint
 - Timer leaks & 36k Task spawns eliminated
@@ -139,6 +169,13 @@ Enable **Settings → On-Device → Use On-Device Summarization**. The app will 
 1. Download and install [Ollama](https://ollama.com) (~60 MB)
 2. Pull the default model `llama3.2:3b` (~2 GB)
 3. Show progress inline — no terminal required
+
+For best results with long meetings (>30 min), also install the 8B model:
+```bash
+ollama pull llama3.1:8b
+```
+
+The **Auto (Dynamic)** model setting (default) picks the right model for each meeting. For slower Macs (≤16GB RAM), select `llama3.2:3b` explicitly to force the lighter model.
 
 Once setup is complete, all summaries, recipes, action items, and chat are generated locally. You can switch back to Claude at any time by disabling the toggle.
 
