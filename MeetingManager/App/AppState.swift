@@ -408,94 +408,36 @@ final class AppState {
                     loadMeetings()
                 }
 
-                // Now batch-transcribe any meetings that have audio
-                // Deduplicate in case a meeting appears in both lists
+                // ── Enqueue stuck meetings into the persistent task queue ──
+                // The TaskQueueManager handles model loading, retries, and crash recovery.
+                // No inline batchTranscribe() — everything goes through the queue.
+
                 var seen = Set<String>()
-                var toTranscribe: [Meeting] = []
+                var enqueued = 0
                 for m in recoveredForTranscription + stuckTranscribing {
-                    if seen.insert(m.id).inserted {
-                        toTranscribe.append(m)
-                    }
-                }
-                fileLog("Startup cleanup: \(toTranscribe.count) meetings to transcribe")
+                    guard seen.insert(m.id).inserted else { continue }
 
-                if !toTranscribe.isEmpty {
-                    // Wait for the WhisperKit model to finish loading before transcribing.
-                    // autoLoadTranscriptionModel() runs concurrently — give it up to 120s.
-                    if !transcriptionService.isModelLoaded {
-                        fileLog("Startup cleanup: waiting for WhisperKit model to load...")
-                        for tick in 0..<120 {
-                            // Yield to let the model-loading Task make progress
-                            try? await Task.sleep(for: .seconds(1))
-                            if transcriptionService.isModelLoaded { break }
-                            if tick == 30 { fileLog("Startup cleanup: still waiting for model (30s)...") }
-                            if tick == 60 { fileLog("Startup cleanup: still waiting for model (60s)...") }
-                        }
-                        if transcriptionService.isModelLoaded {
-                            fileLog("Startup cleanup: model loaded — proceeding with transcription")
-                        } else {
-                            fileLog("Startup cleanup: model failed to load after 120s — marking meetings complete")
-                            for meeting in toTranscribe {
-                                try? await database.writer.write { db in
-                                    var m = meeting
-                                    m.status = .complete
-                                    try m.update(db)
-                                }
-                            }
-                            loadMeetings()
-                            return
+                    // Only enqueue if the meeting has a real audio file
+                    if let path = m.audioFilePath,
+                       FileManager.default.fileExists(atPath: path) {
+                        await taskQueueManager.enqueue(type: .transcription, meetingId: m.id, priority: 2)
+                        enqueued += 1
+                    } else {
+                        // No audio — mark complete directly
+                        try? await database.writer.write { db in
+                            var meeting = m
+                            meeting.status = .complete
+                            try meeting.update(db)
                         }
                     }
                 }
 
-                for meeting in toTranscribe {
-                    fileLog("Startup cleanup: processing '\(meeting.title)' (status=\(meeting.status.rawValue), audio=\(meeting.audioFilePath ?? "nil"))")
-                    guard let path = meeting.audioFilePath else {
-                        // No audio path — just mark complete
-                        try await database.writer.write { db in
-                            var m = meeting
-                            m.status = .complete
-                            try m.update(db)
-                        }
-                        continue
-                    }
-                    let audioURL = URL(fileURLWithPath: path)
-                    guard FileManager.default.fileExists(atPath: path) else {
-                        fileLog("Startup cleanup: no audio file for \(meeting.id) — marking complete")
-                        try await database.writer.write { db in
-                            var m = meeting
-                            m.status = .complete
-                            try m.update(db)
-                        }
-                        continue
-                    }
-
-                    fileLog("Startup cleanup: batch transcribing '\(meeting.title)' (\(meeting.id))")
-                    await batchTranscribe(meetingId: meeting.id, audioURL: audioURL)
-
-                    // Mark complete after transcription
-                    try await database.writer.write { db in
-                        var m = meeting
-                        m.status = .complete
-                        try m.update(db)
-                    }
-                    fileLog("Startup cleanup: completed '\(meeting.title)'")
-
-                    // Auto-summary if enabled
-                    if settings.autoGenerateSummary {
-                        scheduleAutoSummary(meetingId: meeting.id)
-                    }
-                }
-
-                if !toTranscribe.isEmpty {
+                if enqueued > 0 {
+                    fileLog("Startup cleanup: enqueued \(enqueued) meetings for transcription via task queue")
                     loadMeetings()
                 }
 
-                // Drain pending transcription queue if model is already cached —
-                // processPendingTranscriptions() is also called in autoLoadTranscriptionModel()
-                // success path, but that only covers the case where the model had to download.
-                // If the model was already on disk and loaded instantly, this path ensures
-                // any UserDefaults-queued jobs from a prior crash are not abandoned.
+                // Drain any legacy UserDefaults-based pending transcriptions
                 if transcriptionService.isModelLoaded {
                     await processPendingTranscriptions()
                 }
