@@ -80,6 +80,7 @@ final class AppState {
     let transcriptionService: TranscriptionService
     let streamingTranscriber: StreamingTranscriber
     let appleSpeechTranscriber: AppleSpeechTranscriber
+    let taskQueueManager: TaskQueueManager
 
     // State machine — single source of truth for meeting lifecycle
     private(set) var stateMachine: MeetingStateMachine
@@ -131,6 +132,7 @@ final class AppState {
             self.streamingTranscriber = existing.streamingTranscriber
             self.appleSpeechTranscriber = existing.appleSpeechTranscriber
             self.stateMachine = existing.stateMachine
+            self.taskQueueManager = existing.taskQueueManager
 
             // Copy mutable state from existing instance
             self.isRecording = existing.isRecording
@@ -166,6 +168,8 @@ final class AppState {
             audioCaptureService: audioCaptureService
         )
 
+        self.taskQueueManager = TaskQueueManager(database: database)
+
         // Auto-stop recording after sustained silence (meeting ended)
         audioCaptureService.onSilenceDetected = { [weak self] in
             Task { @MainActor in
@@ -190,6 +194,7 @@ final class AppState {
         startProximityCheck()
         autoLoadTranscriptionModel()
         cleanupStuckMeetings()
+        setupTaskQueue()
 
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
@@ -268,6 +273,99 @@ final class AppState {
     /// On launch, recover meetings stuck in "recording" or "transcribing" from a prior crash.
     ///
     /// - Stuck recordings WITH audio files → set to transcribing and queue batch transcription
+    // MARK: - Task Queue Setup
+
+    private func setupTaskQueue() {
+        // Register handlers — these closures do the actual work
+        taskQueueManager.transcriptionHandler = { [weak self] meetingId, audioURL in
+            guard let self else { return }
+            self.fileLog("TaskQueue: running transcription for \(meetingId)")
+            await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+
+            // Mark meeting complete after transcription
+            if var meeting = try? await self.meetingRepository.find(id: meetingId),
+               meeting.status == .transcribing {
+                try? await self.stateMachine.complete(meeting: meeting)
+                self.loadMeetings()
+            }
+        }
+
+        taskQueueManager.summaryHandler = { [weak self] meetingId in
+            guard let self else { return }
+            self.fileLog("TaskQueue: running summary for \(meetingId)")
+            try await self.generateSummaryForTask(meetingId: meetingId)
+            self.loadMeetings()
+        }
+
+        taskQueueManager.enrichmentHandler = { [weak self] meetingId in
+            guard let self else { return }
+            self.fileLog("TaskQueue: enrichment placeholder for \(meetingId)")
+            // Enrichment will be implemented in Sprint 5
+        }
+
+        // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
+        Task {
+            await taskQueueManager.startUp()
+        }
+    }
+
+    /// Generate a summary for a meeting via the task queue.
+    /// Uses Ollama (adaptive) or Claude depending on settings.
+    private func generateSummaryForTask(meetingId: String) async throws {
+        // Load transcript
+        let segments = try await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)
+        guard !segments.isEmpty else {
+            throw TaskQueueError.noHandler("No transcript segments for meeting \(meetingId)")
+        }
+
+        let transcript = segments.map { $0.text }.joined(separator: "\n")
+
+        // Load meeting for template substitution
+        guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
+
+        let systemPrompt = settings.summaryPromptTemplate
+            .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
+            .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
+            .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
+            .replacingOccurrences(of: "{{transcript}}", with: "")
+            .replacingOccurrences(of: "{{notes}}", with: "")
+
+        // Determine which AI backend to use
+        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+        await ollamaService.refreshStatus()
+        let ollamaReachable = ollamaService.isReachable
+        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+        let summaryText: String
+        if useOllama {
+            // Use streaming for task queue — never times out, reads chunks incrementally
+            summaryText = try await ollamaService.generateStreaming(
+                systemPrompt: systemPrompt,
+                userPrompt: transcript,
+                model: settings.ollamaModel
+            )
+        } else if hasClaudeKey {
+            let claude = ClaudeService()
+            summaryText = try await claude.sendMessage(
+                systemPrompt: systemPrompt,
+                userPrompt: transcript,
+                model: settings.claudeModel
+            )
+        } else {
+            throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
+        }
+
+        // Save summary
+        var summary = MeetingSummary(
+            meetingId: meetingId,
+            promptUsed: systemPrompt,
+            summaryText: summaryText,
+            modelUsed: useOllama ? "ollama/\(settings.ollamaModel)" : settings.claudeModel
+        )
+        try await summaryRepository.save(&summary)
+        fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
+    }
+
     /// - Stuck recordings WITHOUT audio → cancel (nothing to transcribe)
     /// - Stuck transcribing → re-run batch transcription if audio exists, else complete
     private func cleanupStuckMeetings() {
@@ -563,51 +661,17 @@ final class AppState {
                 self.sendMeetingEndedNotification(meetingTitle: stoppedMeeting?.title)
                 loadMeetings()
 
-                // ── Deferred: batch transcription in a separate task ──
-                // This MUST NOT block the current task. If the user starts a new
-                // recording while transcription is running, nothing is affected.
+                // ── Enqueue transcription via persistent task queue ──
+                // The task queue handles retries, crash recovery, and auto-enqueues
+                // a summary task after transcription completes.
 
                 if let meetingId = stoppedMeetingId {
-                    let repo = self.meetingRepository
-                    let sm = self.stateMachine
-                    let settings = self.settings
-
-                    Task.detached(priority: .userInitiated) { [weak self] in
-                        guard let self else { return }
-
-                        // Verify meeting is still in transcribing state before starting
-                        guard let refreshed = try? await repo.find(id: meetingId),
-                              refreshed.status == .transcribing else {
-                            return
-                        }
-
-                        await MainActor.run {
-                            self.fileLog("Meeting stopped. Starting batch transcription for \(meetingId)...")
-                        }
-                        await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
-
-                        // Checkpoint WAL to reclaim disk space
-                        try? await AppDatabase.shared.writer.writeWithoutTransaction { db in
-                            try db.checkpoint(.passive)
-                        }
-
-                        // Mark complete — but only if it's still transcribing
-                        // (user might have re-opened or cancelled it in the meantime)
-                        if let final_ = try? await repo.find(id: meetingId),
-                           final_.status == .transcribing {
-                            try? await sm.complete(meeting: final_)
-
-                            if settings.autoGenerateSummary {
-                                await MainActor.run {
-                                    self.scheduleAutoSummary(meetingId: meetingId)
-                                }
-                            }
-                        }
-
-                        await MainActor.run {
-                            self.loadMeetings()
-                        }
-                    }
+                    self.fileLog("Meeting stopped. Enqueuing transcription for \(meetingId)")
+                    await self.taskQueueManager.enqueue(
+                        type: .transcription,
+                        meetingId: meetingId,
+                        priority: 0  // Highest priority — user is waiting
+                    )
                 }
             } catch {
                 Logger.general.error("Failed to stop recording: \(error.localizedDescription)")

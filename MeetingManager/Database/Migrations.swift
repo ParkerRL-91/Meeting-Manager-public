@@ -391,5 +391,35 @@ enum Migrations {
                 t.column("meetingId").notIndexed()
             }
         }
+
+        migrator.registerMigration("v14-task-queue") { db in
+            try db.create(table: "taskQueue") { t in
+                t.column("id", .text).primaryKey()
+                t.column("type", .text).notNull()
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("status", .text).notNull().defaults(to: "pending")
+                t.column("priority", .integer).notNull().defaults(to: 5)
+                t.column("retryCount", .integer).notNull().defaults(to: 0)
+                t.column("maxRetries", .integer).notNull().defaults(to: 3)
+                t.column("error", .text)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("startedAt", .datetime)
+                t.column("completedAt", .datetime)
+                t.column("metadata", .text)
+            }
+            // Index for the processor: fetch next pending task by priority
+            try db.create(
+                index: "idx_taskQueue_status_priority",
+                on: "taskQueue",
+                columns: ["status", "priority", "createdAt"]
+            )
+            // Index for looking up tasks by meeting
+            try db.create(
+                index: "idx_taskQueue_meetingId",
+                on: "taskQueue",
+                columns: ["meetingId"]
+            )
+        }
     }
 }

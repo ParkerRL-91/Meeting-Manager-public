@@ -11,8 +11,15 @@ private struct OllamaMessage: Codable {
 private struct OllamaChatRequest: Encodable {
     let model: String
     let messages: [OllamaMessage]
-    let stream: Bool = false
+    let stream: Bool
     let options: OllamaOptions?
+
+    init(model: String, messages: [OllamaMessage], stream: Bool = false, options: OllamaOptions?) {
+        self.model = model
+        self.messages = messages
+        self.stream = stream
+        self.options = options
+    }
 }
 
 private struct OllamaOptions: Encodable {
@@ -240,6 +247,93 @@ final class OllamaService {
 
         Logger.ai.info("Ollama response received (\(text.count) chars, model: \(selectedModel))")
         return text
+    }
+
+    // MARK: - Streaming Generation (for task queue / long meetings)
+
+    /// Generate a response using streaming — reads chunks incrementally so there's no
+    /// single timeout. Ideal for long meetings processed in the background via the task queue.
+    /// Never times out as long as Ollama keeps sending chunks.
+    func generateStreaming(systemPrompt: String, userPrompt: String, model: String) async throws -> String {
+        let selectedModel: String
+        let numCtx: Int
+        let finalSystem: String
+        let finalUser: String
+
+        if model == "auto" {
+            let selection = adaptiveSelect(systemPrompt: systemPrompt, userPrompt: userPrompt)
+            selectedModel = selection.model
+            numCtx = selection.numCtx
+            finalSystem = selection.systemPrompt
+            finalUser = selection.userPrompt
+        } else {
+            selectedModel = model
+            let estimatedTokens = (systemPrompt.count + userPrompt.count) / 4
+            let needed = estimatedTokens + 2048
+            if needed <= 8192       { numCtx = 8192 }
+            else if needed <= 16384 { numCtx = 16384 }
+            else if needed <= 32768 { numCtx = 32768 }
+            else                    { numCtx = 65536 }
+            finalSystem = systemPrompt
+            finalUser = userPrompt
+        }
+
+        let url = Self.baseURL.appendingPathComponent("api/chat")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // No overall timeout — streaming means we get chunks continuously
+        request.timeoutInterval = 3600
+
+        let body = OllamaChatRequest(
+            model: selectedModel,
+            messages: [
+                OllamaMessage(role: "system", content: finalSystem),
+                OllamaMessage(role: "user", content: finalUser),
+            ],
+            stream: true,
+            options: OllamaOptions(
+                temperature: 0.3,
+                num_predict: 2048,
+                num_ctx: numCtx > 0 ? numCtx : nil
+            )
+        )
+        request.httpBody = try JSONEncoder().encode(body)
+
+        Logger.ai.info("Streaming request to Ollama (model: \(selectedModel), ctx: \(numCtx))")
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw OllamaServiceError.httpError(statusCode: code)
+        }
+
+        // Read NDJSON chunks — each line is a JSON object with {"message":{"content":"..."}, "done":bool}
+        var fullText = ""
+        for try await line in bytes.lines {
+            guard !line.isEmpty else { continue }
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let message = json["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                continue
+            }
+            fullText += content
+
+            if let done = json["done"] as? Bool, done {
+                break
+            }
+        }
+
+        let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw OllamaServiceError.emptyResponse
+        }
+
+        Logger.ai.info("Streaming response complete (\(trimmed.count) chars, model: \(selectedModel))")
+        return trimmed
     }
 
     // MARK: - Status Check

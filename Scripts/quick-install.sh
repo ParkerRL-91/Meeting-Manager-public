@@ -46,17 +46,22 @@ if [ ! -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" ]; then
     [ -d "$SPARKLE_SRC" ] && cp -R "$SPARKLE_SRC" "$APP_BUNDLE/Contents/Frameworks/"
 fi
 
-# 9. Sign inside-out
+# 9. Sign inside-out with stable certificate (preserves TCC permissions across rebuilds)
+SIGN_ID="MeetingManager-Dev"
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+    echo "WARNING: $SIGN_ID certificate not found — falling back to ad-hoc (permissions will reset)"
+    SIGN_ID="-"
+fi
 FW="$APP_BUNDLE/Contents/Frameworks"
 for xpc in "$FW/Sparkle.framework/Versions/B/XPCServices"/*.xpc; do
-    [ -d "$xpc" ] && codesign --force --sign - "$xpc" 2>/dev/null
+    [ -d "$xpc" ] && codesign --force --sign "$SIGN_ID" "$xpc" 2>/dev/null
 done
 [ -d "$FW/Sparkle.framework/Versions/B/Updater.app" ] && \
-    codesign --force --sign - "$FW/Sparkle.framework/Versions/B/Updater.app" 2>/dev/null
+    codesign --force --sign "$SIGN_ID" "$FW/Sparkle.framework/Versions/B/Updater.app" 2>/dev/null
 [ -f "$FW/Sparkle.framework/Versions/B/Autoupdate" ] && \
-    codesign --force --sign - "$FW/Sparkle.framework/Versions/B/Autoupdate" 2>/dev/null
-codesign --force --sign - "$FW/Sparkle.framework" 2>/dev/null
-codesign --force --sign - "$APP_BUNDLE"
+    codesign --force --sign "$SIGN_ID" "$FW/Sparkle.framework/Versions/B/Autoupdate" 2>/dev/null
+codesign --force --sign "$SIGN_ID" "$FW/Sparkle.framework" 2>/dev/null
+codesign --force --sign "$SIGN_ID" "$APP_BUNDLE"
 
 # 10. Launch
 echo "Launching..."

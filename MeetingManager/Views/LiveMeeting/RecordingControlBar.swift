@@ -1,7 +1,8 @@
 import SwiftUI
 import Combine
+import os
 
-/// Top bar displaying recording status, elapsed time, audio levels, and stop control.
+/// Top bar displaying recording status, editable meeting title, elapsed time, audio levels, and stop control.
 struct RecordingControlBar: View {
     let meetingId: String
     @Environment(AppState.self) private var appState
@@ -9,8 +10,13 @@ struct RecordingControlBar: View {
     @State private var elapsedSeconds: Int = 0
     @State private var timer: AnyCancellable?
 
+    /// Editable title — initialized from the active meeting, auto-saved on commit/focus loss.
+    @State private var editableTitle: String = ""
+    @State private var isEditing = false
+    @FocusState private var titleFocused: Bool
+
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             // Pulsing recording indicator
             RecordingDot()
 
@@ -22,6 +28,42 @@ struct RecordingControlBar: View {
             Text(formattedElapsedTime)
                 .font(.body.monospaced())
                 .foregroundStyle(Color.appTextSecondary)
+
+            // Separator
+            Text("·")
+                .foregroundStyle(Color.appTextTertiary)
+
+            // Editable meeting name — click to rename, auto-saves on Enter or focus loss
+            if isEditing {
+                TextField("Meeting name", text: $editableTitle)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.subheadline)
+                    .focused($titleFocused)
+                    .frame(maxWidth: 250)
+                    .onSubmit { commitTitle() }
+                    .onChange(of: titleFocused) { _, focused in
+                        if !focused { commitTitle() }
+                    }
+            } else {
+                HStack(spacing: 4) {
+                    Text(appState.activeMeeting?.title ?? "New Meeting")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextSecondary)
+                        .lineLimit(1)
+
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+                .onTapGesture {
+                    editableTitle = appState.activeMeeting?.title ?? ""
+                    isEditing = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        titleFocused = true
+                    }
+                }
+                .help("Click to rename meeting")
+            }
 
             Spacer()
 
@@ -40,6 +82,8 @@ struct RecordingControlBar: View {
 
             // Stop button
             Button(action: {
+                // Commit any pending title edit before stopping
+                if isEditing { commitTitle() }
                 appState.stopRecording()
             }) {
                 Image(systemName: "stop.fill")
@@ -57,6 +101,28 @@ struct RecordingControlBar: View {
         .background(Color.appSurface)
         .onAppear(perform: startTimer)
         .onDisappear(perform: stopTimer)
+    }
+
+    // MARK: - Title Editing
+
+    private func commitTitle() {
+        isEditing = false
+        titleFocused = false
+        let trimmed = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != appState.activeMeeting?.title else { return }
+
+        Task {
+            guard var meeting = appState.activeMeeting else { return }
+            meeting.title = trimmed
+            do {
+                try await appState.meetingRepository.save(&meeting)
+                appState.activeMeeting = meeting
+                appState.loadMeetings()
+            } catch {
+                Logger.general.error("Failed to save meeting title: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Timer
