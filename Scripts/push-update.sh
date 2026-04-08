@@ -75,12 +75,16 @@ if [[ -n "$(git -C "${REPO_DIR}" status --porcelain)" ]]; then
 fi
 echo "  [OK] git working tree is clean"
 
-# 2. Sparkle EdDSA key must be accessible in Keychain before we spend 3min building
-SPARKLE_KEY_SERVICE="ed25519-priv-${APP_NAME}"
-if ! security find-generic-password -s "${SPARKLE_KEY_SERVICE}" -a "${USER}" &>/dev/null; then
+# 2. Sparkle EdDSA key must be accessible in Keychain before we spend 3min building.
+# Sparkle's generate_keys tool stores the key with service="https://sparkle-project.org"
+# and account="ed25519".
+SPARKLE_KEY_SERVICE="https://sparkle-project.org"
+SPARKLE_KEY_ACCOUNT="ed25519"
+if ! security find-generic-password -s "${SPARKLE_KEY_SERVICE}" -a "${SPARKLE_KEY_ACCOUNT}" &>/dev/null; then
     echo "ERROR: Sparkle EdDSA private key not found in Keychain."
-    echo "  Expected: service='${SPARKLE_KEY_SERVICE}' account='${USER}'"
-    echo "  Run: ./Scripts/setup-signing.sh  (or generate_keys manually)"
+    echo "  Expected: service='${SPARKLE_KEY_SERVICE}' account='${SPARKLE_KEY_ACCOUNT}'"
+    echo "  Run: ${SPARKLE_BIN}/generate_keys  (then copy the public key to Info.plist SUPublicEDKey)"
+    echo "  Or:  ./Scripts/setup-signing.sh"
     exit 1
 fi
 echo "  [OK] Sparkle EdDSA key found in Keychain"
