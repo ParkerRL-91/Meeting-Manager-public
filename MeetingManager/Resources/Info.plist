@@ -35,7 +35,7 @@
 			<string>Google OAuth Callback</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu</string>
+				<string>com.googleusercontent.apps.YOUR_GOOGLE_OAUTH_CLIENT_ID</string>
 			</array>
 		</dict>
 	</array>

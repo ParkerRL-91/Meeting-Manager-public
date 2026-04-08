@@ -64,7 +64,8 @@ final class GoogleAuthManager {
 
     /// Built-in client ID — used when the user hasn't supplied their own.
     /// Users can override this in Settings > Google Calendar.
-    private static let builtInClientId = "168814758458-p49njtppjg4rpbjtqegu0f6b2hs3ilfu.apps.googleusercontent.com"
+    /// NOTE: Replace with your own Google OAuth Client ID from console.cloud.google.com
+    private static let builtInClientId = "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com"
 
     private enum OAuthConfig {
         static let authURL  = "https://accounts.google.com/o/oauth2/v2/auth"
