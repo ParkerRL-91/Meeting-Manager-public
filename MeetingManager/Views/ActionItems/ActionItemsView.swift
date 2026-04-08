@@ -36,6 +36,9 @@ struct ActionItemsView: View {
                     )
 
                     Button {
+                        // EXEMPT from TaskQueue: user-initiated interactive feature scoped to this view.
+                        // Results are persisted to DB by ActionItemExtractor; view reloads from DB on appear.
+                        // Cancellation on view disappear is correct — user left the view.
                         extractTask = Task { await extractItems() }
                     } label: {
                         Label("Extract Action Items", systemImage: "sparkles")
@@ -84,7 +87,7 @@ struct ActionItemsView: View {
                 )
 
                 Button {
-                    Task { await extractItems() }
+                    Task { await extractItems() } // EXEMPT: same as initial extract
                 } label: {
                     Label("Re-extract", systemImage: "arrow.clockwise")
                         .font(.caption)

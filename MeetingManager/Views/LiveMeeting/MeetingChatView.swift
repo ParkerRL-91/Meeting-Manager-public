@@ -244,6 +244,9 @@ struct MeetingChatView: View {
         inputText = ""
         lastFailedQuestion = question
 
+        // EXEMPT from TaskQueue: interactive conversational AI chat during live meeting.
+        // Scoped to this view; user expects immediate streaming response.
+        // Cancellation on view disappear is appropriate (user left the chat panel).
         sendTask = Task {
             guard let textGenerator = await buildTextGenerator() else { return }
             do {
@@ -260,7 +263,7 @@ struct MeetingChatView: View {
         guard let question = lastFailedQuestion, let service = chatService, let repo = chatMessageRepo else { return }
         service.clearError()
 
-        sendTask = Task {
+        sendTask = Task { // EXEMPT: same as sendMessage
             guard let textGenerator = await buildTextGenerator() else { return }
             do {
                 try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)

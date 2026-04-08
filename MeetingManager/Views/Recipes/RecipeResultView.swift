@@ -185,6 +185,10 @@ struct RecipeResultView: View {
         }
     }
 
+    // EXEMPT from TaskQueue: recipe execution is scoped to this modal sheet.
+    // The sheet is opened intentionally by the user and dismissed when done.
+    // Results are persisted to RecipeResultRepository; the modal shows live progress.
+    // Routing through TaskQueue would add latency without user-visible benefit here.
     private func runRecipe() async {
         guard let meeting else { return }
 

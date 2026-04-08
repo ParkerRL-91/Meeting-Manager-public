@@ -55,6 +55,9 @@ struct GlobalChatView: View {
             if messages.isEmpty {
                 GlobalChatEmptyState(onSuggest: { suggestion in
                     inputText = suggestion
+                    // EXEMPT from TaskQueue: interactive conversational AI chat.
+                    // User expects streaming, immediate responses, and cancellation via Stop button.
+                    // Chat history is managed in-view; routing through TaskQueue adds no value here.
                     Task { await sendMessage() }
                 })
             } else {
