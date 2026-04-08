@@ -192,6 +192,12 @@ final class CalendarSyncManager {
                 existing.title = event.title
                 existing.scheduledStartDate = event.startDate
                 existing.scheduledEndDate = event.endDate
+                // Write attendees only when calendar provides them AND the field is currently empty.
+                // Preserves any participants already detected via screen fallback or manual entry.
+                if !event.attendees.isEmpty && (existing.participants == nil || existing.participants!.isEmpty) {
+                    existing.participants = event.attendees.joined(separator: ", ")
+                    Logger.calendar.debug("Updated participants for '\(event.title)': \(event.attendees.count) attendees")
+                }
                 try existing.update(db)
                 Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
             } else {
@@ -202,8 +208,12 @@ final class CalendarSyncManager {
                     status: .scheduled,
                     calendarEventId: event.id
                 )
+                // Populate participants from calendar invite attendees on first insert.
+                if !event.attendees.isEmpty {
+                    meeting.participants = event.attendees.joined(separator: ", ")
+                }
                 try meeting.insert(db)
-                Logger.calendar.debug("Created new meeting '\(event.title)' from calendar")
+                Logger.calendar.debug("Created new meeting '\(event.title)' from calendar (participants: \(event.attendees.count))")
             }
         }
     }

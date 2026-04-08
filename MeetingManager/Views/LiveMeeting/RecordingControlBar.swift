@@ -67,6 +67,23 @@ struct RecordingControlBar: View {
 
             Spacer()
 
+            // Participant count badge — shown when at least 1 participant is known
+            // (from calendar invite or screen detection)
+            if let meeting = appState.activeMeeting, !meeting.participantList.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.2.fill")
+                        .font(.caption)
+                    Text("\(meeting.participantList.count)")
+                        .font(.caption.monospacedDigit())
+                }
+                .foregroundStyle(Color.appTextSecondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.appSurface.opacity(0.6))
+                .clipShape(Capsule())
+                .help(meeting.participantList.joined(separator: ", "))
+            }
+
             // Audio level meters
             AudioLevelIndicator(
                 label: "\u{1F3A4}",

@@ -85,6 +85,10 @@ final class AppState {
     // State machine — single source of truth for meeting lifecycle
     private(set) var stateMachine: MeetingStateMachine
 
+    /// Detects meeting participants from screen when calendar data is absent.
+    /// Only runs when meeting.participantList.isEmpty at recording start.
+    private var participantDetectionService: ParticipantDetectionService?
+
     /// True while the WhisperKit model is downloading/loading.
     private(set) var isLoadingModel = false
 
@@ -528,6 +532,19 @@ final class AppState {
                     self.fileLog("Apple Speech fallback wired for meeting \(meetingId)")
                 }
 
+                // Start participant detection if calendar didn't provide attendees.
+                // Calendar attendees are written to meeting.participants during sync;
+                // if still empty here, fall back to screen/window title detection.
+                if let meetingId = self.stateMachine.currentMeeting?.id {
+                    let currentParticipants = self.stateMachine.currentMeeting?.participantList ?? []
+                    let service = ParticipantDetectionService(
+                        meetingRepository: self.meetingRepository,
+                        database: self.database
+                    )
+                    self.participantDetectionService = service
+                    service.start(meetingId: meetingId, existingParticipants: currentParticipants)
+                }
+
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
@@ -614,6 +631,10 @@ final class AppState {
                 if self.appleSpeechTranscriber.isActive {
                     self.appleSpeechTranscriber.stop()
                 }
+
+                // Stop participant detection
+                self.participantDetectionService?.stop()
+                self.participantDetectionService = nil
 
                 // ── Immediate: UI + notifications (fire NOW, not after transcription) ──
 

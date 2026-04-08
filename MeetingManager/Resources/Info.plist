@@ -45,6 +45,8 @@
 	<string>14.4</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Meeting Manager needs access to your microphone to record and transcribe meetings.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Meeting Manager reads meeting window titles to detect participant names. It does not capture, record, or transmit screen content.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
