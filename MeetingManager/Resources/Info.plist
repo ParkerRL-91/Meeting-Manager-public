@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.8.1</string>
+	<string>1.8.2</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -45,10 +45,10 @@
 	<string>14.4</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Meeting Manager needs access to your microphone to record and transcribe meetings.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Meeting Manager reads meeting window titles to detect participant names. It does not capture, record, or transmit screen content.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Meeting Manager reads meeting window titles to detect participant names. It does not capture, record, or transmit screen content.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Meeting Manager uses on-device speech recognition to transcribe your meetings in real-time.</string>
 	<key>SUEnableAutomaticChecks</key>
