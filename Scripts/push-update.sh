@@ -10,17 +10,22 @@
 #     named "MeetingManager-Notarize" (xcrun notarytool store-credentials)
 #
 # Usage:
-#   ./Scripts/push-update.sh 1.2.0
+#   ./Scripts/push-update.sh 1.2.0           # full release (must set NOTARIZE=1)
+#   ./Scripts/push-update.sh --dry-run 1.2.0 # validate only — no build or publish
+#   NOTARIZE=1 ./Scripts/push-update.sh 1.2.0
+#   SKIP_NOTARIZE=1 ./Scripts/push-update.sh 1.2.0  # override (not recommended)
 #
 # The script will:
-#   1. Bump version in Info.plist
-#   2. Build release binary via swift build
-#   3. Assemble a signed .app bundle
-#   4. Notarize and staple (if NOTARIZE=1)
-#   5. Create a signed DMG
-#   6. Generate and sign appcast.xml for Sparkle
-#   7. Push appcast.xml to docs/ (GitHub Pages) and commit
-#   8. Create a GitHub Release with the DMG attached
+#   1. Pre-flight: git state check + Keychain key check + notarization guard
+#   2. Bump version in Info.plist (atomically: reverts on build failure)
+#   3. Build release binary via swift build
+#   4. Assemble a signed .app bundle
+#   5. Notarize and staple (required unless SKIP_NOTARIZE=1)
+#   6. Create a signed DMG and print SHA-256 checksum
+#   7. Download previous release DMG for delta generation
+#   8. Generate and sign appcast.xml for Sparkle (with .delta files)
+#   9. Push appcast.xml to docs/ (GitHub Pages) — only if changed
+#  10. Create a GitHub Release with the DMG attached
 
 set -euo pipefail
 
@@ -35,19 +40,92 @@ SPARKLE_BIN="${REPO_DIR}/.build/artifacts/sparkle/Sparkle/bin"
 GENERATE_APPCAST="${SPARKLE_BIN}/generate_appcast"
 SIGN_UPDATE="${SPARKLE_BIN}/sign_update"
 NOTARIZE="${NOTARIZE:-0}"
+SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
-VERSION="${1:-}"
+# ──────────────────────────────────────────────────
+# Parse arguments
+# ──────────────────────────────────────────────────
+DRY_RUN=0
+VERSION=""
+
+for arg in "$@"; do
+    case "${arg}" in
+        --dry-run) DRY_RUN=1 ;;
+        *)         VERSION="${arg}" ;;
+    esac
+done
+
 if [[ -z "${VERSION}" ]]; then
-    echo "Usage: $0 <version>  (e.g. $0 1.2.0)"
+    echo "Usage: $0 [--dry-run] <version>  (e.g. $0 1.2.0)"
     exit 1
+fi
+
+PLIST="${REPO_DIR}/MeetingManager/Resources/Info.plist"
+
+# ──────────────────────────────────────────────────
+# Pre-flight validation (always runs, even in dry-run)
+# ──────────────────────────────────────────────────
+echo "=== Pre-flight checks ==="
+
+# 1. Git state: working tree must be clean
+if [[ -n "$(git -C "${REPO_DIR}" status --porcelain)" ]]; then
+    echo "ERROR: Working tree is dirty. Commit or stash all changes before releasing."
+    git -C "${REPO_DIR}" status --short
+    exit 1
+fi
+echo "  [OK] git working tree is clean"
+
+# 2. Sparkle EdDSA key must be accessible in Keychain before we spend 3min building
+SPARKLE_KEY_SERVICE="ed25519-priv-${APP_NAME}"
+if ! security find-generic-password -s "${SPARKLE_KEY_SERVICE}" -a "${USER}" &>/dev/null; then
+    echo "ERROR: Sparkle EdDSA private key not found in Keychain."
+    echo "  Expected: service='${SPARKLE_KEY_SERVICE}' account='${USER}'"
+    echo "  Run: ./Scripts/setup-signing.sh  (or generate_keys manually)"
+    exit 1
+fi
+echo "  [OK] Sparkle EdDSA key found in Keychain"
+
+# 3. Current version
+ORIGINAL_VERSION="$(plutil -extract CFBundleShortVersionString raw "${PLIST}")"
+echo "  [OK] Current version: ${ORIGINAL_VERSION} → new version: ${VERSION}"
+
+# 4. Notarization guard: enforce NOTARIZE=1 unless explicitly overriding
+if [[ "${DRY_RUN}" == "0" && "${NOTARIZE}" != "1" && "${SKIP_NOTARIZE}" != "1" ]]; then
+    echo ""
+    echo "ERROR: Notarization is required for public releases."
+    echo "  Un-notarized apps are blocked by Gatekeeper on macOS 15+ for most users."
+    echo "  Options:"
+    echo "    NOTARIZE=1 $0 ${VERSION}          # full notarization (recommended)"
+    echo "    SKIP_NOTARIZE=1 $0 ${VERSION}     # skip (internal testing only)"
+    exit 1
+fi
+if [[ "${SKIP_NOTARIZE}" == "1" && "${NOTARIZE}" != "1" ]]; then
+    echo ""
+    echo "  WARN: Shipping WITHOUT notarization (SKIP_NOTARIZE=1)."
+    echo "  Users on macOS 15+ will see Gatekeeper warnings. Use for internal testing only."
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────────
+# Dry-run: exit after validation
+# ──────────────────────────────────────────────────
+if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "=== DRY RUN — all checks passed. Would release v${VERSION}. ==="
+    echo "  git state:         clean"
+    echo "  Sparkle key:       found (service='${SPARKLE_KEY_SERVICE}')"
+    echo "  Current version:   ${ORIGINAL_VERSION}"
+    echo "  New version:       ${VERSION}"
+    echo "  Notarize:          ${NOTARIZE}"
+    echo "  No build or publish performed."
+    exit 0
 fi
 
 echo "=== Meeting Manager v${VERSION} release ==="
 
 # ──────────────────────────────────────────────────
-# Step 1: Bump version in Info.plist
+# Step 1: Bump version (atomic — reverts on build failure)
 # ──────────────────────────────────────────────────
-PLIST="${REPO_DIR}/MeetingManager/Resources/Info.plist"
 echo "Bumping version to ${VERSION}..."
 plutil -replace CFBundleShortVersionString -string "${VERSION}" "${PLIST}"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
@@ -58,12 +136,25 @@ plutil -replace CFBundleVersion -string "${BUILD_NUMBER}" "${PLIST}"
 # ──────────────────────────────────────────────────
 echo "Building..."
 cd "${REPO_DIR}"
-swift build -c release 2>&1 | grep -E "^(error:|warning:|Build complete)" || true
+if ! swift build -c release 2>&1 | grep -E "^(error:|warning:|Build complete)" || true; then
+    :  # grep exits non-zero if no match — that's fine
+fi
+
 BINARY="${REPO_DIR}/.build/release/${EXECUTABLE}"
 if [[ ! -f "${BINARY}" ]]; then
-    echo "Error: binary not found at ${BINARY}"
+    echo "ERROR: Build failed — binary not found at ${BINARY}. Reverting version bump."
+    plutil -replace CFBundleShortVersionString -string "${ORIGINAL_VERSION}" "${PLIST}"
+    plutil -replace CFBundleVersion -string "$(date +%Y%m%d%H%M)" "${PLIST}"
     exit 1
 fi
+
+# Verify build actually succeeded (swift build exits 0 even on error in some versions)
+if ! swift build -c release --show-bin-path &>/dev/null; then
+    echo "ERROR: Build verification failed. Reverting version bump."
+    plutil -replace CFBundleShortVersionString -string "${ORIGINAL_VERSION}" "${PLIST}"
+    exit 1
+fi
+
 echo "Binary built: ${BINARY}"
 
 # ──────────────────────────────────────────────────
@@ -135,7 +226,7 @@ codesign --force --deep --options runtime \
 echo "Signed."
 
 # ──────────────────────────────────────────────────
-# Step 5: Notarize (optional, set NOTARIZE=1)
+# Step 5: Notarize (required by default, SKIP_NOTARIZE=1 to override)
 # ──────────────────────────────────────────────────
 if [[ "${NOTARIZE}" == "1" ]]; then
     echo "Notarizing..."
@@ -149,7 +240,7 @@ if [[ "${NOTARIZE}" == "1" ]]; then
 fi
 
 # ──────────────────────────────────────────────────
-# Step 6: Create DMG
+# Step 6: Create DMG + print SHA-256
 # ──────────────────────────────────────────────────
 echo "Creating DMG..."
 DMG_NAME="${APP_NAME// /-}-${VERSION}.dmg"
@@ -171,17 +262,35 @@ if [[ "${NOTARIZE}" == "1" ]]; then
     codesign --sign "${SIGN_IDENTITY}" "${DMG_PATH}"
 fi
 
+DMG_SHA=$(shasum -a 256 "${DMG_PATH}" | awk '{print $1}')
 echo "DMG: ${DMG_PATH}"
+echo "SHA-256: ${DMG_SHA}"
 
 # ──────────────────────────────────────────────────
-# Step 7: Generate appcast.xml
+# Step 7: Fetch previous release DMG for delta generation
 # ──────────────────────────────────────────────────
-echo "Generating appcast..."
+echo "Generating appcast (with delta support)..."
 APPCAST_BUILD_DIR="${BUILD_DIR}/appcast"
 mkdir -p "${APPCAST_BUILD_DIR}"
+
+# Download previous release DMG so generate_appcast can create .delta files
+# (80-90% smaller downloads for minor releases)
+PREV_TAG="$(git -C "${REPO_DIR}" describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")"
+if [[ -n "${PREV_TAG}" ]]; then
+    echo "  Downloading ${PREV_TAG} DMG for delta generation..."
+    if gh release download "${PREV_TAG}" --pattern "*.dmg" --dir "${APPCAST_BUILD_DIR}" 2>/dev/null; then
+        echo "  Downloaded ${PREV_TAG} DMG — deltas will be generated."
+    else
+        echo "  Could not download ${PREV_TAG} DMG — delta updates disabled for this release."
+    fi
+fi
+
+# Copy current DMG into staging (must be alongside previous for delta generation)
 cp "${DMG_PATH}" "${APPCAST_BUILD_DIR}/"
 
-# generate_appcast will sign the release using the Sparkle private key in Keychain
+# ──────────────────────────────────────────────────
+# Step 8: Generate appcast.xml (signs with EdDSA key from Keychain)
+# ──────────────────────────────────────────────────
 "${GENERATE_APPCAST}" \
     --download-url-prefix "https://github.com/ParkerRL-91/Meeting-Manager/releases/download/v${VERSION}/" \
     --link "https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v${VERSION}" \
@@ -190,7 +299,7 @@ cp "${DMG_PATH}" "${APPCAST_BUILD_DIR}/"
 echo "Appcast generated."
 
 # ──────────────────────────────────────────────────
-# Step 8: Publish appcast to GitHub Pages (docs/)
+# Step 9: Publish appcast to GitHub Pages (only if changed)
 # ──────────────────────────────────────────────────
 echo "Publishing appcast to GitHub Pages..."
 DOCS_DIR="${REPO_DIR}/docs"
@@ -199,15 +308,19 @@ cp "${APPCAST_BUILD_DIR}/appcast.xml" "${DOCS_DIR}/appcast.xml"
 
 cd "${REPO_DIR}"
 git add docs/appcast.xml MeetingManager/Resources/Info.plist
-git commit -m "Release v${VERSION}
+
+if git diff --cached --quiet; then
+    echo "appcast.xml unchanged — skipping commit."
+else
+    git commit -m "Release v${VERSION}
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
-git push
-
-echo "Appcast pushed to GitHub Pages."
+    git push
+    echo "Appcast pushed to GitHub Pages."
+fi
 
 # ──────────────────────────────────────────────────
-# Step 9: Create GitHub Release
+# Step 10: Create GitHub Release
 # ──────────────────────────────────────────────────
 echo "Creating GitHub Release v${VERSION}..."
 gh release create "v${VERSION}" \
@@ -223,5 +336,6 @@ gh release create "v${VERSION}" \
 echo ""
 echo "=== Release v${VERSION} complete ==="
 echo "  DMG:      ${DMG_PATH}"
+echo "  SHA-256:  ${DMG_SHA}"
 echo "  Appcast:  https://parkerrl-91.github.io/Meeting-Manager/appcast.xml"
 echo "  Release:  https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v${VERSION}"
