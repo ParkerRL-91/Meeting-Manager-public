@@ -25,6 +25,8 @@ final class TaskQueueManager {
     var transcriptionHandler: ((String, URL?) async throws -> Void)?
     var summaryHandler: ((String) async throws -> Void)?
     var enrichmentHandler: ((String) async throws -> Void)?
+    /// Regeneration handler — meetingId + optional recipeId from task metadata.
+    var regenerationHandler: ((String, String?) async throws -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -311,6 +313,19 @@ final class TaskQueueManager {
                 throw TaskQueueError.noHandler("enrichment")
             }
             try await handler(task.meetingId)
+
+        case .regeneration:
+            guard let handler = regenerationHandler else {
+                throw TaskQueueError.noHandler("regeneration")
+            }
+            // Extract optional recipeId from metadata JSON blob.
+            var recipeId: String? = nil
+            if let meta = task.metadata,
+               let data = meta.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                recipeId = json["recipeId"]
+            }
+            try await handler(task.meetingId, recipeId)
         }
     }
 

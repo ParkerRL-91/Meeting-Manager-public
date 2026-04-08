@@ -18,9 +18,24 @@ struct SummaryView: View {
     @State private var editedText = ""
     @State private var errorMessage: String?
 
-    // Regeneration state
-    @State private var isRegenerating = false
-    @State private var regenerateError: String?
+    // Regeneration state — derived from the persistent task queue, not local @State.
+    // This means regeneration survives view disappearance and navigation.
+    private var isRegenerating: Bool {
+        appState.taskQueueManager.allTasks.contains {
+            $0.type == .regeneration &&
+            $0.meetingId == meetingId &&
+            ($0.status == .pending || $0.status == .running)
+        }
+    }
+
+    private var regenerateError: String? {
+        appState.taskQueueManager.allTasks
+            .filter { $0.type == .regeneration && $0.meetingId == meetingId && $0.status == .failed }
+            .sorted { ($0.createdAt) > ($1.createdAt) }
+            .first?.error
+    }
+
+    // Kept for save-edit flow only (not regeneration).
     @State private var activeTask: Task<Void, Never>?
 
     // History
@@ -47,7 +62,18 @@ struct SummaryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .errorAlert($errorMessage)
-        .onDisappear { activeTask?.cancel() }
+        .onDisappear { activeTask?.cancel() } // activeTask is save-edit only; regeneration persists
+        .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
+            // Reload summary when a regeneration task for this meeting completes.
+            let justCompleted = tasks.contains {
+                $0.type == .regeneration &&
+                $0.meetingId == meetingId &&
+                $0.status == .completed
+            }
+            if justCompleted {
+                Task { await loadSummary() }
+            }
+        }
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             async let summaryLoad: () = loadSummary()
@@ -263,7 +289,14 @@ struct SummaryView: View {
                     .controlSize(.small)
 
                     Button("Dismiss") {
-                        regenerateError = nil
+                        // Clear the failed regeneration task from the queue so the error disappears.
+                        Task {
+                            if let failedTask = appState.taskQueueManager.allTasks.first(where: {
+                                $0.type == .regeneration && $0.meetingId == meetingId && $0.status == .failed
+                            }) {
+                                await appState.taskQueueManager.cancel(taskId: failedTask.id)
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
                     .font(.caption)
@@ -415,68 +448,25 @@ struct SummaryView: View {
     }
 
     private func regenerateSummary(recipe: Recipe? = nil) {
-        guard let meeting else { return }
+        // Enqueue through the persistent task queue instead of running inline.
+        // This ensures regeneration survives navigation, appears in the Tasks sidebar,
+        // and can be cancelled from the task list. isRegenerating and regenerateError
+        // are computed from the queue — no local state to manage here.
+        Task {
+            // Build metadata JSON with optional recipeId
+            var metadataDict: [String: String] = [:]
+            if let recipe { metadataDict["recipeId"] = recipe.id }
+            let metadata: String? = metadataDict.isEmpty ? nil : {
+                let data = try? JSONSerialization.data(withJSONObject: metadataDict)
+                return data.flatMap { String(data: $0, encoding: .utf8) }
+            }()
 
-        isRegenerating = true
-        regenerateError = nil
-
-        activeTask = Task {
-            do {
-                let settings = appState.settings
-                let baseTextGenerator: (String, String) async throws -> String
-                let modelUsed: String
-
-                let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-                // Refresh Ollama status so we have a live check, not a stale cached value
-                await appState.ollamaService.refreshStatus()
-                let ollamaReachable = appState.ollamaService.isReachable
-
-                let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-                if useOllama {
-                    let ollamaService = appState.ollamaService
-                    let ollamaModel = settings.ollamaModel  // "auto" or explicit e.g. "llama3.2:3b"
-                    baseTextGenerator = { sys, usr in
-                        try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
-                    }
-                    modelUsed = "ollama/\(ollamaModel)"
-                } else if hasClaudeKey {
-                    let claude = ClaudeService()
-                    let claudeModel = settings.claudeModel
-                    baseTextGenerator = { sys, usr in
-                        try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
-                    }
-                    modelUsed = settings.claudeModel
-                } else {
-                    isRegenerating = false
-                    regenerateError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
-                    return
-                }
-
-                // If a recipe is selected, override the system prompt with its template
-                let textGenerator: (String, String) async throws -> String
-                if let recipe {
-                    textGenerator = { _, usr in try await baseTextGenerator(recipe.promptTemplate, usr) }
-                } else {
-                    textGenerator = baseTextGenerator
-                }
-
-                let generator = SummaryGenerator()
-                let newSummary = try await generator.generateSummary(
-                    for: meeting,
-                    transcriptRepo: appState.transcriptRepository,
-                    noteRepo: appState.noteRepository,
-                    summaryRepo: appState.summaryRepository,
-                    textGenerator: textGenerator,
-                    modelUsed: modelUsed,
-                    settings: settings
-                )
-                summary = newSummary
-                isRegenerating = false
-            } catch {
-                isRegenerating = false
-                regenerateError = error.localizedDescription
-            }
+            await appState.taskQueueManager.enqueue(
+                type: .regeneration,
+                meetingId: meetingId,
+                priority: 3, // Higher priority than summary (5) — user explicitly requested
+                metadata: metadata
+            )
         }
     }
 

@@ -303,6 +303,13 @@ final class AppState {
             // Enrichment will be implemented in Sprint 5
         }
 
+        taskQueueManager.regenerationHandler = { [weak self] meetingId, recipeId in
+            guard let self else { return }
+            self.fileLog("TaskQueue: running regeneration for \(meetingId) recipeId=\(recipeId ?? "none")")
+            try await self.generateSummaryForTask(meetingId: meetingId, recipeId: recipeId)
+            self.loadMeetings()
+        }
+
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
         Task {
             await taskQueueManager.startUp()
@@ -311,7 +318,9 @@ final class AppState {
 
     /// Generate a summary for a meeting via the task queue.
     /// Uses Ollama (adaptive) or Claude depending on settings.
-    private func generateSummaryForTask(meetingId: String) async throws {
+    /// - Parameter recipeId: Optional recipe override. When provided, uses the recipe's
+    ///   promptTemplate instead of the default summaryPromptTemplate. Used by `.regeneration` tasks.
+    private func generateSummaryForTask(meetingId: String, recipeId: String? = nil) async throws {
         // Load transcript
         let segments = try await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)
         guard !segments.isEmpty else {
@@ -323,7 +332,16 @@ final class AppState {
         // Load meeting for template substitution
         guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
 
-        let systemPrompt = settings.summaryPromptTemplate
+        // Resolve which prompt template to use: recipe override → default template
+        let rawTemplate: String
+        if let recipeId,
+           let recipe = try? await RecipeRepository(database: database).find(id: recipeId) {
+            rawTemplate = recipe.promptTemplate
+        } else {
+            rawTemplate = settings.summaryPromptTemplate
+        }
+
+        let systemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
             .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)

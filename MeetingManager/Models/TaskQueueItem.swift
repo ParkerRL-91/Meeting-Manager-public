@@ -21,6 +21,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case transcription
         case summary
         case enrichment
+        case regeneration
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -36,6 +37,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .transcription: return "Transcribe"
         case .summary:       return "Summarize"
         case .enrichment:    return "Enrich"
+        case .regeneration:  return "Regenerate Summary"
         }
     }
 
