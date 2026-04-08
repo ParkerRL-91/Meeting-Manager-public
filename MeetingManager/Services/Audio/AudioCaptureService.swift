@@ -264,9 +264,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 return
             }
 
-            // micLevel is updated by updateMicLevel on every buffer
+            // Silence = both mic AND system audio below threshold.
+            // Must check both: mic can be zero (e.g. aggregate device routing issue) while
+            // remote participants are still speaking over system audio, and vice versa.
             // Threshold lowered from 0.005 — USB webcam mics have very low signal (~0.002-0.006)
-            if self.micLevel < 0.001 {
+            if self.micLevel < 0.001 && self.systemLevel < 0.001 {
                 self.consecutiveSilentSeconds += 1
                 if self.consecutiveSilentSeconds >= Int(self.silenceTimeout) {
                     Logger.audio.info("Silence detected for \(self.consecutiveSilentSeconds)s — triggering auto-stop")
