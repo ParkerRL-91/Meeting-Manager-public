@@ -418,8 +418,9 @@ final class AppState {
                             try m.update(db)
                             toTranscribe.append(m)
                         } else {
-                            // No audio or only WAV header — cancel
-                            m.status = .cancelled
+                            // No audio or only WAV header — reset to scheduled so user can re-record
+                            m.status = .scheduled
+                            m.endDate = nil
                             try m.update(db)
                         }
                     }

@@ -63,13 +63,22 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// Whether this meeting can be re-opened to append more audio.
     ///
     /// True when:
-    /// - status is `.complete`
+    /// - status is `.complete` or `.cancelled` (crash recovery)
     /// - not an all-day meeting
     /// - current time is within the scheduled window OR within 60 min after scheduled end
+    /// - cancelled meetings with a scheduled window still active are always reopenable
     var isReopenable: Bool {
         guard !isAllDay else { return false }
-        guard status == .complete else { return false }
+        guard status == .complete || status == .cancelled else { return false }
         let now = Date()
+        // Cancelled meetings from a crash — if within scheduled window, always allow
+        if status == .cancelled {
+            if let start = scheduledStartDate, let end = scheduledEndDate {
+                return now >= start && now <= end.addingTimeInterval(3600)
+            }
+            // Cancelled with no schedule — allow within 2 hours of creation (generous for crash recovery)
+            return now <= createdAt.addingTimeInterval(7200)
+        }
         if let start = scheduledStartDate, let end = scheduledEndDate {
             return now >= start && now <= end.addingTimeInterval(3600)
         }

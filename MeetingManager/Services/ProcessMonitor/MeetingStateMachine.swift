@@ -55,7 +55,7 @@ final class MeetingStateMachine {
         .transcribing: [.summarizing, .complete, .cancelled],
         .summarizing:  [.complete, .cancelled],
         .complete:     [.recording],   // allows reopen to append audio
-        .cancelled:    [],
+        .cancelled:    [.scheduled, .recording],  // allow recovery from crash/cancel
     ]
 
     // MARK: - Init

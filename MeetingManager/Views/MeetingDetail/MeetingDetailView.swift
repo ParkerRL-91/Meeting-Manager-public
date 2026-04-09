@@ -114,6 +114,15 @@ struct MeetingDetailView: View {
                         .help("Archive meeting")
                     }
 
+                    if meeting.isReopenable {
+                        Button {
+                            appState.startRecording(for: meeting)
+                        } label: {
+                            Label("Resume Recording", systemImage: "record.circle")
+                        }
+                        .help("Resume recording this meeting")
+                    }
+
                     if meeting.status == .scheduled {
                         Button {
                             cancelMeeting()
