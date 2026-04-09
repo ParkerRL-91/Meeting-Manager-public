@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v1.7.0.dmg**](./MeetingManager-v1.7.0.dmg) — macOS 14.4+
+[**Meeting-Manager-1.9.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v1.9.0) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -31,74 +31,61 @@ This removes the quarantine flag so the app opens without warnings.
 
 ---
 
-## What's New in v1.7.0 — Dynamic Model Selection & Recording Fixes
+## What's New in v1.9.0 — Meeting Detail UX Overhaul
 
-### Adaptive On-Device Summarization
-- **Dynamic model selection** — when set to **Auto (Dynamic)** in Settings → On-Device, the app automatically picks the best Ollama model for each meeting's transcript size:
-  - Short 1:1s (≤4K tokens) → `llama3.2:3b` with 8K context — fast
-  - Standard meetings (≤9K tokens) → `llama3.2:3b` with 16K context
-  - Long group meetings (>9K tokens) → `llama3.1:8b` with 32K context — better quality
-- **Dynamic timeouts** — scales from 2 min (short meetings) to 15 min (marathon sessions) so large transcripts don't time out
-- **Explicit context windows** — no more sending 15K tokens into a 131K default context that chokes the 3B model
-- **Smart truncation** — if no installed model fits the full transcript, keeps the first 10% (intro/agenda) + last 90% (decisions/actions)
-- **Force 3B mode** — select `llama3.2:3b` explicitly in Settings for slower Macs with ≤16GB RAM
+### Search & Calendar
+- **Full-width custom calendar** — modern dark-themed calendar grid with month navigation and "Today" button
+- **Calendar + meeting list split** — calendar top half, meetings for selected date below
+- **Live search** — typing in the search bar replaces the calendar with search results; clear to return to calendar
+- **Search nav item** — dedicated magnifying glass icon in the sidebar
 
-### Recording Reliability
-- **Batch transcription decoupled** — transcription of a stopped meeting now runs in a separate background task. Previously it blocked the stop-recording flow, causing the next recording to be silently killed when the previous transcription completed.
-- **Meetings no longer vanish** — meetings in `transcribing` or `summarizing` status now appear in the Today view and sidebar (previously they fell through both query filters and disappeared)
-- **Silence auto-stop raised to 5 min** — was 45 seconds, which stopped recordings during normal meeting pauses (presentations, screen sharing, muted periods)
+### Live Meeting View (Granola-inspired)
+- **Large meeting title** at top with pill badges: "Today", attendee count, "Add to folder"
+- **Attendee popover** — click the attendees badge to see the full list with initials avatars
+- **Folder picker** — assign the meeting to a folder during recording
+- **Context brief** — collapsible section at the bottom showing relevant past meetings with excerpts
+- **Bottom bar** — stop button + "Ask anything" AI chat prompt (Cmd+J)
+- **Transcript pane removed** — notes-only view during recording (transcription runs in background)
 
-### Google Calendar
-- **Calendar selection** — choose which Google Calendar to sync from a picker in Settings
-- **Meetings preview** — Settings shows 7 upcoming and 7 recent synced meetings
-- **Sync feedback** — success count, error messages, and last-sync timestamp shown in real time
+### Participants & Context
+- **Participant bar** at top of every meeting detail (initials avatars + names, clickable to People view)
+- **Related meetings section** — collapsible section showing past meetings with participant overlap
+- **Calendar-first participant detection** — attendees from Google Calendar written to meetings at sync time
+- **Screen fallback** — CGWindowList-based detection for meetings without calendar data
 
----
+### Notifications
+- **"Join & Record" button** — notification 1 minute before meeting includes a button that opens the video call URL AND starts recording simultaneously
+- **Meet link storage** — video URLs from Google Calendar (Meet, Zoom, Teams) saved on meetings
 
-## What's New in v1.6.0 — Stability & Efficiency
+### Sidebar
+- Cleaned up — meeting list, search bar, and archive toggle removed
+- Navigation: Home, Ask Anything, People, Search, Tasks, My Notes folders
 
-A comprehensive stability and performance sprint touching 30+ areas across the entire codebase.
+### Crash Recovery
+- Meetings no longer get permanently stuck as "Cancelled" after a crash
+- Crashed recordings reset to "Scheduled" so you can re-record
+- "Resume Recording" button on recoverable meetings
 
-### Crash Prevention & Data Integrity
-- **Thread-safe audio pipeline** — `SystemAudioTap`, `MicrophoneCapture`, and `AudioCaptureService` now use proper locking to eliminate data races during recording start/stop
-- **Actor-isolated WhisperEngine** — replaced `@unchecked Sendable` + NSLock with Swift actor isolation
-- **Atomic calendar upserts** — `CalendarSyncManager` wraps fetch-then-insert/update in a single GRDB transaction
-- **Microphone permission flow** — checks authorization before starting capture; surfaces clear errors for denied/restricted states
-- **Mic disconnect handling** — listens for audio engine config changes and gracefully stops capture when a device is unplugged
-- **Write error propagation** — `AudioBufferManager` reports file write errors via callback and auto-stops after 5 consecutive failures
-
-### Memory & Performance
-- **Circular audio buffers** — fixed-capacity ring buffer (480K samples / 30s at 16kHz) replaces growable arrays
-- **Memory pressure monitoring** — flushes audio buffers on warning, triggers auto-stop on critical memory pressure
-- **Segment capping** — in-memory transcript segments capped at 500; older segments persist in SQLite
-- **Batched MainActor updates** — coalesces segment updates into single render passes
-- **Pooled ISO8601DateFormatter** — shared static instances replace 6 inline instantiations
-- **Database indexes** — 6 new performance indexes for foreign keys and common query patterns
-- **Pagination on all repositories** — every query has `LIMIT` clauses (50–200) with offset support
-- **Debounced meeting loads** — rapid-fire `loadMeetings()` calls coalesce with 150ms debounce
-
-### API Resilience
-- **Exponential backoff retry** — Claude, Google Calendar, and Google Auth retry on network errors / 429 / 5xx with jitter
-- **Client-side rate limiting** — 1-second minimum interval between Claude API requests
-- **Response size limits** — rejects responses over 1MB before JSON decode
-- **HTTP timeouts** — all outbound requests use 120-second timeout
-- **Apple Speech fallback** — automatic fallback to `SFSpeechRecognizer` when WhisperKit fails to load
-
-### UI Polish
-- **Memoized sidebar filters** — filtered lists computed via `@State` + `onChange`, not on every render
-- **Scroll performance** — transcript auto-scroll triggers on last segment ID change, not count
-- **Task cancellation** — all views cancel in-flight async tasks on disappear
-- **Timer/observer cleanup** — services invalidate timers and remove observers in `deinit`
-- **Log rotation** — `app.log` rotates at 5MB
-
-### Infrastructure
-- **Comprehensive test suite** — 22 test files covering models, repositories, and services
-- **Error alert system** — reusable `ErrorAlertModifier` with error hoisting from list rows
+### Task Queue & Infrastructure
+- Regeneration routed through persistent task queue (survives navigation)
+- All long-running AI operations audited — exempt or queued
+- `push-update.sh` hardened with fail-fast checks, atomic version bump, delta updates
+- `git-update` Claude Code skill for guided releases
 
 ---
 
 <details>
 <summary><strong>Previous Releases</strong></summary>
+
+#### v1.8.2 — Update Pipeline Test
+- First release via hardened push-update.sh
+- Sparkle appcast on GitHub Pages
+
+#### v1.7.0 — Dynamic Model Selection & Recording Fixes
+- Adaptive on-device summarization — auto-picks Ollama model by transcript size
+- Batch transcription decoupled from stop-recording flow
+- Calendar selection picker in Settings
+- Silence auto-stop raised to 5 min
 
 #### v1.6.0 — Stability & Efficiency
 - Thread-safe audio pipeline, actor-isolated WhisperEngine
@@ -106,26 +93,18 @@ A comprehensive stability and performance sprint touching 30+ areas across the e
 - Exponential backoff retry for Claude/Google APIs
 - 22 test files, DatabasePool, log rotation
 
-#### v1.5.0 — Stability & Efficiency Sprint
+#### v1.5.0 — Stability Sprint
 - Timer leaks & 36k Task spawns eliminated
-- Duplicate meeting notifications fixed, model retry loop capped
-- WhisperKit load timeout (5 min), Apple Speech fallback wired
-- Batch database writes, browser detection optimized, FTS5 search
-- Crash recovery for orphaned recordings, WAL checkpoints, DatabasePool
+- Crash recovery for orphaned recordings
+- Batch database writes, FTS5 search
 
 #### v1.4.0 — Swift 6 & Reliability
 - All Swift 6 strict concurrency errors resolved
-- WhisperKit cache-first loading, model load retries
-- AppState singleton fix, pending transcription queue
+- WhisperKit cache-first loading
 
-#### v1.1.1
-- Model download progress bar, error recovery, readiness indicator
-- Global error alerts for recording, transcription, and detection
-
-#### v1.1
-- Dual audio capture (mic + system audio via ScreenCaptureKit)
+#### v1.1 — Dual Audio Capture
+- Mic + system audio via ScreenCaptureKit
 - Live audio level meters, smart notifications
-- Large v3 transcription model, unified AI routing (Ollama + Claude)
 
 </details>
 
@@ -153,12 +132,14 @@ A comprehensive stability and performance sprint touching 30+ areas across the e
 ### Calendar Integration
 - Connects to Google Calendar to pull upcoming meetings
 - Auto-names recordings from calendar events
-- Upcoming meetings in the **Scheduled** sidebar; past meetings in **History**
+- Attendees from calendar invites shown as participants
+- Video call URLs (Meet, Zoom, Teams) stored for one-click join
 
-### Sidebar
-- **Scheduled** — upcoming meetings, collapsible
-- **History** — past meetings with **Recorded** or **Completed** badges, collapsible
-- Search across all meetings
+### Search & Navigation
+- **Calendar view** — browse meetings by date with a modern calendar grid
+- **Text search** — find meetings by name across all history
+- **People view** — see all meetings with a specific person
+- **Folder grouping** — recurring meetings auto-grouped by series
 
 ---
 
@@ -176,8 +157,6 @@ ollama pull llama3.1:8b
 ```
 
 The **Auto (Dynamic)** model setting (default) picks the right model for each meeting. For slower Macs (≤16GB RAM), select `llama3.2:3b` explicitly to force the lighter model.
-
-Once setup is complete, all summaries, recipes, action items, and chat are generated locally. You can switch back to Claude at any time by disabling the toggle.
 
 ---
 
@@ -216,22 +195,26 @@ swift build -c release
 ```
 MeetingManager/
 ├── App/           — AppState (single observable source of truth), AppDelegate
-├── Models/        — Meeting, Transcript, MeetingSummary, AppSettings
-├── Database/      — GRDB setup, migrations, repositories
+├── Models/        — Meeting, Transcript, MeetingSummary, TaskQueueItem, AppSettings
+├── Database/      — GRDB setup, migrations (v1-v16), repositories
 ├── Services/
-│   ├── AI/        — ClaudeService, OllamaService, SummaryGenerator, RecipeEngine, ActionItemExtractor
+│   ├── AI/        — ClaudeService, OllamaService, SummaryGenerator, RecipeEngine
 │   ├── Audio/     — AudioCaptureService, AudioBufferManager
 │   ├── Calendar/  — GoogleCalendarService, GoogleAuthManager, CalendarSyncManager
+│   ├── Context/   — RelevantMeetingService (past meeting intelligence)
+│   ├── TaskQueue/ — TaskQueueManager (persistent background processing)
 │   ├── Transcription/ — WhisperKit batch transcriber
-│   └── Updates/   — Sparkle UpdateService
+│   └── Notifications/ — NotificationService, NotificationActions
 └── Views/
-    ├── Sidebar/   — SidebarView, MeetingListRow
-    ├── MeetingDetail/ — SummaryView, TranscriptView, MeetingMetadataHeader
-    ├── LiveMeeting/ — MeetingChatView, NotepadPaneView
+    ├── Sidebar/   — SidebarView (nav items, spaces, banners)
+    ├── Search/    — MeetingSearchView (calendar + search)
+    ├── MeetingDetail/ — SummaryView, TranscriptView, ParticipantBar
+    ├── LiveMeeting/ — Granola-style recording view, NotepadPane, MeetingChat
+    ├── Components/ — InitialsAvatar, ParticipantBar, RelatedMeetingsSection
     └── Settings/  — Per-tab settings views (8 tabs)
 ```
 
-Data flow: `AudioCaptureService` → `BatchTranscriber` → `TranscriptRepository` → `SummaryGenerator` → `SummaryRepository`
+Data flow: `AudioCaptureService` → `BatchTranscriber` → `TranscriptRepository` → `TaskQueueManager` → `SummaryGenerator` → `SummaryRepository`
 
 ---
 
