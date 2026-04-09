@@ -1580,6 +1580,7 @@ enum SidebarDestination: Hashable {
     case chat
     case people
     case tasks
+    case search
     case meetings
     case folder(String)  // folder key = normalised base title
 }

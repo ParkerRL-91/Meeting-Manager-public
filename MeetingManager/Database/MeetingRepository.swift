@@ -112,6 +112,31 @@ final class MeetingRepository {
         }
     }
 
+    /// Search meetings by title query and/or date. Returns up to 50 results sorted by date descending.
+    func search(query: String? = nil, date: Date? = nil) async throws -> [Meeting] {
+        return try await database.writer.read { db in
+            var request = Meeting.all()
+
+            if let query, !query.isEmpty {
+                request = request.filter(Meeting.Columns.title.like("%\(query)%"))
+            }
+
+            if let date {
+                let calendar = Calendar.current
+                let dayStart = calendar.startOfDay(for: date)
+                let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+                let scheduledFilter = Meeting.Columns.scheduledStartDate >= dayStart && Meeting.Columns.scheduledStartDate < dayEnd
+                let actualFilter = Meeting.Columns.startDate >= dayStart && Meeting.Columns.startDate < dayEnd
+                request = request.filter(scheduledFilter || actualFilter)
+            }
+
+            return try request
+                .order(Meeting.Columns.startDate.desc)
+                .limit(50)
+                .fetchAll(db)
+        }
+    }
+
     func allMeetingsForDate(_ date: Date) async throws -> [Meeting] {
         let calendar = Calendar.current
         let dayStart = calendar.startOfDay(for: date)

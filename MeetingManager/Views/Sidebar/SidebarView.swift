@@ -45,6 +45,16 @@ struct SidebarView: View {
                 }
 
                 NavItem(
+                    icon: "magnifyingglass",
+                    label: "Search",
+                    destination: .search,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .search
+                    appState.selectedMeetingId = nil
+                }
+
+                NavItem(
                     icon: "checklist",
                     label: "Tasks",
                     badge: appState.taskQueueManager.pendingCount,
