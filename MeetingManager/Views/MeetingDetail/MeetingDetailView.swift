@@ -44,6 +44,11 @@ struct MeetingDetailView: View {
                     showingEditor = true
                 })
 
+                ParticipantBar(participants: meeting.participantList) { name in
+                    appState.sidebarDestination = .people
+                    // PeopleView will handle selecting the person by name
+                }
+
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(DetailTab.allCases, id: \.self) { tab in
                         Label(tab.label, systemImage: tab.icon)

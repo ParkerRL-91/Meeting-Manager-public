@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// Flagship live meeting screen with split-screen layout:
-/// recording controls on top, real-time transcript on the left, notepad on the right,
-/// and an optional AI chat sidebar.
+/// Live meeting screen — recording controls on top, participants below,
+/// notepad as main content, and an optional AI chat sidebar.
+/// Transcript runs in background but is not displayed live.
 struct LiveMeetingView: View {
     let meetingId: String
     @Environment(AppState.self) private var appState
     @State private var showChat = false
+    @State private var meeting: Meeting?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,20 +27,40 @@ struct LiveMeetingView: View {
                     .padding(.trailing, 12)
                 }
             Divider()
-            HSplitView {
-                TranscriptPaneView(meetingId: meetingId)
-                    .frame(minWidth: 300)
-                NotepadPaneView(meetingId: meetingId)
-                    .frame(minWidth: 250)
-                if showChat {
+
+            // Participants bar
+            if let meeting {
+                ParticipantBar(participants: meeting.participantList)
+                if !meeting.participantList.isEmpty {
+                    Divider()
+                }
+            }
+
+            // Main content: notes + optional chat
+            if showChat {
+                HSplitView {
+                    NotepadPaneView(meetingId: meetingId)
+                        .frame(minWidth: 350)
                     MeetingChatView(meetingId: meetingId)
                         .frame(minWidth: 260, idealWidth: 320)
                 }
+            } else {
+                NotepadPaneView(meetingId: meetingId)
             }
         }
         .background(Color.appBackground)
-        .frame(minWidth: showChat ? 960 : 700, minHeight: 400)
+        .frame(minWidth: showChat ? 750 : 500, minHeight: 400)
         .toggleOnKeyboardShortcut("j", modifiers: .command, binding: $showChat)
+        .task {
+            if let active = appState.activeMeeting {
+                meeting = active
+            } else {
+                meeting = try? await appState.meetingRepository.find(id: meetingId)
+            }
+        }
+        .onChange(of: appState.activeMeeting?.id) { _, _ in
+            if let active = appState.activeMeeting { meeting = active }
+        }
     }
 }
 
@@ -63,11 +84,3 @@ private extension View {
         )
     }
 }
-
-// MARK: - Preview
-
-// #Preview {
-//     LiveMeetingView(meetingId: "preview-123")
-//         .frame(width: 900, height: 600)
-//         .environment(AppState())
-// }

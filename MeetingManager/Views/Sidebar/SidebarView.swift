@@ -2,23 +2,8 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
-    @State private var searchQuery = ""
-    @State private var showArchived = false
     @State private var showAllActionItems = false
     @State private var errorMessage: String?
-    @FocusState private var isSearchFocused: Bool
-    @State private var scheduledExpanded = true
-    @State private var historyExpanded = true
-    @State private var filteredUpcoming: [Meeting] = []
-    @State private var filteredPast: [Meeting] = []
-
-    private var hasNoResults: Bool {
-        !searchQuery.isEmpty && filteredUpcoming.isEmpty && filteredPast.isEmpty
-    }
-
-    private var hasNoMeetings: Bool {
-        searchQuery.isEmpty && appState.upcomingMeetings.isEmpty && appState.pastMeetings.isEmpty
-    }
 
     // MARK: - Body
 
@@ -90,7 +75,7 @@ struct SidebarView: View {
             Divider()
                 .background(Color.appSeparator)
 
-            // MARK: - Meetings Header
+            // MARK: - New Meeting + Action Items
 
             VStack(spacing: 8) {
                 Button {
@@ -103,18 +88,8 @@ struct SidebarView: View {
                 .tint(Color.appAccent)
                 .controlSize(.large)
 
-                SearchBar(query: $searchQuery, placeholder: "Search meetings...")
-                    .focused($isSearchFocused)
-
                 HStack {
-                    Toggle(isOn: $showArchived) {
-                        Label("Show Archived", systemImage: "archivebox")
-                            .font(.subheadline)
-                    }
-                    .toggleStyle(.checkbox)
-
                     Spacer()
-
                     Button {
                         showAllActionItems = true
                     } label: {
@@ -139,81 +114,7 @@ struct SidebarView: View {
                 Divider()
             }
 
-            // MARK: - Meeting List
-
-            if hasNoMeetings {
-                Spacer()
-                EmptyStateView(
-                    icon: "calendar.badge.plus",
-                    title: "No Meetings",
-                    subtitle: "Start a new meeting or connect your calendar to see upcoming events."
-                )
-                .padding()
-                Spacer()
-            } else if hasNoResults {
-                Spacer()
-                EmptyStateView(
-                    icon: "magnifyingglass",
-                    title: "No Results",
-                    subtitle: "No meetings match \"\(searchQuery)\". Try a different search term."
-                )
-                .padding()
-                Spacer()
-            } else {
-                List(selection: $appState.selectedMeetingId) {
-                    if !filteredUpcoming.isEmpty {
-                        Section(isExpanded: $scheduledExpanded) {
-                            ForEach(filteredUpcoming) { meeting in
-                                MeetingListRow(meeting: meeting, onError: { errorMessage = $0 })
-                                    .tag(meeting.id)
-                                    .contextMenu {
-                                        if meeting.status == .scheduled || meeting.status == .notified {
-                                            Button {
-                                                startEarly(meeting)
-                                            } label: {
-                                                Label("Start Early", systemImage: "play.fill")
-                                            }
-                                        }
-                                    }
-                            }
-                        } header: {
-                            Text("Scheduled")
-                        }
-                    } else if searchQuery.isEmpty {
-                        Section(isExpanded: $scheduledExpanded) {
-                            Text("No scheduled meetings")
-                                .font(.subheadline)
-                                .foregroundStyle(Color.appTextSecondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding(.vertical, 8)
-                        } header: {
-                            Text("Scheduled")
-                        }
-                    }
-
-                    if !filteredPast.isEmpty {
-                        Section(isExpanded: $historyExpanded) {
-                            ForEach(filteredPast) { meeting in
-                                MeetingListRow(meeting: meeting, isHistory: true, onError: { errorMessage = $0 })
-                                    .tag(meeting.id)
-                            }
-                        } header: {
-                            Text("History")
-                        }
-                    } else if searchQuery.isEmpty {
-                        Section(isExpanded: $historyExpanded) {
-                            Text("No past meetings")
-                                .font(.subheadline)
-                                .foregroundStyle(Color.appTextSecondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding(.vertical, 8)
-                        } header: {
-                            Text("History")
-                        }
-                    }
-                }
-                .listStyle(.sidebar)
-            }
+            Spacer()
         }
         .background(Color.appBackground)
         .errorAlert($errorMessage)
@@ -224,45 +125,10 @@ struct SidebarView: View {
         }
         .onAppear {
             appState.loadMeetings()
-            updateFilteredLists()
-        }
-        .onChange(of: searchQuery) { _, _ in updateFilteredLists() }
-        .onChange(of: showArchived) { _, _ in updateFilteredLists() }
-        .onChange(of: appState.upcomingMeetings) { _, _ in updateFilteredLists() }
-        .onChange(of: appState.pastMeetings) { _, _ in updateFilteredLists() }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
-            isSearchFocused = true
-        }
-    }
-
-    // MARK: - Filtering
-
-    private func updateFilteredLists() {
-        let upcomingBase = showArchived
-            ? appState.upcomingMeetings
-            : appState.upcomingMeetings.filter { $0.status != .archived }
-        let pastBase = showArchived
-            ? appState.pastMeetings
-            : appState.pastMeetings.filter { $0.status != .archived }
-
-        if searchQuery.isEmpty {
-            filteredUpcoming = upcomingBase
-            filteredPast = pastBase
-        } else {
-            filteredUpcoming = upcomingBase.filter {
-                $0.title.localizedCaseInsensitiveContains(searchQuery)
-            }
-            filteredPast = pastBase.filter {
-                $0.title.localizedCaseInsensitiveContains(searchQuery)
-            }
         }
     }
 
     // MARK: - Actions
-
-    private func startEarly(_ meeting: Meeting) {
-        appState.startRecording(for: meeting)
-    }
 
     private func createAdHocMeeting() {
         NotificationCenter.default.post(name: .createNewMeeting, object: nil)
