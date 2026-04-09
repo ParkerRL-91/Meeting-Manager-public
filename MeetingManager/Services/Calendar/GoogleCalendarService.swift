@@ -115,6 +115,7 @@ final class GoogleCalendarService {
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy", value: "startTime"),
             URLQueryItem(name: "maxResults", value: "250"),
+            URLQueryItem(name: "conferenceDataVersion", value: "1"),
         ]
 
         guard let url = components.url else {
@@ -237,6 +238,9 @@ final class GoogleCalendarService {
 
         let attendees = (resource.attendees ?? []).compactMap { attendee in
             attendee.displayName ?? attendee.email
+        }
+        if !attendees.isEmpty {
+            Logger.calendar.debug("Event '\(resource.summary ?? "untitled")' has \(attendees.count) attendees")
         }
 
         // Prefer conference data entry point, fall back to hangoutLink.
