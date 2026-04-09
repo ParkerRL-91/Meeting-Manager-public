@@ -46,8 +46,14 @@ struct MeetingDetailView: View {
 
                 ParticipantBar(participants: meeting.participantList) { name in
                     appState.sidebarDestination = .people
-                    // PeopleView will handle selecting the person by name
                 }
+
+                RelatedMeetingsSection(
+                    contextJSON: meeting.contextJSON,
+                    onSelectMeeting: { relatedId in
+                        appState.selectedMeetingId = relatedId
+                    }
+                )
 
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(DetailTab.allCases, id: \.self) { tab in
@@ -190,8 +196,23 @@ struct MeetingDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .copySummary)) { _ in
             copySummaryMarkdown()
         }
+        .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
+            // Reload meeting when context enrichment completes for this meeting
+            let contextDone = tasks.contains {
+                $0.type == .contextEnrichment && $0.meetingId == meetingId && $0.status == .completed
+            }
+            if contextDone {
+                Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
+            }
+        }
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
+            // Queue context enrichment if meeting has participants but no cached context
+            if let m = meeting, !m.participantList.isEmpty, (m.contextJSON == nil || m.contextJSON!.isEmpty) {
+                await appState.taskQueueManager.enqueue(
+                    type: .contextEnrichment, meetingId: meetingId, priority: 8
+                )
+            }
         }
     }
 

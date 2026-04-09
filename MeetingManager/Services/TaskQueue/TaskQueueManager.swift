@@ -27,6 +27,8 @@ final class TaskQueueManager {
     var enrichmentHandler: ((String) async throws -> Void)?
     /// Regeneration handler — meetingId + optional recipeId from task metadata.
     var regenerationHandler: ((String, String?) async throws -> Void)?
+    /// Context enrichment handler — finds related past meetings for a meeting.
+    var contextEnrichmentHandler: ((String) async throws -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -326,6 +328,12 @@ final class TaskQueueManager {
                 recipeId = json["recipeId"]
             }
             try await handler(task.meetingId, recipeId)
+
+        case .contextEnrichment:
+            guard let handler = contextEnrichmentHandler else {
+                throw TaskQueueError.noHandler("contextEnrichment")
+            }
+            try await handler(task.meetingId)
         }
     }
 

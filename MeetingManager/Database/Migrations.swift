@@ -421,5 +421,11 @@ enum Migrations {
                 columns: ["meetingId"]
             )
         }
+
+        migrator.registerMigration("v15-context-json") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "contextJSON", .text)
+            }
+        }
     }
 }

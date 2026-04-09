@@ -304,7 +304,14 @@ final class AppState {
         taskQueueManager.enrichmentHandler = { [weak self] meetingId in
             guard let self else { return }
             self.fileLog("TaskQueue: enrichment placeholder for \(meetingId)")
-            // Enrichment will be implemented in Sprint 5
+        }
+
+        taskQueueManager.contextEnrichmentHandler = { [weak self] meetingId in
+            guard let self else { return }
+            self.fileLog("TaskQueue: finding related meetings for \(meetingId)")
+            let service = RelevantMeetingService(database: AppDatabase.shared)
+            try await service.enrichContext(meetingId: meetingId)
+            self.loadMeetings()
         }
 
         taskQueueManager.regenerationHandler = { [weak self] meetingId, recipeId in

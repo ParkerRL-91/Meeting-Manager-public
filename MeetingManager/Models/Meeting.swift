@@ -16,6 +16,8 @@ struct Meeting: Identifiable, Codable, Equatable {
     var isAllDay: Bool
     /// Comma-separated list of participant names/emails detected from calendar or speaker diarization.
     var participants: String?
+    /// JSON cache of related past meetings (populated by contextEnrichment task).
+    var contextJSON: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -31,6 +33,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         audioFilePaths: [String] = [],
         isAllDay: Bool = false,
         participants: String? = nil,
+        contextJSON: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -45,6 +48,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.audioFilePaths = audioFilePaths
         self.isAllDay = isAllDay
         self.participants = participants
+        self.contextJSON = contextJSON
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -118,7 +122,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {
