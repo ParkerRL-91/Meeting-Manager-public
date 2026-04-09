@@ -1,55 +1,39 @@
 import SwiftUI
 
-/// Live meeting screen — recording controls on top, participants below,
-/// notepad as main content, and an optional AI chat sidebar.
-/// Transcript runs in background but is not displayed live.
+/// Granola-inspired live meeting view.
+/// Layout: Recording bar at top → Big title + pill badges → Notes area → Context brief → Bottom chat/stop bar.
 struct LiveMeetingView: View {
     let meetingId: String
     @Environment(AppState.self) private var appState
-    @State private var showChat = false
     @State private var meeting: Meeting?
+    @State private var showChat = false
+    @State private var showAttendeePopover = false
+    @State private var showFolderPicker = false
+    @State private var contextMeetings: [RelevantMeeting] = []
+    @State private var showContextBrief = true
 
     var body: some View {
         VStack(spacing: 0) {
-            RecordingControlBar(meetingId: meetingId)
-                .overlay(alignment: .trailing) {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showChat.toggle()
-                        }
-                    } label: {
-                        Image(systemName: showChat ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
-                            .font(.body)
-                            .foregroundStyle(showChat ? Color.appAccent : Color.appTextSecondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Toggle AI Chat (Cmd+J)")
-                    .padding(.trailing, 12)
-                }
-            Divider()
+            // MARK: - Top recording strip (minimal)
+            RecordingStrip(meetingId: meetingId)
 
-            // Participants bar
-            if let meeting {
-                ParticipantBar(participants: meeting.participantList)
-                if !meeting.participantList.isEmpty {
-                    Divider()
-                }
-            }
-
-            // Main content: notes + optional chat
+            // MARK: - Main content (scrollable)
             if showChat {
                 HSplitView {
-                    NotepadPaneView(meetingId: meetingId)
-                        .frame(minWidth: 350)
+                    mainContent
+                        .frame(minWidth: 400)
                     MeetingChatView(meetingId: meetingId)
-                        .frame(minWidth: 260, idealWidth: 320)
+                        .frame(minWidth: 280, idealWidth: 340)
                 }
             } else {
-                NotepadPaneView(meetingId: meetingId)
+                mainContent
             }
+
+            // MARK: - Bottom bar: audio levels + stop + ask anything
+            BottomBar(meetingId: meetingId, showChat: $showChat)
         }
         .background(Color.appBackground)
-        .frame(minWidth: showChat ? 750 : 500, minHeight: 400)
+        .frame(minWidth: showChat ? 800 : 540, minHeight: 500)
         .toggleOnKeyboardShortcut("j", modifiers: .command, binding: $showChat)
         .task {
             if let active = appState.activeMeeting {
@@ -57,17 +41,414 @@ struct LiveMeetingView: View {
             } else {
                 meeting = try? await appState.meetingRepository.find(id: meetingId)
             }
+            loadContext()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in
             if let active = appState.activeMeeting { meeting = active }
         }
+    }
+
+    // MARK: - Main Content
+
+    private var mainContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                // Big title
+                Text(meeting?.title ?? "Meeting")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 24)
+                    .padding(.bottom, 10)
+
+                // Pill badges row
+                HStack(spacing: 8) {
+                    // Today badge
+                    PillBadge(icon: "calendar", label: "Today")
+
+                    // Attendees badge
+                    if let meeting, !meeting.participantList.isEmpty {
+                        Button {
+                            showAttendeePopover.toggle()
+                        } label: {
+                            PillBadge(icon: "person.2", label: "\(meeting.participantList.count) attendees")
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showAttendeePopover, arrowEdge: .bottom) {
+                            AttendeePopover(participants: meeting.participantList)
+                        }
+                    }
+
+                    // Add to folder badge
+                    Button {
+                        showFolderPicker.toggle()
+                    } label: {
+                        PillBadge(icon: "arrow.up.right.square", label: "Add to folder")
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showFolderPicker, arrowEdge: .bottom) {
+                        FolderPickerPopover(meetingTitle: meeting?.title ?? "")
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 20)
+
+                // Notes area
+                NotepadPaneView(meetingId: meetingId)
+                    .frame(minHeight: 250)
+
+                // Context brief (related past meetings)
+                if !contextMeetings.isEmpty && showContextBrief {
+                    ContextBriefView(
+                        meetings: contextMeetings,
+                        participantCompany: extractCompany(),
+                        onDismiss: { showContextBrief = false },
+                        onSelectMeeting: { id in
+                            appState.selectedMeetingId = id
+                            appState.sidebarDestination = .meetings
+                        }
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
+                }
+            }
+        }
+    }
+
+    // MARK: - Context Loading
+
+    private func loadContext() {
+        guard let meeting else { return }
+        contextMeetings = RelevantMeetingService.parseContext(from: meeting.contextJSON)
+        if contextMeetings.isEmpty && !meeting.participantList.isEmpty {
+            Task {
+                let service = RelevantMeetingService(database: AppDatabase.shared)
+                try? await service.enrichContext(meetingId: meetingId)
+                let updated = try? await appState.meetingRepository.find(id: meetingId)
+                contextMeetings = RelevantMeetingService.parseContext(from: updated?.contextJSON)
+            }
+        }
+    }
+
+    private func extractCompany() -> String? {
+        // Try to extract a company name from the meeting title
+        let title = meeting?.title ?? ""
+        let parts = title.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 3 }
+        return parts.first
+    }
+}
+
+// MARK: - Recording Strip (minimal top bar)
+
+private struct RecordingStrip: View {
+    let meetingId: String
+    @Environment(AppState.self) private var appState
+    @State private var elapsedSeconds: Int = 0
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(Color.appRecording)
+                .frame(width: 8, height: 8)
+                .opacity(pulse ? 0.3 : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }
+
+            Text("Recording")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.appRecording)
+
+            Text(formatted)
+                .font(.subheadline.monospaced())
+                .foregroundStyle(Color.appTextSecondary)
+
+            Spacer()
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 8)
+        .background(Color.appSurface.opacity(0.5))
+        .onAppear { startTimer() }
+    }
+
+    private var formatted: String {
+        let h = elapsedSeconds / 3600
+        let m = (elapsedSeconds % 3600) / 60
+        let s = elapsedSeconds % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
+    }
+
+    @State private var timer: Timer?
+
+    private func startTimer() {
+        updateElapsed()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            Task { @MainActor in updateElapsed() }
+        }
+    }
+
+    private func updateElapsed() {
+        guard let start = appState.activeMeeting?.startDate else { elapsedSeconds = 0; return }
+        elapsedSeconds = max(0, Int(Date().timeIntervalSince(start)))
+    }
+}
+
+// MARK: - Pill Badge
+
+private struct PillBadge: View {
+    let icon: String
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+        }
+        .foregroundStyle(Color.appTextSecondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.appSurface)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.appSeparator, lineWidth: 0.5))
+    }
+}
+
+// MARK: - Attendee Popover
+
+private struct AttendeePopover: View {
+    let participants: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Attendees")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.appTextSecondary)
+                .padding(.bottom, 4)
+
+            ForEach(participants, id: \.self) { name in
+                HStack(spacing: 8) {
+                    InitialsAvatar(name: name, size: 26)
+                    Text(name)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextPrimary)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 200)
+    }
+}
+
+// MARK: - Folder Picker Popover
+
+private struct FolderPickerPopover: View {
+    let meetingTitle: String
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Add to Folder")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.appTextSecondary)
+                .padding(.bottom, 4)
+
+            let folders = appState.meetingFolders()
+            if folders.isEmpty {
+                Text("No folders yet")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+            } else {
+                ForEach(folders) { folder in
+                    Button {
+                        // Navigate to the folder
+                        appState.sidebarDestination = .folder(folder.key)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder.fill")
+                                .font(.caption)
+                                .foregroundStyle(Color.appAccent)
+                            Text(folder.displayName)
+                                .font(.subheadline)
+                                .foregroundStyle(Color.appTextPrimary)
+                            Spacer()
+                            Text("\(folder.meetingCount)")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextTertiary)
+                        }
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 220)
+    }
+}
+
+// MARK: - Context Brief (related past meetings)
+
+private struct ContextBriefView: View {
+    let meetings: [RelevantMeeting]
+    let participantCompany: String?
+    var onDismiss: () -> Void
+    var onSelectMeeting: (String) -> Void
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header
+            HStack {
+                Text(headerText)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextTertiary)
+                Spacer()
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Meeting excerpts
+            ForEach(Array(displayedMeetings.enumerated()), id: \.element.meetingId) { _, related in
+                Button {
+                    onSelectMeeting(related.meetingId)
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Text("From")
+                                .foregroundStyle(Color.appTextTertiary)
+                            Text(related.title)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.appTextPrimary)
+                            Text("(\(related.date.formatted(.relative(presentation: .named))))")
+                                .foregroundStyle(Color.appTextTertiary)
+                        }
+                        .font(.subheadline)
+
+                        Text(related.summaryExcerpt)
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                            .lineLimit(isExpanded ? nil : 2)
+                    }
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Show more/less + sources
+            HStack {
+                if meetings.count > 2 || isExpanded {
+                    Button(isExpanded ? "Show less" : "Show more") {
+                        withAnimation { isExpanded.toggle() }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                Text("\(meetings.count) Sources")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+            }
+        }
+        .padding(16)
+        .background(Color.appSurface.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var headerText: String {
+        if let company = participantCompany {
+            return "You last met with \(company) recently"
+        }
+        return "Related meetings"
+    }
+
+    private var displayedMeetings: [RelevantMeeting] {
+        isExpanded ? meetings : Array(meetings.prefix(2))
+    }
+}
+
+// MARK: - Bottom Bar
+
+private struct BottomBar: View {
+    let meetingId: String
+    @Binding var showChat: Bool
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Audio levels
+            AudioLevelIndicator(
+                label: "\u{1F3A4}",
+                level: appState.micLevel,
+                color: .appAccent
+            )
+            AudioLevelIndicator(
+                label: "\u{1F50A}",
+                level: appState.systemLevel,
+                color: .appSuccess
+            )
+
+            // Stop button
+            Button {
+                appState.stopRecording()
+            } label: {
+                Image(systemName: "stop.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Color.appRecording)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .help("Stop Recording")
+
+            // Ask anything bar
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { showChat.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
+                    Text("Ask anything")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextTertiary)
+                    Spacer()
+                    Text("Cmd+J")
+                        .font(.caption2)
+                        .foregroundStyle(Color.appTextTertiary.opacity(0.5))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.appSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(Color.appSurface.opacity(0.3))
     }
 }
 
 // MARK: - Keyboard Shortcut Helper
 
 private extension View {
-    /// Adds a global keyboard shortcut that toggles a `Bool` binding.
     func toggleOnKeyboardShortcut(
         _ key: KeyEquivalent,
         modifiers: EventModifiers,

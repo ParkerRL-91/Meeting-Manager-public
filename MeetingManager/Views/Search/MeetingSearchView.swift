@@ -1,159 +1,218 @@
 import SwiftUI
 
-/// Search view with a date picker calendar and text search for finding meetings.
-/// Replaces the meeting list that was removed from the sidebar.
+/// Full-screen search view. Shows a modern calendar by default;
+/// typing in the search bar replaces the calendar with live search results.
+/// Clicking a date on the calendar also shows that day's meetings.
 struct MeetingSearchView: View {
     @Environment(AppState.self) private var appState
     @State private var searchQuery = ""
     @State private var selectedDate: Date? = nil
+    @State private var displayedMonth = Date()
     @State private var results: [Meeting] = []
     @State private var isLoading = false
     @FocusState private var isSearchFocused: Bool
 
+    /// Whether to show results instead of the calendar
+    private var showingResults: Bool {
+        !searchQuery.isEmpty || selectedDate != nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            // MARK: - Header
-            HStack {
-                Text("Search Meetings")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Color.appTextPrimary)
-                Spacer()
-                if selectedDate != nil || !searchQuery.isEmpty {
-                    Button("Clear All") {
-                        searchQuery = ""
-                        selectedDate = nil
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(Color.appAccent)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 8)
-
-            // MARK: - Search Bar
-            HStack(spacing: 8) {
+            // MARK: - Search Bar (always visible at top)
+            HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
+                    .font(.body)
                     .foregroundStyle(Color.appTextTertiary)
-                TextField("Search by meeting name...", text: $searchQuery)
+                TextField("Search meetings...", text: $searchQuery)
                     .textFieldStyle(.plain)
+                    .font(.body)
                     .focused($isSearchFocused)
-                if !searchQuery.isEmpty {
+                if showingResults {
                     Button {
-                        searchQuery = ""
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            searchQuery = ""
+                            selectedDate = nil
+                        }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
+                            .font(.body)
                             .foregroundStyle(Color.appTextTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear search")
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 16)
+
+            // MARK: - Content: Calendar or Results
+            if showingResults {
+                resultsView
+                    .transition(.opacity)
+            } else {
+                calendarView
+                    .transition(.opacity)
+            }
+        }
+        .background(Color.appBackground)
+        .animation(.easeInOut(duration: 0.2), value: showingResults)
+        .onAppear { performSearch() }
+        .onChange(of: searchQuery) { _, _ in performSearch() }
+        .onChange(of: selectedDate) { _, _ in performSearch() }
+    }
+
+    // MARK: - Modern Calendar View
+
+    private var calendarView: some View {
+        VStack(spacing: 0) {
+            // Month navigation
+            HStack {
+                Button {
+                    withAnimation { displayedMonth = Calendar.current.date(byAdding: .month, value: -1, to: displayedMonth) ?? displayedMonth }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(Color.appTextSecondary)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Text(displayedMonth.formatted(.dateTime.month(.wide).year()))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Color.appTextPrimary)
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    Button("Today") {
+                        withAnimation {
+                            displayedMonth = Date()
+                            selectedDate = Date()
+                        }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.appAccent)
+                    .buttonStyle(.plain)
+
+                    Button {
+                        withAnimation { displayedMonth = Calendar.current.date(byAdding: .month, value: 1, to: displayedMonth) ?? displayedMonth }
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.appTextSecondary)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(10)
-            .background(Color.appSurfaceSecondary)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal, 20)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 28)
+            .padding(.bottom, 20)
 
-            // MARK: - Calendar + Results split
-            HStack(alignment: .top, spacing: 0) {
-                // Calendar Picker
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Pick a Date")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(Color.appTextSecondary)
-                        Spacer()
-                        if selectedDate != nil {
-                            Button("Clear") {
-                                selectedDate = nil
-                            }
-                            .font(.caption)
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(Color.appAccent)
-                        }
-                    }
-                    .padding(.horizontal, 4)
-
-                    DatePicker(
-                        "Date",
-                        selection: Binding(
-                            get: { selectedDate ?? Date() },
-                            set: { selectedDate = $0 }
-                        ),
-                        displayedComponents: [.date]
-                    )
-                    .datePickerStyle(.graphical)
-                    .labelsHidden()
-                    .tint(Color.appAccent)
-                }
-                .frame(width: 280)
-                .padding(.horizontal, 20)
-                .padding(.top, 4)
-
-                Divider()
-
-                // Results
-                VStack(alignment: .leading, spacing: 0) {
-                    // Results header
-                    HStack {
-                        if isLoading {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Searching...")
-                                .font(.subheadline)
-                                .foregroundStyle(Color.appTextSecondary)
-                        } else {
-                            Text(resultsTitle)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(Color.appTextSecondary)
-                        }
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-
-                    Divider()
-
-                    if results.isEmpty && !isLoading {
-                        Spacer()
-                        VStack(spacing: 8) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.system(size: 36))
-                                .foregroundStyle(Color.appTextTertiary)
-                            Text(emptyStateTitle)
-                                .font(.headline)
-                                .foregroundStyle(Color.appTextSecondary)
-                            Text(emptyStateSubtitle)
-                                .font(.subheadline)
-                                .foregroundStyle(Color.appTextTertiary)
-                                .multilineTextAlignment(.center)
-                        }
+            // Day-of-week headers
+            let weekdays = Calendar.current.shortWeekdaySymbols
+            HStack(spacing: 0) {
+                ForEach(weekdays, id: \.self) { day in
+                    Text(day.uppercased())
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.appTextTertiary)
                         .frame(maxWidth: .infinity)
-                        Spacer()
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 1) {
-                                ForEach(results) { meeting in
-                                    SearchResultRow(meeting: meeting) {
-                                        appState.selectedMeetingId = meeting.id
-                                        appState.sidebarDestination = .meetings
-                                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 8)
+
+            // Calendar grid
+            let days = calendarDays(for: displayedMonth)
+            let rows = days.chunked(into: 7)
+
+            VStack(spacing: 4) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, week in
+                    HStack(spacing: 0) {
+                        ForEach(Array(week.enumerated()), id: \.offset) { _, day in
+                            CalendarDayCell(
+                                day: day,
+                                displayedMonth: displayedMonth,
+                                isSelected: isSameDay(day, selectedDate),
+                                isToday: isSameDay(day, Date())
+                            ) {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    selectedDate = day
                                 }
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
                         }
                     }
                 }
             }
+            .padding(.horizontal, 24)
+
+            Spacer()
         }
-        .background(Color.appBackground)
-        .onAppear {
-            isSearchFocused = true
-            performSearch()
+    }
+
+    // MARK: - Results View
+
+    private var resultsView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Results header
+            HStack {
+                if let date = selectedDate {
+                    Text(date.formatted(date: .complete, time: .omitted))
+                        .font(.headline)
+                        .foregroundStyle(Color.appTextPrimary)
+                } else {
+                    Text("Results for \"\(searchQuery)\"")
+                        .font(.headline)
+                        .foregroundStyle(Color.appTextPrimary)
+                }
+                Spacer()
+                Text("\(results.count) meeting\(results.count == 1 ? "" : "s")")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextTertiary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
+
+            if isLoading {
+                Spacer()
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else if results.isEmpty {
+                Spacer()
+                VStack(spacing: 10) {
+                    Image(systemName: "calendar.badge.exclamationmark")
+                        .font(.system(size: 40))
+                        .foregroundStyle(Color.appTextTertiary)
+                    Text("No meetings found")
+                        .font(.headline)
+                        .foregroundStyle(Color.appTextSecondary)
+                    Text(selectedDate != nil ? "Nothing scheduled for this day." : "Try a different search term.")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+                .frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(results) { meeting in
+                            SearchResultRow(meeting: meeting) {
+                                appState.selectedMeetingId = meeting.id
+                                appState.sidebarDestination = .meetings
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 4)
+                }
+            }
         }
-        .onChange(of: searchQuery) { _, _ in performSearch() }
-        .onChange(of: selectedDate) { _, _ in performSearch() }
     }
 
     // MARK: - Search Logic
@@ -171,33 +230,76 @@ struct MeetingSearchView: View {
         }
     }
 
-    // MARK: - Display Helpers
+    // MARK: - Calendar Helpers
 
-    private var resultsTitle: String {
-        if searchQuery.isEmpty && selectedDate == nil {
-            return "\(results.count) recent meetings"
+    private func calendarDays(for month: Date) -> [Date] {
+        let cal = Calendar.current
+        let range = cal.range(of: .day, in: .month, for: month)!
+        let firstOfMonth = cal.date(from: cal.dateComponents([.year, .month], from: month))!
+        let firstWeekday = cal.component(.weekday, from: firstOfMonth)
+        let offset = firstWeekday - cal.firstWeekday
+        let paddingBefore = (offset + 7) % 7
+
+        var days: [Date] = []
+        for i in 0..<paddingBefore {
+            days.append(cal.date(byAdding: .day, value: -(paddingBefore - i), to: firstOfMonth)!)
         }
-        return "\(results.count) result\(results.count == 1 ? "" : "s")"
+        for day in range {
+            days.append(cal.date(byAdding: .day, value: day - 1, to: firstOfMonth)!)
+        }
+        let remaining = (7 - days.count % 7) % 7
+        if let lastDay = days.last {
+            for i in 1...max(remaining, 1) {
+                days.append(cal.date(byAdding: .day, value: i, to: lastDay)!)
+            }
+        }
+        return days
     }
 
-    private var emptyStateTitle: String {
-        if searchQuery.isEmpty && selectedDate == nil {
-            return "No Meetings Yet"
-        }
-        return "No Results"
+    private func isSameDay(_ a: Date?, _ b: Date?) -> Bool {
+        guard let a, let b else { return false }
+        return Calendar.current.isDate(a, inSameDayAs: b)
+    }
+}
+
+// MARK: - Calendar Day Cell
+
+private struct CalendarDayCell: View {
+    let day: Date
+    let displayedMonth: Date
+    let isSelected: Bool
+    let isToday: Bool
+    let action: () -> Void
+
+    private var isCurrentMonth: Bool {
+        Calendar.current.isDate(day, equalTo: displayedMonth, toGranularity: .month)
     }
 
-    private var emptyStateSubtitle: String {
-        if searchQuery.isEmpty && selectedDate == nil {
-            return "Start a new meeting or connect your calendar."
+    var body: some View {
+        Button(action: action) {
+            Text("\(Calendar.current.component(.day, from: day))")
+                .font(.system(size: 15, weight: isToday ? .bold : .regular, design: .rounded))
+                .foregroundStyle(foregroundColor)
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+                .background(backgroundColor)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
         }
-        if selectedDate != nil && !searchQuery.isEmpty {
-            return "No meetings match \"\(searchQuery)\" on the selected date."
-        }
-        if selectedDate != nil {
-            return "No meetings on the selected date."
-        }
-        return "No meetings match \"\(searchQuery)\". Try a different search term."
+        .buttonStyle(.plain)
+    }
+
+    private var foregroundColor: Color {
+        if isSelected { return .white }
+        if isToday { return Color.appAccent }
+        if !isCurrentMonth { return Color.appTextTertiary.opacity(0.4) }
+        return Color.appTextPrimary
+    }
+
+    private var backgroundColor: Color {
+        if isSelected { return Color.appAccent }
+        if isToday { return Color.appAccent.opacity(0.12) }
+        return Color.clear
     }
 }
 
@@ -210,66 +312,46 @@ private struct SearchResultRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                // Date badge
-                VStack(spacing: 0) {
-                    Text(meeting.effectiveDate.formatted(.dateTime.month(.abbreviated)))
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Color.appAccent)
-                    Text(meeting.effectiveDate.formatted(.dateTime.day()))
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                // Time column
+                VStack(spacing: 1) {
+                    Text(meeting.effectiveDate.formatted(date: .omitted, time: .shortened))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.appTextPrimary)
+                    if meeting.duration != nil {
+                        Text(meeting.formattedDuration)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
                 }
-                .frame(width: 40)
+                .frame(width: 60)
 
-                VStack(alignment: .leading, spacing: 3) {
+                // Color bar
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(meeting.status == .complete ? Color.appAccent : Color.appAccent.opacity(0.5))
+                    .frame(width: 3, height: 36)
+
+                // Title + metadata
+                VStack(alignment: .leading, spacing: 2) {
                     Text(meeting.title)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.appTextPrimary)
                         .lineLimit(1)
 
-                    HStack(spacing: 8) {
-                        // Time
-                        Text(meeting.effectiveDate.formatted(date: .omitted, time: .shortened))
+                    if !meeting.participantList.isEmpty {
+                        Text("\(meeting.participantList.count) attendee\(meeting.participantList.count == 1 ? "" : "s")")
                             .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
-
-                        // Duration
-                        if meeting.duration != nil {
-                            Text("·")
-                                .foregroundStyle(Color.appTextTertiary)
-                            Text(meeting.formattedDuration)
-                                .font(.caption)
-                                .foregroundStyle(Color.appTextSecondary)
-                        }
-
-                        // Participant count
-                        if !meeting.participantList.isEmpty {
-                            Text("·")
-                                .foregroundStyle(Color.appTextTertiary)
-                            HStack(spacing: 3) {
-                                Image(systemName: "person.2.fill")
-                                    .font(.system(size: 9))
-                                Text("\(meeting.participantList.count)")
-                                    .font(.caption)
-                            }
-                            .foregroundStyle(Color.appTextSecondary)
-                        }
+                            .foregroundStyle(Color.appTextTertiary)
                     }
                 }
 
                 Spacer()
 
-                // Status
                 SearchStatusBadge(status: meeting.status)
-
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(Color.appTextTertiary)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(Color.appSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -282,18 +364,18 @@ private struct SearchStatusBadge: View {
     let status: MeetingStatus
 
     var body: some View {
-        Text(status.displayLabel)
+        Text(status.searchDisplayLabel)
             .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(status.badgeColor)
+            .foregroundStyle(status.searchBadgeColor)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(status.badgeColor.opacity(0.12))
+            .background(status.searchBadgeColor.opacity(0.12))
             .clipShape(Capsule())
     }
 }
 
 private extension MeetingStatus {
-    var displayLabel: String {
+    var searchDisplayLabel: String {
         switch self {
         case .scheduled: return "Scheduled"
         case .notified: return "Starting"
@@ -306,7 +388,7 @@ private extension MeetingStatus {
         }
     }
 
-    var badgeColor: Color {
+    var searchBadgeColor: Color {
         switch self {
         case .recording: return Color.appRecording
         case .complete: return .green
@@ -314,6 +396,16 @@ private extension MeetingStatus {
         case .cancelled: return Color.appTextTertiary
         case .scheduled, .notified: return Color.appAccent
         case .transcribing, .summarizing: return .orange
+        }
+    }
+}
+
+// MARK: - Array Chunking
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
         }
     }
 }
