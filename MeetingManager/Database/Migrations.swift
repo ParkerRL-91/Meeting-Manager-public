@@ -427,5 +427,11 @@ enum Migrations {
                 t.add(column: "contextJSON", .text)
             }
         }
+
+        migrator.registerMigration("v16-meet-link") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "meetLink", .text)
+            }
+        }
     }
 }

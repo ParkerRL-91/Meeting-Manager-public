@@ -391,18 +391,6 @@ private struct BottomBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Audio levels
-            AudioLevelIndicator(
-                label: "\u{1F3A4}",
-                level: appState.micLevel,
-                color: .appAccent
-            )
-            AudioLevelIndicator(
-                label: "\u{1F50A}",
-                level: appState.systemLevel,
-                color: .appSuccess
-            )
-
             // Stop button
             Button {
                 appState.stopRecording()

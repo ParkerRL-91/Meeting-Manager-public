@@ -1,25 +1,20 @@
 import SwiftUI
 
-/// Full-screen search view. Shows a modern calendar by default;
-/// typing in the search bar replaces the calendar with live search results.
-/// Clicking a date on the calendar also shows that day's meetings.
+/// Full-screen search view. Calendar takes the top half; meeting list fills the bottom.
+/// Typing in the search bar replaces the date-filtered list with search results.
 struct MeetingSearchView: View {
     @Environment(AppState.self) private var appState
     @State private var searchQuery = ""
-    @State private var selectedDate: Date? = nil
-    @State private var displayedMonth = Date()
+    @State private var selectedDate: Date = Date()
+    @State private var displayedMonth: Date = Date()
     @State private var results: [Meeting] = []
     @State private var isLoading = false
+    @State private var isSearching = false  // true when user is typing a search query
     @FocusState private var isSearchFocused: Bool
-
-    /// Whether to show results instead of the calendar
-    private var showingResults: Bool {
-        !searchQuery.isEmpty || selectedDate != nil
-    }
 
     var body: some View {
         VStack(spacing: 0) {
-            // MARK: - Search Bar (always visible at top)
+            // MARK: - Search Bar
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .font(.body)
@@ -28,11 +23,11 @@ struct MeetingSearchView: View {
                     .textFieldStyle(.plain)
                     .font(.body)
                     .focused($isSearchFocused)
-                if showingResults {
+                if isSearching {
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             searchQuery = ""
-                            selectedDate = nil
+                            isSearching = false
                         }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -40,7 +35,6 @@ struct MeetingSearchView: View {
                             .foregroundStyle(Color.appTextTertiary)
                     }
                     .buttonStyle(.plain)
-                    .help("Clear search")
                 }
             }
             .padding(.horizontal, 14)
@@ -49,27 +43,38 @@ struct MeetingSearchView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 24)
             .padding(.top, 20)
-            .padding(.bottom, 16)
+            .padding(.bottom, 12)
 
-            // MARK: - Content: Calendar or Results
-            if showingResults {
-                resultsView
-                    .transition(.opacity)
-            } else {
-                calendarView
-                    .transition(.opacity)
+            // MARK: - Calendar (top half) — hidden when searching
+            if !isSearching {
+                calendarSection
             }
+
+            Divider()
+                .padding(.horizontal, 20)
+
+            // MARK: - Meeting list (bottom half)
+            meetingListSection
         }
         .background(Color.appBackground)
-        .animation(.easeInOut(duration: 0.2), value: showingResults)
-        .onAppear { performSearch() }
-        .onChange(of: searchQuery) { _, _ in performSearch() }
-        .onChange(of: selectedDate) { _, _ in performSearch() }
+        .onAppear { loadMeetingsForDate() }
+        .onChange(of: searchQuery) { _, newValue in
+            if newValue.isEmpty {
+                isSearching = false
+                loadMeetingsForDate()
+            } else {
+                isSearching = true
+                performSearch()
+            }
+        }
+        .onChange(of: selectedDate) { _, _ in
+            if !isSearching { loadMeetingsForDate() }
+        }
     }
 
-    // MARK: - Modern Calendar View
+    // MARK: - Calendar Section
 
-    private var calendarView: some View {
+    private var calendarSection: some View {
         VStack(spacing: 0) {
             // Month navigation
             HStack {
@@ -112,7 +117,7 @@ struct MeetingSearchView: View {
                 }
             }
             .padding(.horizontal, 28)
-            .padding(.bottom, 20)
+            .padding(.bottom, 14)
 
             // Day-of-week headers
             let weekdays = Calendar.current.shortWeekdaySymbols
@@ -125,21 +130,21 @@ struct MeetingSearchView: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 8)
+            .padding(.bottom, 6)
 
             // Calendar grid
             let days = calendarDays(for: displayedMonth)
             let rows = days.chunked(into: 7)
 
-            VStack(spacing: 4) {
+            VStack(spacing: 2) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, week in
                     HStack(spacing: 0) {
                         ForEach(Array(week.enumerated()), id: \.offset) { _, day in
                             CalendarDayCell(
                                 day: day,
                                 displayedMonth: displayedMonth,
-                                isSelected: isSameDay(day, selectedDate),
-                                isToday: isSameDay(day, Date())
+                                isSelected: Calendar.current.isDate(day, inSameDayAs: selectedDate),
+                                isToday: Calendar.current.isDateInToday(day)
                             ) {
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     selectedDate = day
@@ -150,33 +155,32 @@ struct MeetingSearchView: View {
                 }
             }
             .padding(.horizontal, 24)
-
-            Spacer()
+            .padding(.bottom, 12)
         }
     }
 
-    // MARK: - Results View
+    // MARK: - Meeting List Section
 
-    private var resultsView: some View {
+    private var meetingListSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Results header
+            // Header
             HStack {
-                if let date = selectedDate {
-                    Text(date.formatted(date: .complete, time: .omitted))
-                        .font(.headline)
+                if isSearching {
+                    Text("Results for \"\(searchQuery)\"")
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.appTextPrimary)
                 } else {
-                    Text("Results for \"\(searchQuery)\"")
-                        .font(.headline)
+                    Text(selectedDate.formatted(date: .complete, time: .omitted))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.appTextPrimary)
                 }
                 Spacer()
                 Text("\(results.count) meeting\(results.count == 1 ? "" : "s")")
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(Color.appTextTertiary)
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 12)
+            .padding(.vertical, 10)
 
             if isLoading {
                 Spacer()
@@ -185,22 +189,19 @@ struct MeetingSearchView: View {
                 Spacer()
             } else if results.isEmpty {
                 Spacer()
-                VStack(spacing: 10) {
-                    Image(systemName: "calendar.badge.exclamationmark")
-                        .font(.system(size: 40))
+                VStack(spacing: 8) {
+                    Image(systemName: isSearching ? "doc.text.magnifyingglass" : "calendar")
+                        .font(.system(size: 32))
                         .foregroundStyle(Color.appTextTertiary)
-                    Text("No meetings found")
-                        .font(.headline)
+                    Text(isSearching ? "No matches" : "No meetings")
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.appTextSecondary)
-                    Text(selectedDate != nil ? "Nothing scheduled for this day." : "Try a different search term.")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.appTextTertiary)
                 }
                 .frame(maxWidth: .infinity)
                 Spacer()
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 6) {
+                    LazyVStack(spacing: 4) {
                         ForEach(results) { meeting in
                             SearchResultRow(meeting: meeting) {
                                 appState.selectedMeetingId = meeting.id
@@ -215,14 +216,23 @@ struct MeetingSearchView: View {
         }
     }
 
-    // MARK: - Search Logic
+    // MARK: - Data Loading
+
+    private func loadMeetingsForDate() {
+        isLoading = true
+        Task {
+            let found = (try? await appState.meetingRepository.search(date: selectedDate)) ?? []
+            await MainActor.run {
+                results = found
+                isLoading = false
+            }
+        }
+    }
 
     private func performSearch() {
         isLoading = true
         Task {
-            let query = searchQuery.isEmpty ? nil : searchQuery
-            let date = selectedDate
-            let found = (try? await appState.meetingRepository.search(query: query, date: date)) ?? []
+            let found = (try? await appState.meetingRepository.search(query: searchQuery)) ?? []
             await MainActor.run {
                 results = found
                 isLoading = false
@@ -255,11 +265,6 @@ struct MeetingSearchView: View {
         }
         return days
     }
-
-    private func isSameDay(_ a: Date?, _ b: Date?) -> Bool {
-        guard let a, let b else { return false }
-        return Calendar.current.isDate(a, inSameDayAs: b)
-    }
 }
 
 // MARK: - Calendar Day Cell
@@ -278,12 +283,12 @@ private struct CalendarDayCell: View {
     var body: some View {
         Button(action: action) {
             Text("\(Calendar.current.component(.day, from: day))")
-                .font(.system(size: 15, weight: isToday ? .bold : .regular, design: .rounded))
+                .font(.system(size: 14, weight: isToday ? .bold : .regular, design: .rounded))
                 .foregroundStyle(foregroundColor)
                 .frame(maxWidth: .infinity)
-                .frame(height: 40)
+                .frame(height: 34)
                 .background(backgroundColor)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -312,7 +317,6 @@ private struct SearchResultRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                // Time column
                 VStack(spacing: 1) {
                     Text(meeting.effectiveDate.formatted(date: .omitted, time: .shortened))
                         .font(.system(size: 13, weight: .semibold))
@@ -325,18 +329,15 @@ private struct SearchResultRow: View {
                 }
                 .frame(width: 60)
 
-                // Color bar
                 RoundedRectangle(cornerRadius: 2)
                     .fill(meeting.status == .complete ? Color.appAccent : Color.appAccent.opacity(0.5))
                     .frame(width: 3, height: 36)
 
-                // Title + metadata
                 VStack(alignment: .leading, spacing: 2) {
                     Text(meeting.title)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.appTextPrimary)
                         .lineLimit(1)
-
                     if !meeting.participantList.isEmpty {
                         Text("\(meeting.participantList.count) attendee\(meeting.participantList.count == 1 ? "" : "s")")
                             .font(.caption)
@@ -349,7 +350,7 @@ private struct SearchResultRow: View {
                 SearchStatusBadge(status: meeting.status)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
             .background(Color.appSurface)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .contentShape(Rectangle())
@@ -358,24 +359,21 @@ private struct SearchResultRow: View {
     }
 }
 
-// MARK: - Status Badge
-
 private struct SearchStatusBadge: View {
     let status: MeetingStatus
-
     var body: some View {
-        Text(status.searchDisplayLabel)
+        Text(status.searchLabel)
             .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(status.searchBadgeColor)
+            .foregroundStyle(status.searchColor)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(status.searchBadgeColor.opacity(0.12))
+            .background(status.searchColor.opacity(0.12))
             .clipShape(Capsule())
     }
 }
 
 private extension MeetingStatus {
-    var searchDisplayLabel: String {
+    var searchLabel: String {
         switch self {
         case .scheduled: return "Scheduled"
         case .notified: return "Starting"
@@ -387,20 +385,16 @@ private extension MeetingStatus {
         case .cancelled: return "Cancelled"
         }
     }
-
-    var searchBadgeColor: Color {
+    var searchColor: Color {
         switch self {
         case .recording: return Color.appRecording
         case .complete: return .green
-        case .archived: return Color.appTextTertiary
-        case .cancelled: return Color.appTextTertiary
+        case .archived, .cancelled: return Color.appTextTertiary
         case .scheduled, .notified: return Color.appAccent
         case .transcribing, .summarizing: return .orange
         }
     }
 }
-
-// MARK: - Array Chunking
 
 private extension Array {
     func chunked(into size: Int) -> [[Element]] {

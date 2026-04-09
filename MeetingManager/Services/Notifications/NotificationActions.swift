@@ -15,6 +15,9 @@ enum NotificationActions {
     /// Action to snooze the reminder for a few more minutes.
     static let snooze = "SNOOZE"
 
+    /// Action to join the meeting (open video URL) and start recording.
+    static let joinMeeting = "JOIN_MEETING"
+
     /// Action to dismiss the notification without further action.
     static let dismiss = "DISMISS"
 
@@ -25,9 +28,15 @@ enum NotificationActions {
 
     /// Register all notification categories with their associated actions.
     static func registerCategories() {
+        let joinAction = UNNotificationAction(
+            identifier: joinMeeting,
+            title: "Join & Record",
+            options: [.foreground]
+        )
+
         let startAction = UNNotificationAction(
             identifier: startRecording,
-            title: "Start Recording",
+            title: "Record Only",
             options: [.foreground]
         )
 
@@ -43,10 +52,10 @@ enum NotificationActions {
             options: [.destructive]
         )
 
-        // Scheduled meeting alert
+        // Scheduled meeting alert — Join & Record first (most useful action)
         let meetingCategory = UNNotificationCategory(
             identifier: categoryIdentifier,
-            actions: [startAction, snoozeAction, dismissAction],
+            actions: [joinAction, startAction, snoozeAction, dismissAction],
             intentIdentifiers: [],
             options: [.customDismissAction]
         )

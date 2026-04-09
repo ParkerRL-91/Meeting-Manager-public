@@ -49,7 +49,11 @@ final class NotificationService: NSObject {
         content.body = "\(meeting.title) starts in \(leadTimeMinutes) minute\(leadTimeMinutes == 1 ? "" : "s")"
         content.sound = .default
         content.categoryIdentifier = NotificationActions.categoryIdentifier
-        content.userInfo = ["meetingId": meeting.id]
+        var userInfo: [String: String] = ["meetingId": meeting.id]
+        if let meetLink = meeting.meetLink, !meetLink.isEmpty {
+            userInfo["meetLink"] = meetLink
+        }
+        content.userInfo = userInfo
 
         let components = Calendar.current.dateComponents(
             [.year, .month, .day, .hour, .minute, .second],

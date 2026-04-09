@@ -360,8 +360,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let meetingId = response.notification.request.content.userInfo["meetingId"] as? String
+        let meetLink = response.notification.request.content.userInfo["meetLink"] as? String
 
         switch response.actionIdentifier {
+        case NotificationActions.joinMeeting:
+            // Open the video call URL in the default browser
+            if let meetLink, let url = URL(string: meetLink) {
+                NSWorkspace.shared.open(url)
+            }
+            // Also start recording
+            if let meetingId {
+                NotificationCenter.default.post(
+                    name: .startRecording,
+                    object: nil,
+                    userInfo: ["meetingId": meetingId]
+                )
+            }
         case NotificationActions.startRecording:
             if let meetingId {
                 NotificationCenter.default.post(

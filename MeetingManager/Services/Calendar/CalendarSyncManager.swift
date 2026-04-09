@@ -198,6 +198,8 @@ final class CalendarSyncManager {
                     existing.participants = event.attendees.joined(separator: ", ")
                     Logger.calendar.debug("Updated participants for '\(event.title)': \(event.attendees.count) attendees")
                 }
+                // Always update meetLink — it may change if the organizer switches platforms.
+                existing.meetLink = event.meetLink
                 try existing.update(db)
                 Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
             } else {
@@ -212,6 +214,7 @@ final class CalendarSyncManager {
                 if !event.attendees.isEmpty {
                     meeting.participants = event.attendees.joined(separator: ", ")
                 }
+                meeting.meetLink = event.meetLink
                 try meeting.insert(db)
                 Logger.calendar.debug("Created new meeting '\(event.title)' from calendar (participants: \(event.attendees.count))")
             }
