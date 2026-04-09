@@ -182,26 +182,32 @@ final class CalendarSyncManager {
                 .filter(Column("calendarEventId") == event.id)
                 .fetchOne(db)
             {
-                // Never overwrite meetings that are actively recording or already completed —
-                // a calendar sync must not clobber runtime state (startDate, endDate, status, etc.).
-                guard existing.status == .scheduled || existing.status == .notified else {
-                    Logger.calendar.debug("Skipping sync for '\(event.title)' — status is \(existing.status.rawValue)")
-                    return
-                }
-                // Update scheduling details only; don't overwrite user-created data.
-                existing.title = event.title
-                existing.scheduledStartDate = event.startDate
-                existing.scheduledEndDate = event.endDate
-                // Write attendees only when calendar provides them AND the field is currently empty.
-                // Preserves any participants already detected via screen fallback or manual entry.
+                // Always backfill participants and meetLink, regardless of meeting status.
+                // This ensures completed meetings get participant data from calendar.
+                var needsUpdate = false
                 if !event.attendees.isEmpty && (existing.participants == nil || existing.participants!.isEmpty) {
                     existing.participants = event.attendees.joined(separator: ", ")
-                    Logger.calendar.debug("Updated participants for '\(event.title)': \(event.attendees.count) attendees")
+                    needsUpdate = true
+                    Logger.calendar.debug("Backfilled participants for '\(event.title)': \(event.attendees.count) attendees")
                 }
-                // Always update meetLink — it may change if the organizer switches platforms.
-                existing.meetLink = event.meetLink
-                try existing.update(db)
-                Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
+                if existing.meetLink == nil && event.meetLink != nil {
+                    existing.meetLink = event.meetLink
+                    needsUpdate = true
+                }
+
+                // Only update scheduling details for meetings that haven't started yet.
+                if existing.status == .scheduled || existing.status == .notified {
+                    existing.title = event.title
+                    existing.scheduledStartDate = event.startDate
+                    existing.scheduledEndDate = event.endDate
+                    existing.meetLink = event.meetLink  // always update for scheduled
+                    needsUpdate = true
+                }
+
+                if needsUpdate {
+                    try existing.update(db)
+                    Logger.calendar.debug("Updated meeting '\(event.title)' from calendar")
+                }
             } else {
                 var meeting = Meeting(
                     title: event.title,
