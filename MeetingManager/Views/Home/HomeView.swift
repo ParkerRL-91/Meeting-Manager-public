@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Dashboard shown when no meeting is selected. Inspired by Granola's "Coming Up" view.
 /// Shows today's scheduled meetings with countdown timers and Start Now CTAs, followed by recent activity.
@@ -247,21 +248,54 @@ private struct ActiveRecordingBanner: View {
 // MARK: - No Meetings Today Card
 
 private struct NoMeetingsTodayCard: View {
+    @State private var authManager = GoogleAuthManager()
+    @Environment(AppState.self) private var appState
+
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "calendar")
-                .font(.title3)
-                .foregroundStyle(Color.appTextTertiary)
+        if authManager.isSignedIn {
+            HStack(spacing: 12) {
+                Image(systemName: "calendar")
+                    .font(.title3)
+                    .foregroundStyle(Color.appTextTertiary)
 
-            Text("No meetings scheduled for today")
-                .font(.subheadline)
-                .foregroundStyle(Color.appTextSecondary)
+                Text("No meetings scheduled for today")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextSecondary)
 
-            Spacer()
+                Spacer()
+            }
+            .padding(16)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        } else {
+            HStack(spacing: 12) {
+                Image(systemName: "calendar.badge.exclamationmark")
+                    .font(.title3)
+                    .foregroundStyle(Color.appAccent)
+
+                Text("Connect your Google Calendar to see meetings here.")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextSecondary)
+
+                Spacer()
+
+                Button("Connect →") {
+                    appState.pendingSettingsTab = 3
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.appAccent)
+                .controlSize(.small)
+            }
+            .padding(16)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.appAccent.opacity(0.3), lineWidth: 1)
+            )
         }
-        .padding(16)
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 

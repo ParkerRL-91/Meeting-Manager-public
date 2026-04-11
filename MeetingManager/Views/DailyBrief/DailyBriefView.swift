@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import os
 
 /// Full-page daily briefing view showing all of today's meetings with prep context
@@ -18,6 +19,8 @@ struct DailyBriefView: View {
     @State private var aiBriefText: String?
     @State private var isGeneratingBrief = false
     @State private var aiError: String?
+
+    private static let noAIServiceError = "no_ai_service"
 
     private let service = DailyBriefService()
     private let date: Date
@@ -51,10 +54,15 @@ struct DailyBriefView: View {
                         }
 
                         if let error = aiError {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(Color.appRecording)
-                                .padding(.horizontal, 20)
+                            if error == Self.noAIServiceError {
+                                aiSetupCard
+                                    .padding(.horizontal, 20)
+                            } else {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appRecording)
+                                    .padding(.horizontal, 20)
+                            }
                         }
                     }
                 }
@@ -125,6 +133,12 @@ struct DailyBriefView: View {
         .clipShape(Capsule())
     }
 
+    private var isAIConfigured: Bool {
+        if let key = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
+           !key.isEmpty { return true }
+        return appState.ollamaService.isReachable
+    }
+
     private var generateButton: some View {
         Button {
             Task { await generateAIBrief() }
@@ -136,6 +150,9 @@ struct DailyBriefView: View {
                     Text("Generating...")
                         .font(.subheadline.weight(.medium))
                 }
+            } else if !isAIConfigured {
+                Label("Set Up AI →", systemImage: "sparkles")
+                    .font(.subheadline.weight(.medium))
             } else {
                 Label(aiBriefText == nil ? "Generate AI Brief" : "Regenerate", systemImage: "sparkles")
                     .font(.subheadline.weight(.medium))
@@ -145,6 +162,38 @@ struct DailyBriefView: View {
         .tint(Color.appAccent)
         .controlSize(.regular)
         .disabled(isGeneratingBrief)
+    }
+
+    private var aiSetupCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sparkles")
+                .font(.title3)
+                .foregroundStyle(Color.appAccent)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("AI summaries aren't set up yet.")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.appTextPrimary)
+            }
+
+            Spacer()
+
+            Button("Add Claude API Key →") {
+                appState.pendingSettingsTab = 4
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.appAccent)
+            .controlSize(.small)
+        }
+        .padding(14)
+        .background(Color.appSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.appAccent.opacity(0.3), lineWidth: 1)
+        )
     }
 
     // MARK: - Loading / Error / Empty
@@ -341,7 +390,7 @@ struct DailyBriefView: View {
                     model: appState.settings.ollamaModel
                 )
             } else {
-                aiError = "No AI service available. Configure a Claude API key in Settings, or start Ollama."
+                aiError = Self.noAIServiceError
             }
         } catch {
             aiError = error.localizedDescription

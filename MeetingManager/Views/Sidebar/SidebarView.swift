@@ -67,7 +67,7 @@ struct SidebarView: View {
 
                 NavItem(
                     icon: "checklist",
-                    label: "Tasks",
+                    label: "Activity",
                     badge: appState.taskQueueManager.pendingCount,
                     destination: .tasks,
                     current: appState.sidebarDestination

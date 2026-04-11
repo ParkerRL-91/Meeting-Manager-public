@@ -93,6 +93,11 @@ struct AIChoiceStepView: View {
                             .font(.caption)
                             .foregroundStyle(testResult.contains("Success") ? Color.appSuccess : Color.appWarning)
                     }
+
+                    Link("Get your API key at console.anthropic.com →",
+                         destination: URL(string: "https://console.anthropic.com")!)
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
                 }
                 .padding(16)
                 .background(Color.appSurface)

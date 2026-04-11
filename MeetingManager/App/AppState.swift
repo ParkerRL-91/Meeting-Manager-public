@@ -84,6 +84,10 @@ final class AppState {
     /// Updated when the Daily Brief view loads. Used for the sidebar badge.
     var dailyBriefMeetingsNeedingPrep: Int = 0
 
+    /// When set, SettingsView will switch to this tab index and clear the value.
+    /// Tab indices: 0 General, 1 Audio, 2 Transcription, 3 Calendar, 4 AI(Claude), 5 AI(Local).
+    var pendingSettingsTab: Int?
+
     /// The user's persisted settings. Changes are automatically written to the database.
     var settings: AppSettings = .default {
         didSet {
