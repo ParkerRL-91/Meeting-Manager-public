@@ -339,6 +339,22 @@ final class AppState {
             self.loadMeetings()
         }
 
+        taskQueueManager.summaryCompletedHandler = { [weak self] meetingId in
+            guard let self else { return }
+            let meeting = try? await self.meetingRepository.find(id: meetingId)
+            let title = meeting?.title ?? "Meeting"
+            self.sendSummaryReadyNotification(meetingId: meetingId, meetingTitle: title)
+            if self.settings.autoFollowUpEmail {
+                let metadata = "{\"recipeId\":\"builtin-follow-up-email\"}"
+                await self.taskQueueManager.enqueue(
+                    type: .regeneration,
+                    meetingId: meetingId,
+                    priority: 7,
+                    metadata: metadata
+                )
+            }
+        }
+
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
         Task {
             await taskQueueManager.startUp()
@@ -1265,6 +1281,27 @@ final class AppState {
         }
     }
 
+    /// Send a macOS notification that a meeting summary is ready to share.
+    func sendSummaryReadyNotification(meetingId: String, meetingTitle: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Summary Ready"
+        content.body = "\(meetingTitle) — Tap to share the recap"
+        content.sound = .default
+        content.categoryIdentifier = NotificationActions.summaryReadyCategory
+        content.userInfo = ["meetingId": meetingId]
+
+        let request = UNNotificationRequest(
+            identifier: "summary-ready-\(meetingId)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send summary-ready notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Send a macOS notification that a meeting has ended.
     private func sendMeetingEndedNotification(meetingTitle: String?) {
         let content = UNMutableNotificationContent()
@@ -1653,6 +1690,7 @@ final class AppState {
 
 enum SidebarDestination: Hashable {
     case home
+    case dailyBrief
     case chat
     case people
     case tasks
