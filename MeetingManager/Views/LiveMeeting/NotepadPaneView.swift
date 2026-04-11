@@ -3,6 +3,8 @@ import SwiftUI
 /// Right pane: free-form text editor for meeting notes with auto-save.
 struct NotepadPaneView: View {
     let meetingId: String
+    /// Optional text to pre-populate the notepad when no existing note is found.
+    var initialText: String = ""
     @Environment(AppState.self) private var appState
 
     @State private var noteContent: String = ""
@@ -58,6 +60,13 @@ struct NotepadPaneView: View {
         .onChange(of: noteContent) { _, _ in
             scheduleSave()
         }
+        .onChange(of: initialText) { _, newValue in
+            // If initialText arrives after onAppear and the notepad is still empty,
+            // apply the pre-populated carry-forward text now.
+            if noteContent.isEmpty && !newValue.isEmpty {
+                noteContent = newValue
+            }
+        }
         .onDisappear {
             saveTask?.cancel()
             // Perform a final synchronous-style save
@@ -74,6 +83,11 @@ struct NotepadPaneView: View {
                     await MainActor.run {
                         self.existingNote = note
                         self.noteContent = note.content
+                    }
+                } else if !initialText.isEmpty {
+                    // No existing note — pre-populate with carry-forward content
+                    await MainActor.run {
+                        self.noteContent = initialText
                     }
                 }
             } catch {
