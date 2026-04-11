@@ -503,5 +503,13 @@ enum Migrations {
                 t.add(column: "autoFollowUpEmail", .boolean).notNull().defaults(to: false)
             }
         }
+
+        migrator.registerMigration("v20-morning-brief") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "morningBriefEnabled", .boolean).notNull().defaults(to: false)
+                t.add(column: "morningBriefHour", .integer).notNull().defaults(to: 8)
+                t.add(column: "morningBriefMinute", .integer).notNull().defaults(to: 30)
+            }
+        }
     }
 }
