@@ -56,6 +56,21 @@ final class AppState {
     var upcomingMeetings: [Meeting] = [] { didSet { _cachedFolders = nil } }
     var pastMeetings: [Meeting] = []    { didSet { _cachedFolders = nil } }
 
+    /// The next scheduled/notified meeting within the next 2 hours that isn't
+    /// the currently active meeting. Derived from the already-loaded `upcomingMeetings`
+    /// so no async DB call is needed.
+    var nextUpcomingMeeting: Meeting? {
+        let now = Date()
+        let twoHoursFromNow = now.addingTimeInterval(2 * 3600)
+        let activeId = activeMeeting?.id
+        return upcomingMeetings.first { meeting in
+            guard meeting.id != activeId else { return false }
+            guard meeting.status == .scheduled || meeting.status == .notified else { return false }
+            guard let start = meeting.scheduledStartDate else { return false }
+            return start > now && start <= twoHoursFromNow
+        }
+    }
+
     /// Cached folder groupings — invalidated whenever meetings change.
     private var _cachedFolders: [MeetingFolder]?
     var navigationPath = NavigationPath()
