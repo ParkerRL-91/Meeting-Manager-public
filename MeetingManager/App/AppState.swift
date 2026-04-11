@@ -106,6 +106,7 @@ final class AppState {
 
     private var cancellables = Set<AnyCancellable>()
     private var proximityPollingCancellable: AnyCancellable?
+    private var prepContextTimerCancellable: AnyCancellable?
 
     /// Tracks meetings for which a `meetingStartingSoon` notification has already been posted.
     /// Prevents posting 4+ duplicates across timer ticks for the same meeting.
@@ -199,6 +200,7 @@ final class AppState {
         autoLoadTranscriptionModel()
         cleanupStuckMeetings()
         setupTaskQueue()
+        startPrepContextTimer()
 
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
@@ -1360,6 +1362,40 @@ final class AppState {
         levelPollingCancellable = nil
         micLevel = 0
         systemLevel = 0
+    }
+
+    // MARK: - Prep Context Pre-Computation
+
+    /// Proactively enriches context for meetings starting in the next 30 minutes.
+    /// Runs every 5 minutes so prep cards load instantly when Jordan opens HomeView.
+    private func startPrepContextTimer() {
+        preComputePrepContext() // Run immediately on startup
+        prepContextTimerCancellable = Timer.publish(every: 300, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.preComputePrepContext()
+            }
+    }
+
+    @MainActor
+    private func preComputePrepContext() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let soonMeetings = try await self.meetingRepository.meetingsStartingWithin(minutes: 30)
+                let service = RelevantMeetingService(database: self.database)
+                for meeting in soonMeetings {
+                    if meeting.contextJSON == nil || meeting.contextJSON?.isEmpty == true {
+                        try await service.enrichContext(meetingId: meeting.id)
+                    }
+                }
+                if !soonMeetings.isEmpty {
+                    fileLog("Prep: enriched context for \(soonMeetings.count) upcoming meeting(s)")
+                }
+            } catch {
+                fileLog("Prep: context pre-computation failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Meeting Proximity Detection
