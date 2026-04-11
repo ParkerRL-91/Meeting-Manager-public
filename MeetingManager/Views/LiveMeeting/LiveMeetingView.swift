@@ -8,7 +8,7 @@ struct LiveMeetingView: View {
     @State private var meeting: Meeting?
     @State private var showChat = false
     @State private var showAttendeePopover = false
-    @State private var showFolderPicker = false
+
     @State private var contextMeetings: [RelevantMeeting] = []
     @State private var showContextBrief = true
     @State private var carriedItems: [ActionItem] = []
@@ -101,17 +101,6 @@ struct LiveMeetingView: View {
                         }
                     }
 
-                    // Add to folder badge
-                    Button {
-                        showFolderPicker.toggle()
-                    } label: {
-                        PillBadge(icon: "arrow.up.right.square", label: "Add to folder")
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showFolderPicker, arrowEdge: .bottom) {
-                        FolderPickerPopover(meetingTitle: meeting?.title ?? "")
-                    }
-
                     Spacer()
                 }
                 .padding(.horizontal, 28)
@@ -167,10 +156,13 @@ struct LiveMeetingView: View {
     }
 
     private func extractCompany() -> String? {
-        // Try to extract a company name from the meeting title
-        let title = meeting?.title ?? ""
-        let parts = title.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 3 }
-        return parts.first
+        // Use participant names for the context header rather than title heuristics,
+        // which produce nonsensical results like "You last met with with recently".
+        guard let meeting else { return nil }
+        let participants = meeting.participantList
+        if participants.count == 1 { return participants.first }
+        if participants.count > 1 { return "\(participants[0]) and others" }
+        return nil
     }
 
     // MARK: - Open Items Loading (T-021 / T-022)
@@ -349,6 +341,10 @@ private struct RecordingStrip: View {
         .padding(.vertical, 8)
         .background(Color.appSurface.opacity(0.5))
         .onAppear { startTimer() }
+        .onDisappear {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 
     private var formatted: String {
@@ -419,54 +415,6 @@ private struct AttendeePopover: View {
         }
         .padding(14)
         .frame(minWidth: 200)
-    }
-}
-
-// MARK: - Folder Picker Popover
-
-private struct FolderPickerPopover: View {
-    let meetingTitle: String
-    @Environment(AppState.self) private var appState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Add to Folder")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.appTextSecondary)
-                .padding(.bottom, 4)
-
-            let folders = appState.meetingFolders()
-            if folders.isEmpty {
-                Text("No folders yet")
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextTertiary)
-            } else {
-                ForEach(folders) { folder in
-                    Button {
-                        // Navigate to the folder
-                        appState.sidebarDestination = .folder(folder.key)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "folder.fill")
-                                .font(.caption)
-                                .foregroundStyle(Color.appAccent)
-                            Text(folder.displayName)
-                                .font(.subheadline)
-                                .foregroundStyle(Color.appTextPrimary)
-                            Spacer()
-                            Text("\(folder.meetingCount)")
-                                .font(.caption)
-                                .foregroundStyle(Color.appTextTertiary)
-                        }
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .padding(14)
-        .frame(minWidth: 220)
     }
 }
 
@@ -584,6 +532,10 @@ private struct BottomBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+
+            // Audio level indicators
+            AudioLevelIndicator(label: "🎤", level: appState.micLevel)
+            AudioLevelIndicator(label: "🔊", level: appState.systemLevel)
 
             // T-025: Captured action items badge (visible when count > 0)
             if capturedItemCount > 0 {

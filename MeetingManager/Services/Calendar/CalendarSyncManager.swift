@@ -200,7 +200,7 @@ final class CalendarSyncManager {
                     existing.title = event.title
                     existing.scheduledStartDate = event.startDate
                     existing.scheduledEndDate = event.endDate
-                    existing.meetLink = event.meetLink  // always update for scheduled
+                    existing.meetLink = event.meetLink ?? existing.meetLink
                     needsUpdate = true
                 }
 
