@@ -2,20 +2,46 @@ import Foundation
 
 // MARK: - Whisper Model
 
-/// The only supported WhisperKit model. Large v3 provides the best accuracy
-/// and is the only model Meeting Manager ships with.
+/// Supported WhisperKit transcription models.
+/// `largev3turbo` is the default — optimised for Apple Neural Engine with
+/// dramatically lower memory usage and faster inference at near-identical accuracy.
+/// `largev3` is available as a "Max Accuracy" option for users who prefer it.
 enum WhisperModel: String, CaseIterable, Identifiable, Codable {
+    case largev3turbo = "openai_whisper-large-v3-v20240930_turbo_632MB"
     case largev3 = "openai_whisper-large-v3"
 
     var id: String { rawValue }
 
-    var displayName: String { "Large v3" }
+    var displayName: String {
+        switch self {
+        case .largev3turbo: return "Large v3 Turbo"
+        case .largev3: return "Large v3 (Full)"
+        }
+    }
+
+    /// Short description shown in the model picker.
+    var subtitle: String {
+        switch self {
+        case .largev3turbo: return "Recommended — fast, low memory, ANE-optimised"
+        case .largev3: return "Maximum accuracy — uses more memory"
+        }
+    }
 
     /// Estimated peak memory usage in megabytes.
-    var estimatedMemoryMB: Int { 3_000 }
+    var estimatedMemoryMB: Int {
+        switch self {
+        case .largev3turbo: return 800
+        case .largev3: return 3_000
+        }
+    }
 
     /// Human-readable download size.
-    var downloadSizeDescription: String { "~1.5 GB" }
+    var downloadSizeDescription: String {
+        switch self {
+        case .largev3turbo: return "~632 MB"
+        case .largev3: return "~1.5 GB"
+        }
+    }
 }
 
 // MARK: - Transcription Mode
@@ -37,8 +63,9 @@ struct TranscriptionConfiguration: Codable, Equatable {
 
     // MARK: Model
 
-    /// The WhisperKit model to use -- always large-v3.
-    var model: WhisperModel = .largev3
+    /// The WhisperKit model to use. Defaults to the turbo variant for best
+    /// performance on Apple Silicon; can be overridden to `.largev3` in settings.
+    var model: WhisperModel = .largev3turbo
 
     // MARK: Language
 

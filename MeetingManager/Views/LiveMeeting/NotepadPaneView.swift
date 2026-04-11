@@ -3,6 +3,11 @@ import SwiftUI
 /// Right pane: free-form text editor for meeting notes with auto-save.
 struct NotepadPaneView: View {
     let meetingId: String
+    /// Optional text to pre-populate the notepad when no existing note is found.
+    var initialText: String = ""
+    /// Called whenever a /action command is parsed and saved (passes the new count increment).
+    var onActionCaptured: (() -> Void)? = nil
+
     @Environment(AppState.self) private var appState
 
     @State private var noteContent: String = ""
@@ -43,7 +48,7 @@ struct NotepadPaneView: View {
 
                 // Placeholder
                 if noteContent.isEmpty && !isEditorFocused {
-                    Text("Start typing your meeting notes here...\n\n- Action items\n- Key decisions\n- Follow-ups")
+                    Text("Start typing your meeting notes here...\n\n- Action items\n- Key decisions\n- Follow-ups\n\nTip: type /action to capture an action item inline")
                         .font(.body)
                         .foregroundStyle(Color.appTextTertiary)
                         .padding(.horizontal, 13)
@@ -55,8 +60,19 @@ struct NotepadPaneView: View {
         }
         .background(Color.appBackground)
         .onAppear(perform: loadNote)
-        .onChange(of: noteContent) { _, _ in
+        .onChange(of: noteContent) { oldValue, newValue in
+            // Check for /action parsing on newline
+            if newValue.count > oldValue.count && newValue.hasSuffix("\n") {
+                parseActionCommandIfNeeded(in: newValue, oldContent: oldValue)
+            }
             scheduleSave()
+        }
+        .onChange(of: initialText) { _, newValue in
+            // If initialText arrives after onAppear and the notepad is still empty,
+            // apply the pre-populated carry-forward text now.
+            if noteContent.isEmpty && !newValue.isEmpty {
+                noteContent = newValue
+            }
         }
         .onDisappear {
             saveTask?.cancel()
@@ -74,6 +90,11 @@ struct NotepadPaneView: View {
                     await MainActor.run {
                         self.existingNote = note
                         self.noteContent = note.content
+                    }
+                } else if !initialText.isEmpty {
+                    // No existing note — pre-populate with carry-forward content
+                    await MainActor.run {
+                        self.noteContent = initialText
                     }
                 }
             } catch {
@@ -121,6 +142,138 @@ struct NotepadPaneView: View {
         Task {
             await saveNote()
         }
+    }
+
+    // MARK: - /action Inline Parsing
+
+    /// Called whenever a newline is typed. Looks at the line just before the newline
+    /// to check for the `/action` prefix and parse it.
+    private func parseActionCommandIfNeeded(in newContent: String, oldContent: String) {
+        // Split into lines; the new trailing "\n" adds an empty last element
+        let lines = newContent.components(separatedBy: "\n")
+        // The line just completed is the second-to-last (last is the empty string after "\n")
+        guard lines.count >= 2 else { return }
+        let completedLine = lines[lines.count - 2]
+
+        guard completedLine.lowercased().hasPrefix("/action") else { return }
+
+        // Parse the /action command
+        let suffix = completedLine.dropFirst("/action".count)
+            .trimmingCharacters(in: .whitespaces)
+
+        guard !suffix.isEmpty else { return }
+
+        let parsed = ActionCommandParser.parse(suffix)
+        let dueDate = NaturalLanguageDateParser.parse(parsed.dateString ?? "")
+        let confirmationLine = buildConfirmationLine(
+            title: parsed.title,
+            assignee: parsed.assignee,
+            dueDate: dueDate
+        )
+
+        // Replace the /action line in the text with the confirmation line
+        var updatedLines = lines
+        updatedLines[lines.count - 2] = confirmationLine
+        // Prevent onChange recursion by scheduling the update asynchronously
+        let updated = updatedLines.joined(separator: "\n")
+        // Use Task to defer the state mutation so onChange doesn't re-enter immediately
+        Task { @MainActor in
+            noteContent = updated
+        }
+
+        // Save the action item
+        var item = ActionItem(
+            meetingId: meetingId,
+            title: parsed.title,
+            assignee: parsed.assignee,
+            dueDate: dueDate
+        )
+
+        Task {
+            do {
+                try await ActionItemRepository().save(&item)
+                await MainActor.run {
+                    onActionCaptured?()
+                }
+            } catch {
+                print("NotepadPane: failed to save /action item: \(error)")
+            }
+        }
+    }
+
+    private func buildConfirmationLine(title: String, assignee: String?, dueDate: Date?) -> String {
+        var line = "✓ Action: \(title)"
+        if let assignee = assignee, !assignee.isEmpty {
+            line += " → \(assignee)"
+        }
+        if let dueDate = dueDate {
+            let formatted = dueDate.formatted(date: .abbreviated, time: .omitted)
+            line += " (due \(formatted))"
+        }
+        return line
+    }
+}
+
+// MARK: - /action Command Parser
+
+/// Parses the text after `/action ` into components.
+/// Grammar: `[assignee:] [task] [by date]`
+///
+/// Examples:
+///   "Sarah: finalize budget by Friday"  → assignee="Sarah", title="finalize budget", date="Friday"
+///   "review the proposal"               → assignee=nil, title="review the proposal", date=nil
+///   "send report by next week"          → assignee=nil, title="send report", date="next week"
+enum ActionCommandParser {
+
+    struct ParsedAction {
+        let title: String
+        let assignee: String?
+        let dateString: String?
+    }
+
+    static func parse(_ input: String) -> ParsedAction {
+        var remaining = input
+
+        // 1. Extract assignee: if the first "word" (sequence of non-space chars) ends with ":"
+        var assignee: String? = nil
+        let firstSpaceIdx = remaining.firstIndex(of: " ")
+        let colonIdx = remaining.firstIndex(of: ":")
+
+        if let colon = colonIdx,
+           (firstSpaceIdx == nil || colon < firstSpaceIdx!) {
+            // Everything before the colon is the assignee
+            let candidate = String(remaining[remaining.startIndex..<colon]).trimmingCharacters(in: .whitespaces)
+            if !candidate.isEmpty {
+                assignee = candidate
+                // Advance past "colon + optional space"
+                let afterColon = remaining.index(after: colon)
+                remaining = String(remaining[afterColon...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        // 2. Extract " by <date>" suffix (case-insensitive)
+        var dateString: String? = nil
+        let byKeywords = [" by "]
+        for keyword in byKeywords {
+            if let byRange = remaining.range(of: keyword, options: .caseInsensitive) {
+                let taskPart = String(remaining[remaining.startIndex..<byRange.lowerBound])
+                    .trimmingCharacters(in: .whitespaces)
+                let datePart = String(remaining[byRange.upperBound...])
+                    .trimmingCharacters(in: .whitespaces)
+                if !taskPart.isEmpty {
+                    remaining = taskPart
+                    dateString = datePart.isEmpty ? nil : datePart
+                    break
+                }
+            }
+        }
+
+        let title = remaining.trimmingCharacters(in: .whitespaces)
+        return ParsedAction(
+            title: title.isEmpty ? input : title,
+            assignee: assignee,
+            dateString: dateString
+        )
     }
 }
 

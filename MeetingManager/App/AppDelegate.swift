@@ -388,6 +388,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let meetingId {
                 notificationService?.scheduleSnooze(meetingId: meetingId, minutes: 5)
             }
+        case NotificationActions.prepMeeting:
+            if let meetingId {
+                AppState.shared?.selectedMeetingId = meetingId
+            }
+        case NotificationActions.sendRecap:
+            // "Share Recap" action — navigate to the meeting so the user can share
+            if let meetingId {
+                AppState.shared?.selectedMeetingId = meetingId
+            }
+        case UNNotificationDefaultActionIdentifier:
+            // User tapped the banner itself; navigate to the meeting when it's a summary-ready notification
+            let categoryId = response.notification.request.content.categoryIdentifier
+            if categoryId == NotificationActions.summaryReadyCategory, let meetingId {
+                AppState.shared?.selectedMeetingId = meetingId
+            }
         default:
             break
         }

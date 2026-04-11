@@ -11,6 +11,11 @@ struct LiveMeetingView: View {
     @State private var showFolderPicker = false
     @State private var contextMeetings: [RelevantMeeting] = []
     @State private var showContextBrief = true
+    @State private var carriedItems: [ActionItem] = []
+    @State private var showOpenItems = true
+    @State private var notepadInitialText: String = ""
+    @State private var capturedItemCount = 0
+    @State private var showQuickCapture = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,11 +35,27 @@ struct LiveMeetingView: View {
             }
 
             // MARK: - Bottom bar: audio levels + stop + ask anything
-            BottomBar(meetingId: meetingId, showChat: $showChat)
+            BottomBar(meetingId: meetingId, showChat: $showChat, capturedItemCount: capturedItemCount, showQuickCapture: $showQuickCapture)
         }
         .background(Color.appBackground)
         .frame(minWidth: showChat ? 800 : 540, minHeight: 500)
         .toggleOnKeyboardShortcut("j", modifiers: .command, binding: $showChat)
+        .background(
+            // T-026: Cmd+Shift+A shortcut to show quick capture popover
+            Button("") {
+                showQuickCapture.toggle()
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .hidden()
+        )
+        .popover(isPresented: $showQuickCapture, arrowEdge: .bottom) {
+            QuickCapturePopoverView(meetingId: meetingId) {
+                capturedItemCount += 1
+                showQuickCapture = false
+            } onCancel: {
+                showQuickCapture = false
+            }
+        }
         .task {
             if let active = appState.activeMeeting {
                 meeting = active
@@ -42,6 +63,7 @@ struct LiveMeetingView: View {
                 meeting = try? await appState.meetingRepository.find(id: meetingId)
             }
             loadContext()
+            await loadOpenItems()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in
             if let active = appState.activeMeeting { meeting = active }
@@ -95,9 +117,21 @@ struct LiveMeetingView: View {
                 .padding(.horizontal, 28)
                 .padding(.bottom, 20)
 
-                // Notes area
-                NotepadPaneView(meetingId: meetingId)
-                    .frame(minHeight: 250)
+                // Open Items panel (T-022)
+                if !carriedItems.isEmpty {
+                    OpenItemsPanel(
+                        items: $carriedItems,
+                        isExpanded: $showOpenItems
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+                }
+
+                // Notes area (T-021: initialText pre-populates when notepad is empty)
+                NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText) {
+                    capturedItemCount += 1
+                }
+                .frame(minHeight: 250)
 
                 // Context brief (related past meetings)
                 if !contextMeetings.isEmpty && showContextBrief {
@@ -137,6 +171,150 @@ struct LiveMeetingView: View {
         let title = meeting?.title ?? ""
         let parts = title.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 3 }
         return parts.first
+    }
+
+    // MARK: - Open Items Loading (T-021 / T-022)
+
+    private func loadOpenItems() async {
+        guard let meeting else { return }
+        let participants = meeting.participantList
+        guard !participants.isEmpty else { return }
+
+        do {
+            let items = try await ActionItemRepository().openItemsForParticipants(participants)
+            await MainActor.run {
+                carriedItems = items
+                showOpenItems = !items.isEmpty
+                if !items.isEmpty {
+                    notepadInitialText = buildNotepadPrelude(from: items)
+                }
+            }
+        } catch {
+            print("Failed to load open items for carry-forward: \(error)")
+        }
+    }
+
+    /// Builds the pre-population text for the notepad from carried-forward action items.
+    private func buildNotepadPrelude(from items: [ActionItem]) -> String {
+        var lines = ["Follow-ups from previous meetings:"]
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        for item in items {
+            var line = "- [ ] "
+            if let assignee = item.assignee, !assignee.isEmpty {
+                line += "\(assignee): "
+            }
+            line += item.title
+            if let due = item.dueDate {
+                line += " (due \(formatter.string(from: due)))"
+            }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - Open Items Panel (T-022)
+
+private struct OpenItemsPanel: View {
+    @Binding var items: [ActionItem]
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.appWarning)
+                    Text("Open Items (\(items.count))")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.appTextPrimary)
+                    Spacer()
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.appTextSecondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                Divider()
+                    .padding(.horizontal, 0)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        OpenItemRow(item: item) { updatedItem in
+                            items[index] = updatedItem
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+        }
+        .background(Color.appSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.appWarning.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+
+private struct OpenItemRow: View {
+    let item: ActionItem
+    var onToggle: (ActionItem) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Button {
+                guard let id = item.id else { return }
+                Task {
+                    try? await ActionItemRepository().toggleComplete(id: id)
+                    var updated = item
+                    updated.isCompleted.toggle()
+                    onToggle(updated)
+                }
+            } label: {
+                Image(systemName: item.isCompleted ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 14))
+                    .foregroundStyle(item.isCompleted ? Color.appAccent : Color.appTextSecondary)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    if let assignee = item.assignee, !assignee.isEmpty {
+                        Text("\(assignee):")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.appTextPrimary)
+                    }
+                    Text(item.title)
+                        .font(.subheadline)
+                        .foregroundStyle(item.isCompleted ? Color.appTextSecondary : Color.appTextPrimary)
+                        .strikethrough(item.isCompleted)
+                }
+
+                if let due = item.dueDate {
+                    Text("Due \(due.formatted(date: .abbreviated, time: .omitted))")
+                        .font(.caption)
+                        .foregroundStyle(Color.appWarning)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -387,6 +565,8 @@ private struct ContextBriefView: View {
 private struct BottomBar: View {
     let meetingId: String
     @Binding var showChat: Bool
+    let capturedItemCount: Int
+    @Binding var showQuickCapture: Bool
     @Environment(AppState.self) private var appState
 
     var body: some View {
@@ -404,6 +584,30 @@ private struct BottomBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+
+            // T-025: Captured action items badge (visible when count > 0)
+            if capturedItemCount > 0 {
+                Button {
+                    showQuickCapture.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.appAccent)
+                        Text("\(capturedItemCount) item\(capturedItemCount == 1 ? "" : "s")")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.appAccent.opacity(0.12))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Captured action items — click to add more (Cmd+Shift+A)")
+                .transition(.scale.combined(with: .opacity))
+                .animation(.spring(response: 0.3), value: capturedItemCount)
+            }
 
             // Ask anything bar
             Button {

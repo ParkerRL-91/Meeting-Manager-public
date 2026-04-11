@@ -36,12 +36,15 @@ struct AppSettings: Codable, Equatable {
     /// The recipe ID to use for auto-generated summaries. nil = use the default meeting summary prompt.
     var defaultRecipeId: String? = nil
 
+    /// When true, automatically enqueue a follow-up email recipe after a summary is generated.
+    var autoFollowUpEmail: Bool = false
+
     static let `default` = AppSettings(
-        whisperModel: "large-v3",
+        whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
         claudeModel: "claude-sonnet-4-20250514",
         calendarSyncIntervalMinutes: 15,
-        notificationLeadTimeMinutes: 1,
+        notificationLeadTimeMinutes: 5,
         launchAtLogin: false,
         theme: "dark"
     )
@@ -58,6 +61,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite, selectedCalendarId
         case useLocalLLM, ollamaModel
         case autoGenerateSummary, defaultRecipeId
+        case autoFollowUpEmail
     }
 }
 

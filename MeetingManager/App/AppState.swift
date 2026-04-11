@@ -29,6 +29,11 @@ final class AppState {
     var isRecording = false
     var activeMeeting: Meeting?
 
+    /// The resolved template for the current/most-recently-started recording.
+    /// Set when recording starts (from meeting.templateId or series inheritance).
+    /// Read by LiveMeetingView to pre-populate the notepad.
+    var activeTemplate: MeetingTemplate?
+
     /// True only when the current recording was auto-started by BrowserCallDetector.
     /// Used to gate `callAppTerminated` auto-stop — manually-started recordings
     /// must not be stopped just because the browser-call heuristic loses signal.
@@ -56,9 +61,28 @@ final class AppState {
     var upcomingMeetings: [Meeting] = [] { didSet { _cachedFolders = nil } }
     var pastMeetings: [Meeting] = []    { didSet { _cachedFolders = nil } }
 
+    /// The next scheduled/notified meeting within the next 2 hours that isn't
+    /// the currently active meeting. Derived from the already-loaded `upcomingMeetings`
+    /// so no async DB call is needed.
+    var nextUpcomingMeeting: Meeting? {
+        let now = Date()
+        let twoHoursFromNow = now.addingTimeInterval(2 * 3600)
+        let activeId = activeMeeting?.id
+        return upcomingMeetings.first { meeting in
+            guard meeting.id != activeId else { return false }
+            guard meeting.status == .scheduled || meeting.status == .notified else { return false }
+            guard let start = meeting.scheduledStartDate else { return false }
+            return start > now && start <= twoHoursFromNow
+        }
+    }
+
     /// Cached folder groupings — invalidated whenever meetings change.
     private var _cachedFolders: [MeetingFolder]?
     var navigationPath = NavigationPath()
+
+    /// The count of today's meetings that need prep (carryOver category).
+    /// Updated when the Daily Brief view loads. Used for the sidebar badge.
+    var dailyBriefMeetingsNeedingPrep: Int = 0
 
     /// The user's persisted settings. Changes are automatically written to the database.
     var settings: AppSettings = .default {
@@ -106,6 +130,7 @@ final class AppState {
 
     private var cancellables = Set<AnyCancellable>()
     private var proximityPollingCancellable: AnyCancellable?
+    private var prepContextTimerCancellable: AnyCancellable?
 
     /// Tracks meetings for which a `meetingStartingSoon` notification has already been posted.
     /// Prevents posting 4+ duplicates across timer ticks for the same meeting.
@@ -199,6 +224,7 @@ final class AppState {
         autoLoadTranscriptionModel()
         cleanupStuckMeetings()
         setupTaskQueue()
+        startPrepContextTimer()
 
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
@@ -215,11 +241,7 @@ final class AppState {
                 let loaded = try await database.writer.read { db in
                     try AppSettings.fetchOne(db)
                 }
-                if var loaded = loaded {
-                    // Always enforce large-v3 — no other models are supported.
-                    if loaded.whisperModel != WhisperModel.largev3.rawValue {
-                        loaded.whisperModel = WhisperModel.largev3.rawValue
-                    }
+                if let loaded = loaded {
                     await MainActor.run { self.settings = loaded }
                 }
             } catch {
@@ -319,6 +341,22 @@ final class AppState {
             self.fileLog("TaskQueue: running regeneration for \(meetingId) recipeId=\(recipeId ?? "none")")
             try await self.generateSummaryForTask(meetingId: meetingId, recipeId: recipeId)
             self.loadMeetings()
+        }
+
+        taskQueueManager.summaryCompletedHandler = { [weak self] meetingId in
+            guard let self else { return }
+            let meeting = try? await self.meetingRepository.find(id: meetingId)
+            let title = meeting?.title ?? "Meeting"
+            self.sendSummaryReadyNotification(meetingId: meetingId, meetingTitle: title)
+            if self.settings.autoFollowUpEmail {
+                let metadata = "{\"recipeId\":\"builtin-follow-up-email\"}"
+                await self.taskQueueManager.enqueue(
+                    type: .regeneration,
+                    meetingId: meetingId,
+                    priority: 7,
+                    metadata: metadata
+                )
+            }
         }
 
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
@@ -553,6 +591,9 @@ final class AppState {
                     service.start(meetingId: meetingId, existingParticipants: currentParticipants)
                 }
 
+                // Resolve template: use meeting's own templateId, or inherit from series.
+                self.activeTemplate = await self.resolveTemplate(for: meeting)
+
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
@@ -560,6 +601,26 @@ final class AppState {
                 self.lastUserError = error.localizedDescription
             }
         }
+    }
+
+    /// Resolves the template for a meeting:
+    /// 1. If the meeting has a templateId, load that template.
+    /// 2. Otherwise, check the series (same title) for a recently-used template.
+    /// Returns nil if no template is found or loading fails.
+    private func resolveTemplate(for meeting: Meeting) async -> MeetingTemplate? {
+        let templateRepo = MeetingTemplateRepository(database: database)
+
+        // 1. Explicit templateId on the meeting
+        if let templateId = meeting.templateId {
+            return try? await templateRepo.find(id: templateId)
+        }
+
+        // 2. Inherit from the most recent meeting in the same series
+        if let inheritedId = try? await meetingRepository.templateIdForSeries(title: meeting.title) {
+            return try? await templateRepo.find(id: inheritedId)
+        }
+
+        return nil
     }
 
     /// Re-open a completed meeting to append more audio.
@@ -960,8 +1021,8 @@ final class AppState {
                 return
             }
 
-            // Always use large-v3 — it's the only supported model.
-            let model = WhisperModel.largev3
+            // Use the user's selected model (defaults to turbo for best performance).
+            let model = WhisperModel(rawValue: settings.whisperModel) ?? .largev3turbo
             let maxRetries = 3
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")
@@ -1224,6 +1285,27 @@ final class AppState {
         }
     }
 
+    /// Send a macOS notification that a meeting summary is ready to share.
+    func sendSummaryReadyNotification(meetingId: String, meetingTitle: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Summary Ready"
+        content.body = "\(meetingTitle) — Tap to share the recap"
+        content.sound = .default
+        content.categoryIdentifier = NotificationActions.summaryReadyCategory
+        content.userInfo = ["meetingId": meetingId]
+
+        let request = UNNotificationRequest(
+            identifier: "summary-ready-\(meetingId)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.general.error("Failed to send summary-ready notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Send a macOS notification that a meeting has ended.
     private func sendMeetingEndedNotification(meetingTitle: String?) {
         let content = UNMutableNotificationContent()
@@ -1364,6 +1446,40 @@ final class AppState {
         levelPollingCancellable = nil
         micLevel = 0
         systemLevel = 0
+    }
+
+    // MARK: - Prep Context Pre-Computation
+
+    /// Proactively enriches context for meetings starting in the next 30 minutes.
+    /// Runs every 5 minutes so prep cards load instantly when Jordan opens HomeView.
+    private func startPrepContextTimer() {
+        preComputePrepContext() // Run immediately on startup
+        prepContextTimerCancellable = Timer.publish(every: 300, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.preComputePrepContext()
+            }
+    }
+
+    @MainActor
+    private func preComputePrepContext() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let soonMeetings = try await self.meetingRepository.meetingsStartingWithin(minutes: 30)
+                let service = RelevantMeetingService(database: self.database)
+                for meeting in soonMeetings {
+                    if meeting.contextJSON == nil || meeting.contextJSON?.isEmpty == true {
+                        try await service.enrichContext(meetingId: meeting.id)
+                    }
+                }
+                if !soonMeetings.isEmpty {
+                    fileLog("Prep: enriched context for \(soonMeetings.count) upcoming meeting(s)")
+                }
+            } catch {
+                fileLog("Prep: context pre-computation failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Meeting Proximity Detection
@@ -1578,6 +1694,7 @@ final class AppState {
 
 enum SidebarDestination: Hashable {
     case home
+    case dailyBrief
     case chat
     case people
     case tasks

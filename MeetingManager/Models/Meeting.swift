@@ -20,6 +20,8 @@ struct Meeting: Identifiable, Codable, Equatable {
     var contextJSON: String?
     /// Video call URL from Google Calendar (hangoutLink or conferenceData).
     var meetLink: String?
+    /// Optional reference to a MeetingTemplate to pre-populate the notepad.
+    var templateId: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -37,6 +39,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         participants: String? = nil,
         contextJSON: String? = nil,
         meetLink: String? = nil,
+        templateId: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -53,6 +56,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.participants = participants
         self.contextJSON = contextJSON
         self.meetLink = meetLink
+        self.templateId = templateId
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -135,7 +139,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

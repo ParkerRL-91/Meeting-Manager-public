@@ -10,6 +10,8 @@ struct HomeView: View {
     @State private var showAllRecent = false
     @State private var cachedAllToday: [Meeting] = []
     @State private var cachedRecentMeetings: [Meeting] = []
+    @State private var prepBriefs: [String: MeetingPrepBrief] = [:]
+    @State private var expandedCardIds: Set<String> = []
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -58,10 +60,18 @@ struct HomeView: View {
 
                     VStack(spacing: 8) {
                         ForEach(todayMeetings) { meeting in
-                            UpcomingMeetingCard(meeting: meeting, now: now)
-                                .onTapGesture {
-                                    appState.selectedMeetingId = meeting.id
-                                }
+                            MeetingPrepCardView(
+                                meeting: meeting,
+                                prepBrief: prepBriefs[meeting.id],
+                                now: now,
+                                isExpanded: Binding(
+                                    get: { expandedCardIds.contains(meeting.id) },
+                                    set: { newValue in
+                                        if newValue { expandedCardIds.insert(meeting.id) }
+                                        else { expandedCardIds.remove(meeting.id) }
+                                    }
+                                )
+                            )
                         }
                     }
                     .padding(.horizontal, 24)
@@ -109,9 +119,18 @@ struct HomeView: View {
         .onReceive(timer) { date in
             now = date
         }
-        .onAppear { rebuildCache() }
-        .onChange(of: appState.upcomingMeetings) { _, _ in rebuildCache() }
-        .onChange(of: appState.pastMeetings) { _, _ in rebuildCache() }
+        .onAppear {
+            rebuildCache()
+            loadPrepBriefs()
+        }
+        .onChange(of: appState.upcomingMeetings) { _, _ in
+            rebuildCache()
+            loadPrepBriefs()
+        }
+        .onChange(of: appState.pastMeetings) { _, _ in
+            rebuildCache()
+            loadPrepBriefs()
+        }
     }
 
     // MARK: - Computed
@@ -127,6 +146,19 @@ struct HomeView: View {
     }
 
     // MARK: - Cache
+
+    private func loadPrepBriefs() {
+        Task {
+            let service = MeetingPrepService()
+            let meetings = cachedAllToday
+            guard !meetings.isEmpty else { return }
+            if let briefs = try? await service.prepBriefs(for: meetings) {
+                await MainActor.run {
+                    prepBriefs = briefs
+                }
+            }
+        }
+    }
 
     private func rebuildCache() {
         let cal = Calendar.current
@@ -202,148 +234,6 @@ private struct ActiveRecordingBanner: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.appRecording.opacity(0.3), lineWidth: 1)
         )
-    }
-}
-
-// MARK: - Upcoming Meeting Card
-
-private struct UpcomingMeetingCard: View {
-    let meeting: Meeting
-    let now: Date
-    @Environment(AppState.self) private var appState
-
-    private var scheduledDate: Date? {
-        meeting.scheduledStartDate ?? meeting.startDate
-    }
-
-    private var minutesUntil: Int? {
-        guard let date = scheduledDate else { return nil }
-        let diff = date.timeIntervalSince(now)
-        guard diff > 0 else { return nil }
-        return Int(diff / 60)
-    }
-
-    private var isWithinHour: Bool {
-        guard let date = scheduledDate else { return false }
-        let diff = date.timeIntervalSince(now)
-        return diff <= 3600
-    }
-
-    private var isPast: Bool {
-        guard let date = scheduledDate else { return false }
-        return date < now
-    }
-
-    private var statusLabel: String {
-        if meeting.isReopenable { return "Ended" }
-        if meeting.status == .complete { return "Complete" }
-        if meeting.status == .cancelled { return "Cancelled" }
-        if let mins = minutesUntil {
-            if mins == 0 { return "Starting now" }
-            if mins < 60 { return "In \(mins) min" }
-            let hrs = mins / 60
-            let rem = mins % 60
-            return rem == 0 ? "In \(hrs)h" : "In \(hrs)h \(rem)m"
-        }
-        if isPast { return "In progress" }
-        return ""
-    }
-
-    private var statusColor: Color {
-        if meeting.isReopenable { return Color.appSuccess }
-        if meeting.status == .complete { return Color.appTextTertiary }
-        if let mins = minutesUntil {
-            if mins <= 5 { return Color.appRecording }
-            if mins <= 60 { return Color.appWarning }
-            return Color.appTextSecondary
-        }
-        return Color.appSuccess
-    }
-
-    /// Returns (label, tint) for the CTA button, or nil if no CTA should be shown.
-    private var ctaInfo: (label: String, tint: Color)? {
-        guard !meeting.isAllDay else { return nil }
-        if meeting.isReopenable { return ("Re-open recording", Color.appAccent) }
-        guard meeting.status != .complete, meeting.status != .cancelled else { return nil }
-        guard let start = scheduledDate else { return nil }
-        let diff = start.timeIntervalSince(now)
-        if diff > 3600 { return ("Start now", Color.appAccent) }
-        return ("Record now", isWithinHour && !isPast ? Color.appWarning : Color.appRecording)
-    }
-
-    var body: some View {
-        HStack(spacing: 14) {
-            // Time column
-            VStack(alignment: .trailing, spacing: 2) {
-                if let date = scheduledDate {
-                    Text(date, format: .dateTime.hour().minute())
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(Color.appTextPrimary)
-                    if let end = meeting.scheduledEndDate {
-                        Text(end, format: .dateTime.hour().minute())
-                            .font(.caption2)
-                            .foregroundStyle(Color.appTextTertiary)
-                    }
-                }
-            }
-            .frame(width: 52, alignment: .trailing)
-
-            // Left accent bar
-            RoundedRectangle(cornerRadius: 2)
-                .fill(isWithinHour ? statusColor : Color.appAccent)
-                .frame(width: 3, height: 38)
-
-            // Title + participant avatars
-            VStack(alignment: .leading, spacing: 5) {
-                Text(meeting.title)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.appTextPrimary)
-                    .lineLimit(1)
-
-                if !meeting.participantList.isEmpty {
-                    HStack(spacing: -6) {
-                        ForEach(Array(meeting.participantList.prefix(3).enumerated()), id: \.offset) { idx, name in
-                            InitialsAvatar(name: name, size: 20, index: idx)
-                        }
-                        if meeting.participantList.count > 3 {
-                            Text("+\(meeting.participantList.count - 3)")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(Color.appTextSecondary)
-                                .padding(.leading, 8)
-                        }
-                    }
-                }
-            }
-
-            Spacer()
-
-            // Status + CTA
-            VStack(alignment: .trailing, spacing: 4) {
-                if !statusLabel.isEmpty {
-                    Text(statusLabel)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(statusColor)
-                }
-
-                if let cta = ctaInfo {
-                    Button(cta.label) {
-                        if meeting.isReopenable {
-                            appState.startOrReopenRecording(for: meeting)
-                        } else {
-                            appState.startRecording(for: meeting)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(cta.tint)
-                    .controlSize(.mini)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .contentShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 

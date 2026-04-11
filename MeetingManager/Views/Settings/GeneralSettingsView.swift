@@ -14,6 +14,7 @@ struct GeneralSettingsView: View {
     @State private var autoGenerateSummary: Bool = false
     @State private var defaultRecipeId: String? = nil
     @State private var recipes: [Recipe] = []
+    @State private var autoFollowUpEmail: Bool = false
 
     // MARK: - Body
 
@@ -29,6 +30,7 @@ struct GeneralSettingsView: View {
         .task {
             autoGenerateSummary = appState.settings.autoGenerateSummary
             defaultRecipeId = appState.settings.defaultRecipeId
+            autoFollowUpEmail = appState.settings.autoFollowUpEmail
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
         }
@@ -108,10 +110,16 @@ struct GeneralSettingsView: View {
                     appState.settings.defaultRecipeId = newValue
                 }
             }
+
+            Toggle("Auto-generate follow-up email after summary", isOn: $autoFollowUpEmail)
+                .onChange(of: autoFollowUpEmail) { _, enabled in
+                    persistSetting { $0.autoFollowUpEmail = enabled }
+                    appState.settings.autoFollowUpEmail = enabled
+                }
         } header: {
             Text("Summary Automation")
         } footer: {
-            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template.")
+            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template. The follow-up email option additionally drafts a professional email recap using the built-in Follow-Up Email template.")
         }
     }
 

@@ -5,6 +5,7 @@ import os
 final class NotificationService: NSObject {
 
     private let center = UNUserNotificationCenter.current()
+    private let prepService = MeetingPrepService()
 
     // MARK: - Authorization
 
@@ -30,7 +31,7 @@ final class NotificationService: NSObject {
     /// - Parameters:
     ///   - meeting: The meeting to notify about.
     ///   - leadTimeMinutes: How many minutes before the meeting to send the notification.
-    func scheduleNotification(for meeting: Meeting, leadTimeMinutes: Int) {
+    func scheduleNotification(for meeting: Meeting, leadTimeMinutes: Int) async {
         guard let scheduledStart = meeting.scheduledStartDate else {
             Logger.general.warning("Cannot schedule notification for meeting '\(meeting.title)' — no scheduled start date")
             return
@@ -44,9 +45,12 @@ final class NotificationService: NSObject {
             return
         }
 
+        // Build enriched notification body from prep data
+        let body = await enrichedBody(for: meeting, leadTimeMinutes: leadTimeMinutes)
+
         let content = UNMutableNotificationContent()
         content.title = "Upcoming Meeting"
-        content.body = "\(meeting.title) starts in \(leadTimeMinutes) minute\(leadTimeMinutes == 1 ? "" : "s")"
+        content.body = body
         content.sound = .default
         content.categoryIdentifier = NotificationActions.categoryIdentifier
         var userInfo: [String: String] = ["meetingId": meeting.id]
@@ -74,6 +78,51 @@ final class NotificationService: NSObject {
                 Logger.general.info("Scheduled notification for '\(meeting.title)' at \(fireDate)")
             }
         }
+    }
+
+    // MARK: - Prep Enrichment
+
+    /// Build an enriched notification body using prep context when available.
+    /// Falls back to the simple lead-time text if no prep data is found.
+    private func enrichedBody(for meeting: Meeting, leadTimeMinutes: Int) async -> String {
+        let fallback = "\(meeting.title) starts in \(leadTimeMinutes) minute\(leadTimeMinutes == 1 ? "" : "s")"
+
+        guard let brief = try? await prepService.prepBrief(for: meeting) else {
+            return fallback
+        }
+
+        let participantCount = brief.participants.count
+        let itemCount = brief.openActionItems.count
+        let excerpt = brief.lastSummaryExcerpt
+
+        // Only enrich when there is at least one piece of useful context
+        guard participantCount > 0 || itemCount > 0 || excerpt != nil else {
+            return fallback
+        }
+
+        // Build summary line: "Product Sync — 3 participants, 2 open items"
+        var parts: [String] = []
+        if participantCount > 0 {
+            parts.append("\(participantCount) participant\(participantCount == 1 ? "" : "s")")
+        }
+        if itemCount > 0 {
+            parts.append("\(itemCount) open item\(itemCount == 1 ? "" : "s")")
+        }
+
+        let summaryLine: String
+        if parts.isEmpty {
+            summaryLine = meeting.title
+        } else {
+            summaryLine = "\(meeting.title) — \(parts.joined(separator: ", "))"
+        }
+
+        // Append summary excerpt (truncated to ~100 chars) on a second line
+        if let excerpt {
+            let truncated = excerpt.count > 100 ? String(excerpt.prefix(100)) + "…" : excerpt
+            return "\(summaryLine)\nLast time: \(truncated)"
+        }
+
+        return summaryLine
     }
 
     // MARK: - Snooze
@@ -133,8 +182,10 @@ final class NotificationService: NSObject {
         center.removeAllPendingNotificationRequests()
         Logger.general.info("Cleared all pending notifications, rescheduling \(meetings.count) meetings")
 
-        for meeting in meetings {
-            scheduleNotification(for: meeting, leadTimeMinutes: leadTimeMinutes)
+        Task {
+            for meeting in meetings {
+                await scheduleNotification(for: meeting, leadTimeMinutes: leadTimeMinutes)
+            }
         }
     }
 

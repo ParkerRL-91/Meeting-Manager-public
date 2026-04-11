@@ -25,6 +25,17 @@ struct SidebarView: View {
                 }
 
                 NavItem(
+                    icon: "calendar.badge.clock",
+                    label: "Daily Brief",
+                    badge: appState.dailyBriefMeetingsNeedingPrep,
+                    destination: .dailyBrief,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .dailyBrief
+                    appState.selectedMeetingId = nil
+                }
+
+                NavItem(
                     icon: "sparkles",
                     label: "Ask Anything",
                     destination: .chat,

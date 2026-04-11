@@ -112,6 +112,52 @@ final class MeetingRepository {
         }
     }
 
+    // MARK: - Prep Queries
+
+    /// Returns the next upcoming meeting (by scheduledStartDate) that is not the given meeting.
+    /// Only considers scheduled or notified meetings that haven't been cancelled/archived.
+    func nextMeeting(excluding meetingId: String? = nil) async throws -> Meeting? {
+        let now = Date()
+        return try await database.writer.read { db in
+            var request = Meeting
+                .filter(
+                    Meeting.Columns.status == MeetingStatus.scheduled.rawValue
+                    || Meeting.Columns.status == MeetingStatus.notified.rawValue
+                )
+                .filter(Meeting.Columns.scheduledStartDate != nil)
+                .filter(Meeting.Columns.scheduledStartDate > now)
+                .filter(Meeting.Columns.isAllDay == false)
+                .order(Meeting.Columns.scheduledStartDate.asc)
+                .limit(1)
+
+            if let excludeId = meetingId {
+                request = request.filter(Meeting.Columns.id != excludeId)
+            }
+
+            return try request.fetchOne(db)
+        }
+    }
+
+    /// Returns meetings starting within the given number of minutes from now.
+    /// Used by the prep pre-computation timer to proactively enrich context.
+    func meetingsStartingWithin(minutes: Int) async throws -> [Meeting] {
+        let now = Date()
+        let cutoff = now.addingTimeInterval(Double(minutes * 60))
+        return try await database.writer.read { db in
+            try Meeting
+                .filter(
+                    Meeting.Columns.status == MeetingStatus.scheduled.rawValue
+                    || Meeting.Columns.status == MeetingStatus.notified.rawValue
+                )
+                .filter(Meeting.Columns.scheduledStartDate != nil)
+                .filter(Meeting.Columns.scheduledStartDate > now)
+                .filter(Meeting.Columns.scheduledStartDate <= cutoff)
+                .filter(Meeting.Columns.isAllDay == false)
+                .order(Meeting.Columns.scheduledStartDate.asc)
+                .fetchAll(db)
+        }
+    }
+
     /// Search meetings by title query and/or date. Returns up to 50 results sorted by date descending.
     func search(query: String? = nil, date: Date? = nil) async throws -> [Meeting] {
         return try await database.writer.read { db in
@@ -174,6 +220,25 @@ final class MeetingRepository {
                 meeting.status = .complete
                 try meeting.update(db)
             }
+        }
+    }
+
+    /// Returns the templateId from the most recent completed meeting with the same title
+    /// that has a non-nil templateId. Used to inherit templates for recurring meetings.
+    func templateIdForSeries(title: String) async throws -> String? {
+        try await database.writer.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT templateId FROM meeting
+                    WHERE title = ?
+                      AND templateId IS NOT NULL
+                    ORDER BY COALESCE(startDate, scheduledStartDate, createdAt) DESC
+                    LIMIT 1
+                    """,
+                arguments: [title]
+            )
+            return row?["templateId"]
         }
     }
 

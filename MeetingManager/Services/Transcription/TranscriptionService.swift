@@ -75,11 +75,11 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
     private let lock = NSLock()
 
     /// The default HuggingFace cache path where WhisperKit stores downloaded CoreML models.
-    private static var cachedModelFolder: String? {
+    /// Returns the path for the given model if the required CoreML files are already cached.
+    private static func cachedModelFolder(for model: WhisperModel) -> String? {
         let base = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/huggingface/models/argmaxinc/whisperkit-coreml")
-        // Check if the model directory exists with required files
-        let modelDir = base.appendingPathComponent("openai_whisper-large-v3")
+        let modelDir = base.appendingPathComponent(model.rawValue)
         let required = ["AudioEncoder.mlmodelc", "MelSpectrogram.mlmodelc", "TextDecoder.mlmodelc"]
         let allExist = required.allSatisfy {
             FileManager.default.fileExists(atPath: modelDir.appendingPathComponent($0).path)
@@ -96,7 +96,7 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
 
         // Use cached model folder if available — avoids network check on HuggingFace
         // which can intermittently fail and cause "Model not found" errors.
-        let cachedFolder = Self.cachedModelFolder
+        let cachedFolder = Self.cachedModelFolder(for: model)
         let config: WhisperKitConfig
         if let cachedFolder {
             Logger.transcription.info("Using cached model at: \(cachedFolder)")
@@ -260,20 +260,19 @@ final class TranscriptionService {
 
     /// Checks available system memory and logs a warning if it may be tight for the model.
     /// Returns true if memory is likely sufficient, false if critically low.
-    private func checkMemoryAvailability() -> Bool {
+    private func checkMemoryAvailability(for model: WhisperModel) -> Bool {
         let available = ProcessInfo.processInfo.physicalMemory
         let availableMB = available / (1024 * 1024)
-        // WhisperKit large-v3 needs ~3 GB for inference
-        let requiredMB: UInt64 = 3072
-        let warningThresholdMB: UInt64 = 4096
+        let requiredMB = UInt64(model.estimatedMemoryMB)
+        let warningThresholdMB = requiredMB + 1024
 
         if availableMB < requiredMB {
-            Logger.transcription.warning("Very low memory for WhisperKit: \(availableMB) MB available, ~\(requiredMB) MB needed. Transcription may be slow or fail.")
+            Logger.transcription.warning("Very low memory for WhisperKit \(model.displayName): \(availableMB) MB available, ~\(requiredMB) MB needed. Transcription may be slow or fail.")
             return false
         } else if availableMB < warningThresholdMB {
-            Logger.transcription.info("Tight memory for WhisperKit: \(availableMB) MB available. Performance may be reduced.")
+            Logger.transcription.info("Tight memory for WhisperKit \(model.displayName): \(availableMB) MB available. Performance may be reduced.")
         } else {
-            Logger.transcription.info("Memory check OK: \(availableMB) MB available for WhisperKit")
+            Logger.transcription.info("Memory check OK: \(availableMB) MB available for WhisperKit \(model.displayName)")
         }
         return true
     }
@@ -296,8 +295,8 @@ final class TranscriptionService {
             unloadModel()
         }
 
-        // Check memory before loading — warn but don't block (user chose large-v3)
-        lowMemoryWarning = !checkMemoryAvailability()
+        // Check memory before loading — warn but don't block
+        lowMemoryWarning = !checkMemoryAvailability(for: model)
 
         downloadProgress = 0
         lastError = nil

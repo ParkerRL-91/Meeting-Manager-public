@@ -29,6 +29,9 @@ struct SettingsView: View {
             PromptConfigView()
                 .tabItem { Label("Prompts", systemImage: "text.quote") }
 
+            TemplateListView()
+                .tabItem { Label("Templates", systemImage: "doc.text.fill") }
+
             UpdateSettingsView(updater: updateService.updater)
                 .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
         }

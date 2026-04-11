@@ -29,6 +29,8 @@ final class TaskQueueManager {
     var regenerationHandler: ((String, String?) async throws -> Void)?
     /// Context enrichment handler — finds related past meetings for a meeting.
     var contextEnrichmentHandler: ((String) async throws -> Void)?
+    /// Called after a summary task completes — meetingId is passed so a notification can be sent.
+    var summaryCompletedHandler: ((String) async -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -254,6 +256,13 @@ final class TaskQueueManager {
                 try await execute(next)
                 await markCompleted(next)
                 Logger.general.info("TaskQueue: completed \(next.type.rawValue) for \(next.meetingId)")
+
+                // Post-summary follow-up: send notification and optionally enqueue follow-up email
+                if next.type == .summary {
+                    if let handler = summaryCompletedHandler {
+                        await handler(next.meetingId)
+                    }
+                }
 
                 // Auto-enqueue summary after transcription — but only if segments exist
                 if next.type == .transcription {
