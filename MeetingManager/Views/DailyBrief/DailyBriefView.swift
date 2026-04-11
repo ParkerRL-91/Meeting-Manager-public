@@ -49,6 +49,13 @@ struct DailyBriefView: View {
                             aiBriefSection(text: aiText)
                                 .padding(.horizontal, 20)
                         }
+
+                        if let error = aiError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(Color.appRecording)
+                                .padding(.horizontal, 20)
+                        }
                     }
                 }
 
@@ -205,23 +212,53 @@ struct DailyBriefView: View {
 
             VStack(spacing: 8) {
                 ForEach(brief.meetings, id: \.meeting.id) { entry in
-                    DailyBriefRowView(
-                        entry: entry,
-                        isExpanded: expandedMeetingIds.contains(entry.meeting.id)
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            if expandedMeetingIds.contains(entry.meeting.id) {
-                                expandedMeetingIds.remove(entry.meeting.id)
-                            } else {
-                                expandedMeetingIds.insert(entry.meeting.id)
-                            }
-                        }
-                    }
-                    .environment(appState)
+                    briefEntryRow(entry: entry)
                 }
             }
             .padding(.horizontal, 20)
         }
+    }
+
+    /// Renders a single brief entry row with category dot overlay + inline expansion.
+    private func briefEntryRow(entry: DailyBriefEntry) -> some View {
+        let isExpanded = Binding<Bool>(
+            get: { expandedMeetingIds.contains(entry.meeting.id) },
+            set: { newValue in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if newValue {
+                        expandedMeetingIds.insert(entry.meeting.id)
+                    } else {
+                        expandedMeetingIds.remove(entry.meeting.id)
+                    }
+                }
+            }
+        )
+
+        return ZStack(alignment: .leading) {
+            MeetingPrepCardView(
+                meeting: entry.meeting,
+                prepBrief: entry.prepBrief,
+                now: Date(),
+                isExpanded: isExpanded
+            )
+
+            // Category status dot overlaid near the time column
+            categoryDot(for: entry.category)
+                .offset(x: 6, y: -12)
+        }
+    }
+
+    private func categoryDot(for category: MeetingPrepCategory) -> some View {
+        let color: Color
+        switch category {
+        case .carryOver: color = Color.appRecording    // red/orange — needs attention
+        case .followUp:  color = Color.appWarning      // yellow — has context
+        case .new:       color = Color.appSuccess      // green — fresh
+        }
+        return Circle()
+            .fill(color)
+            .frame(width: 7, height: 7)
+            .shadow(color: color.opacity(0.4), radius: 2, x: 0, y: 0)
     }
 
     // MARK: - AI Brief Section
@@ -248,12 +285,6 @@ struct DailyBriefView: View {
                 .padding(14)
                 .background(Color.appSurface)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            if let error = aiError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(Color.appRecording)
-            }
         }
     }
 
@@ -275,7 +306,7 @@ struct DailyBriefView: View {
         isLoading = false
     }
 
-    // MARK: - AI Generation
+    // MARK: - AI Generation (T-017)
 
     @MainActor
     private func generateAIBrief() async {
@@ -287,9 +318,16 @@ struct DailyBriefView: View {
         let system = "You are a meeting preparation assistant. Write clear, concise briefings."
 
         do {
-            // Try Claude first, fall back to Ollama
+            // Try Claude first (if API key exists), fall back to Ollama
+            let hasClaudeKey: Bool
             if let apiKey = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
                let key = apiKey, !key.isEmpty {
+                hasClaudeKey = true
+            } else {
+                hasClaudeKey = false
+            }
+
+            if hasClaudeKey {
                 let claude = ClaudeService()
                 aiBriefText = try await claude.sendMessage(
                     systemPrompt: system,
@@ -314,7 +352,7 @@ struct DailyBriefView: View {
     }
 
     private func buildPrompt(for brief: DailyBrief) -> String {
-        let dateStr = date.formatted(style: .long)
+        let dateStr = date.formatted(date: .long, time: .omitted)
         var lines: [String] = [
             "You are a meeting preparation assistant. Write a 3-5 sentence briefing for today.",
             "",
@@ -369,130 +407,5 @@ struct DailyBriefView: View {
         lines.append("Write a concise briefing highlighting what needs attention today.")
 
         return lines.joined(separator: "\n")
-    }
-}
-
-// MARK: - DailyBriefRowView
-
-/// A single meeting row in the daily brief — shows time badge, status dot,
-/// title, participants, and context note. Tapping expands the prep card.
-private struct DailyBriefRowView: View {
-    let entry: DailyBriefEntry
-    let isExpanded: Bool
-    let onTap: () -> Void
-
-    @Environment(AppState.self) private var appState
-
-    private var scheduledDate: Date? {
-        entry.meeting.scheduledStartDate ?? entry.meeting.startDate
-    }
-
-    private var categoryColor: Color {
-        switch entry.category {
-        case .carryOver: return Color.appRecording    // red/orange — needs attention
-        case .followUp:  return Color.appWarning       // yellow — has context
-        case .new:       return Color.appSuccess       // green — fresh
-        }
-    }
-
-    private var contextNote: String {
-        if let excerpt = entry.prepBrief.lastSummaryExcerpt {
-            return excerpt
-        }
-        switch entry.category {
-        case .carryOver: return "\(entry.prepBrief.openActionItems.count) open items from previous meeting"
-        case .followUp:  return "Related past meeting available"
-        case .new:       return "New conversation"
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            rowContent
-                .contentShape(RoundedRectangle(cornerRadius: 10))
-                .onTapGesture(perform: onTap)
-
-            if isExpanded {
-                Divider()
-                    .padding(.horizontal, 16)
-
-                MeetingPrepCardView(
-                    meeting: entry.meeting,
-                    prepBrief: entry.prepBrief,
-                    now: Date(),
-                    isExpanded: .constant(true)
-                )
-                .allowsHitTesting(false) // row expansion handled by parent tap
-            }
-        }
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-
-    private var rowContent: some View {
-        HStack(spacing: 12) {
-            // Time badge
-            VStack(alignment: .trailing, spacing: 2) {
-                if let date = scheduledDate {
-                    Text(date, format: .dateTime.hour().minute())
-                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.appTextPrimary)
-                }
-            }
-            .frame(width: 52, alignment: .trailing)
-
-            // Category status dot
-            Circle()
-                .fill(categoryColor)
-                .frame(width: 8, height: 8)
-
-            // Meeting info
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.meeting.title)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.appTextPrimary)
-                    .lineLimit(1)
-
-                HStack(spacing: 8) {
-                    // Participant count
-                    if !entry.prepBrief.participants.isEmpty {
-                        Label(
-                            "\(entry.prepBrief.participants.count)",
-                            systemImage: "person.2"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextSecondary)
-                    }
-
-                    // Context note
-                    Text(contextNote)
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextTertiary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer()
-
-            // Expand chevron (shown when there is context)
-            if entry.prepBrief.hasContext {
-                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.caption2)
-                    .foregroundStyle(Color.appTextTertiary)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-}
-
-// MARK: - Date Extension
-
-private extension Date {
-    func formatted(style: DateFormatter.Style) -> String {
-        let f = DateFormatter()
-        f.dateStyle = style
-        f.timeStyle = .none
-        return f.string(from: self)
     }
 }

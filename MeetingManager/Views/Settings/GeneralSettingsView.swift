@@ -110,10 +110,16 @@ struct GeneralSettingsView: View {
                     appState.settings.defaultRecipeId = newValue
                 }
             }
+
+            Toggle("Auto-generate follow-up email after summary", isOn: $autoFollowUpEmail)
+                .onChange(of: autoFollowUpEmail) { _, enabled in
+                    persistSetting { $0.autoFollowUpEmail = enabled }
+                    appState.settings.autoFollowUpEmail = enabled
+                }
         } header: {
             Text("Summary Automation")
         } footer: {
-            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template.")
+            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template. The follow-up email option additionally drafts a professional email recap using the built-in Follow-Up Email template.")
         }
     }
 
