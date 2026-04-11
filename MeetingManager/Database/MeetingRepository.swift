@@ -164,7 +164,11 @@ final class MeetingRepository {
             var request = Meeting.all()
 
             if let query, !query.isEmpty {
-                request = request.filter(Meeting.Columns.title.like("%\(query)%"))
+                let escaped = query
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "%", with: "\\%")
+                    .replacingOccurrences(of: "_", with: "\\_")
+                request = request.filter(sql: "title LIKE '%\(escaped)%' ESCAPE '\\'")
             }
 
             if let date {

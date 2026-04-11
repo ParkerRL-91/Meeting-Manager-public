@@ -184,8 +184,11 @@ struct MeetingPrepCardView: View {
                             Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                                 .font(.caption2)
                                 .foregroundStyle(Color.appTextTertiary)
+                                .padding(12)
                         }
                         .buttonStyle(.plain)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel(isExpanded ? "Collapse prep details" : "Expand prep details")
                     }
                 }
             }

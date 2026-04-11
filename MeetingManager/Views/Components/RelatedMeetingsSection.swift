@@ -41,6 +41,7 @@ struct RelatedMeetingsSection: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "Collapse related meetings" : "Expand related meetings")
 
                 if isExpanded {
                     VStack(spacing: 4) {

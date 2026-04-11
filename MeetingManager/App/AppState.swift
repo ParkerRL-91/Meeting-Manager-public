@@ -1526,13 +1526,13 @@ final class AppState {
                     object: nil,
                     userInfo: ["meetingId": meeting.id, "minutesUntilStart": Int(timeUntilStart / 60)]
                 )
-                Logger.general.info("Meeting '\(meeting.title)' starting in \(Int(timeUntilStart / 60)) minutes")
+                Logger.general.debug("Meeting '\(meeting.title)' starting in \(Int(timeUntilStart / 60)) minutes")
             }
 
             // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
             // The 5-minute window accommodates meetings that start slightly late.
             if timeUntilStart >= -300 && timeUntilStart <= 0 && meeting.status == .scheduled && !isRecording && !isStartingMeeting {
-                Logger.general.info("Auto-starting recording for meeting: \(meeting.title)")
+                Logger.general.debug("Auto-starting recording for meeting: \(meeting.title)")
                 startRecording(for: meeting)
             }
         }

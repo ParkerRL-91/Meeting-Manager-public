@@ -176,7 +176,11 @@ struct LiveMeetingView: View {
 
     private func saveTitleIfChanged() {
         let trimmed = editableTitle.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, trimmed != meeting?.title, var updated = meeting else { return }
+        if trimmed.isEmpty {
+            editableTitle = meeting?.title ?? ""
+            return
+        }
+        guard trimmed != meeting?.title, var updated = meeting else { return }
         updated.title = trimmed
         meeting = updated
         Task {
@@ -547,7 +551,9 @@ private struct BottomBar: View {
         HStack(spacing: 12) {
             // Audio level indicators
             AudioLevelIndicator(label: "🎤", level: appState.micLevel)
+                .accessibilityLabel("Microphone level")
             AudioLevelIndicator(label: "🔊", level: appState.systemLevel, color: .appSuccess)
+                .accessibilityLabel("Speaker level")
 
             // Stop button
             Button {
@@ -562,6 +568,7 @@ private struct BottomBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+            .accessibilityLabel("Stop recording")
 
             // T-025: Captured action items badge (visible when count > 0)
             if capturedItemCount > 0 {

@@ -56,7 +56,7 @@ final class MeetingPrepService {
             return excerpt == "No summary available" ? nil : excerpt
         }()
 
-        Logger.general.info("PrepBrief for \(meeting.title): \(participants.count) participants, \(openItems.count) open items, \(relatedMeetings.count) related meetings")
+        Logger.general.debug("PrepBrief for \(meeting.title): \(participants.count) participants, \(openItems.count) open items, \(relatedMeetings.count) related meetings")
 
         return MeetingPrepBrief(
             meetingId: meeting.id,

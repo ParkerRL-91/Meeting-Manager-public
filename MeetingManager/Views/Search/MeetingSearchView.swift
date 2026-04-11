@@ -272,8 +272,8 @@ struct MeetingSearchView: View {
             days.append(cal.date(byAdding: .day, value: day - 1, to: firstOfMonth)!)
         }
         let remaining = (7 - days.count % 7) % 7
-        if let lastDay = days.last {
-            for i in 1...max(remaining, 1) {
+        if remaining > 0, let lastDay = days.last {
+            for i in 1...remaining {
                 days.append(cal.date(byAdding: .day, value: i, to: lastDay)!)
             }
         }
