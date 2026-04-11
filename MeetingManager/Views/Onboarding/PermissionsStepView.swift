@@ -38,7 +38,7 @@ struct PermissionsStepView: View {
                             Text("Microphone")
                                 .font(.headline)
                                 .foregroundStyle(Color.appTextPrimary)
-                            Text("Required to capture meeting audio")
+                            Text("Required to transcribe your meetings")
                                 .font(.caption)
                                 .foregroundStyle(Color.appTextSecondary)
                         }
@@ -52,7 +52,7 @@ struct PermissionsStepView: View {
                     }
 
                     if microphoneStatus == .notDetermined {
-                        Button("Grant Access") {
+                        Button("Enable Microphone Access") {
                             requestMicrophoneAccess()
                         }
                         .buttonStyle(.borderedProminent)
@@ -143,6 +143,11 @@ struct PermissionsStepView: View {
         .onAppear {
             microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
             checkScreenRecordingPermission()
+            // Auto-trigger the OS mic prompt so the user sees it immediately
+            // rather than having to find and click "Grant Access" manually.
+            if microphoneStatus == .notDetermined {
+                requestMicrophoneAccess()
+            }
         }
     }
 
