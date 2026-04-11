@@ -497,5 +497,11 @@ enum Migrations {
                 )
             }
         }
+
+        migrator.registerMigration("v19-auto-follow-up-email") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "autoFollowUpEmail", .boolean).notNull().defaults(to: false)
+            }
+        }
     }
 }

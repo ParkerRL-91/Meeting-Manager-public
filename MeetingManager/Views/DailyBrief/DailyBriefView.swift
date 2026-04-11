@@ -217,6 +217,7 @@ struct DailyBriefView: View {
                             }
                         }
                     }
+                    .environment(appState)
                 }
             }
             .padding(.horizontal, 20)
