@@ -26,14 +26,14 @@ guard FileManager.default.fileExists(atPath: audioPath) else {
     exit(1)
 }
 
-let modelName = "openai_whisper-large-v3"
+let modelName = "openai_whisper-large-v3-v20240930_turbo_632MB"
 
 let group = DispatchGroup()
 group.enter()
 
 Task {
     do {
-        fputs("loading \(modelName) (downloads ~1.5GB on first run)...\n", stderr)
+        fputs("loading \(modelName) (downloads ~632MB on first run)...\n", stderr)
         let pipe = try await WhisperKit(
             model: modelName,
             verbose: false,

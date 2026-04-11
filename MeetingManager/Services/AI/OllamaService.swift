@@ -89,11 +89,14 @@ final class OllamaService {
 
     /// Model tiers ranked by capability. The adaptive selector picks the best
     /// installed model that can handle the input size.
+    /// Biased toward 3B to avoid saturating GPU/RAM alongside WhisperKit transcription.
+    /// The 8B model is only used for very large transcripts where 3B's context is too small.
     static let modelTiers: [(name: String, maxInputTokens: Int, contextWindow: Int)] = [
         ("llama3.2:3b",  4000,   8192),   // Fast — short 1:1s
         ("llama3.2:3b",  8000,  16384),   // Medium — standard meetings
-        ("llama3.1:8b", 20000,  32768),   // Large — long group meetings
-        ("llama3.1:8b", 40000,  65536),   // XL — marathon sessions
+        ("llama3.2:3b", 14000,  32768),   // Large — extended meetings (prefer 3B to save resources)
+        ("llama3.1:8b", 20000,  32768),   // XL — only when 3B context is too small
+        ("llama3.1:8b", 40000,  65536),   // XXL — marathon sessions
     ]
 
     // MARK: - Status

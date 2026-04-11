@@ -37,7 +37,7 @@ struct AppSettings: Codable, Equatable {
     var defaultRecipeId: String? = nil
 
     static let `default` = AppSettings(
-        whisperModel: "large-v3",
+        whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
         claudeModel: "claude-sonnet-4-20250514",
         calendarSyncIntervalMinutes: 15,

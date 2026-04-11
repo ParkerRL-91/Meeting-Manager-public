@@ -24,7 +24,7 @@ import WhisperKit
 
 // ─── Configuration (must match TranscriptionConfiguration.swift) ─────────────
 
-let modelName = "openai_whisper-large-v3"
+let modelName = "openai_whisper-large-v3-v20240930_turbo_632MB"
 let modelCacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
     .first!
     .appendingPathComponent("MeetingManager/WhisperKit")

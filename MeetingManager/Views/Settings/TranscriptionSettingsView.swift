@@ -6,13 +6,20 @@ struct TranscriptionSettingsView: View {
 
     // MARK: - State
 
+    @Environment(AppState.self) private var appState
     @State private var language: String = "en"
+
+    private var selectedModel: WhisperModel {
+        WhisperModel(rawValue: appState.settings.whisperModel) ?? .largev3turbo
+    }
 
     // MARK: - Body
 
     var body: some View {
+        @Bindable var appState = appState
         Form {
             modelSection
+            modelInfoSection
             languageSection
         }
         .formStyle(.grouped)
@@ -21,25 +28,46 @@ struct TranscriptionSettingsView: View {
     // MARK: - Sections
 
     private var modelSection: some View {
-        Section {
-            LabeledContent("Model") {
-                Text(WhisperModel.largev3.displayName)
-                    .foregroundStyle(.primary)
+        @Bindable var appState = appState
+        return Section {
+            Picker("Transcription Model", selection: Binding(
+                get: { appState.settings.whisperModel },
+                set: { newValue in
+                    appState.settings.whisperModel = newValue
+                    Logger.transcription.info("Whisper model changed to \(newValue)")
+                }
+            )) {
+                ForEach(WhisperModel.allCases) { model in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.displayName)
+                        Text(model.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(model.rawValue)
+                }
             }
+            .pickerStyle(.radioGroup)
+        } header: {
+            Text("Model")
+        } footer: {
+            Text("Turbo is recommended for most users — near-identical accuracy with much lower resource usage. Restart the app after changing models.")
+        }
+    }
 
+    private var modelInfoSection: some View {
+        Section {
             LabeledContent("Download Size") {
-                Text(WhisperModel.largev3.downloadSizeDescription)
+                Text(selectedModel.downloadSizeDescription)
                     .foregroundStyle(.secondary)
             }
 
             LabeledContent("Memory Usage") {
-                Text("~\(WhisperModel.largev3.estimatedMemoryMB) MB")
+                Text("~\(selectedModel.estimatedMemoryMB) MB")
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("Model")
-        } footer: {
-            Text("Meeting Manager uses the Large v3 model for maximum transcription accuracy.")
+            Text("Selected Model Info")
         }
     }
 

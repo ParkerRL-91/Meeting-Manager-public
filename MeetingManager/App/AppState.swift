@@ -215,11 +215,7 @@ final class AppState {
                 let loaded = try await database.writer.read { db in
                     try AppSettings.fetchOne(db)
                 }
-                if var loaded = loaded {
-                    // Always enforce large-v3 — no other models are supported.
-                    if loaded.whisperModel != WhisperModel.largev3.rawValue {
-                        loaded.whisperModel = WhisperModel.largev3.rawValue
-                    }
+                if let loaded = loaded {
                     await MainActor.run { self.settings = loaded }
                 }
             } catch {
@@ -960,8 +956,8 @@ final class AppState {
                 return
             }
 
-            // Always use large-v3 — it's the only supported model.
-            let model = WhisperModel.largev3
+            // Use the user's selected model (defaults to turbo for best performance).
+            let model = WhisperModel(rawValue: settings.whisperModel) ?? .largev3turbo
             let maxRetries = 3
 
             Logger.transcription.info("Auto-loading WhisperKit model: \(model.rawValue)")

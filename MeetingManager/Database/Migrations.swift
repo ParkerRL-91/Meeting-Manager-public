@@ -433,5 +433,17 @@ enum Migrations {
                 t.add(column: "meetLink", .text)
             }
         }
+
+        migrator.registerMigration("v17-whisper-turbo-default") { db in
+            // Migrate existing users from large-v3 to the faster turbo variant.
+            // Users who explicitly want large-v3 can switch back in Settings.
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET whisperModel = ?
+                WHERE whisperModel IN ('openai_whisper-large-v3', 'large-v3')
+                """,
+                arguments: [WhisperModel.largev3turbo.rawValue]
+            )
+        }
     }
 }
