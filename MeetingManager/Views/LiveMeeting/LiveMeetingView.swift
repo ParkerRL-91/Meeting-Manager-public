@@ -563,10 +563,6 @@ private struct BottomBar: View {
             .buttonStyle(.plain)
             .help("Stop Recording")
 
-            // Audio level indicators
-            AudioLevelIndicator(label: "🎤", level: appState.micLevel)
-            AudioLevelIndicator(label: "🔊", level: appState.systemLevel)
-
             // T-025: Captured action items badge (visible when count > 0)
             if capturedItemCount > 0 {
                 Button {
