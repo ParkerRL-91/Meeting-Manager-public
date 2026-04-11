@@ -14,6 +14,8 @@ struct LiveMeetingView: View {
     @State private var carriedItems: [ActionItem] = []
     @State private var showOpenItems = true
     @State private var notepadInitialText: String = ""
+    @State private var capturedItemCount = 0
+    @State private var showQuickCapture = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,11 +35,27 @@ struct LiveMeetingView: View {
             }
 
             // MARK: - Bottom bar: audio levels + stop + ask anything
-            BottomBar(meetingId: meetingId, showChat: $showChat)
+            BottomBar(meetingId: meetingId, showChat: $showChat, capturedItemCount: capturedItemCount, showQuickCapture: $showQuickCapture)
         }
         .background(Color.appBackground)
         .frame(minWidth: showChat ? 800 : 540, minHeight: 500)
         .toggleOnKeyboardShortcut("j", modifiers: .command, binding: $showChat)
+        .background(
+            // T-026: Cmd+Shift+A shortcut to show quick capture popover
+            Button("") {
+                showQuickCapture.toggle()
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .hidden()
+        )
+        .popover(isPresented: $showQuickCapture, arrowEdge: .bottom) {
+            QuickCapturePopoverView(meetingId: meetingId) {
+                capturedItemCount += 1
+                showQuickCapture = false
+            } onCancel: {
+                showQuickCapture = false
+            }
+        }
         .task {
             if let active = appState.activeMeeting {
                 meeting = active
@@ -110,8 +128,10 @@ struct LiveMeetingView: View {
                 }
 
                 // Notes area (T-021: initialText pre-populates when notepad is empty)
-                NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText)
-                    .frame(minHeight: 250)
+                NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText) {
+                    capturedItemCount += 1
+                }
+                .frame(minHeight: 250)
 
                 // Context brief (related past meetings)
                 if !contextMeetings.isEmpty && showContextBrief {
@@ -545,6 +565,8 @@ private struct ContextBriefView: View {
 private struct BottomBar: View {
     let meetingId: String
     @Binding var showChat: Bool
+    let capturedItemCount: Int
+    @Binding var showQuickCapture: Bool
     @Environment(AppState.self) private var appState
 
     var body: some View {
@@ -562,6 +584,30 @@ private struct BottomBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+
+            // T-025: Captured action items badge (visible when count > 0)
+            if capturedItemCount > 0 {
+                Button {
+                    showQuickCapture.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.appAccent)
+                        Text("\(capturedItemCount) item\(capturedItemCount == 1 ? "" : "s")")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.appAccent.opacity(0.12))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Captured action items — click to add more (Cmd+Shift+A)")
+                .transition(.scale.combined(with: .opacity))
+                .animation(.spring(response: 0.3), value: capturedItemCount)
+            }
 
             // Ask anything bar
             Button {
