@@ -8,6 +8,7 @@ struct LiveMeetingView: View {
     @State private var meeting: Meeting?
     @State private var showChat = false
     @State private var showAttendeePopover = false
+
     @State private var contextMeetings: [RelevantMeeting] = []
     @State private var showContextBrief = true
     @State private var carriedItems: [ActionItem] = []
@@ -163,7 +164,13 @@ struct LiveMeetingView: View {
     }
 
     private func extractCompany() -> String? {
-        return meeting?.participantList.first?.components(separatedBy: " ").first
+        // Use participant names for the context header rather than title heuristics,
+        // which produce nonsensical results like "You last met with with recently".
+        guard let meeting else { return nil }
+        let participants = meeting.participantList
+        if participants.count == 1 { return participants.first }
+        if participants.count > 1 { return "\(participants[0]) and others" }
+        return nil
     }
 
     private func saveTitleIfChanged() {
@@ -352,7 +359,10 @@ private struct RecordingStrip: View {
         .padding(.vertical, 8)
         .background(Color.appSurface.opacity(0.5))
         .onAppear { startTimer() }
-        .onDisappear { timer?.invalidate(); timer = nil }
+        .onDisappear {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 
     private var formatted: String {
@@ -544,6 +554,10 @@ private struct BottomBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+
+            // Audio level indicators
+            AudioLevelIndicator(label: "🎤", level: appState.micLevel)
+            AudioLevelIndicator(label: "🔊", level: appState.systemLevel)
 
             // T-025: Captured action items badge (visible when count > 0)
             if capturedItemCount > 0 {

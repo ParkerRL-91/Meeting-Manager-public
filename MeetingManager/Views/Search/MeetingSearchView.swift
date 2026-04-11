@@ -49,10 +49,10 @@ struct MeetingSearchView: View {
             // MARK: - Calendar (top half) — hidden when searching
             if !isSearching {
                 calendarSection
-
                 Divider()
                     .padding(.horizontal, 20)
             }
+
 
             // MARK: - Meeting list (bottom half)
             meetingListSection
@@ -242,7 +242,8 @@ struct MeetingSearchView: View {
         isLoading = true
         let query = searchQuery
         searchTask = Task {
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            // Debounce: wait 200ms before executing to coalesce rapid keystrokes
+            try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled else { return }
             let found = (try? await appState.meetingRepository.search(query: query)) ?? []
             guard !Task.isCancelled else { return }
