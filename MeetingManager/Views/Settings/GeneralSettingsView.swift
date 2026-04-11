@@ -14,6 +14,7 @@ struct GeneralSettingsView: View {
     @State private var autoGenerateSummary: Bool = false
     @State private var defaultRecipeId: String? = nil
     @State private var recipes: [Recipe] = []
+    @State private var autoFollowUpEmail: Bool = false
 
     // MARK: - Body
 
@@ -29,6 +30,7 @@ struct GeneralSettingsView: View {
         .task {
             autoGenerateSummary = appState.settings.autoGenerateSummary
             defaultRecipeId = appState.settings.defaultRecipeId
+            autoFollowUpEmail = appState.settings.autoFollowUpEmail
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
         }
