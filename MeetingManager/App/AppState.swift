@@ -1476,6 +1476,13 @@ final class AppState {
                 if !soonMeetings.isEmpty {
                     fileLog("Prep: enriched context for \(soonMeetings.count) upcoming meeting(s)")
                 }
+
+                // Update daily brief badge so the sidebar count is accurate on launch
+                // and every 5 minutes without requiring DailyBriefView to be opened first.
+                let brief = try await DailyBriefService().buildBrief(for: Date())
+                await MainActor.run {
+                    self.dailyBriefMeetingsNeedingPrep = brief.meetingsNeedingPrep
+                }
             } catch {
                 fileLog("Prep: context pre-computation failed: \(error.localizedDescription)")
             }

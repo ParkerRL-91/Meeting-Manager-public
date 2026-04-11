@@ -393,7 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 AppState.shared?.selectedMeetingId = meetingId
             }
         case NotificationActions.sendRecap:
-            // "Share Recap" action — navigate to the meeting so the user can share
+            // "View Recap" action — navigate to the meeting detail
             if let meetingId {
                 AppState.shared?.selectedMeetingId = meetingId
             }
