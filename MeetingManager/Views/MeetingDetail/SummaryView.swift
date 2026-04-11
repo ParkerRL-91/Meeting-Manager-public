@@ -412,6 +412,8 @@ struct SummaryView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+
+        ShareSummaryButton(summary: summary, meeting: meeting, exportService: exportService)
     }
 
     // MARK: - Actions
@@ -506,6 +508,78 @@ struct SummaryView: View {
         }
     }
 }
+
+// MARK: - Share Button
+
+/// Hosts an `NSSharingServicePicker` anchored to the button's own NSView,
+/// so the share sheet appears in the correct position.
+#if canImport(AppKit)
+private struct ShareSummaryButton: View {
+    let summary: MeetingSummary
+    let meeting: Meeting?
+    let exportService: ExportService
+
+    var body: some View {
+        ShareSummaryButtonRepresentable(summary: summary, meeting: meeting, exportService: exportService)
+            .fixedSize()
+    }
+}
+
+private struct ShareSummaryButtonRepresentable: NSViewRepresentable {
+    let summary: MeetingSummary
+    let meeting: Meeting?
+    let exportService: ExportService
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(
+            title: "Share",
+            target: context.coordinator,
+            action: #selector(Coordinator.share(_:))
+        )
+        button.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share")
+        button.imagePosition = .imageLeading
+        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.isBordered = true
+        return button
+    }
+
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        context.coordinator.summary = summary
+        context.coordinator.meeting = meeting
+        context.coordinator.exportService = exportService
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(summary: summary, meeting: meeting, exportService: exportService)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var summary: MeetingSummary
+        var meeting: Meeting?
+        var exportService: ExportService
+
+        init(summary: MeetingSummary, meeting: Meeting?, exportService: ExportService) {
+            self.summary = summary
+            self.meeting = meeting
+            self.exportService = exportService
+        }
+
+        @objc func share(_ sender: NSButton) {
+            let formattedText: String
+            if let meeting {
+                formattedText = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+            } else {
+                formattedText = summary.summaryText
+            }
+            let picker = NSSharingServicePicker(items: [formattedText])
+            picker.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        }
+    }
+}
+#endif
 
 // MARK: - Preview
 
