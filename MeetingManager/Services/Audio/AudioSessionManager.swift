@@ -94,22 +94,15 @@ final class AudioSessionManager {
     /// that system audio capture uses. Falls back to the CGWindowList heuristic
     /// on older macOS versions.
     func hasScreenRecordingPermission() -> Bool {
-        // Synchronous check: use the legacy heuristic but also kick off an async
-        // SCShareableContent check for accuracy on macOS 14.2+.
-        // The CGWindowList check is kept as a fast synchronous baseline.
-        let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]]
-        return windowList != nil && !(windowList?.isEmpty ?? true)
+        // QA_STUB: Screen recording temporarily disabled for QA testing.
+        return false
     }
 
     /// Async permission check using ScreenCaptureKit — more accurate on macOS 14.2+.
     /// Returns true if the app has Screen Recording permission for audio capture.
     @available(macOS 14.2, *)
     func hasScreenRecordingPermissionAsync() async -> Bool {
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            return true
-        } catch {
-            return false
-        }
+        // QA_STUB: Screen recording temporarily disabled for QA testing.
+        return false
     }
 }

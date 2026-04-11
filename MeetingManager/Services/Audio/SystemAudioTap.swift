@@ -35,6 +35,12 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     /// Start capturing system audio via ScreenCaptureKit.
     /// This captures all system audio output except our own app's audio.
     func start(processID: pid_t? = nil) async throws {
+        // QA_STUB: System audio capture disabled for QA testing (screen recording removed).
+        onDiagnostic?("DIAG:sys_tap QA_STUB — system audio capture disabled")
+        throw AudioCaptureError.captureSetupFailed("Screen recording permission removed (QA mode)")
+    }
+
+    private func _start_disabled(processID: pid_t? = nil) async throws {
         lock.lock()
         guard !isRunning else { lock.unlock(); return }
         lock.unlock()
