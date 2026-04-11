@@ -24,6 +24,12 @@ enum NotificationActions {
     /// Action to open the meeting prep view for the notified meeting.
     static let prepMeeting = "PREP_MEETING"
 
+    /// Action to share the meeting recap after a summary is generated.
+    static let sendRecap = "SEND_RECAP"
+
+    /// Category for post-meeting summary ready notifications.
+    static let summaryReadyCategory = "SUMMARY_READY"
+
     /// Category for auto-detected meeting invites (call app / browser meet).
     static let meetingDetectedCategory = "MEETING_DETECTED"
 
@@ -77,7 +83,21 @@ enum NotificationActions {
             options: [.customDismissAction]
         )
 
-        UNUserNotificationCenter.current().setNotificationCategories([meetingCategory, detectedCategory])
+        let shareRecapAction = UNNotificationAction(
+            identifier: sendRecap,
+            title: "Share Recap",
+            options: [.foreground]
+        )
+
+        // Summary ready — tapping the banner or Share Recap navigates to the meeting
+        let summaryReadyCat = UNNotificationCategory(
+            identifier: summaryReadyCategory,
+            actions: [shareRecapAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        UNUserNotificationCenter.current().setNotificationCategories([meetingCategory, detectedCategory, summaryReadyCat])
         Logger.general.info("Registered notification categories")
     }
 }

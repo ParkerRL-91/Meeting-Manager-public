@@ -29,6 +29,11 @@ final class AppState {
     var isRecording = false
     var activeMeeting: Meeting?
 
+    /// The resolved template for the current/most-recently-started recording.
+    /// Set when recording starts (from meeting.templateId or series inheritance).
+    /// Read by LiveMeetingView to pre-populate the notepad.
+    var activeTemplate: MeetingTemplate?
+
     /// True only when the current recording was auto-started by BrowserCallDetector.
     /// Used to gate `callAppTerminated` auto-stop — manually-started recordings
     /// must not be stopped just because the browser-call heuristic loses signal.
@@ -565,6 +570,9 @@ final class AppState {
                     self.participantDetectionService = service
                     service.start(meetingId: meetingId, existingParticipants: currentParticipants)
                 }
+
+                // Resolve template: use meeting's own templateId, or inherit from series.
+                self.activeTemplate = await self.resolveTemplate(for: meeting)
 
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
