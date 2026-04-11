@@ -321,7 +321,7 @@ struct DailyBriefView: View {
             // Try Claude first (if API key exists), fall back to Ollama
             let hasClaudeKey: Bool
             if let apiKey = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
-               let key = apiKey, !key.isEmpty {
+               !apiKey.isEmpty {
                 hasClaudeKey = true
             } else {
                 hasClaudeKey = false

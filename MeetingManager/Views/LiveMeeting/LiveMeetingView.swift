@@ -17,6 +17,7 @@ struct LiveMeetingView: View {
     @State private var capturedItemCount = 0
     @State private var showQuickCapture = false
     @State private var editableTitle: String = ""
+    @FocusState private var isTitleFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -90,7 +91,8 @@ struct LiveMeetingView: View {
                     .padding(.top, 24)
                     .padding(.bottom, 10)
                     .onSubmit { saveTitleIfChanged() }
-                    .onFocusChange { focused in if !focused { saveTitleIfChanged() } }
+                    .focused($isTitleFocused)
+                    .onChange(of: isTitleFocused) { _, focused in if !focused { saveTitleIfChanged() } }
 
                 // Pill badges row
                 HStack(spacing: 8) {

@@ -876,17 +876,8 @@ final class AppState {
             // Step 2: Run speaker diarization with SpeakerKit
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
-                let config = PyannoteConfig()
-                let modelManager = SpeakerKitModelManager(config: config)
-                try await modelManager.loadModels()
+                let kit = try await SpeakerKit(PyannoteConfig())
                 fileLog("Diarization: SpeakerKit models loaded")
-
-                guard let models = modelManager.models as? PyannoteModels else {
-                    fileLog("Diarization: failed to cast models")
-                    throw SpeakerKitError.invalidConfiguration("Model cast failed")
-                }
-
-                let kit = try SpeakerKit(models: models)
                 let diarResult = try await kit.diarize(audioArray: samples)
                 fileLog("Diarization: \(diarResult.segments.count) speaker segments found")
 
