@@ -194,7 +194,7 @@ struct MeetingSearchView: View {
                     Image(systemName: isSearching ? "doc.text.magnifyingglass" : "calendar")
                         .font(.system(size: 32))
                         .foregroundStyle(Color.appTextTertiary)
-                    Text(isSearching ? "No matches" : "No meetings")
+                    Text(isSearching ? "No matches for \"\(searchQuery)\"" : "No meetings")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.appTextSecondary)
                     if !isSearching {

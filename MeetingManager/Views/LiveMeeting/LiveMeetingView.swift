@@ -88,6 +88,7 @@ struct LiveMeetingView: View {
                     .padding(.top, 24)
                     .padding(.bottom, 10)
                     .onSubmit { saveTitleIfChanged() }
+                    .onFocusChange { focused in if !focused { saveTitleIfChanged() } }
 
                 // Pill badges row
                 HStack(spacing: 8) {

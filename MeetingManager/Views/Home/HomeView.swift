@@ -12,6 +12,7 @@ struct HomeView: View {
     @State private var cachedRecentMeetings: [Meeting] = []
     @State private var prepBriefs: [String: MeetingPrepBrief] = [:]
     @State private var expandedCardIds: Set<String> = []
+    @State private var prepBriefDebounce: DispatchWorkItem?
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -125,11 +126,17 @@ struct HomeView: View {
         }
         .onChange(of: appState.upcomingMeetings) { _, _ in
             rebuildCache()
-            loadPrepBriefs()
+            prepBriefDebounce?.cancel()
+            let work = DispatchWorkItem { loadPrepBriefs() }
+            prepBriefDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
         }
         .onChange(of: appState.pastMeetings) { _, _ in
             rebuildCache()
-            loadPrepBriefs()
+            prepBriefDebounce?.cancel()
+            let work = DispatchWorkItem { loadPrepBriefs() }
+            prepBriefDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
         }
     }
 

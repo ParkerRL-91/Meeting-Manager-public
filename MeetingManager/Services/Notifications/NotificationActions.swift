@@ -70,7 +70,7 @@ enum NotificationActions {
         // Scheduled meeting alert — Join & Record first (most useful action)
         let meetingCategory = UNNotificationCategory(
             identifier: categoryIdentifier,
-            actions: [joinAction, startAction, prepAction, snoozeAction, dismissAction],
+            actions: [joinAction, prepAction, dismissAction],
             intentIdentifiers: [],
             options: [.customDismissAction]
         )
