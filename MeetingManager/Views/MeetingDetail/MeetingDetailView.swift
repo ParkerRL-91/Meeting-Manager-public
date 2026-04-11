@@ -14,6 +14,8 @@ struct MeetingDetailView: View {
     @State private var showingDeleteConfirmation = false
     @State private var showingRecipes = false
     @State private var errorMessage: String?
+    @State private var showUpNext = true
+    @State private var upNextBrief: MeetingPrepBrief?
 
     private let exportService = ExportService()
 
@@ -40,6 +42,28 @@ struct MeetingDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let meeting {
+                // MARK: - Up Next Banner (shown after recording stops)
+                if showUpNext,
+                   meeting.status == .transcribing || meeting.status == .complete,
+                   let nextMeeting = appState.nextUpcomingMeeting {
+                    UpNextBannerView(
+                        meeting: nextMeeting,
+                        prepBrief: upNextBrief,
+                        onPrep: {
+                            appState.selectedMeetingId = nextMeeting.id
+                        },
+                        onDismiss: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showUpNext = false
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 4)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
                 MeetingMetadataHeader(meeting: meeting, onEdit: {
                     showingEditor = true
                 })
@@ -221,6 +245,11 @@ struct MeetingDetailView: View {
                 await appState.taskQueueManager.enqueue(
                     type: .contextEnrichment, meetingId: meetingId, priority: 8
                 )
+            }
+            // Load prep brief for the next upcoming meeting (for the Up Next banner)
+            if let nextMeeting = appState.nextUpcomingMeeting {
+                let prepService = MeetingPrepService(database: appState.database)
+                upNextBrief = try? await prepService.prepBrief(for: nextMeeting)
             }
         }
     }
