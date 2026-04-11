@@ -80,6 +80,10 @@ final class AppState {
     private var _cachedFolders: [MeetingFolder]?
     var navigationPath = NavigationPath()
 
+    /// The count of today's meetings that need prep (carryOver category).
+    /// Updated when the Daily Brief view loads. Used for the sidebar badge.
+    var dailyBriefMeetingsNeedingPrep: Int = 0
+
     /// The user's persisted settings. Changes are automatically written to the database.
     var settings: AppSettings = .default {
         didSet {
