@@ -39,6 +39,15 @@ struct AppSettings: Codable, Equatable {
     /// When true, automatically enqueue a follow-up email recipe after a summary is generated.
     var autoFollowUpEmail: Bool = false
 
+    /// When true, schedule a daily morning briefing notification.
+    var morningBriefEnabled: Bool = false
+
+    /// Hour (0-23) for the morning briefing notification.
+    var morningBriefHour: Int = 8
+
+    /// Minute (0-59) for the morning briefing notification.
+    var morningBriefMinute: Int = 30
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -62,6 +71,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case useLocalLLM, ollamaModel
         case autoGenerateSummary, defaultRecipeId
         case autoFollowUpEmail
+        case morningBriefEnabled, morningBriefHour, morningBriefMinute
     }
 }
 
