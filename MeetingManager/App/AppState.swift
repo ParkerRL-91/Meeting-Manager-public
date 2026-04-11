@@ -583,6 +583,26 @@ final class AppState {
         }
     }
 
+    /// Resolves the template for a meeting:
+    /// 1. If the meeting has a templateId, load that template.
+    /// 2. Otherwise, check the series (same title) for a recently-used template.
+    /// Returns nil if no template is found or loading fails.
+    private func resolveTemplate(for meeting: Meeting) async -> MeetingTemplate? {
+        let templateRepo = MeetingTemplateRepository(database: database)
+
+        // 1. Explicit templateId on the meeting
+        if let templateId = meeting.templateId {
+            return try? await templateRepo.find(id: templateId)
+        }
+
+        // 2. Inherit from the most recent meeting in the same series
+        if let inheritedId = try? await meetingRepository.templateIdForSeries(title: meeting.title) {
+            return try? await templateRepo.find(id: inheritedId)
+        }
+
+        return nil
+    }
+
     /// Re-open a completed meeting to append more audio.
     ///
     /// Creates a new audio capture session; the resulting audio file is appended
