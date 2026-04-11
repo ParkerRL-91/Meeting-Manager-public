@@ -462,42 +462,9 @@ enum Migrations {
             }
 
             // Seed built-in starter templates
-            let oneOnOneNote = """
-Wins this week:
--
-
-Blockers / needs help:
--
-
-Action items:
--
-
-Career growth / feedback:
--
-"""
-            let standupNote = """
-Yesterday:
--
-
-Today:
--
-
-Blockers:
--
-"""
-            let planningNote = """
-Agenda:
--
-
-Key decisions needed:
--
-
-Action items:
--
-
-Parking lot:
--
-"""
+            let oneOnOneNote = "Wins this week:\n- \n\nBlockers / needs help:\n- \n\nAction items:\n- \n\nCareer growth / feedback:\n- "
+            let standupNote = "Yesterday:\n- \n\nToday:\n- \n\nBlockers:\n- "
+            let planningNote = "Agenda:\n- \n\nKey decisions needed:\n- \n\nAction items:\n- \n\nParking lot:\n- "
 
             let templates: [(id: String, name: String, noteTemplate: String, recipeId: String?)] = [
                 (
