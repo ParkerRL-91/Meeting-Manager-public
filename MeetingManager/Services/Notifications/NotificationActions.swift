@@ -85,11 +85,11 @@ enum NotificationActions {
 
         let shareRecapAction = UNNotificationAction(
             identifier: sendRecap,
-            title: "Share Recap",
+            title: "View Recap",
             options: [.foreground]
         )
 
-        // Summary ready — tapping the banner or Share Recap navigates to the meeting
+        // Summary ready — tapping the banner or View Recap navigates to the meeting
         let summaryReadyCat = UNNotificationCategory(
             identifier: summaryReadyCategory,
             actions: [shareRecapAction],

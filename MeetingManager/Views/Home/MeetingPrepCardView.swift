@@ -75,13 +75,7 @@ struct MeetingPrepCardView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture {
-            if prepBrief?.hasContext == true {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isExpanded.toggle()
-                }
-            } else {
-                appState.selectedMeetingId = meeting.id
-            }
+            appState.selectedMeetingId = meeting.id
         }
     }
 
@@ -182,9 +176,16 @@ struct MeetingPrepCardView: View {
                     }
 
                     if prepBrief?.hasContext == true {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.caption2)
-                            .foregroundStyle(Color.appTextTertiary)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isExpanded.toggle()
+                            }
+                        } label: {
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                                .foregroundStyle(Color.appTextTertiary)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }

@@ -68,10 +68,13 @@ struct NotepadPaneView: View {
             scheduleSave()
         }
         .onChange(of: initialText) { _, newValue in
-            // If initialText arrives after onAppear and the notepad is still empty,
-            // apply the pre-populated carry-forward text now.
-            if noteContent.isEmpty && !newValue.isEmpty {
+            // If initialText arrives after onAppear (async load completed after view appeared),
+            // append carry-forward below any existing content.
+            guard !newValue.isEmpty else { return }
+            if noteContent.isEmpty {
                 noteContent = newValue
+            } else {
+                noteContent += "\n\n---\n**Open items from previous meetings:**\n" + newValue
             }
         }
         .onDisappear {
@@ -89,7 +92,12 @@ struct NotepadPaneView: View {
                 if let note = try await appState.noteRepository.latestNote(meetingId: meetingId) {
                     await MainActor.run {
                         self.existingNote = note
-                        self.noteContent = note.content
+                        if !initialText.isEmpty {
+                            // Existing note — append carry-forward below rather than silently skipping
+                            self.noteContent = note.content + "\n\n---\n**Open items from previous meetings:**\n" + initialText
+                        } else {
+                            self.noteContent = note.content
+                        }
                     }
                 } else if !initialText.isEmpty {
                     // No existing note — pre-populate with carry-forward content

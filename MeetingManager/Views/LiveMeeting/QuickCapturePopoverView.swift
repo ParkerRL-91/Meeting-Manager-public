@@ -197,9 +197,13 @@ enum NaturalLanguageDateParser {
             return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))
         }
 
-        // "next week"
+        // "next week" — Monday of the following week
         if lower == "next week" {
-            return calendar.date(byAdding: .weekOfYear, value: 1, to: calendar.startOfDay(for: now))
+            return calendar.nextDate(
+                after: calendar.startOfDay(for: now),
+                matching: DateComponents(weekday: 2), // 2 = Monday
+                matchingPolicy: .nextTime
+            )
         }
 
         // Weekday names (e.g. "friday", "next friday")

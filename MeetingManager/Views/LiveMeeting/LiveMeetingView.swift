@@ -64,6 +64,7 @@ struct LiveMeetingView: View {
             }
             loadContext()
             await loadOpenItems()
+            await loadCapturedItemCount()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in
             if let active = appState.activeMeeting { meeting = active }
@@ -191,6 +192,13 @@ struct LiveMeetingView: View {
             }
         } catch {
             print("Failed to load open items for carry-forward: \(error)")
+        }
+    }
+
+    private func loadCapturedItemCount() async {
+        let items = (try? await ActionItemRepository().itemsForMeeting(meetingId)) ?? []
+        await MainActor.run {
+            capturedItemCount = items.count
         }
     }
 
