@@ -258,11 +258,15 @@ struct DailyBriefView: View {
 
     // MARK: - Data Loading
 
+    @MainActor
     private func loadBrief() async {
         isLoading = true
         loadError = nil
         do {
-            dailyBrief = try await service.buildBrief(for: date)
+            let brief = try await service.buildBrief(for: date)
+            dailyBrief = brief
+            // Update sidebar badge
+            appState.dailyBriefMeetingsNeedingPrep = brief.meetingsNeedingPrep
         } catch {
             loadError = error.localizedDescription
             Logger.general.error("DailyBriefView: failed to load brief: \(error.localizedDescription)")
