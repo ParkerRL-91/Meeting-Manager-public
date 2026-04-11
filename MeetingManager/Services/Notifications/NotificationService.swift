@@ -125,6 +125,64 @@ final class NotificationService: NSObject {
         return summaryLine
     }
 
+    // MARK: - Morning Brief
+
+    /// Schedule a daily morning briefing notification at the user-configured time.
+    ///
+    /// The notification repeats every day at the same hour/minute. It is idempotent —
+    /// calling this multiple times replaces any existing morning brief notification.
+    ///
+    /// - Parameters:
+    ///   - meetingCount: Total number of meetings today.
+    ///   - openItemCount: Total number of open action items to follow up on.
+    ///   - hour: Hour (0-23) to fire the notification.
+    ///   - minute: Minute (0-59) to fire the notification.
+    func scheduleMorningBrief(meetingCount: Int, openItemCount: Int, hour: Int = 8, minute: Int = 30) {
+        let content = UNMutableNotificationContent()
+        content.title = "Good morning! Your daily brief is ready."
+
+        let meetingWord = meetingCount == 1 ? "meeting" : "meetings"
+        if openItemCount > 0 {
+            let itemWord = openItemCount == 1 ? "open item" : "open items"
+            content.body = "You have \(meetingCount) \(meetingWord) today. \(openItemCount) \(itemWord) to follow up on."
+        } else if meetingCount > 0 {
+            content.body = "You have \(meetingCount) \(meetingWord) today."
+        } else {
+            content.body = "No meetings scheduled today. Enjoy your free time!"
+        }
+
+        content.sound = .default
+        content.userInfo = ["type": "morningBrief"]
+
+        var dateComponents = DateComponents()
+        dateComponents.hour = hour
+        dateComponents.minute = minute
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+
+        let request = UNNotificationRequest(
+            identifier: morningBriefIdentifier,
+            content: content,
+            trigger: trigger
+        )
+
+        // Remove any existing morning brief before scheduling the new one
+        center.removePendingNotificationRequests(withIdentifiers: [morningBriefIdentifier])
+        center.add(request) { error in
+            if let error {
+                Logger.general.error("Failed to schedule morning brief notification: \(error.localizedDescription)")
+            } else {
+                Logger.general.info("Scheduled morning brief notification at \(hour):\(String(format: "%02d", minute))")
+            }
+        }
+    }
+
+    /// Cancel the recurring morning brief notification.
+    func cancelMorningBrief() {
+        center.removePendingNotificationRequests(withIdentifiers: [morningBriefIdentifier])
+        Logger.general.info("Cancelled morning brief notification")
+    }
+
     // MARK: - Snooze
 
     /// Schedule a snooze notification for a meeting.
@@ -197,5 +255,9 @@ final class NotificationService: NSObject {
 
     private func snoozeIdentifier(for meetingId: String) -> String {
         "meeting-snooze-\(meetingId)"
+    }
+
+    private var morningBriefIdentifier: String {
+        "morning-brief"
     }
 }
