@@ -8,7 +8,6 @@ struct LiveMeetingView: View {
     @State private var meeting: Meeting?
     @State private var showChat = false
     @State private var showAttendeePopover = false
-    @State private var showFolderPicker = false
     @State private var contextMeetings: [RelevantMeeting] = []
     @State private var showContextBrief = true
     @State private var carriedItems: [ActionItem] = []
@@ -16,6 +15,7 @@ struct LiveMeetingView: View {
     @State private var notepadInitialText: String = ""
     @State private var capturedItemCount = 0
     @State private var showQuickCapture = false
+    @State private var editableTitle: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,11 +62,15 @@ struct LiveMeetingView: View {
             } else {
                 meeting = try? await appState.meetingRepository.find(id: meetingId)
             }
+            editableTitle = meeting?.title ?? ""
             loadContext()
             await loadOpenItems()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in
-            if let active = appState.activeMeeting { meeting = active }
+            if let active = appState.activeMeeting {
+                meeting = active
+                editableTitle = active.title
+            }
         }
     }
 
@@ -75,13 +79,15 @@ struct LiveMeetingView: View {
     private var mainContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Big title
-                Text(meeting?.title ?? "Meeting")
+                // Big title (inline editable)
+                TextField("Meeting title", text: $editableTitle)
                     .font(.system(size: 28, weight: .bold))
                     .foregroundStyle(Color.appTextPrimary)
+                    .textFieldStyle(.plain)
                     .padding(.horizontal, 28)
                     .padding(.top, 24)
                     .padding(.bottom, 10)
+                    .onSubmit { saveTitleIfChanged() }
 
                 // Pill badges row
                 HStack(spacing: 8) {
@@ -99,17 +105,6 @@ struct LiveMeetingView: View {
                         .popover(isPresented: $showAttendeePopover, arrowEdge: .bottom) {
                             AttendeePopover(participants: meeting.participantList)
                         }
-                    }
-
-                    // Add to folder badge
-                    Button {
-                        showFolderPicker.toggle()
-                    } label: {
-                        PillBadge(icon: "arrow.up.right.square", label: "Add to folder")
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showFolderPicker, arrowEdge: .bottom) {
-                        FolderPickerPopover(meetingTitle: meeting?.title ?? "")
                     }
 
                     Spacer()
@@ -167,10 +162,17 @@ struct LiveMeetingView: View {
     }
 
     private func extractCompany() -> String? {
-        // Try to extract a company name from the meeting title
-        let title = meeting?.title ?? ""
-        let parts = title.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 3 }
-        return parts.first
+        return meeting?.participantList.first?.components(separatedBy: " ").first
+    }
+
+    private func saveTitleIfChanged() {
+        let trimmed = editableTitle.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != meeting?.title, var updated = meeting else { return }
+        updated.title = trimmed
+        meeting = updated
+        Task {
+            try? await appState.meetingRepository.update(updated)
+        }
     }
 
     // MARK: - Open Items Loading (T-021 / T-022)
@@ -349,6 +351,7 @@ private struct RecordingStrip: View {
         .padding(.vertical, 8)
         .background(Color.appSurface.opacity(0.5))
         .onAppear { startTimer() }
+        .onDisappear { timer?.invalidate(); timer = nil }
     }
 
     private var formatted: String {
@@ -419,54 +422,6 @@ private struct AttendeePopover: View {
         }
         .padding(14)
         .frame(minWidth: 200)
-    }
-}
-
-// MARK: - Folder Picker Popover
-
-private struct FolderPickerPopover: View {
-    let meetingTitle: String
-    @Environment(AppState.self) private var appState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Add to Folder")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.appTextSecondary)
-                .padding(.bottom, 4)
-
-            let folders = appState.meetingFolders()
-            if folders.isEmpty {
-                Text("No folders yet")
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextTertiary)
-            } else {
-                ForEach(folders) { folder in
-                    Button {
-                        // Navigate to the folder
-                        appState.sidebarDestination = .folder(folder.key)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "folder.fill")
-                                .font(.caption)
-                                .foregroundStyle(Color.appAccent)
-                            Text(folder.displayName)
-                                .font(.subheadline)
-                                .foregroundStyle(Color.appTextPrimary)
-                            Spacer()
-                            Text("\(folder.meetingCount)")
-                                .font(.caption)
-                                .foregroundStyle(Color.appTextTertiary)
-                        }
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .padding(14)
-        .frame(minWidth: 220)
     }
 }
 
@@ -571,6 +526,10 @@ private struct BottomBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            // Audio level indicators
+            AudioLevelIndicator(label: "🎤", level: appState.micLevel)
+            AudioLevelIndicator(label: "🔊", level: appState.systemLevel, color: .appSuccess)
+
             // Stop button
             Button {
                 appState.stopRecording()

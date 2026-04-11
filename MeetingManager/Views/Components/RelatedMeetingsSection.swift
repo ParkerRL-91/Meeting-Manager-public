@@ -6,7 +6,7 @@ struct RelatedMeetingsSection: View {
     let contextJSON: String?
     var onSelectMeeting: ((String) -> Void)?
 
-    @State private var isExpanded = false
+    @State private var isExpanded = true
 
     private var relatedMeetings: [RelevantMeeting] {
         RelevantMeetingService.parseContext(from: contextJSON)

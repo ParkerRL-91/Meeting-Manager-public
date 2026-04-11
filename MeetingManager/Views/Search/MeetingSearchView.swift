@@ -10,6 +10,7 @@ struct MeetingSearchView: View {
     @State private var results: [Meeting] = []
     @State private var isLoading = false
     @State private var isSearching = false  // true when user is typing a search query
+    @State private var searchTask: Task<Void, Never>?
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -48,10 +49,10 @@ struct MeetingSearchView: View {
             // MARK: - Calendar (top half) — hidden when searching
             if !isSearching {
                 calendarSection
-            }
 
-            Divider()
-                .padding(.horizontal, 20)
+                Divider()
+                    .padding(.horizontal, 20)
+            }
 
             // MARK: - Meeting list (bottom half)
             meetingListSection
@@ -196,6 +197,11 @@ struct MeetingSearchView: View {
                     Text(isSearching ? "No matches" : "No meetings")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.appTextSecondary)
+                    if !isSearching {
+                        Text("Nothing on \(selectedDate.formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 Spacer()
@@ -219,9 +225,11 @@ struct MeetingSearchView: View {
     // MARK: - Data Loading
 
     private func loadMeetingsForDate() {
+        searchTask?.cancel()
         isLoading = true
-        Task {
+        searchTask = Task {
             let found = (try? await appState.meetingRepository.search(date: selectedDate)) ?? []
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 results = found
                 isLoading = false
@@ -230,9 +238,14 @@ struct MeetingSearchView: View {
     }
 
     private func performSearch() {
+        searchTask?.cancel()
         isLoading = true
-        Task {
-            let found = (try? await appState.meetingRepository.search(query: searchQuery)) ?? []
+        let query = searchQuery
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else { return }
+            let found = (try? await appState.meetingRepository.search(query: query)) ?? []
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 results = found
                 isLoading = false
