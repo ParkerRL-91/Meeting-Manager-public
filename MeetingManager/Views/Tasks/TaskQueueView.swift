@@ -17,7 +17,7 @@ struct TaskQueueView: View {
                 // MARK: - Header
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Tasks")
+                        Text("Activity")
                             .font(.title2.weight(.semibold))
                             .foregroundStyle(Color.appTextPrimary)
                         Text("\(pending.count) pending \u{00B7} \(running.count) running \u{00B7} \(done.count) done")
@@ -88,7 +88,7 @@ struct TaskQueueView: View {
                         Image(systemName: "checkmark.circle")
                             .font(.largeTitle)
                             .foregroundStyle(Color.appTextTertiary)
-                        Text("No tasks in the queue")
+                        Text("No activity yet")
                             .font(.headline)
                             .foregroundStyle(Color.appTextSecondary)
                         Text("Transcription and summary tasks appear here automatically after meetings end.")
