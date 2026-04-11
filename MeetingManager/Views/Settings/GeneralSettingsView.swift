@@ -15,6 +15,9 @@ struct GeneralSettingsView: View {
     @State private var defaultRecipeId: String? = nil
     @State private var recipes: [Recipe] = []
     @State private var autoFollowUpEmail: Bool = false
+    @State private var morningBriefEnabled: Bool = false
+    @State private var morningBriefHour: Int = 8
+    @State private var morningBriefMinute: Int = 30
 
     // MARK: - Body
 
@@ -31,6 +34,9 @@ struct GeneralSettingsView: View {
             autoGenerateSummary = appState.settings.autoGenerateSummary
             defaultRecipeId = appState.settings.defaultRecipeId
             autoFollowUpEmail = appState.settings.autoFollowUpEmail
+            morningBriefEnabled = appState.settings.morningBriefEnabled
+            morningBriefHour = appState.settings.morningBriefHour
+            morningBriefMinute = appState.settings.morningBriefMinute
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
         }
@@ -80,10 +86,52 @@ struct GeneralSettingsView: View {
                 persistSetting { $0.notificationLeadTimeMinutes = newValue }
                 Logger.ui.info("Notification lead time changed to \(newValue) minutes")
             }
+
+            Toggle("Morning Brief Notification", isOn: $morningBriefEnabled)
+                .onChange(of: morningBriefEnabled) { _, enabled in
+                    persistSetting { $0.morningBriefEnabled = enabled }
+                    appState.settings.morningBriefEnabled = enabled
+                    updateMorningBriefNotification(enabled: enabled)
+                }
+
+            if morningBriefEnabled {
+                HStack {
+                    Text("Notification time")
+                    Spacer()
+                    Picker("Hour", selection: $morningBriefHour) {
+                        ForEach(0..<24, id: \.self) { hour in
+                            Text(String(format: "%02d", hour)).tag(hour)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 70)
+                    .onChange(of: morningBriefHour) { _, newValue in
+                        persistSetting { $0.morningBriefHour = newValue }
+                        appState.settings.morningBriefHour = newValue
+                        updateMorningBriefNotification(enabled: morningBriefEnabled)
+                    }
+
+                    Text(":")
+                        .foregroundStyle(Color.appTextSecondary)
+
+                    Picker("Minute", selection: $morningBriefMinute) {
+                        ForEach([0, 15, 30, 45], id: \.self) { minute in
+                            Text(String(format: "%02d", minute)).tag(minute)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 70)
+                    .onChange(of: morningBriefMinute) { _, newValue in
+                        persistSetting { $0.morningBriefMinute = newValue }
+                        appState.settings.morningBriefMinute = newValue
+                        updateMorningBriefNotification(enabled: morningBriefEnabled)
+                    }
+                }
+            }
         } header: {
             Text("Notifications")
         } footer: {
-            Text("How many minutes before a scheduled meeting you would like to be notified.")
+            Text("Set how many minutes before a meeting to be notified. Enable the Morning Brief to receive a daily summary of your meetings and open items at the configured time.")
         }
     }
 
@@ -176,6 +224,20 @@ struct GeneralSettingsView: View {
             Logger.general.info("Launch at login \(enabled ? "enabled" : "disabled")")
         } catch {
             Logger.general.error("Failed to update launch at login: \(error.localizedDescription)")
+        }
+    }
+
+    private func updateMorningBriefNotification(enabled: Bool) {
+        let service = NotificationService()
+        if enabled {
+            service.scheduleMorningBrief(
+                meetingCount: 0,
+                openItemCount: 0,
+                hour: morningBriefHour,
+                minute: morningBriefMinute
+            )
+        } else {
+            service.cancelMorningBrief()
         }
     }
 }
