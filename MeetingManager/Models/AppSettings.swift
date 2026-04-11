@@ -41,7 +41,7 @@ struct AppSettings: Codable, Equatable {
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
         claudeModel: "claude-sonnet-4-20250514",
         calendarSyncIntervalMinutes: 15,
-        notificationLeadTimeMinutes: 1,
+        notificationLeadTimeMinutes: 5,
         launchAtLogin: false,
         theme: "dark"
     )
