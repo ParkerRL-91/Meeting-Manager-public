@@ -445,5 +445,90 @@ enum Migrations {
                 arguments: [WhisperModel.largev3turbo.rawValue]
             )
         }
+
+        migrator.registerMigration("v18-meeting-templates") { db in
+            // Create meetingTemplate table
+            try db.create(table: "meetingTemplate") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("noteTemplate", .text).notNull().defaults(to: "")
+                t.column("recipeId", .text)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+
+            // Add templateId to meeting table
+            try db.alter(table: "meeting") { t in
+                t.add(column: "templateId", .text)
+            }
+
+            // Seed built-in starter templates
+            let oneOnOneNote = """
+Wins this week:
+-
+
+Blockers / needs help:
+-
+
+Action items:
+-
+
+Career growth / feedback:
+-
+"""
+            let standupNote = """
+Yesterday:
+-
+
+Today:
+-
+
+Blockers:
+-
+"""
+            let planningNote = """
+Agenda:
+-
+
+Key decisions needed:
+-
+
+Action items:
+-
+
+Parking lot:
+-
+"""
+
+            let templates: [(id: String, name: String, noteTemplate: String, recipeId: String?)] = [
+                (
+                    id: "builtin-template-one-on-one",
+                    name: "1:1 Meeting",
+                    noteTemplate: oneOnOneNote,
+                    recipeId: "builtin-coaching-feedback"
+                ),
+                (
+                    id: "builtin-template-standup",
+                    name: "Standup",
+                    noteTemplate: standupNote,
+                    recipeId: nil
+                ),
+                (
+                    id: "builtin-template-planning",
+                    name: "Planning Session",
+                    noteTemplate: planningNote,
+                    recipeId: "builtin-action-items"
+                ),
+            ]
+
+            for template in templates {
+                try db.execute(
+                    sql: """
+                        INSERT INTO meetingTemplate (id, name, noteTemplate, recipeId, createdAt)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                    arguments: [template.id, template.name, template.noteTemplate, template.recipeId]
+                )
+            }
+        }
     }
 }

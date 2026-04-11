@@ -223,6 +223,25 @@ final class MeetingRepository {
         }
     }
 
+    /// Returns the templateId from the most recent completed meeting with the same title
+    /// that has a non-nil templateId. Used to inherit templates for recurring meetings.
+    func templateIdForSeries(title: String) async throws -> String? {
+        try await database.writer.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT templateId FROM meeting
+                    WHERE title = ?
+                      AND templateId IS NOT NULL
+                    ORDER BY COALESCE(startDate, scheduledStartDate, createdAt) DESC
+                    LIMIT 1
+                    """,
+                arguments: [title]
+            )
+            return row?["templateId"]
+        }
+    }
+
     /// Observe meetings list for real-time UI updates
     func observeUpcoming(
         onChange: @escaping ([Meeting]) -> Void
