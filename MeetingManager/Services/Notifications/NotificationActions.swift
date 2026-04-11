@@ -21,6 +21,9 @@ enum NotificationActions {
     /// Action to dismiss the notification without further action.
     static let dismiss = "DISMISS"
 
+    /// Action to open the meeting prep view for the notified meeting.
+    static let prepMeeting = "PREP_MEETING"
+
     /// Category for auto-detected meeting invites (call app / browser meet).
     static let meetingDetectedCategory = "MEETING_DETECTED"
 
@@ -52,10 +55,16 @@ enum NotificationActions {
             options: [.destructive]
         )
 
+        let prepAction = UNNotificationAction(
+            identifier: prepMeeting,
+            title: "Prep",
+            options: [.foreground]
+        )
+
         // Scheduled meeting alert — Join & Record first (most useful action)
         let meetingCategory = UNNotificationCategory(
             identifier: categoryIdentifier,
-            actions: [joinAction, startAction, snoozeAction, dismissAction],
+            actions: [joinAction, startAction, prepAction, snoozeAction, dismissAction],
             intentIdentifiers: [],
             options: [.customDismissAction]
         )

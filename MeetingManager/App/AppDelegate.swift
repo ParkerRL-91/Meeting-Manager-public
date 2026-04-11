@@ -388,6 +388,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let meetingId {
                 notificationService?.scheduleSnooze(meetingId: meetingId, minutes: 5)
             }
+        case NotificationActions.prepMeeting:
+            if let meetingId {
+                AppState.shared?.selectedMeetingId = meetingId
+            }
         default:
             break
         }
