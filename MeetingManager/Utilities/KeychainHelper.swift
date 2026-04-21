@@ -104,7 +104,11 @@ enum KeychainHelper {
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
+            // Restrict to this device + unlocked state. Items are not migrated to
+            // a restored device / new Mac via iCloud Keychain, and are inaccessible
+            // while the device is locked. For credentials that exist only to reach
+            // per-user cloud APIs, this is the correct accessibility class.
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
 
         let status = SecItemAdd(query as CFDictionary, nil)
