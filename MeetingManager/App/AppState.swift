@@ -190,6 +190,10 @@ final class AppState {
         }
 
         self.database = AppDatabase.shared
+        if let dbError = AppDatabase.initializationError {
+            Logger.general.critical("AppState: database unavailable at launch — \(dbError)")
+            self.lastUserError = "The database could not be opened (\(dbError.localizedDescription)). Your meeting data is unavailable. Please restart the app or contact support."
+        }
         self.ollamaService = OllamaService()
         self.ollamaInstaller = OllamaInstaller()
         self.meetingRepository = MeetingRepository(database: database)
@@ -317,12 +321,32 @@ final class AppState {
         taskQueueManager.transcriptionHandler = { [weak self] meetingId, audioURL in
             guard let self else { return }
             self.fileLog("TaskQueue: running transcription for \(meetingId)")
-            await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            let (transcripts, speakerLabels) = await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
 
-            // Mark meeting complete after transcription
-            if var meeting = try? await self.meetingRepository.find(id: meetingId),
-               meeting.status == .transcribing {
-                try? await self.stateMachine.complete(meeting: meeting)
+            // Atomically commit transcripts + meeting-status update + speaker labels in one write.
+            // Previously three separate writer.write calls; now a single transaction so a crash
+            // between steps cannot leave transcripts saved but meeting still in .transcribing.
+            if var meeting = try? await self.meetingRepository.find(id: meetingId) {
+                if let labels = speakerLabels {
+                    let existing = meeting.participants ?? ""
+                    meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
+                }
+                let wasTranscribing = meeting.status == .transcribing
+                if wasTranscribing { meeting.status = .complete }
+
+                try? await self.database.writer.write { db in
+                    for var t in transcripts { try t.save(db) }
+                    try meeting.save(db)
+                }
+
+                if wasTranscribing {
+                    NotificationCenter.default.post(
+                        name: .meetingStateChanged,
+                        object: self.stateMachine,
+                        userInfo: ["meetingId": meeting.id, "status": meeting.status.rawValue]
+                    )
+                }
+                Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
                 self.loadMeetings()
             }
         }
@@ -893,12 +917,12 @@ final class AppState {
     }
 
     /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
-    /// This gives dramatically better accuracy than streaming 30-second chunks because
-    /// Whisper carries context between windows and the full audio is available.
-    private func batchTranscribe(meetingId: String, audioURL: URL?) async {
+    /// Returns the filtered transcripts and diarisation speaker labels to the caller, which
+    /// is responsible for the atomic DB write (see transcriptionHandler in setupTaskQueue).
+    private func batchTranscribe(meetingId: String, audioURL: URL?) async -> (transcripts: [Transcript], speakerLabels: String?) {
         guard let audioURL else {
             fileLog("Batch transcribe: no audio file URL")
-            return
+            return ([], nil)
         }
 
         if !transcriptionService.isModelLoaded {
@@ -912,9 +936,10 @@ final class AppState {
             fileLog("Batch transcribe: model not loaded after 5 min — queuing for later")
             addPendingTranscription(meetingId: meetingId, audioURL: audioURL)
             lastUserError = "Transcription queued — will process when model loads."
-            return
+            return ([], nil)
         }
 
+        var capturedSpeakerLabels: String?
         fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
 
         do {
@@ -924,13 +949,13 @@ final class AppState {
             let frameCount = AVAudioFrameCount(audioFile.length)
             guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
                 fileLog("Batch transcribe: failed to create buffer")
-                return
+                return ([], nil)
             }
             try audioFile.read(into: buffer)
 
             guard let channelData = buffer.floatChannelData else {
                 fileLog("Batch transcribe: no channel data")
-                return
+                return ([], nil)
             }
             let allSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
 
@@ -972,14 +997,9 @@ final class AppState {
                 let uniqueSpeakers = Set(diarResult.segments.compactMap { $0.speaker.speakerId })
                 fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
 
-                // Update meeting participants
+                // Capture speaker labels — written atomically with transcripts in the caller
                 if uniqueSpeakers.count > 1 {
-                    let speakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
-                    if var meeting = try? await meetingRepository.find(id: meetingId) {
-                        let existing = meeting.participants ?? ""
-                        meeting.participants = existing.isEmpty ? speakerLabels : "\(existing) (\(speakerLabels))"
-                        try? await meetingRepository.save(&meeting)
-                    }
+                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
                 }
             } catch {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
@@ -1063,15 +1083,14 @@ final class AppState {
                     confidence: seg.confidence
                 ))
             }
-            try await transcriptRepository.saveBatch(toSave)
-            let savedCount = toSave.count
-
-            fileLog("Batch transcribe: saved \(savedCount) segments, skipped \(skippedCount) hallucinations")
-            Logger.transcription.info("Batch transcription complete: \(savedCount) segments for meeting \(meetingId)")
+            fileLog("Batch transcribe: prepared \(toSave.count) segments, skipped \(skippedCount) hallucinations")
+            Logger.transcription.info("Batch transcription ready: \(toSave.count) segments for meeting \(meetingId)")
+            return (toSave, capturedSpeakerLabels)
 
         } catch {
             fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
             Logger.transcription.error("Batch transcription failed: \(error.localizedDescription)")
+            return ([], capturedSpeakerLabels)
         }
     }
 
@@ -1201,7 +1220,19 @@ final class AppState {
                 fileLog("Pending transcription: audio file missing for \(meetingId), removing from queue")
                 continue
             }
-            await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            // Use same atomic-write pattern as transcriptionHandler
+            let (transcripts, speakerLabels) = await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            if var meeting = try? await meetingRepository.find(id: meetingId) {
+                if let labels = speakerLabels {
+                    let existing = meeting.participants ?? ""
+                    meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
+                }
+                if meeting.status == .transcribing { meeting.status = .complete }
+                try? await database.writer.write { db in
+                    for var t in transcripts { try t.save(db) }
+                    try meeting.save(db)
+                }
+            }
         }
 
         // Clear the queue

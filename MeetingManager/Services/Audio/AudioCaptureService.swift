@@ -131,6 +131,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         currentAudioFileURL = fileURL
 
         try bufferManager.prepareForRecording(outputURL: fileURL)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
 
         // Surface write errors (e.g. disk full) to the caller via onWriteError
         bufferManager.onWriteError = { [weak self] error in
@@ -319,6 +320,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
             .appendingPathComponent("MeetingManager/Audio", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         return url
     }
 

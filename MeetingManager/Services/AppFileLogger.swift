@@ -22,10 +22,11 @@ final class AppFileLogger {
         let dir = logURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        // Create the log file if it doesn't exist
+        // Create the log file if it doesn't exist, then restrict to owner-only
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
     }
 
     /// Append a timestamped message to the log file. Safe to call from any thread.
