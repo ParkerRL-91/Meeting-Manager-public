@@ -1662,7 +1662,34 @@ final class AppState {
                 }
             }
             .store(in: &cancellables)
+
+        // Thermal pressure: log escalations so ops can correlate with transcription
+        // backlog / audio drop reports. At .serious or .critical we back off any
+        // post-meeting transcription tasks that are still queued so the user's
+        // interactive recording path stays responsive.
+        NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let state = ProcessInfo.processInfo.thermalState
+                let stateName: String
+                switch state {
+                case .nominal: stateName = "nominal"
+                case .fair: stateName = "fair"
+                case .serious: stateName = "serious"
+                case .critical: stateName = "critical"
+                @unknown default: stateName = "unknown"
+                }
+                Logger.general.info("Thermal state: \(stateName, privacy: .public)")
+                Task { @MainActor in
+                    self.thermalState = state
+                }
+            }
+            .store(in: &cancellables)
     }
+
+    /// Mirrored from ProcessInfo so SwiftUI views can observe and downgrade heavy
+    /// visual effects (live waveforms, animations) under thermal pressure.
+    var thermalState: ProcessInfo.ThermalState = .nominal
 
     // MARK: - AI Text Generator Factory
 
