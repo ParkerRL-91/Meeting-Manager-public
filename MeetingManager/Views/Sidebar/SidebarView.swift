@@ -152,7 +152,7 @@ struct SidebarView: View {
     // MARK: - Actions
 
     private func createAdHocMeeting() {
-        NotificationCenter.default.post(name: .createNewMeeting, object: nil)
+        appState.startNewMeeting()
     }
 }
 

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Granola-inspired live meeting view.
@@ -68,11 +69,17 @@ struct LiveMeetingView: View {
             loadContext()
             await loadOpenItems()
             await loadCapturedItemCount()
+            await focusTitleForRenameIfNeeded()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in
             if let active = appState.activeMeeting {
                 meeting = active
                 editableTitle = active.title
+            }
+        }
+        .onChange(of: appState.focusTitleForRename) { _, shouldFocus in
+            if shouldFocus {
+                Task { await focusTitleForRenameIfNeeded() }
             }
         }
     }
@@ -188,6 +195,23 @@ struct LiveMeetingView: View {
         Task {
             try? await appState.meetingRepository.update(updated)
         }
+    }
+
+    /// When AppState signals that a newly-created ad-hoc meeting needs its title renamed,
+    /// focus the title TextField and select all of its text so the user can type straight
+    /// over "New Meeting" without having to click or drag-select first.
+    @MainActor
+    private func focusTitleForRenameIfNeeded() async {
+        guard appState.focusTitleForRename else { return }
+        // Wait for the TextField to be mounted and hosted by AppKit before selecting.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        isTitleFocused = true
+        // SwiftUI focus doesn't select the contents of a macOS TextField by default;
+        // fire selectAll on the newly-focused first responder so typing replaces the
+        // default placeholder text.
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        appState.focusTitleForRename = false
     }
 
     // MARK: - Open Items Loading (T-021 / T-022)

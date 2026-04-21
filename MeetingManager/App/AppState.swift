@@ -53,6 +53,11 @@ final class AppState {
     /// Cleared when recording begins or the call app exits.
     private(set) var detectedCallApp: String?
 
+    /// Signals the active meeting view to focus and select its title field so the user can
+    /// rename immediately after an ad-hoc "New Meeting" is created. The consumer resets this
+    /// to false after handling.
+    var focusTitleForRename: Bool = false
+
     /// Timestamp of the last call detection event, used to deduplicate rapid-fire
     /// notifications from CallDetectionService and BrowserCallDetector firing for
     /// the same meeting (e.g., Zoom native app + Zoom in browser tab).
@@ -525,6 +530,72 @@ final class AppState {
     /// The state machine's `currentMeeting == nil` guard is necessary but not sufficient
     /// because multiple async Tasks can read it as nil before any of them set it.
     private var isStartingMeeting = false
+
+    /// Create an ad-hoc meeting and start recording. Called from the sidebar "New Meeting"
+    /// button, menu bar, Home view, and the `.createNewMeeting` notification observer.
+    ///
+    /// Behaviour:
+    /// 1. Switches `sidebarDestination` to `.meetings` synchronously for immediate visual feedback.
+    /// 2. If a scheduled meeting starts within ±5 minutes, records against that one instead of
+    ///    creating a duplicate ad-hoc entry.
+    /// 3. After recording starts, sets `focusTitleForRename` so the meeting view auto-focuses
+    ///    the title field for easy rename (ad-hoc meetings only).
+    /// 4. Surfaces guard-rail failures (already recording, start in progress) as `lastUserError`
+    ///    so the user gets a visible alert instead of a silent no-op.
+    @MainActor
+    func startNewMeeting() {
+        guard !isRecording else {
+            lastUserError = "A meeting is already recording. Stop it before starting a new one."
+            fileLog("startNewMeeting: skipped — already recording")
+            return
+        }
+        guard !isStartingMeeting else {
+            fileLog("startNewMeeting: skipped — another start in progress (debounce)")
+            return
+        }
+
+        // Flip the detail pane immediately so the user sees *something* change even before
+        // audio services spin up.
+        sidebarDestination = .meetings
+        isStartingMeeting = true
+        fileLog("startNewMeeting invoked")
+
+        Task { @MainActor in
+            defer { self.isStartingMeeting = false }
+            do {
+                let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+                let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
+
+                let meeting: Meeting
+                let isAdHoc: Bool
+                if let scheduled = scheduledMatch {
+                    self.fileLog("startNewMeeting: matched scheduled '\(scheduled.title)' — starting it")
+                    try await self.stateMachine.startRecording(meeting: scheduled)
+                    meeting = self.stateMachine.currentMeeting ?? scheduled
+                    isAdHoc = false
+                } else {
+                    meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                    isAdHoc = true
+                }
+
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                self.selectedMeetingId = meeting.id
+                if self.isRecording { self.startAudioLevelPolling() }
+                self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
+                self.loadMeetings()
+
+                // Only auto-focus the title when the meeting was created ad-hoc; for a scheduled
+                // meeting we want to keep the calendar-provided title as-is.
+                if isAdHoc {
+                    self.focusTitleForRename = true
+                }
+            } catch {
+                Logger.general.error("Failed to start meeting: \(error.localizedDescription)")
+                self.lastUserError = "Couldn't start recording: \(error.localizedDescription)"
+            }
+        }
+    }
 
     func createMeeting(title: String, scheduledStart: Date? = nil, scheduledEnd: Date? = nil) async throws -> Meeting {
         var meeting = Meeting(
@@ -1536,47 +1607,12 @@ final class AppState {
     // MARK: - Notification Observers
 
     private func observeNotifications() {
-        // Create ad-hoc meeting via state machine (manual "New Meeting" button).
-        // If a scheduled meeting starts within 5 minutes, start that instead.
+        // Create ad-hoc meeting via state machine (manual "New Meeting" button, menu bar,
+        // HomeView, AppDelegate). All paths route through startNewMeeting() for one code path.
         NotificationCenter.default.publisher(for: .createNewMeeting)
             .sink { [weak self] _ in
-                guard let self else { return }
-                guard !self.isRecording else {
-                    self.fileLog("createNewMeeting: skipped — already recording")
-                    return
-                }
-                guard !self.isStartingMeeting else {
-                    self.fileLog("createNewMeeting: skipped — another start in progress (debounce)")
-                    return
-                }
-                self.isStartingMeeting = true
-                self.fileLog("createNewMeeting notification received")
                 Task { @MainActor in
-                    defer { self.isStartingMeeting = false }
-                    do {
-                        // Check for a nearby scheduled meeting first
-                        let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
-                        let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
-
-                        let meeting: Meeting
-                        if let scheduled = scheduledMatch {
-                            self.fileLog("New Meeting: matched scheduled '\(scheduled.title)' — starting it")
-                            try await self.stateMachine.startRecording(meeting: scheduled)
-                            meeting = self.stateMachine.currentMeeting ?? scheduled
-                        } else {
-                            meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
-                        }
-
-                        self.activeMeeting = self.stateMachine.currentMeeting
-                        self.isRecording = self.stateMachine.isRecording
-                        self.selectedMeetingId = meeting.id
-                        if self.isRecording { self.startAudioLevelPolling() }
-                        self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
-                        self.loadMeetings()
-                    } catch {
-                        Logger.general.error("Failed to start meeting: \(error.localizedDescription)")
-                        self.lastUserError = error.localizedDescription
-                    }
+                    self?.startNewMeeting()
                 }
             }
             .store(in: &cancellables)
