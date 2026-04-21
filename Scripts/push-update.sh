@@ -75,7 +75,25 @@ if [[ -n "$(git -C "${REPO_DIR}" status --porcelain)" ]]; then
 fi
 echo "  [OK] git working tree is clean"
 
-# 2. Sparkle EdDSA key must be accessible in Keychain before we spend 3min building.
+# 2. Signing environment: required to produce a release-quality archive.
+#    build-release.sh silently substitutes empty strings if these are missing,
+#    which surfaces far later as cryptic xcodebuild / notarytool errors. Fail fast.
+MISSING_ENV=()
+if [[ -z "${TEAM_ID:-}" ]]; then MISSING_ENV+=("TEAM_ID"); fi
+if [[ "${SKIP_NOTARIZE:-}" != "1" && -z "${APPLE_ID:-}" ]]; then MISSING_ENV+=("APPLE_ID"); fi
+if [[ "${SKIP_NOTARIZE:-}" != "1" && -z "${APP_SPECIFIC_PASSWORD:-}" ]]; then MISSING_ENV+=("APP_SPECIFIC_PASSWORD"); fi
+if [[ ${#MISSING_ENV[@]} -gt 0 ]]; then
+    echo "ERROR: Required signing env vars not set: ${MISSING_ENV[*]}"
+    echo "  Set them in your shell profile or a .env.local (gitignored), then re-run."
+    echo "  TEAM_ID                Apple Developer team ID (10-char alphanumeric)"
+    echo "  APPLE_ID               Apple ID used for notarization"
+    echo "  APP_SPECIFIC_PASSWORD  App-specific password for notarytool"
+    echo "  (APPLE_ID / APP_SPECIFIC_PASSWORD may be omitted when SKIP_NOTARIZE=1.)"
+    exit 1
+fi
+echo "  [OK] signing env vars present"
+
+# 3. Sparkle EdDSA key must be accessible in Keychain before we spend 3min building.
 # Sparkle's generate_keys tool stores the key with service="https://sparkle-project.org"
 # and account="ed25519".
 SPARKLE_KEY_SERVICE="https://sparkle-project.org"
