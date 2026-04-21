@@ -78,8 +78,8 @@ final class CalendarSyncManager {
     /// The first sync runs immediately.
     ///
     /// - Parameter interval: Time between syncs, in seconds.
-    func startPeriodicSync(interval: TimeInterval) {
-        stopSync()
+    func startPeriodicSync(interval: TimeInterval) async {
+        await stopSync()
 
         Logger.calendar.info("Starting periodic calendar sync every \(Int(interval / 60)) minutes")
 
@@ -95,12 +95,22 @@ final class CalendarSyncManager {
         }
     }
 
-    /// Stops the periodic sync timer and cancels any in-flight sync.
-    func stopSync() {
+    /// Stops the periodic sync timer and waits for the in-flight sync to quiesce.
+    ///
+    /// Awaiting `syncTask?.value` matters because a cancel-only path can leave a
+    /// half-written meeting record in SQLite: the Task is marked cancelled but it
+    /// may still be mid-transaction when the caller moves on to start a new sync
+    /// or reconfigure auth. Waiting for quiesce eliminates that race.
+    func stopSync() async {
         syncTimer?.invalidate()
         syncTimer = nil
-        syncTask?.cancel()
+        let inflight = syncTask
         syncTask = nil
+        inflight?.cancel()
+        // `Task.value` is nonthrowing for `Task<Void, Never>` and returns once the
+        // task honors cancellation (`performSync` checks for `Task.isCancelled` at
+        // its async boundaries).
+        await inflight?.value
         Logger.calendar.info("Periodic calendar sync stopped")
     }
 
