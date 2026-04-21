@@ -1472,49 +1472,10 @@ final class AppState {
         return Array(samples[firstNonSilent..<lastNonSilent])
     }
 
-    // MARK: - File Logging (for debugging with user)
-
-    /// Append a line to a shared log file that both the app and Claude can read.
-    /// Log rotation: when the file exceeds `maxLogFileSize`, the current log is
-    /// renamed to `app.log.1` (overwriting any previous backup) and a fresh file
-    /// is started.  This prevents unbounded disk growth.
-    static let logFile = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
-
-    /// Maximum log file size before rotation (5 MB).
-    private static let maxLogFileSize: UInt64 = 5 * 1024 * 1024
+    // MARK: - File Logging (delegates to AppFileLogger for thread-safe, date-rotated output)
 
     func fileLog(_ message: String) {
-        let timestamp = DateFormatting.iso8601Formatter.string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-
-        let fm = FileManager.default
-        if fm.fileExists(atPath: Self.logFile.path) {
-            // Rotate if the file is too large
-            if let attrs = try? fm.attributesOfItem(atPath: Self.logFile.path),
-               let size = attrs[.size] as? UInt64,
-               size > Self.maxLogFileSize {
-                let backupURL = Self.logFile.deletingPathExtension()
-                    .appendingPathExtension("log.1")
-                try? fm.removeItem(at: backupURL)
-                try? fm.moveItem(at: Self.logFile, to: backupURL)
-                // Start fresh
-                try? data.write(to: Self.logFile)
-                return
-            }
-
-            if let handle = try? FileHandle(forWritingTo: Self.logFile) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                handle.closeFile()
-            }
-        } else {
-            // Ensure directory exists
-            let dir = Self.logFile.deletingLastPathComponent()
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try? data.write(to: Self.logFile)
-        }
+        AppFileLogger.shared.log(message)
     }
 
     // MARK: - Audio Level Polling
