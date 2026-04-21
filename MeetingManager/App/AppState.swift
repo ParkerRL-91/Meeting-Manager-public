@@ -12,7 +12,9 @@ import os
 final class AppState {
     /// Shared instance for access from AppDelegate (menu bar popover).
     /// Set during init — there is exactly one AppState per app lifetime.
-    static var shared: AppState!
+    /// Held as Optional (not IUO) so early access during app launch is a
+    /// compile-time-visible nil check rather than a runtime crash.
+    static private(set) var shared: AppState?
 
     // MARK: - Sidebar Navigation
 
