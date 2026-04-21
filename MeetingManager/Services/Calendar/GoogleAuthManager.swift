@@ -429,7 +429,9 @@ final class GoogleAuthManager {
                 }
             }
         }
-        throw lastError!
+        // maxAttempts >= 1 at call sites, so lastError is always set here. Guard
+        // defensively anyway — a retry path must never be a crash vector.
+        throw lastError ?? GoogleAuthError.networkError(URLError(.unknown))
     }
 }
 
