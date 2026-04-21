@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 /// A small popover for quickly capturing action items during a live meeting.
 /// Triggered via Cmd+Shift+A or a toolbar button.
@@ -164,7 +165,7 @@ struct QuickCapturePopoverView: View {
                     onSave()
                 }
             } catch {
-                print("QuickCapture: failed to save action item: \(error)")
+                Logger.database.error("QuickCapture: failed to save action item: \(error.localizedDescription, privacy: .public)")
                 await MainActor.run { isSaving = false }
             }
         }

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import os
 
 /// Granola-inspired live meeting view.
 /// Layout: Recording bar at top → Big title + pill badges → Notes area → Context brief → Bottom chat/stop bar.
@@ -231,7 +232,7 @@ struct LiveMeetingView: View {
                 }
             }
         } catch {
-            print("Failed to load open items for carry-forward: \(error)")
+            Logger.database.error("Failed to load open items for carry-forward: \(error.localizedDescription, privacy: .public)")
         }
     }
 

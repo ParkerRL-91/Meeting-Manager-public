@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 struct AIChoiceStepView: View {
     @Bindable var onboardingManager: OnboardingManager
@@ -181,7 +182,7 @@ struct AIChoiceStepView: View {
             try KeychainHelper.save(apiKey, forKey: KeychainHelper.Key.claudeAPIKey)
             apiKeySaved = true
         } catch {
-            print("Failed to save API key: \(error)")
+            Logger.general.error("Failed to save API key: \(error.localizedDescription, privacy: .public)")
         }
     }
 

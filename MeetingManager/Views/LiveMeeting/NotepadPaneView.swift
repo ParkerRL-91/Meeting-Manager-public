@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 /// Right pane: free-form text editor for meeting notes with auto-save.
 struct NotepadPaneView: View {
@@ -106,7 +107,7 @@ struct NotepadPaneView: View {
                     }
                 }
             } catch {
-                print("Failed to load note: \(error)")
+                Logger.database.error("Failed to load note: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -140,7 +141,7 @@ struct NotepadPaneView: View {
                 await MainActor.run { self.existingNote = note }
             }
         } catch {
-            print("Failed to save note: \(error)")
+            Logger.database.error("Failed to save note: \(error.localizedDescription, privacy: .public)")
         }
 
         await MainActor.run { isSaving = false }
@@ -204,7 +205,7 @@ struct NotepadPaneView: View {
                     onActionCaptured?()
                 }
             } catch {
-                print("NotepadPane: failed to save /action item: \(error)")
+                Logger.database.error("NotepadPane: failed to save /action item: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

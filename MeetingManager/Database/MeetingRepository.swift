@@ -282,7 +282,7 @@ final class MeetingRepository {
                     .fetchAll(db)
             }
             .start(in: database.writer, onError: { error in
-                print("Meeting observation error: \(error)")
+                Logger.database.error("Meeting observation error: \(error.localizedDescription, privacy: .public)")
             }, onChange: onChange)
     }
 }

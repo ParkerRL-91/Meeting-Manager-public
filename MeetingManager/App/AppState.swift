@@ -256,7 +256,7 @@ final class AppState {
                     await MainActor.run { self.settings = loaded }
                 }
             } catch {
-                print("Failed to load settings: \(error)")
+                Logger.database.error("Failed to load settings: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -274,7 +274,7 @@ final class AppState {
                     }
                 }
             } catch {
-                print("Failed to persist settings: \(error)")
+                Logger.database.error("Failed to persist settings: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -299,7 +299,7 @@ final class AppState {
                 }
             } catch {
                 if !Task.isCancelled {
-                    print("Failed to load meetings: \(error)")
+                    Logger.database.error("Failed to load meetings: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }
