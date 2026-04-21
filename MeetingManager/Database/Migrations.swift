@@ -548,5 +548,13 @@ enum Migrations {
                 options: .unique
             )
         }
+
+        // v22: rebuild the FTS index so search results match the transcript table.
+        // transcript_fts uses FTS5 content-sync triggers added in v13; users who
+        // had transcripts before v13 (or whose FTS triggers were skipped due to a
+        // crash) may have a stale index. The 'rebuild' command forces a full resync.
+        migrator.registerMigration("v22-fts-rebuild") { db in
+            try db.execute(sql: "INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')")
+        }
     }
 }

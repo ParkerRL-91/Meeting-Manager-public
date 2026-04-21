@@ -47,7 +47,32 @@ final class AppDatabase {
         config.maximumReaderCount = 5
         let dbPool = try DatabasePool(path: dbPath, configuration: config)
 
-        return try AppDatabase(writer: dbPool)
+        let db = try AppDatabase(writer: dbPool)
+        db.checkFTSConsistency()
+        return db
+    }
+
+    /// Logs a warning if transcript_fts is out of sync with the transcript table.
+    /// Inconsistency can occur if a migration ran partially or triggers were bypassed.
+    /// A mismatch here is non-fatal — search may return stale results until the next
+    /// v22-fts-rebuild migration runs (or the user rebuilds manually).
+    private func checkFTSConsistency() {
+        Task.detached(priority: .utility) { [writer] in
+            do {
+                let (transcriptCount, ftsCount) = try await writer.read { db -> (Int, Int) in
+                    let tc = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript") ?? 0
+                    let fc = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_fts") ?? 0
+                    return (tc, fc)
+                }
+                if transcriptCount != ftsCount {
+                    logger.warning("FTS inconsistency: transcript=\(transcriptCount) fts=\(ftsCount) — search results may be stale")
+                } else {
+                    logger.info("FTS consistency check: \(transcriptCount) rows — OK")
+                }
+            } catch {
+                logger.error("FTS consistency check failed: \(error)")
+            }
+        }
     }
 
     /// In-memory database for previews and tests
