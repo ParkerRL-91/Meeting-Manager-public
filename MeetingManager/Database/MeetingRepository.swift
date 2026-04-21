@@ -164,11 +164,15 @@ final class MeetingRepository {
             var request = Meeting.all()
 
             if let query, !query.isEmpty {
+                // Escape LIKE wildcards in the user query (the whole thing is still passed
+                // as a bound parameter, so SQL-syntax injection is impossible; escaping
+                // here only prevents '%' and '_' inside the query from behaving as wildcards).
                 let escaped = query
                     .replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "%", with: "\\%")
                     .replacingOccurrences(of: "_", with: "\\_")
-                request = request.filter(sql: "title LIKE '%\(escaped)%' ESCAPE '\\'")
+                request = request.filter(sql: "title LIKE ? ESCAPE '\\'",
+                                         arguments: ["%\(escaped)%"])
             }
 
             if let date {
