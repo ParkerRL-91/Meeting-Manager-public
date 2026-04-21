@@ -119,7 +119,7 @@ struct MeetingPrepCardView: View {
                             }
                             if meeting.participantList.count > 3 {
                                 Text("+\(meeting.participantList.count - 3)")
-                                    .font(.system(size: 9, weight: .semibold))
+                                    .font(.caption2.weight(.semibold))
                                     .foregroundStyle(Color.appTextSecondary)
                                     .padding(.leading, 4)
                             }
@@ -130,9 +130,9 @@ struct MeetingPrepCardView: View {
                     if let brief = prepBrief, !brief.openActionItems.isEmpty {
                         HStack(spacing: 3) {
                             Image(systemName: "checkmark.circle")
-                                .font(.system(size: 10))
+                                .font(.caption2)
                             Text("\(brief.openActionItems.count) open")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.caption2.weight(.medium))
                         }
                         .foregroundStyle(Color.appWarning)
                         .padding(.horizontal, 6)
@@ -239,7 +239,7 @@ struct MeetingPrepCardView: View {
                     ForEach(brief.openActionItems.prefix(5)) { item in
                         HStack(spacing: 8) {
                             Image(systemName: "circle")
-                                .font(.system(size: 10))
+                                .font(.caption2)
                                 .foregroundStyle(Color.appWarning)
 
                             Text(item.title)
@@ -251,7 +251,7 @@ struct MeetingPrepCardView: View {
 
                             if let assignee = item.assignee {
                                 Text(assignee)
-                                    .font(.system(size: 10, weight: .medium))
+                                    .font(.caption2.weight(.medium))
                                     .foregroundStyle(Color.appTextSecondary)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 2)
@@ -281,7 +281,7 @@ struct MeetingPrepCardView: View {
                     ForEach(brief.relatedMeetings.prefix(3)) { related in
                         HStack(spacing: 8) {
                             Text(related.date, format: .dateTime.month(.abbreviated).day())
-                                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                .font(.caption2.weight(.medium).monospacedDigit())
                                 .foregroundStyle(Color.appAccent)
                                 .frame(width: 44, alignment: .leading)
 

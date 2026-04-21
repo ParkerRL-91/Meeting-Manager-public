@@ -56,14 +56,7 @@ final class StreamingTranscriber {
         bufferManager: AudioBufferManager,
         repository: TranscriptRepository
     ) {
-        // File log for debugging
-        let logLine = "[StreamingTranscriber] start() called — isActive=\(isActive), modelLoaded=\(transcriptionService.isModelLoaded)\n"
-        if let data = logLine.data(using: .utf8),
-           let handle = try? FileHandle(forWritingTo: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MeetingManager/app.log")) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        }
+        AppFileLogger.shared.log("[StreamingTranscriber] start() called — isActive=\(isActive), modelLoaded=\(transcriptionService.isModelLoaded)")
 
         guard !isActive else {
             Logger.transcription.warning("StreamingTranscriber.start called while already active")
@@ -166,9 +159,20 @@ final class StreamingTranscriber {
                         )
                     }
 
-                    // Deduplicate: if the same text appears 3+ times in a batch, it's hallucination
-                    let textCounts = Dictionary(grouping: transcripts, by: { $0.text }).mapValues { $0.count }
-                    let filteredTranscripts = transcripts.filter { (textCounts[$0.text] ?? 0) < 3 }
+                    // Deduplicate hallucinations without dropping legitimate repeats.
+                    //
+                    // WhisperKit occasionally emits the same segment text multiple times at
+                    // the SAME time window (classic repetition artefact). Dropping those is
+                    // the goal. But a speaker can also legitimately say "thank you" at 00:01,
+                    // 00:15, and 00:30 — the old text-only dedup would delete all three as
+                    // hallucinations. Group by (text, startTime-rounded-to-0.5s) instead:
+                    // hallucinations share a bucket, legitimate repeats do not.
+                    func dedupKey(for t: Transcript) -> String {
+                        let bucket = Int((t.startTime * 2).rounded())
+                        return "\(bucket)\u{1F}\(t.text)"  // \u{1F} is an ASCII unit separator
+                    }
+                    let keyCounts = Dictionary(grouping: transcripts, by: dedupKey).mapValues { $0.count }
+                    let filteredTranscripts = transcripts.filter { (keyCounts[dedupKey(for: $0)] ?? 0) < 3 }
 
                     guard !filteredTranscripts.isEmpty else { continue }
 

@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import os
 
 /// Granola-inspired live meeting view.
 /// Layout: Recording bar at top → Big title + pill badges → Notes area → Context brief → Bottom chat/stop bar.
@@ -68,11 +70,17 @@ struct LiveMeetingView: View {
             loadContext()
             await loadOpenItems()
             await loadCapturedItemCount()
+            await focusTitleForRenameIfNeeded()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in
             if let active = appState.activeMeeting {
                 meeting = active
                 editableTitle = active.title
+            }
+        }
+        .onChange(of: appState.focusTitleForRename) { _, shouldFocus in
+            if shouldFocus {
+                Task { await focusTitleForRenameIfNeeded() }
             }
         }
     }
@@ -84,7 +92,7 @@ struct LiveMeetingView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Big title (inline editable)
                 TextField("Meeting title", text: $editableTitle)
-                    .font(.system(size: 28, weight: .bold))
+                    .font(.title.weight(.bold))
                     .foregroundStyle(Color.appTextPrimary)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 28)
@@ -190,6 +198,23 @@ struct LiveMeetingView: View {
         }
     }
 
+    /// When AppState signals that a newly-created ad-hoc meeting needs its title renamed,
+    /// focus the title TextField and select all of its text so the user can type straight
+    /// over "New Meeting" without having to click or drag-select first.
+    @MainActor
+    private func focusTitleForRenameIfNeeded() async {
+        guard appState.focusTitleForRename else { return }
+        // Wait for the TextField to be mounted and hosted by AppKit before selecting.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        isTitleFocused = true
+        // SwiftUI focus doesn't select the contents of a macOS TextField by default;
+        // fire selectAll on the newly-focused first responder so typing replaces the
+        // default placeholder text.
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        appState.focusTitleForRename = false
+    }
+
     // MARK: - Open Items Loading (T-021 / T-022)
 
     private func loadOpenItems() async {
@@ -207,7 +232,7 @@ struct LiveMeetingView: View {
                 }
             }
         } catch {
-            print("Failed to load open items for carry-forward: \(error)")
+            Logger.database.error("Failed to load open items for carry-forward: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -255,14 +280,14 @@ private struct OpenItemsPanel: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 12))
+                        .font(.footnote)
                         .foregroundStyle(Color.appWarning)
                     Text("Open Items (\(items.count))")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.appTextPrimary)
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(Color.appTextSecondary)
                 }
                 .padding(.horizontal, 12)
@@ -311,7 +336,7 @@ private struct OpenItemRow: View {
                 }
             } label: {
                 Image(systemName: item.isCompleted ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 14))
+                    .font(.callout)
                     .foregroundStyle(item.isCompleted ? Color.appAccent : Color.appTextSecondary)
             }
             .buttonStyle(.plain)
@@ -410,9 +435,9 @@ private struct PillBadge: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 11))
+                .font(.caption)
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .font(.footnote.weight(.medium))
         }
         .foregroundStyle(Color.appTextSecondary)
         .padding(.horizontal, 10)
@@ -579,10 +604,10 @@ private struct BottomBar: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "bolt.fill")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(Color.appAccent)
                         Text("\(capturedItemCount) item\(capturedItemCount == 1 ? "" : "s")")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.footnote.weight(.medium))
                             .foregroundStyle(Color.appAccent)
                     }
                     .padding(.horizontal, 8)

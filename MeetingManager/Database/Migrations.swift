@@ -70,9 +70,11 @@ enum Migrations {
                 t.column("theme", .text).notNull().defaults(to: "dark")
             }
 
-            // Insert default settings
+            // Insert default settings. Uses OR REPLACE so the migration is idempotent
+            // — if a prior migration attempt populated the row before crashing, we
+            // won't now fail the CHECK(id==1) constraint trying to insert a duplicate.
             try db.execute(sql: """
-                INSERT INTO appSettings (id, summaryPromptTemplate)
+                INSERT OR REPLACE INTO appSettings (id, summaryPromptTemplate)
                 VALUES (1, ?)
                 """, arguments: [AppSettings.default.summaryPromptTemplate])
         }
@@ -510,6 +512,49 @@ enum Migrations {
                 t.add(column: "morningBriefHour", .integer).notNull().defaults(to: 8)
                 t.add(column: "morningBriefMinute", .integer).notNull().defaults(to: 30)
             }
+        }
+
+        // P2-DATA-03: transcript dedup by time, not text.
+        // Existing code guarded against duplicate transcripts with a text-only filter
+        // at the Swift layer, which both dropped legitimate repeats and missed dupes
+        // that crossed batch boundaries. The database-level guarantee here is
+        // (meetingId, startTime, endTime) — WhisperKit re-emitting the same segment
+        // hits the unique constraint and INSERT OR IGNORE is a no-op at the call site.
+        //
+        // Existing rows may contain duplicates from before this migration; dedupe
+        // them first by keeping the highest-confidence row per (meeting, start, end).
+        migrator.registerMigration("v21-transcript-dedup-index") { db in
+            // Drop lower-confidence duplicates, if any. Keeps the row with the
+            // highest confidence in each time bucket; ties broken by rowid asc.
+            try db.execute(sql: """
+                DELETE FROM transcript
+                WHERE rowid NOT IN (
+                    SELECT rowid
+                    FROM (
+                        SELECT rowid,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY meetingId, startTime, endTime
+                                   ORDER BY COALESCE(confidence, 0) DESC, rowid ASC
+                               ) AS rn
+                        FROM transcript
+                    )
+                    WHERE rn = 1
+                );
+                """)
+            try db.create(
+                index: "idx_transcript_unique_time",
+                on: "transcript",
+                columns: ["meetingId", "startTime", "endTime"],
+                options: .unique
+            )
+        }
+
+        // v22: rebuild the FTS index so search results match the transcript table.
+        // transcript_fts uses FTS5 content-sync triggers added in v13; users who
+        // had transcripts before v13 (or whose FTS triggers were skipped due to a
+        // crash) may have a stale index. The 'rebuild' command forces a full resync.
+        migrator.registerMigration("v22-fts-rebuild") { db in
+            try db.execute(sql: "INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')")
         }
     }
 }

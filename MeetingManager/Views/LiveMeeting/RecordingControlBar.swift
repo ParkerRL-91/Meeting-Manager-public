@@ -15,6 +15,10 @@ struct RecordingControlBar: View {
     @State private var isEditing = false
     @FocusState private var titleFocused: Bool
 
+    /// Gate on the stop button so users don't accidentally end a meeting. Surfaces a
+    /// confirmationDialog with explicit copy about what "stop" does.
+    @State private var showStopConfirmation = false
+
     var body: some View {
         HStack(spacing: 12) {
             // Pulsing recording indicator
@@ -99,9 +103,9 @@ struct RecordingControlBar: View {
 
             // Stop button
             Button(action: {
-                // Commit any pending title edit before stopping
+                // Commit any pending title edit before prompting for confirmation.
                 if isEditing { commitTitle() }
-                appState.stopRecording()
+                showStopConfirmation = true
             }) {
                 Image(systemName: "stop.fill")
                     .font(.title3)
@@ -112,12 +116,26 @@ struct RecordingControlBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+            .accessibilityLabel("Stop recording")
+            .accessibilityHint("Ends the meeting and starts transcription")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Color.appSurface)
         .onAppear(perform: startTimer)
         .onDisappear(perform: stopTimer)
+        .confirmationDialog(
+            "Stop recording?",
+            isPresented: $showStopConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Stop Recording", role: .destructive) {
+                appState.stopRecording()
+            }
+            Button("Keep Recording", role: .cancel) { }
+        } message: {
+            Text("This ends the meeting and begins transcription. You can't resume this recording afterwards.")
+        }
     }
 
     // MARK: - Title Editing

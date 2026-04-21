@@ -32,7 +32,7 @@ struct UpNextBannerView: View {
             // Up Next label
             VStack(alignment: .leading, spacing: 1) {
                 Text("UP NEXT")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.appAccent)
                     .tracking(0.8)
 
@@ -61,9 +61,9 @@ struct UpNextBannerView: View {
                     if participantCount > 0 {
                         HStack(spacing: 3) {
                             Image(systemName: "person.2")
-                                .font(.system(size: 9))
+                                .font(.caption2)
                             Text("\(participantCount)")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.caption2.weight(.medium))
                         }
                         .foregroundStyle(Color.appTextSecondary)
                         .padding(.horizontal, 6)
@@ -76,9 +76,9 @@ struct UpNextBannerView: View {
                     if openItemsCount > 0 {
                         HStack(spacing: 3) {
                             Image(systemName: "checkmark.circle")
-                                .font(.system(size: 9))
+                                .font(.caption2)
                             Text("\(openItemsCount) open")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.caption2.weight(.medium))
                         }
                         .foregroundStyle(Color.appWarning)
                         .padding(.horizontal, 6)
@@ -106,7 +106,7 @@ struct UpNextBannerView: View {
                 }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(Color.appTextSecondary)
             }
             .buttonStyle(.plain)

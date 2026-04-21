@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import os
 
 final class MeetingRepository {
     private let database: AppDatabase
@@ -17,8 +18,23 @@ final class MeetingRepository {
     }
 
     func delete(_ meeting: Meeting) async throws {
+        // Snapshot the on-disk audio paths before the DB cascade runs so we don't lose
+        // the reference. SQL foreign-key cascades drop transcript/notes/summary rows,
+        // but audio files live on the filesystem and must be cleaned up explicitly —
+        // otherwise ~/Library/Application Support/MeetingManager/Audio grows unbounded.
+        let audioPaths = meeting.audioFilePaths
         try await database.writer.write { db in
             _ = try meeting.delete(db)
+        }
+        let fm = FileManager.default
+        for path in audioPaths {
+            do {
+                if fm.fileExists(atPath: path) {
+                    try fm.removeItem(atPath: path)
+                }
+            } catch {
+                Logger.database.warning("Failed to remove audio file '\(path, privacy: .public)': \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -164,11 +180,15 @@ final class MeetingRepository {
             var request = Meeting.all()
 
             if let query, !query.isEmpty {
+                // Escape LIKE wildcards in the user query (the whole thing is still passed
+                // as a bound parameter, so SQL-syntax injection is impossible; escaping
+                // here only prevents '%' and '_' inside the query from behaving as wildcards).
                 let escaped = query
                     .replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "%", with: "\\%")
                     .replacingOccurrences(of: "_", with: "\\_")
-                request = request.filter(sql: "title LIKE '%\(escaped)%' ESCAPE '\\'")
+                request = request.filter(sql: "title LIKE ? ESCAPE '\\'",
+                                         arguments: ["%\(escaped)%"])
             }
 
             if let date {
@@ -262,7 +282,7 @@ final class MeetingRepository {
                     .fetchAll(db)
             }
             .start(in: database.writer, onError: { error in
-                print("Meeting observation error: \(error)")
+                Logger.database.error("Meeting observation error: \(error.localizedDescription, privacy: .public)")
             }, onChange: onChange)
     }
 }

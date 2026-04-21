@@ -282,7 +282,9 @@ final class GoogleCalendarService {
                 }
             }
         }
-        throw lastError!
+        // maxAttempts >= 1 at call sites, so lastError is always set here. Guard
+        // defensively anyway — a retry path must never be a crash vector.
+        throw lastError ?? GoogleCalendarError.networkError(URLError(.unknown))
     }
 
     /// Parses a Google Calendar `EventDateTime` into a `Date`.

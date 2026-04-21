@@ -234,16 +234,6 @@ final class AppleSpeechTranscriber {
     // MARK: - File Logging
 
     private func fileLog(_ message: String) {
-        let timestamp = DateFormatting.iso8601Formatter.string(from: Date())
-        let line = "[\(timestamp)] AppleSpeech: \(message)\n"
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
-        if let data = line.data(using: .utf8) {
-            if let handle = try? FileHandle(forWritingTo: logURL) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                handle.closeFile()
-            }
-        }
+        AppFileLogger.shared.log("AppleSpeech: \(message)")
     }
 }

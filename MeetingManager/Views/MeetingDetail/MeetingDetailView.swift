@@ -206,16 +206,16 @@ struct MeetingDetailView: View {
             }
         }
         .confirmationDialog(
-            "Delete Meeting",
+            "Delete this meeting?",
             isPresented: $showingDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
+            Button("Delete Meeting", role: .destructive) {
                 deleteMeeting()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to delete this meeting? This will also delete all associated transcripts, notes, and summaries. This action cannot be undone.")
+            Text("This permanently removes the transcript, notes, summaries, action items, and any stored audio recording for this meeting. This cannot be undone.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .switchTab)) { notification in
             if let tabName = notification.object as? String,

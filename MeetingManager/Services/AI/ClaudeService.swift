@@ -258,7 +258,10 @@ final class ClaudeService {
                 }
             }
         }
-        throw lastError!
+        // Fallback: withRetry is only ever entered with maxAttempts >= 1, so lastError
+        // will be set if we reach here. Guard defensively anyway — we must never crash
+        // the app from a network retry path.
+        throw lastError ?? ClaudeServiceError.networkError(URLError(.unknown))
     }
 
     /// Performs a lightweight request to verify the API key and connectivity.

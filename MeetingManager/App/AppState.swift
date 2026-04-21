@@ -12,7 +12,9 @@ import os
 final class AppState {
     /// Shared instance for access from AppDelegate (menu bar popover).
     /// Set during init — there is exactly one AppState per app lifetime.
-    static var shared: AppState!
+    /// Held as Optional (not IUO) so early access during app launch is a
+    /// compile-time-visible nil check rather than a runtime crash.
+    static private(set) var shared: AppState?
 
     // MARK: - Sidebar Navigation
 
@@ -52,6 +54,11 @@ final class AppState {
     /// The name of a detected call app when a meeting is in progress but recording hasn't started.
     /// Cleared when recording begins or the call app exits.
     private(set) var detectedCallApp: String?
+
+    /// Signals the active meeting view to focus and select its title field so the user can
+    /// rename immediately after an ad-hoc "New Meeting" is created. The consumer resets this
+    /// to false after handling.
+    var focusTitleForRename: Bool = false
 
     /// Timestamp of the last call detection event, used to deduplicate rapid-fire
     /// notifications from CallDetectionService and BrowserCallDetector firing for
@@ -183,6 +190,10 @@ final class AppState {
         }
 
         self.database = AppDatabase.shared
+        if let dbError = AppDatabase.initializationError {
+            Logger.general.critical("AppState: database unavailable at launch — \(dbError)")
+            self.lastUserError = "The database could not be opened (\(dbError.localizedDescription)). Your meeting data is unavailable. Please restart the app or contact support."
+        }
         self.ollamaService = OllamaService()
         self.ollamaInstaller = OllamaInstaller()
         self.meetingRepository = MeetingRepository(database: database)
@@ -249,7 +260,7 @@ final class AppState {
                     await MainActor.run { self.settings = loaded }
                 }
             } catch {
-                print("Failed to load settings: \(error)")
+                Logger.database.error("Failed to load settings: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -267,7 +278,7 @@ final class AppState {
                     }
                 }
             } catch {
-                print("Failed to persist settings: \(error)")
+                Logger.database.error("Failed to persist settings: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -292,7 +303,7 @@ final class AppState {
                 }
             } catch {
                 if !Task.isCancelled {
-                    print("Failed to load meetings: \(error)")
+                    Logger.database.error("Failed to load meetings: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }
@@ -310,12 +321,32 @@ final class AppState {
         taskQueueManager.transcriptionHandler = { [weak self] meetingId, audioURL in
             guard let self else { return }
             self.fileLog("TaskQueue: running transcription for \(meetingId)")
-            await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            let (transcripts, speakerLabels) = await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
 
-            // Mark meeting complete after transcription
-            if var meeting = try? await self.meetingRepository.find(id: meetingId),
-               meeting.status == .transcribing {
-                try? await self.stateMachine.complete(meeting: meeting)
+            // Atomically commit transcripts + meeting-status update + speaker labels in one write.
+            // Previously three separate writer.write calls; now a single transaction so a crash
+            // between steps cannot leave transcripts saved but meeting still in .transcribing.
+            if var meeting = try? await self.meetingRepository.find(id: meetingId) {
+                if let labels = speakerLabels {
+                    let existing = meeting.participants ?? ""
+                    meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
+                }
+                let wasTranscribing = meeting.status == .transcribing
+                if wasTranscribing { meeting.status = .complete }
+
+                try? await self.database.writer.write { db in
+                    for var t in transcripts { try t.save(db) }
+                    try meeting.save(db)
+                }
+
+                if wasTranscribing {
+                    NotificationCenter.default.post(
+                        name: .meetingStateChanged,
+                        object: self.stateMachine,
+                        userInfo: ["meetingId": meeting.id, "status": meeting.status.rawValue]
+                    )
+                }
+                Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
                 self.loadMeetings()
             }
         }
@@ -525,6 +556,72 @@ final class AppState {
     /// The state machine's `currentMeeting == nil` guard is necessary but not sufficient
     /// because multiple async Tasks can read it as nil before any of them set it.
     private var isStartingMeeting = false
+
+    /// Create an ad-hoc meeting and start recording. Called from the sidebar "New Meeting"
+    /// button, menu bar, Home view, and the `.createNewMeeting` notification observer.
+    ///
+    /// Behaviour:
+    /// 1. Switches `sidebarDestination` to `.meetings` synchronously for immediate visual feedback.
+    /// 2. If a scheduled meeting starts within ±5 minutes, records against that one instead of
+    ///    creating a duplicate ad-hoc entry.
+    /// 3. After recording starts, sets `focusTitleForRename` so the meeting view auto-focuses
+    ///    the title field for easy rename (ad-hoc meetings only).
+    /// 4. Surfaces guard-rail failures (already recording, start in progress) as `lastUserError`
+    ///    so the user gets a visible alert instead of a silent no-op.
+    @MainActor
+    func startNewMeeting() {
+        guard !isRecording else {
+            lastUserError = "A meeting is already recording. Stop it before starting a new one."
+            fileLog("startNewMeeting: skipped — already recording")
+            return
+        }
+        guard !isStartingMeeting else {
+            fileLog("startNewMeeting: skipped — another start in progress (debounce)")
+            return
+        }
+
+        // Flip the detail pane immediately so the user sees *something* change even before
+        // audio services spin up.
+        sidebarDestination = .meetings
+        isStartingMeeting = true
+        fileLog("startNewMeeting invoked")
+
+        Task { @MainActor in
+            defer { self.isStartingMeeting = false }
+            do {
+                let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+                let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
+
+                let meeting: Meeting
+                let isAdHoc: Bool
+                if let scheduled = scheduledMatch {
+                    self.fileLog("startNewMeeting: matched scheduled '\(scheduled.title)' — starting it")
+                    try await self.stateMachine.startRecording(meeting: scheduled)
+                    meeting = self.stateMachine.currentMeeting ?? scheduled
+                    isAdHoc = false
+                } else {
+                    meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                    isAdHoc = true
+                }
+
+                self.activeMeeting = self.stateMachine.currentMeeting
+                self.isRecording = self.stateMachine.isRecording
+                self.selectedMeetingId = meeting.id
+                if self.isRecording { self.startAudioLevelPolling() }
+                self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
+                self.loadMeetings()
+
+                // Only auto-focus the title when the meeting was created ad-hoc; for a scheduled
+                // meeting we want to keep the calendar-provided title as-is.
+                if isAdHoc {
+                    self.focusTitleForRename = true
+                }
+            } catch {
+                Logger.general.error("Failed to start meeting: \(error.localizedDescription)")
+                self.lastUserError = "Couldn't start recording: \(error.localizedDescription)"
+            }
+        }
+    }
 
     func createMeeting(title: String, scheduledStart: Date? = nil, scheduledEnd: Date? = nil) async throws -> Meeting {
         var meeting = Meeting(
@@ -820,12 +917,12 @@ final class AppState {
     }
 
     /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
-    /// This gives dramatically better accuracy than streaming 30-second chunks because
-    /// Whisper carries context between windows and the full audio is available.
-    private func batchTranscribe(meetingId: String, audioURL: URL?) async {
+    /// Returns the filtered transcripts and diarisation speaker labels to the caller, which
+    /// is responsible for the atomic DB write (see transcriptionHandler in setupTaskQueue).
+    private func batchTranscribe(meetingId: String, audioURL: URL?) async -> (transcripts: [Transcript], speakerLabels: String?) {
         guard let audioURL else {
             fileLog("Batch transcribe: no audio file URL")
-            return
+            return ([], nil)
         }
 
         if !transcriptionService.isModelLoaded {
@@ -839,9 +936,10 @@ final class AppState {
             fileLog("Batch transcribe: model not loaded after 5 min — queuing for later")
             addPendingTranscription(meetingId: meetingId, audioURL: audioURL)
             lastUserError = "Transcription queued — will process when model loads."
-            return
+            return ([], nil)
         }
 
+        var capturedSpeakerLabels: String?
         fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
 
         do {
@@ -851,13 +949,13 @@ final class AppState {
             let frameCount = AVAudioFrameCount(audioFile.length)
             guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
                 fileLog("Batch transcribe: failed to create buffer")
-                return
+                return ([], nil)
             }
             try audioFile.read(into: buffer)
 
             guard let channelData = buffer.floatChannelData else {
                 fileLog("Batch transcribe: no channel data")
-                return
+                return ([], nil)
             }
             let allSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
 
@@ -899,14 +997,9 @@ final class AppState {
                 let uniqueSpeakers = Set(diarResult.segments.compactMap { $0.speaker.speakerId })
                 fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
 
-                // Update meeting participants
+                // Capture speaker labels — written atomically with transcripts in the caller
                 if uniqueSpeakers.count > 1 {
-                    let speakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
-                    if var meeting = try? await meetingRepository.find(id: meetingId) {
-                        let existing = meeting.participants ?? ""
-                        meeting.participants = existing.isEmpty ? speakerLabels : "\(existing) (\(speakerLabels))"
-                        try? await meetingRepository.save(&meeting)
-                    }
+                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
                 }
             } catch {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
@@ -990,15 +1083,14 @@ final class AppState {
                     confidence: seg.confidence
                 ))
             }
-            try await transcriptRepository.saveBatch(toSave)
-            let savedCount = toSave.count
-
-            fileLog("Batch transcribe: saved \(savedCount) segments, skipped \(skippedCount) hallucinations")
-            Logger.transcription.info("Batch transcription complete: \(savedCount) segments for meeting \(meetingId)")
+            fileLog("Batch transcribe: prepared \(toSave.count) segments, skipped \(skippedCount) hallucinations")
+            Logger.transcription.info("Batch transcription ready: \(toSave.count) segments for meeting \(meetingId)")
+            return (toSave, capturedSpeakerLabels)
 
         } catch {
             fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
             Logger.transcription.error("Batch transcription failed: \(error.localizedDescription)")
+            return ([], capturedSpeakerLabels)
         }
     }
 
@@ -1128,7 +1220,19 @@ final class AppState {
                 fileLog("Pending transcription: audio file missing for \(meetingId), removing from queue")
                 continue
             }
-            await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            // Use same atomic-write pattern as transcriptionHandler
+            let (transcripts, speakerLabels) = await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            if var meeting = try? await meetingRepository.find(id: meetingId) {
+                if let labels = speakerLabels {
+                    let existing = meeting.participants ?? ""
+                    meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
+                }
+                if meeting.status == .transcribing { meeting.status = .complete }
+                try? await database.writer.write { db in
+                    for var t in transcripts { try t.save(db) }
+                    try meeting.save(db)
+                }
+            }
         }
 
         // Clear the queue
@@ -1368,49 +1472,10 @@ final class AppState {
         return Array(samples[firstNonSilent..<lastNonSilent])
     }
 
-    // MARK: - File Logging (for debugging with user)
-
-    /// Append a line to a shared log file that both the app and Claude can read.
-    /// Log rotation: when the file exceeds `maxLogFileSize`, the current log is
-    /// renamed to `app.log.1` (overwriting any previous backup) and a fresh file
-    /// is started.  This prevents unbounded disk growth.
-    static let logFile = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/MeetingManager/app.log")
-
-    /// Maximum log file size before rotation (5 MB).
-    private static let maxLogFileSize: UInt64 = 5 * 1024 * 1024
+    // MARK: - File Logging (delegates to AppFileLogger for thread-safe, date-rotated output)
 
     func fileLog(_ message: String) {
-        let timestamp = DateFormatting.iso8601Formatter.string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-
-        let fm = FileManager.default
-        if fm.fileExists(atPath: Self.logFile.path) {
-            // Rotate if the file is too large
-            if let attrs = try? fm.attributesOfItem(atPath: Self.logFile.path),
-               let size = attrs[.size] as? UInt64,
-               size > Self.maxLogFileSize {
-                let backupURL = Self.logFile.deletingPathExtension()
-                    .appendingPathExtension("log.1")
-                try? fm.removeItem(at: backupURL)
-                try? fm.moveItem(at: Self.logFile, to: backupURL)
-                // Start fresh
-                try? data.write(to: Self.logFile)
-                return
-            }
-
-            if let handle = try? FileHandle(forWritingTo: Self.logFile) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                handle.closeFile()
-            }
-        } else {
-            // Ensure directory exists
-            let dir = Self.logFile.deletingLastPathComponent()
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try? data.write(to: Self.logFile)
-        }
+        AppFileLogger.shared.log(message)
     }
 
     // MARK: - Audio Level Polling
@@ -1536,47 +1601,12 @@ final class AppState {
     // MARK: - Notification Observers
 
     private func observeNotifications() {
-        // Create ad-hoc meeting via state machine (manual "New Meeting" button).
-        // If a scheduled meeting starts within 5 minutes, start that instead.
+        // Create ad-hoc meeting via state machine (manual "New Meeting" button, menu bar,
+        // HomeView, AppDelegate). All paths route through startNewMeeting() for one code path.
         NotificationCenter.default.publisher(for: .createNewMeeting)
             .sink { [weak self] _ in
-                guard let self else { return }
-                guard !self.isRecording else {
-                    self.fileLog("createNewMeeting: skipped — already recording")
-                    return
-                }
-                guard !self.isStartingMeeting else {
-                    self.fileLog("createNewMeeting: skipped — another start in progress (debounce)")
-                    return
-                }
-                self.isStartingMeeting = true
-                self.fileLog("createNewMeeting notification received")
                 Task { @MainActor in
-                    defer { self.isStartingMeeting = false }
-                    do {
-                        // Check for a nearby scheduled meeting first
-                        let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
-                        let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
-
-                        let meeting: Meeting
-                        if let scheduled = scheduledMatch {
-                            self.fileLog("New Meeting: matched scheduled '\(scheduled.title)' — starting it")
-                            try await self.stateMachine.startRecording(meeting: scheduled)
-                            meeting = self.stateMachine.currentMeeting ?? scheduled
-                        } else {
-                            meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
-                        }
-
-                        self.activeMeeting = self.stateMachine.currentMeeting
-                        self.isRecording = self.stateMachine.isRecording
-                        self.selectedMeetingId = meeting.id
-                        if self.isRecording { self.startAudioLevelPolling() }
-                        self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
-                        self.loadMeetings()
-                    } catch {
-                        Logger.general.error("Failed to start meeting: \(error.localizedDescription)")
-                        self.lastUserError = error.localizedDescription
-                    }
+                    self?.startNewMeeting()
                 }
             }
             .store(in: &cancellables)
@@ -1624,7 +1654,34 @@ final class AppState {
                 }
             }
             .store(in: &cancellables)
+
+        // Thermal pressure: log escalations so ops can correlate with transcription
+        // backlog / audio drop reports. At .serious or .critical we back off any
+        // post-meeting transcription tasks that are still queued so the user's
+        // interactive recording path stays responsive.
+        NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let state = ProcessInfo.processInfo.thermalState
+                let stateName: String
+                switch state {
+                case .nominal: stateName = "nominal"
+                case .fair: stateName = "fair"
+                case .serious: stateName = "serious"
+                case .critical: stateName = "critical"
+                @unknown default: stateName = "unknown"
+                }
+                Logger.general.info("Thermal state: \(stateName, privacy: .public)")
+                Task { @MainActor in
+                    self.thermalState = state
+                }
+            }
+            .store(in: &cancellables)
     }
+
+    /// Mirrored from ProcessInfo so SwiftUI views can observe and downgrade heavy
+    /// visual effects (live waveforms, animations) under thermal pressure.
+    var thermalState: ProcessInfo.ThermalState = .nominal
 
     // MARK: - AI Text Generator Factory
 

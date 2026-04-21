@@ -47,21 +47,21 @@ struct PeopleView: View {
 
                 if filteredPeople.isEmpty {
                     Spacer()
-                    VStack(spacing: 10) {
-                        Image(systemName: "person.2.slash")
-                            .font(.largeTitle)
-                            .foregroundStyle(Color.appTextTertiary)
-                        Text(searchQuery.isEmpty ? "No people found" : "No results for \"\(searchQuery)\"")
-                            .font(.subheadline)
-                            .foregroundStyle(Color.appTextSecondary)
-                        if searchQuery.isEmpty {
-                            Text("Participants will appear here once you\nhave meetings with named attendees.")
-                                .font(.caption)
-                                .foregroundStyle(Color.appTextTertiary)
-                                .multilineTextAlignment(.center)
-                        }
+                    if searchQuery.isEmpty {
+                        EmptyStateView(
+                            icon: "person.2.slash",
+                            title: "No people yet",
+                            subtitle: "Participants you meet with appear here. Start a meeting and we'll pull names from the calendar invite or connected Zoom/Teams attendee list.",
+                            ctaLabel: "Start a Meeting",
+                            ctaAction: { appState.startNewMeeting() }
+                        )
+                    } else {
+                        EmptyStateView(
+                            icon: "person.2.slash",
+                            title: "No results for \u{201C}\(searchQuery)\u{201D}",
+                            subtitle: "Try a different name or clear the search."
+                        )
                     }
-                    .padding()
                     Spacer()
                 } else {
                     ScrollView {

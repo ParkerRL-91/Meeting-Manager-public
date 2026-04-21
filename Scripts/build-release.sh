@@ -25,6 +25,14 @@ APPCAST_DIR="docs/appcast"
 # Version from argument or Info.plist
 VERSION="${1:-$(defaults read "$(pwd)/MeetingManager/Resources/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "1.0.0")}"
 
+# Fail fast on missing signing config. Silent empty substitution surfaces as
+# cryptic archive/notarize errors 3 minutes in, which wastes everyone's time.
+if [[ -z "${TEAM_ID:-}" ]]; then
+    echo "ERROR: TEAM_ID not set. Export your Apple Developer team ID (10-char)"
+    echo "  in your shell profile or .env.local, then re-run."
+    exit 1
+fi
+
 echo "=== Building ${APP_NAME} v${VERSION} ==="
 
 # Step 1: Clean build directory

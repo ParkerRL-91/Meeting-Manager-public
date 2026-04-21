@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import os
 
 final class TranscriptRepository {
     private let database: AppDatabase
@@ -83,7 +84,7 @@ final class TranscriptRepository {
                     .fetchAll(db)
             }
             .start(in: database.writer, onError: { error in
-                print("Transcript observation error: \(error)")
+                Logger.database.error("Transcript observation error: \(error.localizedDescription, privacy: .public)")
             }, onChange: onChange)
     }
 }
