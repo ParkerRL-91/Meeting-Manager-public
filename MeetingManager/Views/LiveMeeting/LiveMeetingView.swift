@@ -92,7 +92,7 @@ struct LiveMeetingView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Big title (inline editable)
                 TextField("Meeting title", text: $editableTitle)
-                    .font(.system(size: 28, weight: .bold))
+                    .font(.title.weight(.bold))
                     .foregroundStyle(Color.appTextPrimary)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 28)
@@ -280,14 +280,14 @@ private struct OpenItemsPanel: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 12))
+                        .font(.footnote)
                         .foregroundStyle(Color.appWarning)
                     Text("Open Items (\(items.count))")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.appTextPrimary)
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(Color.appTextSecondary)
                 }
                 .padding(.horizontal, 12)
@@ -336,7 +336,7 @@ private struct OpenItemRow: View {
                 }
             } label: {
                 Image(systemName: item.isCompleted ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 14))
+                    .font(.callout)
                     .foregroundStyle(item.isCompleted ? Color.appAccent : Color.appTextSecondary)
             }
             .buttonStyle(.plain)
@@ -435,9 +435,9 @@ private struct PillBadge: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 11))
+                .font(.caption)
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .font(.footnote.weight(.medium))
         }
         .foregroundStyle(Color.appTextSecondary)
         .padding(.horizontal, 10)
@@ -604,10 +604,10 @@ private struct BottomBar: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "bolt.fill")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(Color.appAccent)
                         Text("\(capturedItemCount) item\(capturedItemCount == 1 ? "" : "s")")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.footnote.weight(.medium))
                             .foregroundStyle(Color.appAccent)
                     }
                     .padding(.horizontal, 8)

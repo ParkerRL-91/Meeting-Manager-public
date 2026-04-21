@@ -125,7 +125,7 @@ struct MeetingSearchView: View {
             HStack(spacing: 0) {
                 ForEach(weekdays, id: \.self) { day in
                     Text(day.uppercased())
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.appTextTertiary)
                         .frame(maxWidth: .infinity)
                 }
@@ -192,7 +192,7 @@ struct MeetingSearchView: View {
                 Spacer()
                 VStack(spacing: 8) {
                     Image(systemName: isSearching ? "doc.text.magnifyingglass" : "calendar")
-                        .font(.system(size: 32))
+                        .font(.largeTitle)
                         .foregroundStyle(Color.appTextTertiary)
                     Text(isSearching ? "No matches for \"\(searchQuery)\"" : "No meetings")
                         .font(.subheadline.weight(.medium))
@@ -297,7 +297,7 @@ private struct CalendarDayCell: View {
     var body: some View {
         Button(action: action) {
             Text("\(Calendar.current.component(.day, from: day))")
-                .font(.system(size: 14, weight: isToday ? .bold : .regular, design: .rounded))
+                .font(.system(.callout, design: .rounded, weight: isToday ? .bold : .regular))
                 .foregroundStyle(foregroundColor)
                 .frame(maxWidth: .infinity)
                 .frame(height: 34)
@@ -333,11 +333,11 @@ private struct SearchResultRow: View {
             HStack(spacing: 12) {
                 VStack(spacing: 1) {
                     Text(meeting.effectiveDate.formatted(date: .omitted, time: .shortened))
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.appTextPrimary)
                     if meeting.duration != nil {
                         Text(meeting.formattedDuration)
-                            .font(.system(size: 11))
+                            .font(.caption)
                             .foregroundStyle(Color.appTextTertiary)
                     }
                 }
@@ -377,7 +377,7 @@ private struct SearchStatusBadge: View {
     let status: MeetingStatus
     var body: some View {
         Text(status.searchLabel)
-            .font(.system(size: 10, weight: .medium))
+            .font(.caption2.weight(.medium))
             .foregroundStyle(status.searchColor)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)

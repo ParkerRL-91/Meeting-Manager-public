@@ -172,13 +172,13 @@ private struct SpacesSidebarSection: View {
             } label: {
                 HStack(spacing: 4) {
                     Text("My Notes")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.appTextTertiary)
                         .textCase(.uppercase)
                         .tracking(0.7)
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.appTextTertiary)
                 }
                 .padding(.horizontal, 10)
@@ -207,7 +207,7 @@ private struct SidebarSectionHeader: View {
     let title: String
     var body: some View {
         Text(title)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.caption2.weight(.semibold))
             .foregroundStyle(Color.appTextTertiary)
             .textCase(.uppercase)
             .tracking(0.7)
