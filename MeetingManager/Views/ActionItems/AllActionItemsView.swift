@@ -20,7 +20,12 @@ struct AllActionItemsView: View {
                 EmptyStateView(
                     icon: "checkmark.circle",
                     title: "No Open Action Items",
-                    subtitle: "All action items have been completed, or none have been extracted yet."
+                    subtitle: "Action items are extracted from meeting transcripts after a recording ends. Start a meeting to generate your first items.",
+                    ctaLabel: "Start a Meeting",
+                    ctaAction: {
+                        dismiss()
+                        appState.startNewMeeting()
+                    }
                 )
                 Spacer()
             } else {
