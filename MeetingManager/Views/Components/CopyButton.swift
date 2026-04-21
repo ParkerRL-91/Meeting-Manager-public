@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct CopyButton: View {
@@ -12,6 +13,16 @@ struct CopyButton: View {
             withAnimation {
                 copied = true
             }
+            // VoiceOver users don't see the "Copied!" label change — post an
+            // announcement so they get immediate confirmation.
+            NSAccessibility.post(
+                element: NSApp as Any,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: "Copied to clipboard",
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue
+                ]
+            )
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 withAnimation {
                     copied = false
@@ -27,6 +38,8 @@ struct CopyButton: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+        .accessibilityLabel(copied ? "Copied to clipboard" : label)
+        .accessibilityHint("Copies the text to the clipboard")
     }
 }
 

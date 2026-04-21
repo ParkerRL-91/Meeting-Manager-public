@@ -340,6 +340,8 @@ private struct SidebarRecordingBar: View {
             }
             .buttonStyle(.plain)
             .help("Stop Recording")
+            .accessibilityLabel("Stop recording")
+            .accessibilityHint("Ends the meeting and starts transcription")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
