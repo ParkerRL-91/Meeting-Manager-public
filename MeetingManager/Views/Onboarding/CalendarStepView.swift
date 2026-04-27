@@ -8,6 +8,7 @@ struct CalendarStepView: View {
     @State private var authManager = GoogleAuthManager()
     @State private var isConnecting = false
     @State private var connectionError: String?
+    @State private var isConnectingApple = false
 
     var body: some View {
         VStack(spacing: 32) {
@@ -91,6 +92,26 @@ struct CalendarStepView: View {
                 .font(.caption)
                 .foregroundStyle(Color.appTextTertiary)
 
+            // Apple Calendar option — uses EventKit and works with iCloud,
+            // local, Exchange, and Outlook-on-macOS calendars.
+            Button {
+                connectAppleCalendar()
+            } label: {
+                HStack(spacing: 8) {
+                    if isConnectingApple {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "calendar")
+                    }
+                    Text("Use Apple Calendar")
+                }
+                .frame(maxWidth: 280)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .disabled(isConnectingApple)
+
             if let onSkip {
                 Button("Set up later", action: onSkip)
                     .buttonStyle(.bordered)
@@ -113,6 +134,22 @@ struct CalendarStepView: View {
                 connectionError = "Connection failed: \(error.localizedDescription)"
             }
             isConnecting = false
+        }
+    }
+
+    private func connectAppleCalendar() {
+        isConnectingApple = true
+        connectionError = nil
+
+        Task {
+            let granted = await AppleCalendarService.shared.requestAccess()
+            isConnectingApple = false
+            if granted {
+                UserDefaults.standard.set("appleCalendar", forKey: "calendar.source")
+                onSkip?()
+            } else {
+                connectionError = "Apple Calendar access was not granted. You can enable it later in System Settings > Privacy & Security > Calendars."
+            }
         }
     }
 }
