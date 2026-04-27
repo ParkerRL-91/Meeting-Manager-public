@@ -47,6 +47,10 @@
 	<string>Meeting Manager needs access to your microphone to record and transcribe meetings.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Meeting Manager can push action items extracted from your meetings to Apple Reminders.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Meeting Manager can push action items extracted from your meetings to Apple Reminders.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Meeting Manager reads meeting window titles to detect participant names. It does not capture, record, or transmit screen content.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
