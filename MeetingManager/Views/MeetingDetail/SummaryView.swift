@@ -48,12 +48,22 @@ struct SummaryView: View {
 
     private let exportService = ExportService()
 
+    /// True when the pipeline is actively preparing the summary for the first
+    /// time (no summary persisted yet). We hide stage names and percentages
+    /// behind a single skeleton view (P1-T05).
+    private var isPreparingFirstSummary: Bool {
+        guard summary == nil, let status = meeting?.status else { return false }
+        return status == .transcribing || status == .summarizing
+    }
+
     var body: some View {
         Group {
             if isLoading {
                 Spacer()
                 ProgressView()
                 Spacer()
+            } else if isPreparingFirstSummary {
+                SummarySkeletonView()
             } else if let summary {
                 summaryContent(summary)
             } else {
