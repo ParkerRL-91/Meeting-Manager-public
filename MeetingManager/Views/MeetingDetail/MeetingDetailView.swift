@@ -23,10 +23,7 @@ struct MeetingDetailView: View {
         case summary, notes, transcript
 
         var label: String {
-            switch self {
-            case .transcript: return "Raw"
-            default: return rawValue.capitalized
-            }
+            rawValue.capitalized
         }
 
         var icon: String {

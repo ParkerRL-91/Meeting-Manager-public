@@ -1265,11 +1265,21 @@ final class AppState {
         let transcriptText = transcripts.map { $0.text }.joined(separator: " ")
         guard !transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        guard let generated = await TitleGenerationService.shared.generate(
+        let resolvedTitle: String?
+        if let generated = await TitleGenerationService.shared.generate(
             fromTranscript: transcriptText,
             using: ollamaService
-        ) else {
-            Logger.general.info("Auto-title: no title generated for \(meeting.id, privacy: .public) (Ollama unavailable or empty result)")
+        ) {
+            resolvedTitle = generated
+        } else if let summary = try? await summaryRepository.latestSummary(meetingId: meeting.id),
+                  !summary.summaryText.isEmpty {
+            resolvedTitle = TitleGenerationService.shared.extractFromSummary(summary.summaryText)
+        } else {
+            resolvedTitle = nil
+        }
+
+        guard let generated = resolvedTitle else {
+            Logger.general.info("Auto-title: no title generated for \(meeting.id, privacy: .public) (Ollama unavailable, no summary fallback)")
             return
         }
 

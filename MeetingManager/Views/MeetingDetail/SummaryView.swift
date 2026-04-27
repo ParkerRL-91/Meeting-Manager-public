@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -487,7 +488,11 @@ struct SummaryView: View {
         var updated = latest
         updated.summaryText = text
         updated.isEdited = true
-        try? await appState.summaryRepository.update(updated)
+        do {
+            try await appState.summaryRepository.update(updated)
+        } catch {
+            Logger.general.error("Summary auto-save failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Actions

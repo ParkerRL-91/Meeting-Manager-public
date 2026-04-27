@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 /// Compact action-items list rendered inline beneath the summary text.
 /// Replaces the dedicated Action Items tab — items belong with the summary,
@@ -9,6 +10,7 @@ struct InlineActionItemsSection: View {
     @State private var items: [ActionItem] = []
     @State private var isAddingNew = false
     @State private var newItemTitle = ""
+    @State private var errorMessage: String?
     @FocusState private var newItemFocused: Bool
 
     private let repo = ActionItemRepository()
@@ -37,6 +39,7 @@ struct InlineActionItemsSection: View {
         }
         .padding(.vertical, 12)
         .task { await reload() }
+        .errorAlert($errorMessage)
     }
 
     // MARK: - Header
@@ -74,7 +77,14 @@ struct InlineActionItemsSection: View {
             Button {
                 guard let id = item.id else { return }
                 Task {
-                    try? await repo.toggleComplete(id: id)
+                    do {
+                        try await repo.toggleComplete(id: id)
+                    } catch {
+                        Logger.database.error("Failed to toggle action item \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        await MainActor.run {
+                            errorMessage = "Failed to update action item: \(error.localizedDescription)"
+                        }
+                    }
                     await reload()
                 }
             } label: {
@@ -152,7 +162,14 @@ struct InlineActionItemsSection: View {
         }
         var item = ActionItem(meetingId: meetingId, title: trimmed)
         Task {
-            try? await repo.save(&item)
+            do {
+                try await repo.save(&item)
+            } catch {
+                Logger.database.error("Failed to save new action item: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run {
+                    errorMessage = "Failed to add action item: \(error.localizedDescription)"
+                }
+            }
             await MainActor.run {
                 newItemTitle = ""
                 isAddingNew = false
@@ -162,7 +179,15 @@ struct InlineActionItemsSection: View {
     }
 
     private func reload() async {
-        items = (try? await repo.itemsForMeeting(meetingId)) ?? []
+        do {
+            items = try await repo.itemsForMeeting(meetingId)
+        } catch {
+            Logger.database.error("Failed to load action items for \(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            await MainActor.run {
+                errorMessage = "Failed to load action items: \(error.localizedDescription)"
+            }
+            items = []
+        }
     }
 }
 
