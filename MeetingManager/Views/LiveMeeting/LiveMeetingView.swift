@@ -602,7 +602,8 @@ private struct BottomBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             .buttonStyle(.plain)
-            .help("Stop Recording")
+            .keyboardShortcut("r", modifiers: .command)
+            .help("Stop Recording (⌘R)")
             .accessibilityLabel("Stop recording")
 
             // T-025: Captured action items badge (visible when count > 0)

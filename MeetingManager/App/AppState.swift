@@ -605,6 +605,27 @@ final class AppState {
     ///    the title field for easy rename (ad-hoc meetings only).
     /// 4. Surfaces guard-rail failures (already recording, start in progress) as `lastUserError`
     ///    so the user gets a visible alert instead of a silent no-op.
+    /// P4-T01: Cycle to the previous (-1) or next (+1) meeting in the currently sorted
+    /// list. No-op if no meeting is selected or the list is empty. Used by the
+    /// ⌘[ / ⌘] keyboard shortcuts in MeetingDetailView.
+    @MainActor
+    func selectAdjacentMeeting(direction: Int) {
+        let sorted = meetings.sorted {
+            ($0.scheduledStartDate ?? $0.startDate ?? .distantPast)
+                > ($1.scheduledStartDate ?? $1.startDate ?? .distantPast)
+        }
+        guard !sorted.isEmpty else { return }
+        guard let currentId = selectedMeetingId,
+              let idx = sorted.firstIndex(where: { $0.id == currentId }) else {
+            // No selection → land on the first meeting.
+            selectedMeetingId = sorted.first?.id
+            return
+        }
+        let newIdx = max(0, min(sorted.count - 1, idx + direction))
+        guard newIdx != idx else { return }
+        selectedMeetingId = sorted[newIdx].id
+    }
+
     @MainActor
     func startNewMeeting() {
         guard !isRecording else {

@@ -106,6 +106,23 @@ struct MeetingDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
         .errorAlert($errorMessage)
+        // P4-T01: Keyboard shortcuts for tab switching + meeting navigation.
+        // Hidden buttons attached as background — same pattern LiveMeetingView uses for ⌘J.
+        .background(
+            Group {
+                Button("") { selectedTab = .summary }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("") { selectedTab = .notes }
+                    .keyboardShortcut("2", modifiers: .command)
+                Button("") { selectedTab = .transcript }
+                    .keyboardShortcut("3", modifiers: .command)
+                Button("") { appState.selectAdjacentMeeting(direction: -1) }
+                    .keyboardShortcut("[", modifiers: .command)
+                Button("") { appState.selectAdjacentMeeting(direction: 1) }
+                    .keyboardShortcut("]", modifiers: .command)
+            }
+            .hidden()
+        )
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let meeting {
