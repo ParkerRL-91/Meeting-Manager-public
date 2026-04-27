@@ -51,6 +51,12 @@ struct SummaryView: View {
     @State private var selectedRecipe: Recipe? = nil
 
     private let exportService = ExportService()
+    private let richShareService = RichShareService()
+
+    // Email draft sheet state (P3-T03).
+    @State private var emailDraftText: String?
+    @State private var isDraftingEmail = false
+    @State private var emailRecipeEngine = RecipeEngine()
 
     /// True when the pipeline is actively preparing the summary for the first
     /// time (no summary persisted yet). We hide stage names and percentages
@@ -103,6 +109,20 @@ struct SummaryView: View {
             SummaryHistoryView(meetingId: meetingId)
                 .environment(appState)
         }
+        .sheet(item: Binding(
+            get: { emailDraftText.map { EmailDraftPayload(text: $0) } },
+            set: { emailDraftText = $0?.text }
+        )) { payload in
+            EmailDraftResultView(
+                rawText: payload.text,
+                meetingTitle: meeting?.title ?? "Meeting"
+            )
+        }
+    }
+
+    private struct EmailDraftPayload: Identifiable {
+        let id = UUID()
+        let text: String
     }
 
     // MARK: - No Summary Empty State
@@ -379,31 +399,69 @@ struct SummaryView: View {
 
     @ViewBuilder
     private func standardToolbar(_ summary: MeetingSummary) -> some View {
-        Button {
-            copyToClipboard(editableContent)
-        } label: {
-            Label(
-                copiedToClipboard ? "Copied" : "Copy",
-                systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
-            )
-            .font(.caption)
-            .fontWeight(.medium)
+        // Split share button: primary tap copies as rich text; chevron menu
+        // exposes Markdown copy, system share, and HTML export. (P3-T01 / P3-T04)
+        HStack(spacing: 0) {
+            Button {
+                copyAsRichText(summary)
+            } label: {
+                Label(
+                    copiedToClipboard ? "Copied" : "Copy",
+                    systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
+                )
+                .font(.caption)
+                .fontWeight(.medium)
+                .padding(.horizontal, 2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Menu {
+                Button {
+                    copyAsMarkdown(summary)
+                } label: {
+                    Label(
+                        copiedMarkdownToClipboard ? "Copied as Markdown" : "Copy as Markdown",
+                        systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
+                    )
+                }
+
+                Button {
+                    Task { await openInBrowser(summary) }
+                } label: {
+                    Label("Export HTML / Open in Browser", systemImage: "safari")
+                }
+
+                Divider()
+
+                Button {
+                    systemShare(summary)
+                } label: {
+                    Label("AirDrop / System Share…", systemImage: "square.and.arrow.up")
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 22)
+            .controlSize(.small)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
 
         Button {
-            copyAsMarkdown(summary)
+            draftFollowUpEmail()
         } label: {
             Label(
-                copiedMarkdownToClipboard ? "Copied" : "Copy as Markdown",
-                systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
+                isDraftingEmail ? "Drafting…" : "Draft Email",
+                systemImage: "envelope"
             )
             .font(.caption)
             .fontWeight(.medium)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+        .disabled(isDraftingEmail)
 
         Button {
             regenerateSummary(recipe: selectedRecipe)
@@ -424,8 +482,121 @@ struct SummaryView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
 
-        ShareSummaryButton(summary: summary, meeting: meeting, exportService: exportService)
+    // MARK: - Share / Export Actions (P3-T01 / P3-T04)
+
+    private func copyAsRichText(_ summary: MeetingSummary) {
+        guard let meeting else { return }
+        Task {
+            let actionRepo = ActionItemRepository(database: appState.database)
+            let items = (try? await actionRepo.itemsForMeeting(meetingId)) ?? []
+
+            // Build a transient summary with the live edited text so what the
+            // user sees is what they paste.
+            var live = summary
+            live.summaryText = editableContent
+
+            await MainActor.run {
+                _ = richShareService.copyAsRichText(meeting: meeting, summary: live, actionItems: items)
+                withAnimation { copiedToClipboard = true }
+            }
+            try? await Task.sleep(for: .seconds(2))
+            await MainActor.run { withAnimation { copiedToClipboard = false } }
+        }
+    }
+
+    private func systemShare(_ summary: MeetingSummary) {
+        guard let meeting else { return }
+        let formatted = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+        ShareService.share(formatted)
+    }
+
+    @MainActor
+    private func openInBrowser(_ summary: MeetingSummary) async {
+        guard let meeting else { return }
+        let transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        let notes = (try? await appState.noteRepository.notesForMeeting(meetingId)) ?? []
+        let actionRepo = ActionItemRepository(database: appState.database)
+        let items = (try? await actionRepo.itemsForMeeting(meetingId)) ?? []
+        do {
+            // Use the live edited summary so what the browser shows matches.
+            var live = summary
+            live.summaryText = editableContent
+            _ = try exportService.writeHTMLAndOpen(
+                meeting: meeting,
+                summary: live,
+                transcripts: transcripts,
+                notes: notes,
+                actionItems: items
+            )
+        } catch {
+            errorMessage = "Failed to open HTML preview: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Draft Email (P3-T03)
+
+    private func draftFollowUpEmail() {
+        guard let meeting, !isDraftingEmail else { return }
+        isDraftingEmail = true
+        Task {
+            defer { Task { @MainActor in isDraftingEmail = false } }
+
+            // Locate the built-in follow-up email recipe (seeded in Migrations.swift).
+            let recipeRepo = RecipeRepository(database: appState.database)
+            let allRecipes = (try? await recipeRepo.allRecipes()) ?? []
+            guard let recipe = allRecipes.first(where: { $0.id == "builtin-follow-up-email" })
+                ?? allRecipes.first(where: { $0.category == .email && $0.isBuiltIn }) else {
+                await MainActor.run {
+                    errorMessage = "Follow-up Email recipe not found. Reinstall the app or check your database migrations."
+                }
+                return
+            }
+
+            // Build textGenerator the same way RecipeResultView does.
+            let settings = appState.settings
+            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+            await appState.ollamaService.refreshStatus()
+            let ollamaReachable = appState.ollamaService.isReachable
+            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+            let textGenerator: (String, String) async throws -> String
+            if useOllama {
+                let ollamaService = appState.ollamaService
+                let ollamaModel = settings.ollamaModel
+                textGenerator = { sys, usr in
+                    try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
+                }
+            } else if hasClaudeKey {
+                let claude = ClaudeService()
+                let claudeModel = settings.claudeModel
+                textGenerator = { sys, usr in
+                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+                }
+            } else {
+                await MainActor.run {
+                    errorMessage = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+                }
+                return
+            }
+
+            do {
+                let result = try await emailRecipeEngine.execute(
+                    recipe: recipe,
+                    meeting: meeting,
+                    transcriptRepo: appState.transcriptRepository,
+                    noteRepo: appState.noteRepository,
+                    resultRepo: RecipeResultRepository(database: appState.database),
+                    textGenerator: textGenerator
+                )
+                await MainActor.run { emailDraftText = result }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "Failed to draft email: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     // MARK: - Inline auto-save (P1-T04)
@@ -552,95 +723,7 @@ struct SummaryView: View {
         }
     }
 
-    private func copyToClipboard(_ text: String) {
-        ShareService.copyToClipboard(text)
-
-        withAnimation {
-            copiedToClipboard = true
-        }
-
-        Task {
-            try? await Task.sleep(for: .seconds(2))
-            await MainActor.run {
-                withAnimation {
-                    copiedToClipboard = false
-                }
-            }
-        }
-    }
 }
-
-// MARK: - Share Button
-
-/// Hosts an `NSSharingServicePicker` anchored to the button's own NSView,
-/// so the share sheet appears in the correct position.
-#if canImport(AppKit)
-private struct ShareSummaryButton: View {
-    let summary: MeetingSummary
-    let meeting: Meeting?
-    let exportService: ExportService
-
-    var body: some View {
-        ShareSummaryButtonRepresentable(summary: summary, meeting: meeting, exportService: exportService)
-            .fixedSize()
-    }
-}
-
-private struct ShareSummaryButtonRepresentable: NSViewRepresentable {
-    let summary: MeetingSummary
-    let meeting: Meeting?
-    let exportService: ExportService
-
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(
-            title: "Share",
-            target: context.coordinator,
-            action: #selector(Coordinator.share(_:))
-        )
-        button.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share")
-        button.imagePosition = .imageLeading
-        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.isBordered = true
-        return button
-    }
-
-    func updateNSView(_ nsView: NSButton, context: Context) {
-        context.coordinator.summary = summary
-        context.coordinator.meeting = meeting
-        context.coordinator.exportService = exportService
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(summary: summary, meeting: meeting, exportService: exportService)
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var summary: MeetingSummary
-        var meeting: Meeting?
-        var exportService: ExportService
-
-        init(summary: MeetingSummary, meeting: Meeting?, exportService: ExportService) {
-            self.summary = summary
-            self.meeting = meeting
-            self.exportService = exportService
-        }
-
-        @objc func share(_ sender: NSButton) {
-            let formattedText: String
-            if let meeting {
-                formattedText = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
-            } else {
-                formattedText = summary.summaryText
-            }
-            let picker = NSSharingServicePicker(items: [formattedText])
-            picker.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-        }
-    }
-}
-#endif
 
 // MARK: - Preview
 
