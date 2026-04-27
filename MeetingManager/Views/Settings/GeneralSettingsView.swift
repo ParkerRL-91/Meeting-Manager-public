@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import EventKit
 import os
 
 /// Settings view for appearance, startup behaviour, and notification preferences.
@@ -19,6 +20,12 @@ struct GeneralSettingsView: View {
     @State private var morningBriefHour: Int = 8
     @State private var morningBriefMinute: Int = 30
 
+    // Reminders integration (P4-T02).
+    @AppStorage("reminders.autoSend") private var remindersAutoSend: Bool = false
+    @AppStorage("reminders.listIdentifier") private var remindersListIdentifier: String = ""
+    @State private var remindersLists: [EKCalendar] = []
+    @State private var remindersAuthorized: Bool = false
+
     // MARK: - Body
 
     var body: some View {
@@ -27,6 +34,7 @@ struct GeneralSettingsView: View {
             startupSection
             notificationSection
             summaryAutomationSection
+            remindersSection
             aboutSection
         }
         .formStyle(.grouped)
@@ -39,6 +47,7 @@ struct GeneralSettingsView: View {
             morningBriefMinute = appState.settings.morningBriefMinute
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
+            await refreshRemindersLists()
         }
     }
 
@@ -169,6 +178,38 @@ struct GeneralSettingsView: View {
         } footer: {
             Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template. The follow-up email option additionally drafts a professional email recap using the built-in Follow-Up Email template.")
         }
+    }
+
+    private var remindersSection: some View {
+        Section {
+            Toggle("Auto-send action items to Reminders", isOn: $remindersAutoSend)
+
+            if remindersAuthorized {
+                Picker("Reminders list", selection: $remindersListIdentifier) {
+                    Text("Default").tag("")
+                    ForEach(remindersLists, id: \.calendarIdentifier) { cal in
+                        Text(cal.title).tag(cal.calendarIdentifier)
+                    }
+                }
+            } else {
+                Button("Grant Reminders Access") {
+                    Task {
+                        _ = await RemindersService.shared.requestAccess()
+                        await refreshRemindersLists()
+                    }
+                }
+            }
+        } header: {
+            Text("Reminders")
+        } footer: {
+            Text("Action items extracted from meeting summaries can sync to Apple Reminders. Choose which list new items go into.")
+        }
+    }
+
+    private func refreshRemindersLists() async {
+        let service = RemindersService.shared
+        remindersAuthorized = service.isAuthorized
+        remindersLists = service.availableLists()
     }
 
     private var aboutSection: some View {
