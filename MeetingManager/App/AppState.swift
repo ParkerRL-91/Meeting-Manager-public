@@ -430,12 +430,44 @@ final class AppState {
             rawTemplate = settings.summaryPromptTemplate
         }
 
-        let systemPrompt = rawTemplate
+        let baseSystemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
             .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
             .replacingOccurrences(of: "{{transcript}}", with: "")
             .replacingOccurrences(of: "{{notes}}", with: "")
+
+        // P2-T03: Notes-first summary. If the user captured notes during the meeting via
+        // NotepadPaneView, treat those notes as the primary anchor and use the transcript to
+        // fill in details. When no notes exist, fall back to the standard transcript-only path.
+        let notes = (try? await noteRepository.notesForMeeting(meetingId)) ?? []
+        let noteText = notes.map { $0.content }
+            .joined(separator: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let systemPrompt: String
+        let userPrompt: String
+        if noteText.isEmpty {
+            systemPrompt = baseSystemPrompt
+            userPrompt = transcript
+        } else {
+            systemPrompt = baseSystemPrompt + """
+
+
+            The user captured notes during this meeting — treat these notes as ground truth and \
+            anchor the summary around them. Use the transcript to fill in details, context, and \
+            action items the user may have missed. Do not contradict the notes.
+            """
+            userPrompt = """
+            <user_notes>
+            \(noteText)
+            </user_notes>
+
+            <transcript>
+            \(transcript)
+            </transcript>
+            """
+        }
 
         // Determine which AI backend to use
         let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
@@ -448,14 +480,14 @@ final class AppState {
             // Use streaming for task queue — never times out, reads chunks incrementally
             summaryText = try await ollamaService.generateStreaming(
                 systemPrompt: systemPrompt,
-                userPrompt: transcript,
+                userPrompt: userPrompt,
                 model: settings.ollamaModel
             )
         } else if hasClaudeKey {
             let claude = ClaudeService()
             summaryText = try await claude.sendMessage(
                 systemPrompt: systemPrompt,
-                userPrompt: transcript,
+                userPrompt: userPrompt,
                 model: settings.claudeModel
             )
         } else {
