@@ -556,5 +556,42 @@ enum Migrations {
         migrator.registerMigration("v22-fts-rebuild") { db in
             try db.execute(sql: "INSERT INTO transcript_fts(transcript_fts) VALUES('rebuild')")
         }
+
+        // P3-T03: tighten the follow-up email recipe so the response begins
+        // with a parseable "Subject:" line that EmailDraftResultView can split.
+        migrator.registerMigration("v23-follow-up-email-prompt-v2") { db in
+            let updatedPrompt = """
+            Write a concise follow-up email based on this meeting.
+
+            Format the response EXACTLY as:
+            Subject: <one-line subject>
+
+            <email body>
+
+            Body guidance: thank the attendees, recap the 3 most important decisions or discussion points, list action items with owners (if known), and close with next steps. Keep it under 200 words. Professional but warm tone.
+
+            Meeting: {{meetingTitle}}
+            Date: {{date}}
+
+            ## Transcript:
+            {{transcript}}
+
+            ## Notes:
+            {{notes}}
+            """
+            try db.execute(
+                sql: """
+                    UPDATE recipe
+                    SET promptTemplate = ?,
+                        description = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    updatedPrompt,
+                    "Draft a parseable follow-up email with a Subject line and concise body",
+                    "builtin-follow-up-email"
+                ]
+            )
+        }
     }
 }
