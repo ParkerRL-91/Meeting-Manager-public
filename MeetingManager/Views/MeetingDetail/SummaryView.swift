@@ -323,15 +323,22 @@ struct SummaryView: View {
                     .padding(12)
                     .background(Color.appSurface)
             } else {
-                // Summary text (read-only)
+                // Summary text (read-only) + inline action items in the same scroll view
                 ScrollView {
-                    Text(summary.summaryText)
-                        .font(.body)
-                        .foregroundStyle(Color.appTextPrimary)
-                        .textSelection(.enabled)
-                        .lineSpacing(4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(summary.summaryText)
+                            .font(.body)
+                            .foregroundStyle(Color.appTextPrimary)
+                            .textSelection(.enabled)
+                            .lineSpacing(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Divider()
+                            .padding(.vertical, 16)
+
+                        InlineActionItemsSection(meetingId: meetingId)
+                    }
+                    .padding(16)
                 }
             }
         }

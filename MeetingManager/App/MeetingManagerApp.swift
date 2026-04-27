@@ -89,11 +89,6 @@ struct MeetingManagerApp: App {
                 }
                 .keyboardShortcut(KeyboardShortcuts.tabNotes)
 
-                Button("Action Items") {
-                    NotificationCenter.default.post(name: .switchTab, object: "actionItems")
-                }
-                .keyboardShortcut(KeyboardShortcuts.tabActionItems)
-
                 Divider()
 
                 Button("Find...") {
