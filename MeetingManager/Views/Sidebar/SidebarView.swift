@@ -12,7 +12,7 @@ struct SidebarView: View {
 
         VStack(spacing: 0) {
 
-            // MARK: - Top Nav Items (Granola-style)
+            // MARK: - Top Nav Items
             VStack(spacing: 2) {
                 NavItem(
                     icon: "house.fill",

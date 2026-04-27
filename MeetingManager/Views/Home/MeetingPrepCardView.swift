@@ -317,7 +317,7 @@ struct MeetingPrepCardView: View {
                 }
             }
 
-            // Template chips — Granola-style meeting type picker, persists to meeting.templateId
+            // Template chips — Meeting type picker, persists to meeting.templateId
             VStack(alignment: .leading, spacing: 6) {
                 Text("Template")
                     .font(.caption.weight(.semibold))

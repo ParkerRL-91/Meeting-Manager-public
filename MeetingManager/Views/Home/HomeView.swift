@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// Dashboard shown when no meeting is selected. Inspired by Granola's "Coming Up" view.
+/// Dashboard shown when no meeting is selected. Shows today's meetings and upcoming context.
 /// Shows today's scheduled meetings with countdown timers and Start Now CTAs, followed by recent activity.
 struct HomeView: View {
     @Environment(AppState.self) private var appState

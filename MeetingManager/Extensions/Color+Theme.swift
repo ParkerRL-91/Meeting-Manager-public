@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Dark-mode-first color palette inspired by Shadow and Granola meeting apps.
+/// Dark-mode-first color palette designed for focused, calm meeting workflows.
 /// All colors provide adaptive light/dark variants but are optimised for the dark appearance.
 extension Color {
 

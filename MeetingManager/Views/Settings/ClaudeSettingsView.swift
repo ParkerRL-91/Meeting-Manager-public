@@ -22,8 +22,8 @@ struct ClaudeSettingsView: View {
     // MARK: - Models
 
     private let availableModels: [(id: String, label: String)] = [
-        ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
-        ("claude-opus-4-20250514", "Claude Opus 4"),
+        ("claude-sonnet-4-20250514", "Claude 4 (Balanced)"),
+        ("claude-opus-4-20250514", "Claude 4 (Premium)"),
     ]
 
     enum ConnectionStatus: Equatable {
@@ -121,7 +121,7 @@ struct ClaudeSettingsView: View {
         } header: {
             Text("Model")
         } footer: {
-            Text("Sonnet is faster and more cost-effective. Opus provides higher quality for complex meetings.")
+            Text("Balanced is faster and more cost-effective. Premium provides higher quality for complex meetings.")
         }
     }
 

@@ -3,7 +3,7 @@ import GRDB
 import SwiftUI
 import os
 
-/// Granola-inspired live meeting view.
+/// Live meeting view: notes-first, transcript secondary.
 /// Layout: Recording bar at top → Big title + pill badges → Notes area → Context brief → Bottom chat/stop bar.
 struct LiveMeetingView: View {
     let meetingId: String
@@ -143,7 +143,7 @@ struct LiveMeetingView: View {
                 .frame(minHeight: 250)
 
                 // P2-T02: Collapsible live transcript pane (collapsed by default —
-                // notes are primary, transcript is secondary, à la Granola).
+                // notes are primary, transcript is secondary).
                 LiveTranscriptPane(meetingId: meetingId)
                     .padding(.horizontal, 24)
                     .padding(.top, 12)

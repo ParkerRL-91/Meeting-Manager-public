@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Granola-style meeting type chip picker. Shown either inline (expanded prep card)
+/// Meeting type chip picker. Shown either inline (expanded prep card)
 /// or as a quick sheet before starting a new ad-hoc meeting.
 ///
 /// - When `compact` is true the picker renders as a horizontally scrollable single-row
