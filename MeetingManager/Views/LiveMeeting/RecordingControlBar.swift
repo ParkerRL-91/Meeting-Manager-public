@@ -32,6 +32,26 @@ struct RecordingControlBar: View {
             // the Apple Speech engine is actively producing transcripts.
             TranscribingPill()
 
+            // P3-T02: Active template pill — shows the meeting's current template
+            // (skipped when nil/empty/"standard").
+            if let templateId = appState.activeMeeting?.templateId,
+               !templateId.isEmpty,
+               templateId != "standard",
+               let label = Self.templateLabel(for: templateId) {
+                HStack(spacing: 4) {
+                    Image(systemName: Self.templateIcon(for: templateId) ?? "doc.text")
+                        .font(.caption2)
+                    Text(label)
+                        .font(.caption)
+                }
+                .foregroundStyle(Color.appTextSecondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.appSurfaceSecondary)
+                .clipShape(Capsule())
+                .accessibilityLabel("Template: \(label)")
+            }
+
             // Elapsed time
             Text(formattedElapsedTime)
                 .font(.body.monospaced())
@@ -140,6 +160,19 @@ struct RecordingControlBar: View {
         } message: {
             Text("This ends the meeting and begins transcription. You can't resume this recording afterwards.")
         }
+    }
+
+    // MARK: - Template Helpers (P3-T02)
+
+    /// Label for a template id. Mirrors `MeetingTemplatePickerView.templates` —
+    /// duplicated here intentionally to keep the recording bar lightweight; will
+    /// be deduped once a shared template registry lands.
+    private static func templateLabel(for id: String) -> String? {
+        MeetingTemplatePickerView.label(for: id)
+    }
+
+    private static func templateIcon(for id: String) -> String? {
+        MeetingTemplatePickerView.icon(for: id)
     }
 
     // MARK: - Title Editing
