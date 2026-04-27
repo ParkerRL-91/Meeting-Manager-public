@@ -1798,5 +1798,6 @@ enum SidebarDestination: Hashable {
     case tasks
     case search
     case meetings
+    case analytics
     case folder(String)  // folder key = normalised base title
 }

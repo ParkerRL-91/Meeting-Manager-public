@@ -66,6 +66,17 @@ struct SidebarView: View {
                 }
 
                 NavItem(
+                    icon: "chart.bar.xaxis",
+                    label: "Analytics",
+                    destination: .analytics,
+                    current: appState.sidebarDestination
+                ) {
+                    appState.sidebarDestination = .analytics
+                    // Intentionally preserve selectedMeetingId so the
+                    // talk-time card can target the previously-selected meeting.
+                }
+
+                NavItem(
                     icon: "checklist",
                     label: "Activity",
                     badge: appState.taskQueueManager.pendingCount,
