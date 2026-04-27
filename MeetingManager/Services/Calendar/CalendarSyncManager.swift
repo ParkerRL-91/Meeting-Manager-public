@@ -2,6 +2,24 @@ import Foundation
 import GRDB
 import os
 
+// MARK: - CalendarSource
+
+/// Where the app pulls calendar events from. Persisted under
+/// `UserDefaults` key `"calendar.source"` (raw string).
+enum CalendarSource: String, CaseIterable {
+    case googleCalendar
+    case appleCalendar
+    case both
+    case none
+
+    /// Convenience reader for the current user setting. Defaults to
+    /// `.googleCalendar` to preserve existing behavior.
+    static var current: CalendarSource {
+        let raw = UserDefaults.standard.string(forKey: "calendar.source") ?? "googleCalendar"
+        return CalendarSource(rawValue: raw) ?? .googleCalendar
+    }
+}
+
 // MARK: - CalendarSyncError
 
 enum CalendarSyncError: LocalizedError {
@@ -116,7 +134,9 @@ final class CalendarSyncManager {
 
     /// Triggers a single sync cycle manually.
     func syncNow() async throws {
-        guard authManager.isSignedIn else {
+        let source = CalendarSource.current
+        // The not-signed-in guard only applies when Google is the active source.
+        if (source == .googleCalendar || source == .both) && !authManager.isSignedIn {
             throw CalendarSyncError.notSignedIn
         }
         await performSync()
@@ -128,13 +148,21 @@ final class CalendarSyncManager {
     // MARK: - Sync Logic
 
     private func performSync() async {
-        guard authManager.isSignedIn else {
-            Logger.calendar.debug("Skipping sync — not signed in")
-            return
-        }
+        let source = CalendarSource.current
 
         guard !isSyncing else {
             Logger.calendar.debug("Skipping sync — already in progress")
+            return
+        }
+
+        // For Google-backed sources we still require a signed-in account.
+        if (source == .googleCalendar || source == .both) && !authManager.isSignedIn {
+            Logger.calendar.debug("Skipping sync — Google not signed in")
+            return
+        }
+
+        if source == .none {
+            Logger.calendar.debug("Skipping sync — calendar source set to .none")
             return
         }
 
@@ -142,36 +170,104 @@ final class CalendarSyncManager {
         lastError = nil
 
         do {
-            let accessToken = try await authManager.refreshTokenIfNeeded()
-
-            let now = Date()
-            let from = Calendar.current.date(byAdding: .day, value: -lookBehindDays, to: now)!
-            let to = Calendar.current.date(byAdding: .day, value: lookAheadDays, to: now)!
-
-            let calendarId = selectedCalendarId() ?? "primary"
-            let events = try await calendarService.fetchEvents(
-                accessToken: accessToken,
-                from: from,
-                to: to,
-                calendarId: calendarId
-            )
-
             var synced = 0
-            for event in events {
-                try await upsertMeeting(from: event)
-                synced += 1
+
+            if source == .googleCalendar || source == .both {
+                synced += try await syncGoogle()
+            }
+
+            if source == .appleCalendar || source == .both {
+                synced += await syncApple()
             }
 
             eventsSyncedCount = synced
             lastSyncDate = Date()
 
-            Logger.calendar.info("Calendar sync complete: \(synced) events processed")
+            Logger.calendar.info("Calendar sync complete (\(source.rawValue, privacy: .public)): \(synced) events processed")
         } catch {
             lastError = error.localizedDescription
             Logger.calendar.error("Calendar sync failed: \(error.localizedDescription)")
         }
 
         isSyncing = false
+    }
+
+    /// Existing Google Calendar sync path, factored out so the source switch is readable.
+    private func syncGoogle() async throws -> Int {
+        let accessToken = try await authManager.refreshTokenIfNeeded()
+
+        let now = Date()
+        let from = Calendar.current.date(byAdding: .day, value: -lookBehindDays, to: now)!
+        let to = Calendar.current.date(byAdding: .day, value: lookAheadDays, to: now)!
+
+        let calendarId = selectedCalendarId() ?? "primary"
+        let events = try await calendarService.fetchEvents(
+            accessToken: accessToken,
+            from: from,
+            to: to,
+            calendarId: calendarId
+        )
+
+        var synced = 0
+        for event in events {
+            try await upsertMeeting(from: event)
+            synced += 1
+        }
+        return synced
+    }
+
+    /// Pulls EventKit events and upserts them as Meeting rows. Dedupes by
+    /// `calendarEventId` so events that also appear via Google are merged.
+    private func syncApple() async -> Int {
+        let events = await AppleCalendarService.shared.fetchUpcomingEvents(daysAhead: lookAheadDays)
+        var synced = 0
+        for event in events {
+            do {
+                let meeting = AppleCalendarService.shared.meeting(from: event)
+                try await upsertAppleMeeting(meeting)
+                synced += 1
+            } catch {
+                Logger.calendar.error("Apple Calendar upsert failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return synced
+    }
+
+    /// Upserts a Meeting derived from an EKEvent. Mirrors `upsertMeeting(from:)`
+    /// but works directly on a fully-formed Meeting struct.
+    private func upsertAppleMeeting(_ incoming: Meeting) async throws {
+        guard let eventId = incoming.calendarEventId else { return }
+        try await AppDatabase.shared.writer.write { db in
+            if var existing = try Meeting
+                .filter(Column("calendarEventId") == eventId)
+                .fetchOne(db)
+            {
+                var needsUpdate = false
+                if let p = incoming.participants, !p.isEmpty,
+                   existing.participants == nil || existing.participants!.isEmpty {
+                    existing.participants = p
+                    needsUpdate = true
+                }
+                if existing.meetLink == nil, let link = incoming.meetLink {
+                    existing.meetLink = link
+                    needsUpdate = true
+                }
+                if existing.status == .scheduled || existing.status == .notified {
+                    existing.title = incoming.title
+                    existing.scheduledStartDate = incoming.scheduledStartDate
+                    existing.scheduledEndDate = incoming.scheduledEndDate
+                    existing.isAllDay = incoming.isAllDay
+                    existing.meetLink = incoming.meetLink ?? existing.meetLink
+                    needsUpdate = true
+                }
+                if needsUpdate {
+                    try existing.update(db)
+                }
+            } else {
+                var copy = incoming
+                try copy.insert(db)
+            }
+        }
     }
 
     /// Returns the user-selected calendar ID from settings, or nil for "primary".

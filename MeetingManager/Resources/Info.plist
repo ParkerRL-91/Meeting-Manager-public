@@ -45,6 +45,10 @@
 	<string>14.4</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Meeting Manager needs access to your microphone to record and transcribe meetings.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Meeting Manager reads your Apple Calendar events to surface upcoming meetings.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Meeting Manager reads your Apple Calendar events to surface upcoming meetings and prepare context for them.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSRemindersUsageDescription</key>
