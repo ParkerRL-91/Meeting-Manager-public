@@ -445,11 +445,41 @@ final class AppState {
             .joined(separator: "\n\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // P5-T02: Inject open action items from up to 3 prior sessions in the same series
+        // so the model can carry them forward in the new summary.
+        let seriesContext: String = await {
+            let series = MeetingSeriesService.shared.detectSeries(for: meeting, in: meetings)
+            let recent = Array(series.prefix(3))
+            guard !recent.isEmpty else { return "" }
+            let openByMeeting = await fetchOpenActionItems(for: recent)
+            let lines = openByMeeting.compactMap { (m, items) -> String? in
+                guard !items.isEmpty else { return nil }
+                return items.map { "- [ ] \($0.title) (from \(m.title))" }.joined(separator: "\n")
+            }
+            guard !lines.isEmpty else { return "" }
+            return """
+
+            <previous_session_open_items>
+            \(lines.joined(separator: "\n"))
+            </previous_session_open_items>
+            """
+        }()
+
         let systemPrompt: String
         let userPrompt: String
         if noteText.isEmpty {
             systemPrompt = baseSystemPrompt
-            userPrompt = transcript
+            if seriesContext.isEmpty {
+                userPrompt = transcript
+            } else {
+                userPrompt = """
+                \(seriesContext)
+
+                <transcript>
+                \(transcript)
+                </transcript>
+                """
+            }
         } else {
             systemPrompt = baseSystemPrompt + """
 
@@ -462,7 +492,7 @@ final class AppState {
             <user_notes>
             \(noteText)
             </user_notes>
-
+            \(seriesContext)
             <transcript>
             \(transcript)
             </transcript>
@@ -503,6 +533,19 @@ final class AppState {
         )
         try await summaryRepository.save(&summary)
         fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
+    }
+
+    /// P5-T02: Loads open action items for a set of prior meetings, preserving order.
+    /// Used by the summary prompt to carry forward unfinished items across a series.
+    private func fetchOpenActionItems(for meetings: [Meeting]) async -> [(Meeting, [ActionItem])] {
+        let repo = ActionItemRepository(database: database)
+        var result: [(Meeting, [ActionItem])] = []
+        for m in meetings {
+            let items = (try? await repo.itemsForMeeting(m.id)) ?? []
+            let open = items.filter { !$0.isCompleted }
+            if !open.isEmpty { result.append((m, open)) }
+        }
+        return result
     }
 
     /// - Stuck recordings WITHOUT audio → cancel (nothing to transcribe)
