@@ -16,6 +16,7 @@ struct MeetingDetailView: View {
     @State private var errorMessage: String?
     @State private var showUpNext = true
     @State private var upNextBrief: MeetingPrepBrief?
+    @State private var previousSessions: [Meeting] = []
 
     private let exportService = ExportService()
 
@@ -74,6 +75,11 @@ struct MeetingDetailView: View {
                         appState.selectedMeetingId = relatedId
                     }
                 )
+
+                // P5-T02: Previous sessions in the same meeting series.
+                if !previousSessions.isEmpty {
+                    previousSessionsSection
+                }
 
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(DetailTab.allCases, id: \.self) { tab in
@@ -262,7 +268,46 @@ struct MeetingDetailView: View {
                 let prepService = MeetingPrepService(database: appState.database)
                 upNextBrief = try? await prepService.prepBrief(for: nextMeeting)
             }
+            // P5-T02: Detect prior sessions in the same series.
+            if let m = meeting {
+                previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
+            }
         }
+    }
+
+    // MARK: - P5-T02 Previous Sessions
+
+    private var previousSessionsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("PREVIOUS SESSIONS")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.appTextTertiary)
+                .textCase(.uppercase)
+                .tracking(0.5)
+
+            ForEach(previousSessions.prefix(5)) { prev in
+                Button {
+                    appState.selectedMeetingId = prev.id
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(prev.scheduledStartDate ?? prev.startDate ?? prev.createdAt,
+                             format: .dateTime.month(.abbreviated).day())
+                            .font(.caption2.weight(.medium).monospacedDigit())
+                            .foregroundStyle(Color.appAccent)
+                            .frame(width: 44, alignment: .leading)
+                        Text(prev.title)
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Actions

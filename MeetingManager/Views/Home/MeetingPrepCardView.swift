@@ -201,6 +201,23 @@ struct MeetingPrepCardView: View {
 
     private func expandedContent(brief: MeetingPrepBrief) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            // P5-T02: Series awareness — "Last time:" line.
+            if let prev = brief.previousSession {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                        .font(.caption2)
+                        .foregroundStyle(Color.appAccent)
+                    Text("Last time (\(prev.date, format: .dateTime.month(.abbreviated).day())):")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.appTextSecondary)
+                    Text(prev.summaryExcerpt ?? "No summary")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+            }
+
             // Full participant list
             if brief.participants.count > 3 {
                 VStack(alignment: .leading, spacing: 6) {
