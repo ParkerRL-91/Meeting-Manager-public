@@ -28,6 +28,10 @@ struct RecordingControlBar: View {
                 .font(.headline)
                 .foregroundStyle(Color.appTextPrimary)
 
+            // P2-T02: Transcribing heartbeat — shown only while recording AND
+            // the Apple Speech engine is actively producing transcripts.
+            TranscribingPill()
+
             // Elapsed time
             Text(formattedElapsedTime)
                 .font(.body.monospaced())
@@ -192,6 +196,63 @@ struct RecordingControlBar: View {
             return
         }
         elapsedSeconds = max(0, Int(Date().timeIntervalSince(start)))
+    }
+}
+
+// MARK: - Transcribing Pill (P2-T02)
+
+/// Small "● Transcribing" pill that appears next to the Recording indicator
+/// while live transcription is producing segments. Mirrors the Recording pill's
+/// styling but in `Color.appSuccess`. The transcriber's `isActive` flag isn't
+/// `@Observable`, so we sample it on a low-frequency timer (1Hz) — calm and
+/// cheap, no spinner, no percentage.
+private struct TranscribingPill: View {
+    @Environment(AppState.self) private var appState
+    @State private var isTranscribing = false
+    @State private var pollTimer: AnyCancellable?
+
+    var body: some View {
+        Group {
+            if isTranscribing {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(Color.appSuccess)
+                        .frame(width: 8, height: 8)
+                    Text("Transcribing")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.appSuccess)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.appSuccess.opacity(0.12))
+                .clipShape(Capsule())
+                .accessibilityLabel("Transcribing")
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isTranscribing)
+        .onAppear(perform: startPolling)
+        .onDisappear(perform: stopPolling)
+    }
+
+    private func startPolling() {
+        updateState()
+        pollTimer = Timer.publish(every: 1, on: .main, in: .common)
+            .autoconnect()
+            .sink { _ in updateState() }
+    }
+
+    private func stopPolling() {
+        pollTimer?.cancel()
+        pollTimer = nil
+        isTranscribing = false
+    }
+
+    private func updateState() {
+        let active = appState.isRecording && appState.appleSpeechTranscriber.isActive
+        if active != isTranscribing {
+            isTranscribing = active
+        }
     }
 }
 
