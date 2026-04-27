@@ -310,6 +310,22 @@ struct SummaryView: View {
                         .padding(.vertical, 16)
 
                     InlineActionItemsSection(meetingId: meetingId)
+
+                    Divider()
+                        .padding(.vertical, 16)
+
+                    // "View raw transcript" link (P1-T01) — secondary, de-emphasized.
+                    // Posts the existing .switchTab notification rather than threading
+                    // a binding through; MeetingDetailView already listens for this.
+                    Button {
+                        NotificationCenter.default.post(name: .switchTab, object: "transcript")
+                    } label: {
+                        Label("View raw transcript", systemImage: "text.quote")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 8)
                 }
                 .padding(16)
             }
