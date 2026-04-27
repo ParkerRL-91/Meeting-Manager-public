@@ -22,6 +22,9 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
 
+                // MARK: - Model Download Banner (background download from P2-T01)
+                ModelDownloadBanner()
+
                 // MARK: - Date Header
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
