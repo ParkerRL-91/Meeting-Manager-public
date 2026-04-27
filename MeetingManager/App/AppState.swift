@@ -347,6 +347,11 @@ final class AppState {
                     )
                 }
                 Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
+
+                // P1-T06: auto-title ad-hoc meetings once transcripts are persisted.
+                // Calendar meetings already have a title from the event, so skip those.
+                await self.autoTitleIfNeeded(meeting: meeting, transcripts: transcripts)
+
                 self.loadMeetings()
             }
         }
@@ -1232,12 +1237,50 @@ final class AppState {
                     for var t in transcripts { try t.save(db) }
                     try meeting.save(db)
                 }
+
+                // P1-T06: auto-title ad-hoc meetings on the recovery path too.
+                await autoTitleIfNeeded(meeting: meeting, transcripts: transcripts)
             }
         }
 
         // Clear the queue
         UserDefaults.standard.removeObject(forKey: Self.pendingTranscriptionKey)
         fileLog("Pending transcription queue cleared")
+    }
+
+    // MARK: - Auto-title (P1-T06)
+
+    /// If the meeting still has the default/empty title and is not tied to a
+    /// calendar event, ask Ollama for a 5-7 word title from the transcript.
+    /// Falls through silently when Ollama is unavailable — the meeting just
+    /// keeps its default title until the user (or summary) renames it.
+    private func autoTitleIfNeeded(meeting: Meeting, transcripts: [Transcript]) async {
+        // Calendar meetings already have a meaningful title from the event.
+        guard meeting.calendarEventId == nil else { return }
+
+        let defaultTitles: Set<String> = ["New Meeting", "Untitled Meeting", ""]
+        let trimmedTitle = meeting.title.trimmingCharacters(in: .whitespaces)
+        guard defaultTitles.contains(meeting.title) || trimmedTitle.isEmpty else { return }
+
+        let transcriptText = transcripts.map { $0.text }.joined(separator: " ")
+        guard !transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        guard let generated = await TitleGenerationService.shared.generate(
+            fromTranscript: transcriptText,
+            using: ollamaService
+        ) else {
+            Logger.general.info("Auto-title: no title generated for \(meeting.id, privacy: .public) (Ollama unavailable or empty result)")
+            return
+        }
+
+        var updated = meeting
+        updated.title = generated
+        do {
+            try await meetingRepository.update(updated)
+            Logger.general.info("Auto-titled meeting \(meeting.id, privacy: .public): \(generated, privacy: .public)")
+        } catch {
+            Logger.general.error("Auto-title persist failed for \(meeting.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Send a macOS notification that the transcription model is ready.
