@@ -1,4 +1,5 @@
 import AppKit
+import GRDB
 import SwiftUI
 import os
 
@@ -140,6 +141,13 @@ struct LiveMeetingView: View {
                     capturedItemCount += 1
                 }
                 .frame(minHeight: 250)
+
+                // P2-T02: Collapsible live transcript pane (collapsed by default —
+                // notes are primary, transcript is secondary, à la Granola).
+                LiveTranscriptPane(meetingId: meetingId)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
+                    .padding(.bottom, 12)
 
                 // Context brief (related past meetings)
                 if !contextMeetings.isEmpty && showContextBrief {
@@ -594,7 +602,8 @@ private struct BottomBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             .buttonStyle(.plain)
-            .help("Stop Recording")
+            .keyboardShortcut("r", modifiers: .command)
+            .help("Stop Recording (⌘R)")
             .accessibilityLabel("Stop recording")
 
             // T-025: Captured action items badge (visible when count > 0)
@@ -647,6 +656,82 @@ private struct BottomBar: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .background(Color.appSurface.opacity(0.3))
+    }
+}
+
+// MARK: - Live Transcript Pane (P2-T02)
+
+/// Collapsible "Live transcript" section shown below the notepad during a live
+/// meeting. Defaults to collapsed; user-pinned state persists across launches via
+/// @AppStorage. The segment count is observed live via TranscriptRepository so
+/// the header label keeps ticking even when the pane is collapsed.
+private struct LiveTranscriptPane: View {
+    let meetingId: String
+    @Environment(AppState.self) private var appState
+    @AppStorage("liveMeeting.transcriptExpanded") private var isExpanded = false
+    @State private var segmentCount = 0
+    @State private var observation: DatabaseCancellable?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.appTextSecondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Image(systemName: "waveform")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appAccent)
+                    Text("Live transcript")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.appTextPrimary)
+                    Text("(\(segmentCount) \(segmentCount == 1 ? "segment" : "segments"))")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Live transcript, \(segmentCount) segments")
+            .accessibilityHint(isExpanded ? "Collapse transcript" : "Expand transcript")
+
+            if isExpanded {
+                Divider()
+                TranscriptPaneView(meetingId: meetingId)
+                    .frame(maxHeight: 200)
+            }
+        }
+        .background(Color.appSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.appSeparator, lineWidth: 0.5)
+        )
+        .onAppear(perform: startObserving)
+        .onDisappear(perform: stopObserving)
+    }
+
+    private func startObserving() {
+        observation = appState.transcriptRepository.observeTranscripts(
+            meetingId: meetingId
+        ) { transcripts in
+            Task { @MainActor in
+                self.segmentCount = transcripts.count
+            }
+        }
+    }
+
+    private func stopObserving() {
+        observation?.cancel()
+        observation = nil
     }
 }
 

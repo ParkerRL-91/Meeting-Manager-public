@@ -14,11 +14,16 @@ struct HomeView: View {
     @State private var prepBriefs: [String: MeetingPrepBrief] = [:]
     @State private var expandedCardIds: Set<String> = []
     @State private var prepBriefDebounce: DispatchWorkItem?
+    @State private var authManager = GoogleAuthManager()
+    @AppStorage("home.calendarBannerDismissed") private var calendarBannerDismissed: Bool = false
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+
+                // MARK: - Model Download Banner (background download from P2-T01)
+                ModelDownloadBanner()
 
                 // MARK: - Date Header
                 HStack(alignment: .firstTextBaseline) {
@@ -51,6 +56,24 @@ struct HomeView: View {
                     ActiveRecordingBanner(meeting: activeMeeting)
                         .padding(.horizontal, 24)
                         .padding(.bottom, 16)
+                }
+
+                // MARK: - Calendar Connect Banner (subtle, dismissible)
+                if !authManager.isSignedIn
+                    && cachedAllToday.isEmpty
+                    && !calendarBannerDismissed {
+                    CalendarConnectBanner(
+                        onConnect: {
+                            appState.pendingSettingsTab = 3
+                            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                            NSApp.activate(ignoringOtherApps: true)
+                        },
+                        onDismiss: {
+                            calendarBannerDismissed = true
+                        }
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
                 }
 
                 // MARK: - Today's Meetings
@@ -248,54 +271,83 @@ private struct ActiveRecordingBanner: View {
 // MARK: - No Meetings Today Card
 
 private struct NoMeetingsTodayCard: View {
-    @State private var authManager = GoogleAuthManager()
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if authManager.isSignedIn {
-            HStack(spacing: 12) {
-                Image(systemName: "calendar")
-                    .font(.title3)
-                    .foregroundStyle(Color.appTextTertiary)
+        HStack(spacing: 12) {
+            Image(systemName: "calendar")
+                .font(.title3)
+                .foregroundStyle(Color.appTextTertiary)
 
-                Text("No meetings scheduled for today")
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextSecondary)
+            Text("No meetings scheduled for today")
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextSecondary)
 
-                Spacer()
+            Spacer()
+
+            Button {
+                appState.startNewMeeting()
+            } label: {
+                Label("Start a meeting now", systemImage: "record.circle")
+                    .font(.subheadline.weight(.medium))
             }
-            .padding(16)
-            .background(Color.appSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-        } else {
-            HStack(spacing: 12) {
-                Image(systemName: "calendar.badge.exclamationmark")
-                    .font(.title3)
-                    .foregroundStyle(Color.appAccent)
-
-                Text("Connect your Google Calendar to see meetings here.")
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextSecondary)
-
-                Spacer()
-
-                Button("Connect →") {
-                    appState.pendingSettingsTab = 3
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.appAccent)
-                .controlSize(.small)
-            }
-            .padding(16)
-            .background(Color.appSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.appAccent.opacity(0.3), lineWidth: 1)
-            )
+            .buttonStyle(.borderedProminent)
+            .tint(Color.appAccent)
+            .controlSize(.small)
         }
+        .padding(16)
+        .background(Color.appSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - Calendar Connect Banner
+
+private struct CalendarConnectBanner: View {
+    let onConnect: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "calendar")
+                .font(.subheadline)
+                .foregroundStyle(Color.appAccent)
+                .frame(width: 18)
+
+            Text("Connect calendar to see your meetings here")
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextSecondary)
+                .lineLimit(1)
+
+            Spacer()
+
+            Button("Connect") {
+                onConnect()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.appAccent)
+            .controlSize(.small)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    onDismiss()
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.appAccent.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.appAccent.opacity(0.25), lineWidth: 1)
+        )
     }
 }
 

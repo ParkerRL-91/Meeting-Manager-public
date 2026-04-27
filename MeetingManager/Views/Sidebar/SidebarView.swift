@@ -108,6 +108,8 @@ struct SidebarView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.appAccent)
                 .controlSize(.large)
+                .keyboardShortcut("n", modifiers: .command)
+                .help("New Meeting (⌘N)")
 
                 HStack {
                     Spacer()

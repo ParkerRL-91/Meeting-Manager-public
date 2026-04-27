@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -13,9 +14,15 @@ struct SummaryView: View {
     @State private var copiedToClipboard = false
     @State private var copiedMarkdownToClipboard = false
 
-    // Editing state
-    @State private var isEditing = false
-    @State private var editedText = ""
+    // Inline auto-save editor state (P1-T04).
+    // editableContent is the always-mounted TextEditor's binding. originalContent
+    // is the AI-generated text used to drive the "Edited" badge. saveTask debounces
+    // persistence with the same 1-second pattern as NotepadPaneView.
+    @State private var editableContent: String = ""
+    @State private var originalContent: String = ""
+    @State private var saveTask: Task<Void, Never>?
+    @State private var showSavedFlash = false
+    @State private var hasLoadedEditor = false
     @State private var errorMessage: String?
 
     // Regeneration state — derived from the persistent task queue, not local @State.
@@ -35,9 +42,6 @@ struct SummaryView: View {
             .first?.error
     }
 
-    // Kept for save-edit flow only (not regeneration).
-    @State private var activeTask: Task<Void, Never>?
-
     // History
     @State private var showHistory = false
 
@@ -47,6 +51,20 @@ struct SummaryView: View {
     @State private var selectedRecipe: Recipe? = nil
 
     private let exportService = ExportService()
+    private let richShareService = RichShareService()
+
+    // Email draft sheet state (P3-T03).
+    @State private var emailDraftText: String?
+    @State private var isDraftingEmail = false
+    @State private var emailRecipeEngine = RecipeEngine()
+
+    /// True when the pipeline is actively preparing the summary for the first
+    /// time (no summary persisted yet). We hide stage names and percentages
+    /// behind a single skeleton view (P1-T05).
+    private var isPreparingFirstSummary: Bool {
+        guard summary == nil, let status = meeting?.status else { return false }
+        return status == .transcribing || status == .summarizing
+    }
 
     var body: some View {
         Group {
@@ -54,6 +72,8 @@ struct SummaryView: View {
                 Spacer()
                 ProgressView()
                 Spacer()
+            } else if isPreparingFirstSummary {
+                SummarySkeletonView()
             } else if let summary {
                 summaryContent(summary)
             } else {
@@ -62,7 +82,11 @@ struct SummaryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .errorAlert($errorMessage)
-        .onDisappear { activeTask?.cancel() } // activeTask is save-edit only; regeneration persists
+        .onDisappear {
+            // Cancel pending debounce, flush any unsaved edit synchronously.
+            saveTask?.cancel()
+            flushPendingSaveIfNeeded()
+        }
         .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
             // Reload summary when a regeneration task for this meeting completes.
             let justCompleted = tasks.contains {
@@ -85,6 +109,20 @@ struct SummaryView: View {
             SummaryHistoryView(meetingId: meetingId)
                 .environment(appState)
         }
+        .sheet(item: Binding(
+            get: { emailDraftText.map { EmailDraftPayload(text: $0) } },
+            set: { emailDraftText = $0?.text }
+        )) { payload in
+            EmailDraftResultView(
+                rawText: payload.text,
+                meetingTitle: meeting?.title ?? "Meeting"
+            )
+        }
+    }
+
+    private struct EmailDraftPayload: Identifiable {
+        let id = UUID()
+        let text: String
     }
 
     // MARK: - No Summary Empty State
@@ -231,7 +269,9 @@ struct SummaryView: View {
                     .font(.caption)
                     .foregroundStyle(Color.appTextTertiary)
 
-                if summary.isEdited {
+                // "Edited" badge — driven by live edit state, so it appears as
+                // soon as the user diverges from the AI text.
+                if isEdited {
                     Text("Edited")
                         .font(.caption2)
                         .fontWeight(.semibold)
@@ -242,13 +282,29 @@ struct SummaryView: View {
                         .clipShape(Capsule())
                 }
 
+                // Subtle "Saved" flash after each debounced auto-save.
+                if showSavedFlash {
+                    Label("Saved", systemImage: "checkmark")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption)
+                        .foregroundStyle(Color.appSuccess)
+                        .transition(.opacity)
+                }
+
+                // Smaller inline regen indicator (NOT a full-screen replacement).
+                if isRegenerating {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Regenerating…")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                }
+
                 Spacer()
 
-                if isEditing {
-                    editingToolbar
-                } else {
-                    standardToolbar(summary)
-                }
+                standardToolbar(summary)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -256,142 +312,156 @@ struct SummaryView: View {
             Divider()
                 .foregroundStyle(Color.appSeparator)
 
-            // Regeneration overlay or content
-            if isRegenerating {
-                Spacer()
-                VStack(spacing: 12) {
-                    ProgressView("Regenerating...")
-                        .foregroundStyle(Color.appTextPrimary)
-                }
-                Spacer()
-            } else if let error = regenerateError {
-                Spacer()
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.title)
-                        .foregroundStyle(Color.appWarning)
+            if let error = regenerateError {
+                regenerateErrorBanner(error)
+            }
 
-                    Text("Regeneration Failed")
-                        .font(.headline)
-                        .foregroundStyle(Color.appTextPrimary)
-
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextTertiary)
-                        .multilineTextAlignment(.center)
-
-                    Button {
-                        regenerateSummary()
-                    } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Button("Dismiss") {
-                        // Clear the failed regeneration task from the queue so the error disappears.
-                        Task {
-                            if let failedTask = appState.taskQueueManager.allTasks.first(where: {
-                                $0.type == .regeneration && $0.meetingId == meetingId && $0.status == .failed
-                            }) {
-                                await appState.taskQueueManager.cancel(taskId: failedTask.id)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextTertiary)
-                }
-                Spacer()
-            } else if isEditing {
-                // Editable text
-                TextEditor(text: $editedText)
-                    .font(.body)
-                    .foregroundStyle(Color.appTextPrimary)
-                    .scrollContentBackground(.hidden)
-                    .lineSpacing(4)
-                    .padding(12)
-                    .background(Color.appSurface)
-            } else {
-                // Summary text (read-only)
-                ScrollView {
-                    Text(summary.summaryText)
+            // Always-mounted inline editor + inline action items (P1-T04 + P1-T02).
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    TextEditor(text: $editableContent)
                         .font(.body)
                         .foregroundStyle(Color.appTextPrimary)
-                        .textSelection(.enabled)
+                        .scrollContentBackground(.hidden)
                         .lineSpacing(4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
+                        .frame(minHeight: 240)
+                        .background(Color.appBackground)
+
+                    Divider()
+                        .padding(.vertical, 16)
+
+                    InlineActionItemsSection(meetingId: meetingId)
+
+                    Divider()
+                        .padding(.vertical, 16)
+
+                    // "View raw transcript" link (P1-T01) — secondary, de-emphasized.
+                    // Posts the existing .switchTab notification rather than threading
+                    // a binding through; MeetingDetailView already listens for this.
+                    Button {
+                        NotificationCenter.default.post(name: .switchTab, object: "transcript")
+                    } label: {
+                        Label("View raw transcript", systemImage: "text.quote")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 8)
                 }
+                .padding(16)
             }
         }
+        .onAppear { loadEditorIfNeeded(from: summary) }
+        .onChange(of: summary.id) { _, _ in
+            // A different summary version landed (regen complete) — reload editor.
+            hasLoadedEditor = false
+            loadEditorIfNeeded(from: summary)
+        }
+        .onChange(of: editableContent) { _, _ in
+            // Skip the initial load assignment.
+            guard hasLoadedEditor else { return }
+            scheduleSave()
+        }
     }
-
-    // MARK: - Toolbars
 
     @ViewBuilder
-    private var editingToolbar: some View {
-        Button {
-            saveEdit()
-        } label: {
-            Label("Save", systemImage: "checkmark")
+    private func regenerateErrorBanner(_ error: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.appWarning)
+            Text(error)
                 .font(.caption)
-                .fontWeight(.medium)
+                .foregroundStyle(Color.appTextPrimary)
+                .lineLimit(2)
+            Spacer()
+            Button("Retry") { regenerateSummary() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            Button("Dismiss") {
+                Task {
+                    if let failedTask = appState.taskQueueManager.allTasks.first(where: {
+                        $0.type == .regeneration && $0.meetingId == meetingId && $0.status == .failed
+                    }) {
+                        await appState.taskQueueManager.cancel(taskId: failedTask.id)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(Color.appTextTertiary)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.small)
-        .tint(Color.appAccent)
-
-        Button {
-            isEditing = false
-            editedText = ""
-        } label: {
-            Label("Cancel", systemImage: "xmark")
-                .font(.caption)
-                .fontWeight(.medium)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.appWarning.opacity(0.12))
     }
+
+    // MARK: - Toolbar
 
     @ViewBuilder
     private func standardToolbar(_ summary: MeetingSummary) -> some View {
-        Button {
-            copyToClipboard(summary.summaryText)
-        } label: {
-            Label(
-                copiedToClipboard ? "Copied" : "Copy",
-                systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
-            )
-            .font(.caption)
-            .fontWeight(.medium)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-
-        Button {
-            copyAsMarkdown(summary)
-        } label: {
-            Label(
-                copiedMarkdownToClipboard ? "Copied" : "Copy as Markdown",
-                systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
-            )
-            .font(.caption)
-            .fontWeight(.medium)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-
-        Button {
-            isEditing = true
-            editedText = summary.summaryText
-        } label: {
-            Label("Edit", systemImage: "pencil")
+        // Split share button: primary tap copies as rich text; chevron menu
+        // exposes Markdown copy, system share, and HTML export. (P3-T01 / P3-T04)
+        HStack(spacing: 0) {
+            Button {
+                copyAsRichText(summary)
+            } label: {
+                Label(
+                    copiedToClipboard ? "Copied" : "Copy",
+                    systemImage: copiedToClipboard ? "checkmark" : "doc.on.doc"
+                )
                 .font(.caption)
                 .fontWeight(.medium)
+                .padding(.horizontal, 2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Menu {
+                Button {
+                    copyAsMarkdown(summary)
+                } label: {
+                    Label(
+                        copiedMarkdownToClipboard ? "Copied as Markdown" : "Copy as Markdown",
+                        systemImage: copiedMarkdownToClipboard ? "checkmark" : "text.document"
+                    )
+                }
+
+                Button {
+                    Task { await openInBrowser(summary) }
+                } label: {
+                    Label("Export HTML / Open in Browser", systemImage: "safari")
+                }
+
+                Divider()
+
+                Button {
+                    systemShare(summary)
+                } label: {
+                    Label("AirDrop / System Share…", systemImage: "square.and.arrow.up")
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 22)
+            .controlSize(.small)
+        }
+
+        Button {
+            draftFollowUpEmail()
+        } label: {
+            Label(
+                isDraftingEmail ? "Drafting…" : "Draft Email",
+                systemImage: "envelope"
+            )
+            .font(.caption)
+            .fontWeight(.medium)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+        .disabled(isDraftingEmail)
 
         Button {
             regenerateSummary(recipe: selectedRecipe)
@@ -412,8 +482,188 @@ struct SummaryView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
 
-        ShareSummaryButton(summary: summary, meeting: meeting, exportService: exportService)
+    // MARK: - Share / Export Actions (P3-T01 / P3-T04)
+
+    private func copyAsRichText(_ summary: MeetingSummary) {
+        guard let meeting else { return }
+        Task {
+            let actionRepo = ActionItemRepository(database: appState.database)
+            let items = (try? await actionRepo.itemsForMeeting(meetingId)) ?? []
+
+            // Build a transient summary with the live edited text so what the
+            // user sees is what they paste.
+            var live = summary
+            live.summaryText = editableContent
+
+            await MainActor.run {
+                _ = richShareService.copyAsRichText(meeting: meeting, summary: live, actionItems: items)
+                withAnimation { copiedToClipboard = true }
+            }
+            try? await Task.sleep(for: .seconds(2))
+            await MainActor.run { withAnimation { copiedToClipboard = false } }
+        }
+    }
+
+    private func systemShare(_ summary: MeetingSummary) {
+        guard let meeting else { return }
+        let formatted = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
+        ShareService.share(formatted)
+    }
+
+    @MainActor
+    private func openInBrowser(_ summary: MeetingSummary) async {
+        guard let meeting else { return }
+        let transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        let notes = (try? await appState.noteRepository.notesForMeeting(meetingId)) ?? []
+        let actionRepo = ActionItemRepository(database: appState.database)
+        let items = (try? await actionRepo.itemsForMeeting(meetingId)) ?? []
+        do {
+            // Use the live edited summary so what the browser shows matches.
+            var live = summary
+            live.summaryText = editableContent
+            _ = try exportService.writeHTMLAndOpen(
+                meeting: meeting,
+                summary: live,
+                transcripts: transcripts,
+                notes: notes,
+                actionItems: items
+            )
+        } catch {
+            errorMessage = "Failed to open HTML preview: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Draft Email (P3-T03)
+
+    private func draftFollowUpEmail() {
+        guard let meeting, !isDraftingEmail else { return }
+        isDraftingEmail = true
+        Task {
+            defer { Task { @MainActor in isDraftingEmail = false } }
+
+            // Locate the built-in follow-up email recipe (seeded in Migrations.swift).
+            let recipeRepo = RecipeRepository(database: appState.database)
+            let allRecipes = (try? await recipeRepo.allRecipes()) ?? []
+            guard let recipe = allRecipes.first(where: { $0.id == "builtin-follow-up-email" })
+                ?? allRecipes.first(where: { $0.category == .email && $0.isBuiltIn }) else {
+                await MainActor.run {
+                    errorMessage = "Follow-up Email recipe not found. Reinstall the app or check your database migrations."
+                }
+                return
+            }
+
+            // Build textGenerator the same way RecipeResultView does.
+            let settings = appState.settings
+            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+            await appState.ollamaService.refreshStatus()
+            let ollamaReachable = appState.ollamaService.isReachable
+            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+
+            let textGenerator: (String, String) async throws -> String
+            if useOllama {
+                let ollamaService = appState.ollamaService
+                let ollamaModel = settings.ollamaModel
+                textGenerator = { sys, usr in
+                    try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
+                }
+            } else if hasClaudeKey {
+                let claude = ClaudeService()
+                let claudeModel = settings.claudeModel
+                textGenerator = { sys, usr in
+                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
+                }
+            } else {
+                await MainActor.run {
+                    errorMessage = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+                }
+                return
+            }
+
+            do {
+                let result = try await emailRecipeEngine.execute(
+                    recipe: recipe,
+                    meeting: meeting,
+                    transcriptRepo: appState.transcriptRepository,
+                    noteRepo: appState.noteRepository,
+                    resultRepo: RecipeResultRepository(database: appState.database),
+                    textGenerator: textGenerator
+                )
+                await MainActor.run { emailDraftText = result }
+            } catch {
+                await MainActor.run {
+                    errorMessage = "Failed to draft email: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    // MARK: - Inline auto-save (P1-T04)
+
+    private var isEdited: Bool {
+        hasLoadedEditor && editableContent != originalContent
+    }
+
+    private func loadEditorIfNeeded(from summary: MeetingSummary) {
+        guard !hasLoadedEditor else { return }
+        editableContent = summary.summaryText
+        originalContent = summary.summaryText
+        hasLoadedEditor = true
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            await persistSummary()
+        }
+    }
+
+    /// Synchronously kicks off a save if there's an unsaved divergence.
+    /// Used on view disappearance — fire-and-forget; cannot block onDisappear,
+    /// but the Task is detached and will run to completion.
+    private func flushPendingSaveIfNeeded() {
+        guard hasLoadedEditor,
+              let s = summary,
+              editableContent != s.summaryText else { return }
+        Task.detached { [editableContent] in
+            await persistImmediately(text: editableContent)
+        }
+    }
+
+    @MainActor
+    private func persistSummary() async {
+        guard hasLoadedEditor, var updated = summary else { return }
+        // No-op if user reverted to the persisted text.
+        guard editableContent != updated.summaryText else { return }
+        updated.summaryText = editableContent
+        updated.isEdited = (editableContent != originalContent)
+        do {
+            try await appState.summaryRepository.update(updated)
+            summary = updated
+            withAnimation(.easeInOut(duration: 0.2)) { showSavedFlash = true }
+            try? await Task.sleep(for: .milliseconds(800))
+            withAnimation(.easeInOut(duration: 0.3)) { showSavedFlash = false }
+        } catch {
+            errorMessage = "Failed to save edited summary: \(error.localizedDescription)"
+        }
+    }
+
+    private func persistImmediately(text: String) async {
+        // Used by flushPendingSaveIfNeeded — re-fetch latest persisted summary
+        // off the main actor and write the diverged text back.
+        guard let latest = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) else { return }
+        guard text != latest.summaryText else { return }
+        var updated = latest
+        updated.summaryText = text
+        updated.isEdited = true
+        do {
+            try await appState.summaryRepository.update(updated)
+        } catch {
+            Logger.general.error("Summary auto-save failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Actions
@@ -429,24 +679,6 @@ struct SummaryView: View {
         isLoading = true
         defer { isLoading = false }
         summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId)
-    }
-
-    private func saveEdit() {
-        guard var updatedSummary = summary else { return }
-        updatedSummary.summaryText = editedText
-        updatedSummary.isEdited = true
-
-        activeTask = Task {
-            do {
-                try await appState.summaryRepository.update(updatedSummary)
-                summary = updatedSummary
-                isEditing = false
-                editedText = ""
-            } catch {
-                // Keep editing state on failure so user doesn't lose changes
-                errorMessage = "Failed to save edited summary: \(error.localizedDescription)"
-            }
-        }
     }
 
     private func regenerateSummary(recipe: Recipe? = nil) {
@@ -491,95 +723,7 @@ struct SummaryView: View {
         }
     }
 
-    private func copyToClipboard(_ text: String) {
-        ShareService.copyToClipboard(text)
-
-        withAnimation {
-            copiedToClipboard = true
-        }
-
-        Task {
-            try? await Task.sleep(for: .seconds(2))
-            await MainActor.run {
-                withAnimation {
-                    copiedToClipboard = false
-                }
-            }
-        }
-    }
 }
-
-// MARK: - Share Button
-
-/// Hosts an `NSSharingServicePicker` anchored to the button's own NSView,
-/// so the share sheet appears in the correct position.
-#if canImport(AppKit)
-private struct ShareSummaryButton: View {
-    let summary: MeetingSummary
-    let meeting: Meeting?
-    let exportService: ExportService
-
-    var body: some View {
-        ShareSummaryButtonRepresentable(summary: summary, meeting: meeting, exportService: exportService)
-            .fixedSize()
-    }
-}
-
-private struct ShareSummaryButtonRepresentable: NSViewRepresentable {
-    let summary: MeetingSummary
-    let meeting: Meeting?
-    let exportService: ExportService
-
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(
-            title: "Share",
-            target: context.coordinator,
-            action: #selector(Coordinator.share(_:))
-        )
-        button.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share")
-        button.imagePosition = .imageLeading
-        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.isBordered = true
-        return button
-    }
-
-    func updateNSView(_ nsView: NSButton, context: Context) {
-        context.coordinator.summary = summary
-        context.coordinator.meeting = meeting
-        context.coordinator.exportService = exportService
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(summary: summary, meeting: meeting, exportService: exportService)
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var summary: MeetingSummary
-        var meeting: Meeting?
-        var exportService: ExportService
-
-        init(summary: MeetingSummary, meeting: Meeting?, exportService: ExportService) {
-            self.summary = summary
-            self.meeting = meeting
-            self.exportService = exportService
-        }
-
-        @objc func share(_ sender: NSButton) {
-            let formattedText: String
-            if let meeting {
-                formattedText = exportService.exportSummaryMarkdown(meeting: meeting, summary: summary)
-            } else {
-                formattedText = summary.summaryText
-            }
-            let picker = NSSharingServicePicker(items: [formattedText])
-            picker.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-        }
-    }
-}
-#endif
 
 // MARK: - Preview
 

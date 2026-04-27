@@ -347,6 +347,11 @@ final class AppState {
                     )
                 }
                 Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
+
+                // P1-T06: auto-title ad-hoc meetings once transcripts are persisted.
+                // Calendar meetings already have a title from the event, so skip those.
+                await self.autoTitleIfNeeded(meeting: meeting, transcripts: transcripts)
+
                 self.loadMeetings()
             }
         }
@@ -425,12 +430,44 @@ final class AppState {
             rawTemplate = settings.summaryPromptTemplate
         }
 
-        let systemPrompt = rawTemplate
+        let baseSystemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
             .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
             .replacingOccurrences(of: "{{transcript}}", with: "")
             .replacingOccurrences(of: "{{notes}}", with: "")
+
+        // P2-T03: Notes-first summary. If the user captured notes during the meeting via
+        // NotepadPaneView, treat those notes as the primary anchor and use the transcript to
+        // fill in details. When no notes exist, fall back to the standard transcript-only path.
+        let notes = (try? await noteRepository.notesForMeeting(meetingId)) ?? []
+        let noteText = notes.map { $0.content }
+            .joined(separator: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let systemPrompt: String
+        let userPrompt: String
+        if noteText.isEmpty {
+            systemPrompt = baseSystemPrompt
+            userPrompt = transcript
+        } else {
+            systemPrompt = baseSystemPrompt + """
+
+
+            The user captured notes during this meeting — treat these notes as ground truth and \
+            anchor the summary around them. Use the transcript to fill in details, context, and \
+            action items the user may have missed. Do not contradict the notes.
+            """
+            userPrompt = """
+            <user_notes>
+            \(noteText)
+            </user_notes>
+
+            <transcript>
+            \(transcript)
+            </transcript>
+            """
+        }
 
         // Determine which AI backend to use
         let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
@@ -443,14 +480,14 @@ final class AppState {
             // Use streaming for task queue — never times out, reads chunks incrementally
             summaryText = try await ollamaService.generateStreaming(
                 systemPrompt: systemPrompt,
-                userPrompt: transcript,
+                userPrompt: userPrompt,
                 model: settings.ollamaModel
             )
         } else if hasClaudeKey {
             let claude = ClaudeService()
             summaryText = try await claude.sendMessage(
                 systemPrompt: systemPrompt,
-                userPrompt: transcript,
+                userPrompt: userPrompt,
                 model: settings.claudeModel
             )
         } else {
@@ -568,6 +605,27 @@ final class AppState {
     ///    the title field for easy rename (ad-hoc meetings only).
     /// 4. Surfaces guard-rail failures (already recording, start in progress) as `lastUserError`
     ///    so the user gets a visible alert instead of a silent no-op.
+    /// P4-T01: Cycle to the previous (-1) or next (+1) meeting in the currently sorted
+    /// list. No-op if no meeting is selected or the list is empty. Used by the
+    /// ⌘[ / ⌘] keyboard shortcuts in MeetingDetailView.
+    @MainActor
+    func selectAdjacentMeeting(direction: Int) {
+        let sorted = meetings.sorted {
+            ($0.scheduledStartDate ?? $0.startDate ?? .distantPast)
+                > ($1.scheduledStartDate ?? $1.startDate ?? .distantPast)
+        }
+        guard !sorted.isEmpty else { return }
+        guard let currentId = selectedMeetingId,
+              let idx = sorted.firstIndex(where: { $0.id == currentId }) else {
+            // No selection → land on the first meeting.
+            selectedMeetingId = sorted.first?.id
+            return
+        }
+        let newIdx = max(0, min(sorted.count - 1, idx + direction))
+        guard newIdx != idx else { return }
+        selectedMeetingId = sorted[newIdx].id
+    }
+
     @MainActor
     func startNewMeeting() {
         guard !isRecording else {
@@ -832,89 +890,22 @@ final class AppState {
     }
 
     // MARK: - Auto-Summary
-
-    /// Schedule automatic summary generation 10 minutes after transcription completes.
-    private func scheduleAutoSummary(meetingId: String) {
-        fileLog("Auto-summary: scheduled for meeting \(meetingId) in 10 minutes")
-        Logger.ai.info("Auto-summary scheduled for \(meetingId) — will fire in 10 minutes")
-
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(600)) // 10 minutes
-
-            // Verify the meeting still exists and doesn't already have a summary
-            guard let meeting = try? await meetingRepository.find(id: meetingId) else {
-                fileLog("Auto-summary: meeting \(meetingId) no longer exists — skipping")
-                return
-            }
-
-            if let existing = try? await summaryRepository.latestSummary(meetingId: meetingId), !existing.summaryText.isEmpty {
-                fileLog("Auto-summary: meeting \(meetingId) already has a summary — skipping")
-                return
-            }
-
-            fileLog("Auto-summary: generating for meeting \(meetingId)...")
-
-            // Determine AI backend (same routing as SummaryView)
-            let baseTextGenerator: (String, String) async throws -> String
-            let modelUsed: String
-
-            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-            await ollamaService.refreshStatus()
-            let ollamaReachable = ollamaService.isReachable
-
-            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-            if useOllama {
-                let service = ollamaService
-                let ollamaModel = settings.ollamaModel  // "auto" or explicit
-                baseTextGenerator = { sys, usr in
-                    try await service.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
-                }
-                modelUsed = "ollama/\(ollamaModel)"
-            } else if hasClaudeKey {
-                let claude = ClaudeService()
-                let claudeModel = settings.claudeModel
-                baseTextGenerator = { sys, usr in
-                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
-                }
-                modelUsed = claudeModel
-            } else {
-                fileLog("Auto-summary: no AI configured — skipping")
-                return
-            }
-
-            // If a default recipe is set, use its prompt template
-            let textGenerator: (String, String) async throws -> String
-            if let recipeId = settings.defaultRecipeId {
-                let repo = RecipeRepository(database: database)
-                if let recipe = try? await repo.find(id: recipeId) {
-                    textGenerator = { _, usr in try await baseTextGenerator(recipe.promptTemplate, usr) }
-                } else {
-                    textGenerator = baseTextGenerator
-                }
-            } else {
-                textGenerator = baseTextGenerator
-            }
-
-            do {
-                let generator = SummaryGenerator()
-                let summary = try await generator.generateSummary(
-                    for: meeting,
-                    transcriptRepo: transcriptRepository,
-                    noteRepo: noteRepository,
-                    summaryRepo: summaryRepository,
-                    textGenerator: textGenerator,
-                    modelUsed: modelUsed,
-                    settings: settings
-                )
-                fileLog("Auto-summary: completed for meeting \(meetingId) (\(summary.summaryText.count) chars)")
-                Logger.ai.info("Auto-summary generated for \(meetingId)")
-            } catch {
-                fileLog("Auto-summary: FAILED for meeting \(meetingId) — \(error.localizedDescription)")
-                Logger.ai.error("Auto-summary failed: \(error.localizedDescription)")
-            }
-        }
-    }
+    //
+    // P2-T04: Summary generation fires IMMEDIATELY after transcription completes —
+    // no delay, no separate user trigger. The flow is:
+    //
+    //   1. Recording stops → transcription task enqueued (priority 0).
+    //   2. transcriptionHandler runs batchTranscribe(), commits transcripts,
+    //      then awaits autoTitleIfNeeded() (P1-T06).
+    //   3. TaskQueueManager.processLoop() observes the transcription task completed
+    //      and immediately enqueues a summary task (priority 5) for the same meeting,
+    //      provided segments exist. See TaskQueueManager.processLoop().
+    //   4. summaryHandler invokes generateSummaryForTask, which is notes-anchored
+    //      when the user captured notes during the meeting (P2-T03).
+    //
+    // Order is therefore: transcribe → auto-title → summary, with no artificial wait.
+    // generateSummaryForTask is idempotent in the sense that the regeneration UI uses
+    // the same code path; the queue itself dedupes pending summary tasks per meeting.
 
     /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
     /// Returns the filtered transcripts and diarisation speaker labels to the caller, which
@@ -1232,12 +1223,60 @@ final class AppState {
                     for var t in transcripts { try t.save(db) }
                     try meeting.save(db)
                 }
+
+                // P1-T06: auto-title ad-hoc meetings on the recovery path too.
+                await autoTitleIfNeeded(meeting: meeting, transcripts: transcripts)
             }
         }
 
         // Clear the queue
         UserDefaults.standard.removeObject(forKey: Self.pendingTranscriptionKey)
         fileLog("Pending transcription queue cleared")
+    }
+
+    // MARK: - Auto-title (P1-T06)
+
+    /// If the meeting still has the default/empty title and is not tied to a
+    /// calendar event, ask Ollama for a 5-7 word title from the transcript.
+    /// Falls through silently when Ollama is unavailable — the meeting just
+    /// keeps its default title until the user (or summary) renames it.
+    private func autoTitleIfNeeded(meeting: Meeting, transcripts: [Transcript]) async {
+        // Calendar meetings already have a meaningful title from the event.
+        guard meeting.calendarEventId == nil else { return }
+
+        let defaultTitles: Set<String> = ["New Meeting", "Untitled Meeting", ""]
+        let trimmedTitle = meeting.title.trimmingCharacters(in: .whitespaces)
+        guard defaultTitles.contains(meeting.title) || trimmedTitle.isEmpty else { return }
+
+        let transcriptText = transcripts.map { $0.text }.joined(separator: " ")
+        guard !transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let resolvedTitle: String?
+        if let generated = await TitleGenerationService.shared.generate(
+            fromTranscript: transcriptText,
+            using: ollamaService
+        ) {
+            resolvedTitle = generated
+        } else if let summary = try? await summaryRepository.latestSummary(meetingId: meeting.id),
+                  !summary.summaryText.isEmpty {
+            resolvedTitle = TitleGenerationService.shared.extractFromSummary(summary.summaryText)
+        } else {
+            resolvedTitle = nil
+        }
+
+        guard let generated = resolvedTitle else {
+            Logger.general.info("Auto-title: no title generated for \(meeting.id, privacy: .public) (Ollama unavailable, no summary fallback)")
+            return
+        }
+
+        var updated = meeting
+        updated.title = generated
+        do {
+            try await meetingRepository.update(updated)
+            Logger.general.info("Auto-titled meeting \(meeting.id, privacy: .public): \(generated, privacy: .public)")
+        } catch {
+            Logger.general.error("Auto-title persist failed for \(meeting.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Send a macOS notification that the transcription model is ready.

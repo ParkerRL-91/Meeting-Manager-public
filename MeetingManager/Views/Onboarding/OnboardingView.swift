@@ -7,20 +7,15 @@ struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Step content
+            // P2-T01: 3-step onboarding. AI choice / local model / prompts steps
+            // were removed — defaults to Ollama local; users can switch in
+            // Settings → AI. Model download moves to a background banner on Home.
             Group {
                 switch onboardingManager.currentStep {
                 case .welcome:
                     WelcomeStepView(onNext: onboardingManager.nextStep)
-                case .permissions:
-                    PermissionsStepView()
                 case .calendar:
-                    CalendarStepView()
-                case .aiChoice:
-                    AIChoiceStepView(onboardingManager: onboardingManager)
-                case .localModel:
-                    LocalModelStepView()
-                case .prompts:
-                    PromptsStepView()
+                    CalendarStepView(onSkip: onboardingManager.nextStep)
                 case .ready:
                     ReadyStepView(onComplete: onboardingManager.complete)
                 }

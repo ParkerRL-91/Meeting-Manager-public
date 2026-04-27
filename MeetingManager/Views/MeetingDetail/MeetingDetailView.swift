@@ -20,13 +20,10 @@ struct MeetingDetailView: View {
     private let exportService = ExportService()
 
     enum DetailTab: String, CaseIterable {
-        case summary, transcript, notes, actionItems
+        case summary, notes, transcript
 
         var label: String {
-            switch self {
-            case .actionItems: return "Action Items"
-            default: return rawValue.capitalized
-            }
+            rawValue.capitalized
         }
 
         var icon: String {
@@ -34,7 +31,6 @@ struct MeetingDetailView: View {
             case .summary: return "doc.text"
             case .transcript: return "text.quote"
             case .notes: return "note.text"
-            case .actionItems: return "checklist"
             }
         }
     }
@@ -99,8 +95,6 @@ struct MeetingDetailView: View {
                     FullTranscriptView(meetingId: meetingId)
                 case .notes:
                     NotesReviewView(meetingId: meetingId)
-                case .actionItems:
-                    ActionItemsView(meetingId: meetingId)
                 }
             } else {
                 Spacer()
@@ -112,6 +106,23 @@ struct MeetingDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
         .errorAlert($errorMessage)
+        // P4-T01: Keyboard shortcuts for tab switching + meeting navigation.
+        // Hidden buttons attached as background — same pattern LiveMeetingView uses for ⌘J.
+        .background(
+            Group {
+                Button("") { selectedTab = .summary }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("") { selectedTab = .notes }
+                    .keyboardShortcut("2", modifiers: .command)
+                Button("") { selectedTab = .transcript }
+                    .keyboardShortcut("3", modifiers: .command)
+                Button("") { appState.selectAdjacentMeeting(direction: -1) }
+                    .keyboardShortcut("[", modifiers: .command)
+                Button("") { appState.selectAdjacentMeeting(direction: 1) }
+                    .keyboardShortcut("]", modifiers: .command)
+            }
+            .hidden()
+        )
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let meeting {

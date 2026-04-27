@@ -300,6 +300,29 @@ struct MeetingPrepCardView: View {
                 }
             }
 
+            // Template chips — Granola-style meeting type picker, persists to meeting.templateId
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Template")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appTextTertiary)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+
+                MeetingTemplatePickerView(
+                    selectedTemplateId: Binding(
+                        get: { meeting.templateId },
+                        set: { newId in
+                            Task {
+                                var updated = meeting
+                                updated.templateId = newId
+                                try? await appState.meetingRepository.update(updated)
+                            }
+                        }
+                    ),
+                    compact: true
+                )
+            }
+
             // Action buttons
             HStack(spacing: 8) {
                 if let link = brief.meetLink, let url = URL(string: link) {
