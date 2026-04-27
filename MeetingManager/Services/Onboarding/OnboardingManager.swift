@@ -15,28 +15,26 @@ final class OnboardingManager {
         didSet { UserDefaults.standard.set(currentStep.rawValue, forKey: stepKey) }
     }
 
-    /// Tracks the user's AI choice during onboarding so downstream steps can adapt.
+    /// Tracks the user's AI choice. Defaults to `.local` (Ollama) — power users can
+    /// switch to Claude in Settings → AI. Persisted for downstream consumers that
+    /// still read this value, even though onboarding no longer prompts for it.
     var aiChoice: AIChoice {
         didSet { UserDefaults.standard.set(aiChoice.rawValue, forKey: aiChoiceKey) }
     }
 
+    /// Reduced 3-step onboarding (P2-T01). Welcome+permissions are combined,
+    /// calendar is optional, and the model download moves to a background banner
+    /// rather than a blocking step. AI choice / local model / prompts steps were
+    /// removed entirely — they live in Settings now.
     enum OnboardingStep: Int, CaseIterable {
         case welcome = 0
-        case permissions = 1
-        case calendar = 2
-        case aiChoice = 3
-        case localModel = 4
-        case prompts = 5
-        case ready = 6
+        case calendar = 1
+        case ready = 2
 
         var title: String {
             switch self {
             case .welcome: return "Welcome"
-            case .permissions: return "Permissions"
             case .calendar: return "Calendar"
-            case .aiChoice: return "AI Setup"
-            case .localModel: return "Local Model"
-            case .prompts: return "Prompts"
             case .ready: return "Ready"
             }
         }
@@ -50,19 +48,18 @@ final class OnboardingManager {
 
     init() {
         let savedStep = UserDefaults.standard.integer(forKey: stepKey)
+        // Map legacy persisted step indices (0–6) onto the new 3-step flow so
+        // a user mid-onboarding from a previous build doesn't land on an
+        // invalid case.
         self.currentStep = OnboardingStep(rawValue: savedStep) ?? .welcome
-        let savedChoice = UserDefaults.standard.string(forKey: aiChoiceKey) ?? "none"
-        self.aiChoice = AIChoice(rawValue: savedChoice) ?? .none
+        let savedChoice = UserDefaults.standard.string(forKey: aiChoiceKey) ?? "local"
+        self.aiChoice = AIChoice(rawValue: savedChoice) ?? .local
     }
 
-    /// Steps that should be displayed (localModel is conditional on aiChoice == .local,
-    /// prompts only shown if AI is enabled).
+    /// All steps are now visible — no conditional steps remain. Kept for the
+    /// dot-indicator binding in `OnboardingView`.
     var visibleSteps: [OnboardingStep] {
-        OnboardingStep.allCases.filter { step in
-            if step == .localModel { return aiChoice == .local }
-            if step == .prompts { return aiChoice != .none }
-            return true
-        }
+        OnboardingStep.allCases
     }
 
     func nextStep() {
@@ -89,6 +86,6 @@ final class OnboardingManager {
     func reset() {
         isCompleted = false
         currentStep = .welcome
-        aiChoice = .none
+        aiChoice = .local
     }
 }

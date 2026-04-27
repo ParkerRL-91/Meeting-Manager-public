@@ -1,6 +1,10 @@
 import SwiftUI
 
 struct CalendarStepView: View {
+    /// Optional callback so the user can skip calendar setup entirely (P2-T01).
+    /// Bound to `OnboardingManager.nextStep` from the parent view.
+    var onSkip: (() -> Void)? = nil
+
     @State private var authManager = GoogleAuthManager()
     @State private var isConnecting = false
     @State private var connectionError: String?
@@ -86,6 +90,12 @@ struct CalendarStepView: View {
             Text("You can skip this and connect later in Settings.")
                 .font(.caption)
                 .foregroundStyle(Color.appTextTertiary)
+
+            if let onSkip {
+                Button("Set up later", action: onSkip)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+            }
 
             Spacer()
         }
