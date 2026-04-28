@@ -18,15 +18,32 @@ final class PromptManager {
 
     // MARK: - Template Persistence
 
-    /// Loads the current prompt template from the provided `AppSettings`, falling back to the
-    /// built-in default when the stored value is empty.
+    /// Loads the current prompt template, falling back to the built-in default
+    /// when the stored value is empty.
+    ///
+    /// Reads fresh from the database rather than the in-memory `appState.settings`
+    /// snapshot — that snapshot can be stale after a save (the DB write doesn't
+    /// invalidate it), so reading from settings caused saved edits to "revert"
+    /// the next time PromptConfigView opened. The settings table is a single
+    /// row and this is only called from the settings UI, so the read cost is
+    /// negligible.
     func loadTemplate(settings: AppSettings = .default) -> String {
-        let stored = settings.summaryPromptTemplate
+        let stored: String = {
+            // Try fresh-from-DB first; fall back to the passed-in snapshot if
+            // the DB read fails (offline / disk full / brand-new install).
+            if let fresh = try? AppDatabase.shared.writer.read({ db in
+                try AppSettings.fetchOne(db)?.summaryPromptTemplate
+            }) {
+                return fresh ?? settings.summaryPromptTemplate
+            }
+            return settings.summaryPromptTemplate
+        }()
         return stored.isEmpty ? DefaultPrompts.meetingSummary : stored
     }
 
     /// Persists a custom prompt template. Pass an empty string to effectively
-    /// revert to the default on next load.
+    /// revert to the default on next load. Also posts a notification so any
+    /// observer of in-memory settings can refresh.
     func saveTemplate(_ template: String) {
         do {
             try AppDatabase.shared.writer.write { db in
@@ -40,6 +57,9 @@ final class PromptManager {
                 }
             }
             Logger.ai.info("Prompt template saved (\(template.count) characters)")
+            // Notify observers (AppState, etc.) so any cached in-memory copy
+            // gets refreshed instead of returning stale data on the next read.
+            NotificationCenter.default.post(name: .summaryPromptTemplateDidChange, object: nil)
         } catch {
             Logger.ai.error("Failed to save prompt template: \(error.localizedDescription)")
         }

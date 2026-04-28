@@ -1693,6 +1693,16 @@ final class AppState {
             }
             .store(in: &cancellables)
 
+        // Settings → Prompts edits the summary prompt template directly in the
+        // DB via PromptManager.saveTemplate. Refresh the in-memory snapshot so
+        // the next summary generation picks up the new template instead of the
+        // stale cached value.
+        NotificationCenter.default.publisher(for: .summaryPromptTemplateDidChange)
+            .sink { [weak self] _ in
+                self?.loadSettings()
+            }
+            .store(in: &cancellables)
+
         // Call app detected — decide auto-record vs notification based on settings
         NotificationCenter.default.publisher(for: .callAppLaunched)
             .sink { [weak self] notification in

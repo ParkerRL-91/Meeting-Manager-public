@@ -168,7 +168,9 @@ private struct TaskRow: View {
                             .foregroundStyle(.red)
                             .lineLimit(2)
                     } else if task.status == .completed, let completed = task.completedAt {
-                        Text("Completed \(completed, style: .relative) ago")
+                        // Bucketed updates instead of per-second tick — quieter UI when
+                        // many completed jobs are shown.
+                        RelativeTimestampLabel(date: completed, prefix: "Completed")
                             .font(.caption)
                             .foregroundStyle(Color.appTextTertiary)
                     } else if task.status == .pending {

@@ -457,6 +457,7 @@ extension Notification.Name {
     static let meetingStateChanged = Notification.Name("meetingStateChanged")
     static let switchTab = Notification.Name("switchTab")
     static let exportMeeting = Notification.Name("exportMeeting")
+    static let summaryPromptTemplateDidChange = Notification.Name("summaryPromptTemplateDidChange")
     static let copySummary = Notification.Name("copySummary")
     static let focusSearch = Notification.Name("focusSearch")
     static let meetingStartingSoon = Notification.Name("meetingStartingSoon")
