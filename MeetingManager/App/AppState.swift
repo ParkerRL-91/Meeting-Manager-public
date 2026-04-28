@@ -321,7 +321,7 @@ final class AppState {
         taskQueueManager.transcriptionHandler = { [weak self] meetingId, audioURL in
             guard let self else { return }
             self.fileLog("TaskQueue: running transcription for \(meetingId)")
-            let (transcripts, speakerLabels) = await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            let (rawTranscripts, speakerLabels) = await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
 
             // Atomically commit transcripts + meeting-status update + speaker labels in one write.
             // Previously three separate writer.write calls; now a single transaction so a crash
@@ -331,6 +331,18 @@ final class AppState {
                     let existing = meeting.participants ?? ""
                     meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
                 }
+
+                // v3.1 Layer 2: try to attribute "Speaker N" clusters to real
+                // attendee names. The hook fires AFTER diarization but BEFORE
+                // persistence so the rewritten labels land in the DB on the
+                // first save. No-op when Ollama is down, no other participants
+                // exist, or the LLM fails — labels just stay as Speaker N.
+                let (transcripts, attributedMeeting) = await self.applySpeakerAttribution(
+                    transcripts: rawTranscripts,
+                    meeting: meeting
+                )
+                meeting = attributedMeeting
+
                 let wasTranscribing = meeting.status == .transcribing
                 if wasTranscribing { meeting.status = .complete }
 
@@ -1128,6 +1140,58 @@ final class AppState {
         }
     }
 
+    // MARK: - Speaker Attribution (v3.1 Layer 2)
+
+    /// Run LLM-based cluster -> name attribution on freshly diarized
+    /// transcripts. Returns the (possibly relabelled) transcripts plus a
+    /// meeting whose `speakerMap` has been populated when the LLM produced
+    /// any mappings. No-op (returns inputs unchanged) when:
+    ///   - the meeting has no other named participants,
+    ///   - Ollama is unreachable and no fallback is wired,
+    ///   - the LLM returns invalid JSON or only "Unknown" verdicts.
+    ///
+    /// The hook fires AFTER WhisperKit + SpeakerKit have produced raw
+    /// `Speaker N` labels but BEFORE persistence so the rewritten labels land
+    /// in the DB on the first save.
+    private func applySpeakerAttribution(
+        transcripts: [Transcript],
+        meeting: Meeting
+    ) async -> (transcripts: [Transcript], meeting: Meeting) {
+        let participants = meeting.participantList
+        guard !participants.isEmpty else { return (transcripts, meeting) }
+
+        let userFirst = NSFullUserName()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .first
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+
+        let mapping = await SpeakerAttributionService.shared.attribute(
+            transcripts: transcripts,
+            participantNames: participants,
+            userFirstName: userFirst,
+            ollama: ollamaService,
+            claude: nil
+        )
+
+        guard !mapping.isEmpty else { return (transcripts, meeting) }
+
+        // Rewrite each transcript's speakerLabel in place when the cluster id
+        // is in the map. Clusters that came back "Unknown" stay as Speaker N.
+        let relabelled: [Transcript] = transcripts.map { t in
+            guard let label = t.speakerLabel,
+                  let mapped = mapping[label] else { return t }
+            var copy = t
+            copy.speakerLabel = mapped
+            return copy
+        }
+
+        var updated = meeting
+        updated.setSpeakerMap(mapping)
+        Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) for meeting \(meeting.id, privacy: .public)")
+        return (relabelled, updated)
+    }
+
     // MARK: - Transcription Lifecycle
 
     /// Automatically load the default WhisperKit model at app startup.
@@ -1255,12 +1319,20 @@ final class AppState {
                 continue
             }
             // Use same atomic-write pattern as transcriptionHandler
-            let (transcripts, speakerLabels) = await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            let (rawTranscripts, speakerLabels) = await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
             if var meeting = try? await meetingRepository.find(id: meetingId) {
                 if let labels = speakerLabels {
                     let existing = meeting.participants ?? ""
                     meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
                 }
+
+                // v3.1 Layer 2: attribute Speaker N clusters before persistence.
+                let (transcripts, attributedMeeting) = await applySpeakerAttribution(
+                    transcripts: rawTranscripts,
+                    meeting: meeting
+                )
+                meeting = attributedMeeting
+
                 if meeting.status == .transcribing { meeting.status = .complete }
                 try? await database.writer.write { db in
                     for var t in transcripts { try t.save(db) }
