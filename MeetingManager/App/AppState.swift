@@ -1022,6 +1022,26 @@ final class AppState {
             fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
 
             // Step 2: Run speaker diarization with SpeakerKit
+            //
+            // TODO Layer 2 follow-up (deferred): SpeakerKit currently runs on
+            // the MIXED buffer that contains both mic and system audio. The
+            // research note for v3.1 calls for diarizing the SYSTEM stream
+            // only — mic is by definition a single speaker (the user) and
+            // diarizing the mix produces false splits at speaker overlaps.
+            //
+            // The blocker is that AudioCaptureService writes a single
+            // `{meetingId}.wav` (see AudioCaptureService.swift:130) — by the
+            // time batchTranscribe loads samples, the per-source separation
+            // is already lost. Splitting requires either:
+            //   (a) AudioBufferManager keeping a parallel system-only file,
+            //   (b) StreamingTranscriber surfacing per-source samples that
+            //       batch path can reuse, or
+            //   (c) source-separating the mixed file post-hoc.
+            //
+            // None of these are localized changes. LLM attribution still
+            // works correctly on Speaker N clusters from the mixed buffer; it
+            // is just suboptimal on overlapping speech. Track in the v3.1
+            // SPRINT_LOG.
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
                 let kit = try await SpeakerKit(PyannoteConfig())
