@@ -593,5 +593,14 @@ enum Migrations {
                 ]
             )
         }
+
+        // v3.1 Layer 2: persist the per-meeting cluster -> attendee-name map
+        // produced by SpeakerAttributionService. JSON-encoded dictionary,
+        // e.g. {"Speaker 1": "Alex Chen"}. NULL when no attribution ran.
+        migrator.registerMigration("v24-speaker-map") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "speakerMap", .text)
+            }
+        }
     }
 }

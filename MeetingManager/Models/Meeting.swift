@@ -22,6 +22,11 @@ struct Meeting: Identifiable, Codable, Equatable {
     var meetLink: String?
     /// Optional reference to a MeetingTemplate to pre-populate the notepad.
     var templateId: String?
+    /// JSON-encoded `[clusterId: name]` dictionary persisted by Layer 2
+    /// speaker attribution (e.g. `{"Speaker 1": "Alex Chen"}`). NULL when no
+    /// attribution ran or attribution returned empty. Used by Layer 3 to
+    /// pre-seed the LLM prompt for recurring meetings.
+    var speakerMap: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -40,6 +45,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         contextJSON: String? = nil,
         meetLink: String? = nil,
         templateId: String? = nil,
+        speakerMap: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -57,8 +63,34 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.contextJSON = contextJSON
         self.meetLink = meetLink
         self.templateId = templateId
+        self.speakerMap = speakerMap
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    // MARK: - Speaker Map (v3.1 Layer 2)
+
+    /// Decoded cluster -> name dictionary. Returns an empty dict when the
+    /// column is NULL or contains non-JSON garbage; callers should treat
+    /// empty as "no attribution available".
+    var speakerMapDictionary: [String: String] {
+        guard let json = speakerMap?.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: json) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    /// Persist a cluster -> name mapping. Empty dict clears the column to
+    /// NULL so future reads see "no attribution" rather than an empty JSON
+    /// object.
+    mutating func setSpeakerMap(_ map: [String: String]) {
+        if map.isEmpty {
+            speakerMap = nil
+        } else if let data = try? JSONEncoder().encode(map),
+                  let str = String(data: data, encoding: .utf8) {
+            speakerMap = str
+        }
     }
 
     // MARK: - Backward Compat
@@ -139,7 +171,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {
