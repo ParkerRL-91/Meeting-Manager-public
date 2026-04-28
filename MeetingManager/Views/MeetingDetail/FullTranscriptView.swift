@@ -90,7 +90,7 @@ struct FullTranscriptView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(filteredTranscripts) { transcript in
-                    TranscriptBubble(transcript: transcript)
+                    TranscriptBubble(transcript: transcript, meeting: meeting)
 
                     if transcript.id != filteredTranscripts.last?.id {
                         Divider()
@@ -109,9 +109,12 @@ struct FullTranscriptView: View {
         if searchQuery.isEmpty {
             filteredTranscripts = transcripts
         } else {
+            let userName = NSFullUserName()
+            let m = meeting
             filteredTranscripts = transcripts.filter {
                 $0.text.localizedCaseInsensitiveContains(searchQuery)
-                || $0.speakerDisplayName.localizedCaseInsensitiveContains(searchQuery)
+                || $0.displayedSpeakerName(meeting: m, userDisplayName: userName)
+                    .localizedCaseInsensitiveContains(searchQuery)
             }
         }
     }
@@ -119,8 +122,11 @@ struct FullTranscriptView: View {
     // MARK: - Copy
 
     private func formatTranscriptText() -> String {
-        transcripts.map { transcript in
-            "[\(transcript.formattedTimestamp)] \(transcript.speakerDisplayName): \(transcript.text)"
+        let userName = NSFullUserName()
+        let m = meeting
+        return transcripts.map { transcript in
+            let speaker = transcript.displayedSpeakerName(meeting: m, userDisplayName: userName)
+            return "[\(transcript.formattedTimestamp)] \(speaker): \(transcript.text)"
         }.joined(separator: "\n\n")
     }
 

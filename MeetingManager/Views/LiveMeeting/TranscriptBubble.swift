@@ -3,6 +3,7 @@ import SwiftUI
 /// A single transcript segment row showing timestamp, speaker, and text.
 struct TranscriptBubble: View {
     let transcript: Transcript
+    var meeting: Meeting? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -14,7 +15,7 @@ struct TranscriptBubble: View {
 
             // Speaker + text
             VStack(alignment: .leading, spacing: 2) {
-                Text(transcript.speakerDisplayName)
+                Text(transcript.displayedSpeakerName(meeting: meeting, userDisplayName: NSFullUserName()))
                     .font(.caption)
                     .fontWeight(transcript.isMicrophone ? .bold : .medium)
                     .foregroundStyle(

@@ -43,8 +43,10 @@ final class ExportService {
         lines.append("---")
         lines.append("")
 
+        let userName = NSFullUserName()
         for transcript in transcripts {
-            lines.append("[\(transcript.formattedTimestamp)] \(transcript.speakerDisplayName): \(transcript.text)")
+            let speaker = transcript.displayedSpeakerName(meeting: meeting, userDisplayName: userName)
+            lines.append("[\(transcript.formattedTimestamp)] \(speaker): \(transcript.text)")
         }
 
         return lines.joined(separator: "\n")
@@ -83,8 +85,10 @@ final class ExportService {
             lines.append("")
             lines.append("## Transcript")
             lines.append("")
+            let userName = NSFullUserName()
             for transcript in transcripts {
-                lines.append("[\(transcript.formattedTimestamp)] \(transcript.speakerDisplayName): \(transcript.text)")
+                let speaker = transcript.displayedSpeakerName(meeting: meeting, userDisplayName: userName)
+                lines.append("[\(transcript.formattedTimestamp)] \(speaker): \(transcript.text)")
             }
             lines.append("")
             lines.append("---")
@@ -213,11 +217,13 @@ final class ExportService {
 
         let transcriptHTML: String = {
             guard !transcripts.isEmpty else { return "" }
+            let userName = NSFullUserName()
             let rows = transcripts.map { t in
-                """
+                let speaker = t.displayedSpeakerName(meeting: meeting, userDisplayName: userName)
+                return """
                 <div class="t-row">
                   <span class="t-time">[\(htmlEscape(t.formattedTimestamp))]</span>
-                  <span class="t-speaker">\(htmlEscape(t.speakerDisplayName))</span>
+                  <span class="t-speaker">\(htmlEscape(speaker))</span>
                   <span class="t-text">\(htmlEscape(t.text))</span>
                 </div>
                 """
