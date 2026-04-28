@@ -1186,10 +1186,22 @@ final class AppState {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .flatMap { $0.isEmpty ? nil : $0 }
 
+        // v3.1 Layer 3: pre-seed the LLM with renames the user has already
+        // confirmed in prior meetings of the same series. Empty when this is
+        // a one-off meeting or the user hasn't renamed anyone yet.
+        let seriesKey = MeetingSeriesService.shared.seriesKey(for: meeting)
+        let priorAliasRows = (try? await SpeakerAliasRepository(database: database)
+            .aliases(forSeriesKey: seriesKey)) ?? []
+        let priorAliases = Dictionary(
+            priorAliasRows.map { ($0.clusterId, $0.resolvedName) },
+            uniquingKeysWith: { _, new in new }
+        )
+
         let mapping = await SpeakerAttributionService.shared.attribute(
             transcripts: transcripts,
             participantNames: participants,
             userFirstName: userFirst,
+            priorAliases: priorAliases,
             ollama: ollamaService,
             claude: nil
         )

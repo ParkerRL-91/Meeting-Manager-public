@@ -33,6 +33,7 @@ final class SpeakerAttributionService {
         transcripts: [Transcript],
         participantNames: [String],
         userFirstName: String?,
+        priorAliases: [String: String] = [:],
         ollama: OllamaService,
         claude: ClaudeService?
     ) async -> [String: String] {
@@ -73,7 +74,9 @@ final class SpeakerAttributionService {
             return [:]
         }
 
-        let prompt = buildPrompt(candidates: candidates, clusterPreviews: clusterPreviews)
+        let prompt = buildPrompt(candidates: candidates,
+                                 clusterPreviews: clusterPreviews,
+                                 priorAliases: priorAliases)
         logger.info("Attributing \(clusters.count) clusters against \(candidates.count) candidates")
 
         // Try Ollama first; fall back to Claude if available (currently unused).
@@ -96,7 +99,8 @@ final class SpeakerAttributionService {
     // MARK: - Prompt
 
     private func buildPrompt(candidates: [String],
-                             clusterPreviews: [String: String]) -> String {
+                             clusterPreviews: [String: String],
+                             priorAliases: [String: String]) -> String {
         let clustersBody = clusterPreviews
             .sorted(by: { $0.key < $1.key })
             .map { "## \($0.key)\n\($0.value)" }
@@ -104,11 +108,30 @@ final class SpeakerAttributionService {
 
         let candidateLine = candidates.map { "\"\($0)\"" }.joined(separator: ", ")
 
+        // v3.1 Layer 3: when the user has previously confirmed renames in this
+        // recurring series, surface them so the model can prefer the same
+        // mapping. Empty dict skips the section entirely.
+        let priorBlock: String = {
+            guard !priorAliases.isEmpty else { return "" }
+            let lines = priorAliases
+                .sorted(by: { $0.key < $1.key })
+                .map { "  \($0.key) → \($0.value)" }
+                .joined(separator: "\n")
+            return """
+
+            Prior renames you've already confirmed for this recurring meeting series:
+            \(lines)
+
+            If a current cluster's pattern of speech matches one of these prior speakers, prefer the same name.
+
+            """
+        }()
+
         return """
         You are matching anonymous speaker clusters to real meeting attendees. Below are the meeting attendees and the first turns from each unidentified speaker cluster (the user themselves is NOT in this list — they were filtered out).
 
         Meeting attendees: [\(candidateLine)]
-
+        \(priorBlock)
         For each speaker cluster, return the SINGLE most likely attendee from the list above, or the literal string "Unknown" if you genuinely cannot tell. Do not invent names not in the list.
 
         Speaker clusters:

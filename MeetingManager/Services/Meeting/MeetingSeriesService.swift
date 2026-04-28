@@ -52,8 +52,42 @@ final class MeetingSeriesService {
         return an == bn
     }
 
+    // MARK: - Series Key (v3.1 Layer 3)
+
+    /// Stable key identifying a meeting series. Used by the speaker alias
+    /// store to remember user renames across recurring meetings.
+    ///
+    /// Order of preference:
+    /// 1. Google's recurring root id parsed from `calendarEventId`
+    /// 2. Normalized title + sorted-participants hash
+    nonisolated func seriesKey(for meeting: Meeting) -> String {
+        if let calId = meeting.calendarEventId,
+           let recurringRoot = parseRecurringRoot(from: calId),
+           !recurringRoot.isEmpty {
+            return "rec:\(recurringRoot)"
+        }
+        let normTitle = normalize(meeting.title)
+        let participantHash = meeting.participantList
+            .sorted()
+            .map { $0.lowercased() }
+            .joined(separator: "|")
+            .hashValue
+        return "title:\(normTitle):\(participantHash)"
+    }
+
+    /// Parse a Google-style recurring event id (`<rootId>_<RFC5545 datestamp>`).
+    /// Apple Calendar event ids are namespaced `applecal-<UUID>` and do not
+    /// directly encode recurrence — fall back to title+participants for those.
+    nonisolated private func parseRecurringRoot(from calendarEventId: String) -> String? {
+        guard !calendarEventId.hasPrefix("applecal-") else { return nil }
+        if let underscoreIdx = calendarEventId.firstIndex(of: "_") {
+            return String(calendarEventId[..<underscoreIdx])
+        }
+        return nil
+    }
+
     /// Lowercase, strip ordinal/date suffixes that recurring calendar series often append.
-    private func normalize(_ title: String) -> String {
+    nonisolated private func normalize(_ title: String) -> String {
         var t = title.lowercased()
         let patterns = [
             "\\s*\\(\\d+\\)$",                  // "(1)", "(2)"
