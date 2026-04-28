@@ -63,6 +63,20 @@ final class TranscriptRepository {
         }
     }
 
+    /// Bulk-rename every transcript in a meeting whose `speakerLabel` matches
+    /// `oldLabel`. Used by v3.1 Layer 3 when the user reassigns a cluster
+    /// ("Speaker 1" → "Alex Chen") so all of that cluster's turns flip in one
+    /// write rather than per-row updates from the UI.
+    func updateSpeakerLabel(meetingId: String, from oldLabel: String, to newLabel: String) async throws {
+        guard oldLabel != newLabel else { return }
+        try await database.writer.write { db in
+            try Transcript
+                .filter(Transcript.Columns.meetingId == meetingId)
+                .filter(Transcript.Columns.speakerLabel == oldLabel)
+                .updateAll(db, Transcript.Columns.speakerLabel.set(to: newLabel))
+        }
+    }
+
     func deleteForMeeting(_ meetingId: String) async throws {
         try await database.writer.write { db in
             _ = try Transcript

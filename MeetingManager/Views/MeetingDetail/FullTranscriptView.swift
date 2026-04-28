@@ -12,6 +12,8 @@ struct FullTranscriptView: View {
     @State private var searchQuery: String = ""
     @State private var isLoading = true
     @State private var filteredTranscripts: [Transcript] = []
+    @State private var speakerToCustomRename: Transcript?
+    @State private var renameError: String?
 
     private let exportService = ExportService()
 
@@ -82,6 +84,24 @@ struct FullTranscriptView: View {
         }
         .onChange(of: searchQuery) { _, _ in updateFilteredTranscripts() }
         .onChange(of: transcripts) { _, _ in updateFilteredTranscripts() }
+        .sheet(item: $speakerToCustomRename) { transcript in
+            CustomSpeakerNameSheet(
+                currentName: transcript.displayedSpeakerName(
+                    meeting: meeting,
+                    userDisplayName: NSFullUserName()
+                )
+            ) { newName in
+                renameSpeaker(transcript: transcript, newName: newName)
+            }
+        }
+        .alert("Rename Failed", isPresented: Binding(
+            get: { renameError != nil },
+            set: { if !$0 { renameError = nil } }
+        )) {
+            Button("OK", role: .cancel) { renameError = nil }
+        } message: {
+            Text(renameError ?? "")
+        }
     }
 
     // MARK: - Transcript List
@@ -90,7 +110,14 @@ struct FullTranscriptView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(filteredTranscripts) { transcript in
-                    TranscriptBubble(transcript: transcript, meeting: meeting)
+                    TranscriptBubble(
+                        transcript: transcript,
+                        meeting: meeting,
+                        onRename: { action in
+                            handleRenameAction(action, for: transcript)
+                        },
+                        isAIAttributed: isAIAttributed(transcript)
+                    )
 
                     if transcript.id != filteredTranscripts.last?.id {
                         Divider()
@@ -100,6 +127,81 @@ struct FullTranscriptView: View {
                 }
             }
             .padding(.vertical, 8)
+        }
+    }
+
+    // MARK: - Rename
+
+    /// True when the transcript's `speakerLabel` was assigned by the LLM
+    /// (i.e. the meeting's `speakerMap` contains the cluster id as a key OR
+    /// the resolved name as a value). Per the v3.1 plan we keep this purely
+    /// in-memory for ship — once the user clicks rename the local
+    /// `meeting.speakerMap` no longer reflects an unconfirmed mapping after
+    /// the upsert path completes the next reload.
+    private func isAIAttributed(_ transcript: Transcript) -> Bool {
+        guard let label = transcript.speakerLabel,
+              let map = meeting?.speakerMapDictionary,
+              !map.isEmpty else { return false }
+        // The label may be the cluster id (pre-Layer-2 rewrite) OR the mapped
+        // name (post-rewrite). Match either side.
+        if map.keys.contains(label) { return true }
+        if map.values.contains(label) { return true }
+        return false
+    }
+
+    private func handleRenameAction(_ action: TranscriptBubbleRenameAction,
+                                    for transcript: Transcript) {
+        switch action {
+        case .assign(let name):
+            renameSpeaker(transcript: transcript, newName: name)
+        case .custom:
+            speakerToCustomRename = transcript
+        }
+    }
+
+    private func renameSpeaker(transcript: Transcript, newName: String) {
+        Task { @MainActor in
+            guard let meeting else { return }
+            let clusterId = transcript.speakerLabel ?? ""
+            guard !clusterId.isEmpty else { return }
+            let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != clusterId else { return }
+
+            // 1. Bulk-rename every transcript in this meeting where speakerLabel == clusterId.
+            do {
+                try await appState.transcriptRepository.updateSpeakerLabel(
+                    meetingId: meeting.id,
+                    from: clusterId,
+                    to: trimmed
+                )
+            } catch {
+                renameError = error.localizedDescription
+                return
+            }
+
+            // 2. Persist the new mapping on the meeting.
+            var updated = meeting
+            var map = updated.speakerMapDictionary
+            map[clusterId] = trimmed
+            updated.setSpeakerMap(map)
+            do {
+                try await appState.meetingRepository.update(updated)
+                self.meeting = updated
+            } catch {
+                // Non-fatal — the transcripts are already renamed; the alias
+                // upsert below still records the user's intent for future
+                // meetings in the series.
+                renameError = error.localizedDescription
+            }
+
+            // 3. Remember for future meetings in the same series.
+            let seriesKey = MeetingSeriesService.shared.seriesKey(for: meeting)
+            try? await SpeakerAliasRepository(database: AppDatabase.shared)
+                .upsert(seriesKey: seriesKey, clusterId: clusterId, resolvedName: trimmed)
+
+            // 4. Reload to reflect the rewritten labels.
+            await loadTranscripts()
+            updateFilteredTranscripts()
         }
     }
 
