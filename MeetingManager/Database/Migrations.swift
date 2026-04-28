@@ -602,5 +602,31 @@ enum Migrations {
                 t.add(column: "speakerMap", .text)
             }
         }
+
+        // v3.1 Layer 3: remember user-confirmed speaker renames so future
+        // meetings in the same series can pre-seed the LLM attribution prompt.
+        // The unique (seriesKey, clusterId) index gives us upsert semantics —
+        // SpeakerAliasRepository deletes any existing row before insert so
+        // "rename Speaker 1 to Alex, then later to Sam" replaces, not stacks.
+        migrator.registerMigration("v25-speaker-alias") { db in
+            try db.create(table: "speakerAlias") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("seriesKey", .text).notNull()
+                t.column("clusterId", .text).notNull()
+                t.column("resolvedName", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(
+                index: "idx_speakerAlias_unique_pair",
+                on: "speakerAlias",
+                columns: ["seriesKey", "clusterId"],
+                options: .unique
+            )
+            try db.create(
+                index: "idx_speakerAlias_seriesKey",
+                on: "speakerAlias",
+                columns: ["seriesKey"]
+            )
+        }
     }
 }
