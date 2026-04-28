@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import os
 
 /// Heuristic detector for meeting series — surfaces previous sessions that
@@ -67,12 +68,24 @@ final class MeetingSeriesService {
             return "rec:\(recurringRoot)"
         }
         let normTitle = normalize(meeting.title)
-        let participantHash = meeting.participantList
+        let participantsKey = meeting.participantList
             .sorted()
             .map { $0.lowercased() }
             .joined(separator: "|")
-            .hashValue
+        // Use SHA-256 (truncated to 16 hex chars = 64 bits) for a deterministic
+        // hash. Swift's `String.hashValue` is randomized per process launch by
+        // design — it would make the alias-memory feature silently fail across
+        // app restarts for any meeting without a Google recurring root id.
+        let participantHash = Self.deterministicHash(participantsKey)
         return "title:\(normTitle):\(participantHash)"
+    }
+
+    /// Deterministic short hash of a string. SHA-256 truncated to first 16 hex
+    /// characters (64 bits) — collision probability negligible for our scale
+    /// (~thousands of meeting series per user) and stable across launches.
+    nonisolated private static func deterministicHash(_ input: String) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Parse a Google-style recurring event id (`<rootId>_<RFC5545 datestamp>`).
