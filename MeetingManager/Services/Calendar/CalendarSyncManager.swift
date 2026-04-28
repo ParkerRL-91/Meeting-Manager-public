@@ -253,7 +253,13 @@ final class CalendarSyncManager {
                     needsUpdate = true
                 }
                 if existing.status == .scheduled || existing.status == .notified {
-                    existing.title = incoming.title
+                    // QA finding: don't clobber a user-edited title. Only adopt the
+                    // calendar title if the local title is empty or still a placeholder.
+                    // Otherwise the v3.0.0 click-to-edit feature would silently lose
+                    // edits on the next sync cycle.
+                    if Self.isPlaceholderTitle(existing.title) {
+                        existing.title = incoming.title
+                    }
                     existing.scheduledStartDate = incoming.scheduledStartDate
                     existing.scheduledEndDate = incoming.scheduledEndDate
                     existing.isAllDay = incoming.isAllDay
@@ -268,6 +274,17 @@ final class CalendarSyncManager {
                 try copy.insert(db)
             }
         }
+    }
+
+    /// True when a meeting title is empty / a placeholder, meaning the calendar
+    /// is the source of truth. Any other title is treated as user-owned.
+    /// Marked `nonisolated` so it can be called from inside GRDB's synchronous
+    /// write closure (which is not main-actor isolated).
+    nonisolated private static func isPlaceholderTitle(_ title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty
+            || trimmed == "New Meeting"
+            || trimmed == "Untitled Meeting"
     }
 
     /// Returns the user-selected calendar ID from settings, or nil for "primary".
@@ -303,7 +320,10 @@ final class CalendarSyncManager {
 
                 // Only update scheduling details for meetings that haven't started yet.
                 if existing.status == .scheduled || existing.status == .notified {
-                    existing.title = event.title
+                    // Don't clobber user-edited titles (see isPlaceholderTitle helper above).
+                    if Self.isPlaceholderTitle(existing.title) {
+                        existing.title = event.title
+                    }
                     existing.scheduledStartDate = event.startDate
                     existing.scheduledEndDate = event.endDate
                     existing.meetLink = event.meetLink ?? existing.meetLink

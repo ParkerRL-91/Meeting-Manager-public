@@ -5,6 +5,10 @@ import os
 
 enum GoogleCalendarError: LocalizedError {
     case invalidURL
+    /// 401/403 — the stored token doesn't have the calendar scope (or it was
+    /// revoked by the user / expired silently). Caller should prompt for a
+    /// fresh sign-in rather than dumping raw API JSON.
+    case accessRevoked
     case httpError(statusCode: Int, message: String)
     case decodingError(Error)
     case networkError(Error)
@@ -14,8 +18,11 @@ enum GoogleCalendarError: LocalizedError {
         switch self {
         case .invalidURL:
             return "Invalid Google Calendar API URL."
-        case .httpError(let statusCode, let message):
-            return "Calendar API error (\(statusCode)): \(message)"
+        case .accessRevoked:
+            return "Calendar access was revoked. Please reconnect your Google account."
+        case .httpError(let statusCode, _):
+            // Don't leak Google's verbose JSON error body to users.
+            return "Calendar API error (\(statusCode)). Please try again or reconnect your account."
         case .decodingError(let error):
             return "Failed to parse calendar response: \(error.localizedDescription)"
         case .networkError(let error):
@@ -219,6 +226,12 @@ final class GoogleCalendarService {
         guard (200...299).contains(httpResponse.statusCode) else {
             let message = String(data: data, encoding: .utf8) ?? "Unknown error"
             Logger.calendar.error("Calendar API HTTP \(httpResponse.statusCode): \(message)")
+            // 401 = invalid token, 403 = scope/permission denied. Both mean
+            // "the stored credential isn't viable for this API call any more,"
+            // which from a UX perspective is the same: prompt for reconnect.
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw GoogleCalendarError.accessRevoked
+            }
             throw GoogleCalendarError.httpError(statusCode: httpResponse.statusCode, message: message)
         }
     }

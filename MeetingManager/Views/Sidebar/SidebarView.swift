@@ -119,8 +119,10 @@ struct SidebarView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.appAccent)
                 .controlSize(.large)
-                .keyboardShortcut("n", modifiers: .command)
                 .help("New Meeting (⌘N)")
+                // ⌘N is registered at the app level via `CommandGroup` in
+                // MeetingManagerApp; binding it locally too caused a duplicate
+                // registration with non-deterministic responder-chain behaviour.
 
                 HStack {
                     Spacer()
@@ -149,6 +151,9 @@ struct SidebarView: View {
             }
 
             Spacer()
+
+            // Footer: model download status (slim, non-blocking — only visible while loading)
+            ModelDownloadBanner()
         }
         .background(Color.appBackground)
         .errorAlert($errorMessage)

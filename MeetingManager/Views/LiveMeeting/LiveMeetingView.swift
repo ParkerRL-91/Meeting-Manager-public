@@ -602,9 +602,11 @@ private struct BottomBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             .buttonStyle(.plain)
-            .keyboardShortcut("r", modifiers: .command)
             .help("Stop Recording (⌘R)")
             .accessibilityLabel("Stop recording")
+            // ⌘R is registered at the app level (Toggle Recording menu command).
+            // Binding it locally caused a duplicate registration with non-
+            // deterministic responder-chain behaviour.
 
             // T-025: Captured action items badge (visible when count > 0)
             if capturedItemCount > 0 {

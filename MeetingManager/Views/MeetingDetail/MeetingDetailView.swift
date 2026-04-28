@@ -112,20 +112,17 @@ struct MeetingDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
         .errorAlert($errorMessage)
-        // P4-T01: Keyboard shortcuts for tab switching + meeting navigation.
-        // Hidden buttons attached as background — same pattern LiveMeetingView uses for ⌘J.
+        // P4-T01: Keyboard shortcuts for meeting navigation.
+        // Tab switching (⌘1/2/3) is handled by the app-level Navigate menu in
+        // MeetingManagerApp.swift via NotificationCenter — registering the same
+        // shortcuts here would create a duplicate registration whose target is
+        // responder-chain-dependent (caught in v3.0.0 QA).
         .background(
             Group {
-                Button("") { selectedTab = .summary }
-                    .keyboardShortcut("1", modifiers: .command)
-                Button("") { selectedTab = .notes }
-                    .keyboardShortcut("2", modifiers: .command)
-                Button("") { selectedTab = .transcript }
-                    .keyboardShortcut("3", modifiers: .command)
                 Button("") { appState.selectAdjacentMeeting(direction: -1) }
-                    .keyboardShortcut("[", modifiers: .command)
+                    .keyboardShortcut(KeyboardShortcuts.prevMeeting)
                 Button("") { appState.selectAdjacentMeeting(direction: 1) }
-                    .keyboardShortcut("]", modifiers: .command)
+                    .keyboardShortcut(KeyboardShortcuts.nextMeeting)
             }
             .hidden()
         )

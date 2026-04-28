@@ -61,7 +61,10 @@ struct AnalyticsView: View {
 
     private var weeklyCard: some View {
         AnalyticsCard(title: "This week") {
-            if let w = weekly {
+            // weeklyStats() always returns a non-nil struct (zeroed when no
+            // meetings), so we additionally gate on count > 0 to actually surface
+            // the empty state instead of a card full of zeros.
+            if let w = weekly, w.count > 0 {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(formattedHours(w.totalHours))

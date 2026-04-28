@@ -18,12 +18,12 @@ struct CalendarStepView: View {
                 .font(.system(size: 56))
                 .foregroundStyle(Color.appAccent)
 
-            Text("Google Calendar")
+            Text("Connect a calendar")
                 .font(.largeTitle)
                 .fontWeight(.bold)
                 .foregroundStyle(Color.appTextPrimary)
 
-            Text("Connect your Google Calendar to automatically detect upcoming meetings and sync event details.")
+            Text("Connect Google Calendar or Apple Calendar to automatically detect upcoming meetings and sync event details. You can change this later in Settings.")
                 .font(.body)
                 .foregroundStyle(Color.appTextSecondary)
                 .multilineTextAlignment(.center)

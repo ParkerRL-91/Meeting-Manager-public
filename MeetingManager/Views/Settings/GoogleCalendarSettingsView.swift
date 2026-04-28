@@ -21,6 +21,10 @@ struct GoogleCalendarSettingsView: View {
     @State private var availableCalendars: [(id: String, name: String)] = []
     @State private var selectedCalendarId: String = "primary"
     @State private var isLoadingCalendars = false
+    /// True when the most recent calendar fetch returned 401/403, meaning the
+    /// stored OAuth token doesn't grant calendar access any more (revoked,
+    /// scope mismatch, or expired refresh token). UI surfaces a Reconnect CTA.
+    @State private var calendarAccessRevoked = false
 
     // Sync
     @State private var isSyncing = false
@@ -231,6 +235,27 @@ struct GoogleCalendarSettingsView: View {
                     Text("Loading calendars…")
                         .foregroundStyle(.secondary)
                 }
+            } else if calendarAccessRevoked {
+                // Specific recovery state — the OAuth token doesn't grant calendar
+                // access. Most likely cause is that the user revoked it in their
+                // Google account, or it was minted before we requested calendar scope.
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.appWarning)
+                        Text("Calendar access expired")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    Text("Your Google account is connected, but the saved sign-in no longer grants calendar access. Reconnect to continue syncing meetings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Reconnect Google Calendar") {
+                        signIn()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(.vertical, 4)
             } else if availableCalendars.isEmpty {
                 HStack {
                     Text("No calendars found")
@@ -394,6 +419,7 @@ struct GoogleCalendarSettingsView: View {
 
     private func loadCalendars() {
         isLoadingCalendars = true
+        calendarAccessRevoked = false
         Task {
             do {
                 let token = try await authManager.refreshTokenIfNeeded()
@@ -404,6 +430,14 @@ struct GoogleCalendarSettingsView: View {
                     : [(id: "primary", name: "Primary Calendar")] + calendars
                 availableCalendars = withPrimary
                 Logger.calendar.info("Loaded \(calendars.count) calendars")
+            } catch GoogleCalendarError.accessRevoked {
+                Logger.calendar.error("Calendar access revoked — clearing stale session for clean reconnect")
+                calendarAccessRevoked = true
+                availableCalendars = []
+                // Clear the stale token so the next sign-in is a clean OAuth handshake
+                // requesting full calendar scope (rather than re-using whatever scope
+                // the old refresh token was minted with).
+                authManager.signOut()
             } catch {
                 Logger.calendar.error("Failed to load calendars: \(error.localizedDescription)")
             }

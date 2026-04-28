@@ -22,8 +22,8 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
 
-                // MARK: - Model Download Banner (background download from P2-T01)
-                ModelDownloadBanner()
+                // Model download progress is rendered as a sidebar footer (see SidebarView)
+                // so it doesn't compete with primary content.
 
                 // MARK: - Date Header
                 HStack(alignment: .firstTextBaseline) {
@@ -59,9 +59,13 @@ struct HomeView: View {
                 }
 
                 // MARK: - Calendar Connect Banner (subtle, dismissible)
+                // Only nag about connecting Google Calendar if the user actually
+                // wants Google as their calendar source. Users who picked Apple
+                // Calendar (or none) shouldn't see this banner.
                 if !authManager.isSignedIn
                     && cachedAllToday.isEmpty
-                    && !calendarBannerDismissed {
+                    && !calendarBannerDismissed
+                    && (CalendarSource.current == .googleCalendar || CalendarSource.current == .both) {
                     CalendarConnectBanner(
                         onConnect: {
                             appState.pendingSettingsTab = 3
