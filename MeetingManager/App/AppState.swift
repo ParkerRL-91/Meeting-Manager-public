@@ -1135,11 +1135,6 @@ final class AppState {
                     skippedCount += 1; continue
                 }
 
-                // Skip very low confidence segments (< 0.4)
-                if seg.confidence < 0.4 {
-                    skippedCount += 1; continue
-                }
-
                 // Skip intra-segment repetition (same phrase repeated within one segment)
                 if text.count > 50 {
                     let words = text.components(separatedBy: .whitespaces)
