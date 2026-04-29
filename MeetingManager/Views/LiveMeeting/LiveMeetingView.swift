@@ -84,6 +84,23 @@ struct LiveMeetingView: View {
                 Task { await focusTitleForRenameIfNeeded() }
             }
         }
+        // Re-check context when enrichment completes in the background so the
+        // brief appears mid-meeting if it wasn't ready at start time.
+        .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
+            let justFinished = tasks.contains {
+                $0.type == .contextEnrichment && $0.meetingId == meetingId && $0.status == .completed
+            }
+            if justFinished && contextMeetings.isEmpty {
+                Task {
+                    let updated = try? await appState.meetingRepository.find(id: meetingId)
+                    let found = RelevantMeetingService.parseContext(from: updated?.contextJSON)
+                    if !found.isEmpty {
+                        contextMeetings = found
+                        showContextBrief = true
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Main Content
@@ -126,6 +143,23 @@ struct LiveMeetingView: View {
                 .padding(.horizontal, 28)
                 .padding(.bottom, 20)
 
+                // Context brief — shown at the top so it's the first thing you
+                // see when the meeting starts. Pre-computed 30 min before by
+                // preComputePrepContext(); if still loading it appears once ready.
+                if !contextMeetings.isEmpty && showContextBrief {
+                    ContextBriefView(
+                        meetings: contextMeetings,
+                        participantCompany: extractCompany(),
+                        onDismiss: { showContextBrief = false },
+                        onSelectMeeting: { id in
+                            appState.selectedMeetingId = id
+                            appState.sidebarDestination = .meetings
+                        }
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+                }
+
                 // Open Items panel (T-022)
                 if !carriedItems.isEmpty {
                     OpenItemsPanel(
@@ -148,21 +182,6 @@ struct LiveMeetingView: View {
                     .padding(.horizontal, 24)
                     .padding(.top, 12)
                     .padding(.bottom, 12)
-
-                // Context brief (related past meetings)
-                if !contextMeetings.isEmpty && showContextBrief {
-                    ContextBriefView(
-                        meetings: contextMeetings,
-                        participantCompany: extractCompany(),
-                        onDismiss: { showContextBrief = false },
-                        onSelectMeeting: { id in
-                            appState.selectedMeetingId = id
-                            appState.sidebarDestination = .meetings
-                        }
-                    )
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
-                }
             }
         }
     }
