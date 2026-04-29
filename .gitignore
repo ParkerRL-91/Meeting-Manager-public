@@ -17,6 +17,12 @@ Package.resolved
 # Claude Code — ignore local settings, track skills
 .claude/settings.local.json
 
+# Build artifacts / release DMGs (managed by push-update.sh + GitHub Releases)
+*.dmg
+
+# QA evidence / local screenshots
+qa-evidence/
+
 # Xcode
 *.pbxuser
 *.mode1v3
