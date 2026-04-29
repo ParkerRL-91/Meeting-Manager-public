@@ -17,6 +17,7 @@ struct MeetingDetailView: View {
     @State private var showUpNext = true
     @State private var upNextBrief: MeetingPrepBrief?
     @State private var previousSessions: [Meeting] = []
+    @State private var summaryModelInfo: String? = nil
 
     private let exportService = ExportService()
 
@@ -81,18 +82,11 @@ struct MeetingDetailView: View {
                     previousSessionsSection
                 }
 
-                Picker("Tab", selection: $selectedTab) {
-                    ForEach(DetailTab.allCases, id: \.self) { tab in
-                        Label(tab.label, systemImage: tab.icon)
-                            .tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-
-                Divider()
-                    .foregroundStyle(Color.appSeparator)
+                UnderlinedTabStrip(
+                    tabs: DetailTab.allCases,
+                    selected: $selectedTab,
+                    modelInfo: summaryModelInfo
+                )
 
                 switch selectedTab {
                 case .summary:
@@ -269,6 +263,12 @@ struct MeetingDetailView: View {
             if let m = meeting {
                 previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
             }
+            // Load model info for tab strip caption
+            if let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) {
+                let model = summary.modelUsed ?? "auto"
+                let date = DateFormatting.fullDateTime(from: summary.generatedAt)
+                summaryModelInfo = "\(model) · \(date)"
+            }
         }
     }
 
@@ -429,6 +429,58 @@ struct MeetingDetailView: View {
                 errorMessage = "Failed to delete meeting: \(error.localizedDescription)"
             }
         }
+    }
+}
+
+// MARK: - Underlined Tab Strip
+
+private struct UnderlinedTabStrip: View {
+    let tabs: [MeetingDetailView.DetailTab]
+    @Binding var selected: MeetingDetailView.DetailTab
+    let modelInfo: String?
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(tabs, id: \.self) { tab in
+                tabButton(tab)
+            }
+            Spacer()
+            if let info = modelInfo {
+                Text(info)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.appTextMuted)
+                    .padding(.trailing, 16)
+            }
+        }
+        .padding(.horizontal, 4)
+        .background(Color.appBackground)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.appSeparator)
+                .frame(height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func tabButton(_ tab: MeetingDetailView.DetailTab) -> some View {
+        let isSelected = selected == tab
+        Button {
+            selected = tab
+        } label: {
+            Text(tab.label)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.appTextPrimary : Color.appTextTertiary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(isSelected ? Color.appAccentMid : Color.clear)
+                        .frame(height: 2)
+                        .offset(y: 0)
+                }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
     }
 }
 

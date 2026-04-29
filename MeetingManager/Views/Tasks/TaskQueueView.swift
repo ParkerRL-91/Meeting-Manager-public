@@ -1,99 +1,139 @@
 import SwiftUI
 
-/// Full-page view of the background task queue — transcription, summarization, enrichment jobs.
+/// Full-page activity view — failed jobs are collapsible-by-default; completed jobs are a flat list.
 struct TaskQueueView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
         let qm = appState.taskQueueManager
         let running = qm.allTasks.filter { $0.status == .running }
-        let pending = qm.allTasks.filter { $0.status == .pending }
-        let failed  = qm.allTasks.filter { $0.status == .failed }
-        let done    = qm.allTasks.filter { $0.status == .completed }
+        let pending  = qm.allTasks.filter { $0.status == .pending }
+        let failed   = qm.allTasks.filter { $0.status == .failed }
+        let done     = qm.allTasks.filter { $0.status == .completed }
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
 
-                // MARK: - Header
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
+                // MARK: Header
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Activity")
-                            .font(.title2.weight(.semibold))
+                            .font(.system(size: 22, weight: .semibold))
                             .foregroundStyle(Color.appTextPrimary)
-                        Text("\(pending.count) pending \u{00B7} \(running.count) running \u{00B7} \(done.count) done")
-                            .font(.subheadline)
-                            .foregroundStyle(Color.appTextSecondary)
+
+                        HStack(spacing: 4) {
+                            activityCount(value: pending.count, label: "pending")
+                            Text("·").foregroundStyle(Color.appTextMuted)
+                            activityCount(value: running.count, label: "running")
+                            Text("·").foregroundStyle(Color.appTextMuted)
+                            activityCount(value: done.count, label: "done", highlight: false)
+                            if !failed.isEmpty {
+                                Text("·").foregroundStyle(Color.appTextMuted)
+                                Text("\(failed.count) failed")
+                                    .foregroundStyle(Color.appRecording)
+                            }
+                        }
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.appTextTertiary)
                     }
+
                     Spacer()
+
                     if !done.isEmpty || !failed.isEmpty {
-                        Button("Clear Finished") {
+                        Button("Clear finished") {
                             Task { await qm.clearCompleted() }
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.appTextSecondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(Color.appSurfaceSecondary)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(Color.appBorderStrong, lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 28)
                 .padding(.bottom, 20)
 
-                // MARK: - Running
-                if !running.isEmpty {
-                    sectionHeader("Running")
-                    ForEach(running) { task in
-                        TaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                // MARK: Running / Pending
+                if !running.isEmpty || !pending.isEmpty {
+                    activitySectionLabel("In Progress", color: Color.appAccentLight)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 8)
+
+                    VStack(spacing: 4) {
+                        ForEach(running) { task in
+                            CompletedTaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                        }
+                        ForEach(pending) { task in
+                            CompletedTaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                        }
                     }
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, 20)
                 }
 
-                // MARK: - Pending
-                if !pending.isEmpty {
-                    sectionHeader("Pending")
-                    ForEach(pending) { task in
-                        TaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
-                }
-
-                // MARK: - Failed
+                // MARK: Failed (collapsible)
                 if !failed.isEmpty {
-                    sectionHeader("Failed")
-                    ForEach(failed) { task in
-                        TaskRow(
-                            task: task,
-                            meetingTitle: meetingTitle(for: task.meetingId),
-                            onRetry: { Task { await qm.retry(taskId: task.id) } },
-                            onClear: { Task { await qm.cancel(taskId: task.id) } }
-                        )
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.appRecording)
+                        Text("Failed · \(failed.count)")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(Color.appRecording)
+                            .textCase(.uppercase)
+                            .tracking(0.6)
                     }
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, 8)
+
+                    VStack(spacing: 6) {
+                        ForEach(failed) { task in
+                            FailedTaskRow(
+                                task: task,
+                                meetingTitle: meetingTitle(for: task.meetingId),
+                                onRetry: { Task { await qm.retry(taskId: task.id) } },
+                                onClear: { Task { await qm.cancel(taskId: task.id) } }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
                 }
 
-                // MARK: - Completed
+                // MARK: Completed
                 if !done.isEmpty {
-                    sectionHeader("Completed")
-                    ForEach(done.prefix(20)) { task in
-                        TaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                    activitySectionLabel("Completed · \(done.count)", color: Color.appTextMuted)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 8)
+
+                    VStack(spacing: 4) {
+                        ForEach(done.prefix(20)) { task in
+                            CompletedTaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                        }
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 16)
                 }
 
-                // MARK: - Empty State
+                // MARK: Empty
                 if qm.allTasks.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "checkmark.circle")
                             .font(.largeTitle)
-                            .foregroundStyle(Color.appTextTertiary)
+                            .foregroundStyle(Color.appTextMuted)
                         Text("No activity yet")
                             .font(.headline)
-                            .foregroundStyle(Color.appTextSecondary)
+                            .foregroundStyle(Color.appTextTertiary)
                         Text("Transcription and summary tasks appear here automatically after meetings end.")
                             .font(.subheadline)
-                            .foregroundStyle(Color.appTextTertiary)
+                            .foregroundStyle(Color.appTextMuted)
                             .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: .infinity)
@@ -109,16 +149,16 @@ struct TaskQueueView: View {
         }
     }
 
-    // MARK: - Helpers
+    private func activityCount(value: Int, label: String, highlight: Bool = false) -> some View {
+        Text("\(value) \(label)")
+            .foregroundStyle(highlight && value > 0 ? Color.appAccentLight : Color.appTextTertiary)
+    }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(Color.appTextTertiary)
-            .textCase(.uppercase)
-            .tracking(0.8)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 8)
+    private func activitySectionLabel(_ text: String, color: Color) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 10.5, weight: .bold))
+            .foregroundStyle(color)
+            .tracking(0.6)
     }
 
     private func meetingTitle(for meetingId: String) -> String {
@@ -127,104 +167,179 @@ struct TaskQueueView: View {
     }
 }
 
-// MARK: - Task Row
+// MARK: - Failed Task Row (collapsible)
 
-private struct TaskRow: View {
+private struct FailedTaskRow: View {
     let task: TaskQueueItem
     let meetingTitle: String
-    var onRetry: (() -> Void)? = nil
-    var onClear: (() -> Void)? = nil
+    let onRetry: () -> Void
+    let onClear: () -> Void
+
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header row
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(Color.appRecordingSubtle)
+                        .frame(width: 16, height: 16)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(Color.appRecording)
+                }
+
+                Text(task.displayName)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Color.appTextPrimary)
+
+                Text("·")
+                    .foregroundStyle(Color.appTextMuted)
+
+                Text(meetingTitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.appTextTertiary)
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button("Details") {
+                    withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.appTextTertiary)
+                .buttonStyle(.plain)
+
+                Button("Retry") { onRetry() }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.appTextSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.appSurfaceSecondary)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .buttonStyle(.plain)
+
+                Button("Clear") { onClear() }
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appTextMuted)
+                    .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+            }
+
+            // Expanded error
+            if isExpanded, let error = task.error {
+                Rectangle()
+                    .fill(Color.appSeparator)
+                    .frame(height: 1)
+
+                Text(error)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.appRecording)
+                    .lineSpacing(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 40)
+                    .padding(.trailing, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.appRecording.opacity(0.04))
+            }
+        }
+        .background(Color.appSurface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.appRecordingSubtle, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Completed / Running / Pending Task Row
+
+private struct CompletedTaskRow: View {
+    let task: TaskQueueItem
+    let meetingTitle: String
 
     var body: some View {
         HStack(spacing: 12) {
-            // Status icon
             statusIcon
-                .frame(width: 28, height: 28)
 
-            // Info
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(task.displayName)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color.appTextPrimary)
-                    Text("\u{00B7}")
-                        .foregroundStyle(Color.appTextTertiary)
-                    Text(meetingTitle)
-                        .font(.subheadline)
-                        .foregroundStyle(Color.appTextSecondary)
-                        .lineLimit(1)
-                }
+            Text(task.displayName)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(Color.appTextPrimary)
 
-                HStack(spacing: 8) {
-                    if task.status == .running {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text("Processing...")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextTertiary)
-                    } else if task.status == .failed, let error = task.error {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
-                    } else if task.status == .completed, let completed = task.completedAt {
-                        // Bucketed updates instead of per-second tick — quieter UI when
-                        // many completed jobs are shown.
-                        RelativeTimestampLabel(date: completed, prefix: "Completed")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextTertiary)
-                    } else if task.status == .pending {
-                        Text("Priority \(task.priority) \u{00B7} Attempt \(task.retryCount + 1)/\(task.maxRetries)")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextTertiary)
-                    }
-                }
-            }
+            Text("·")
+                .foregroundStyle(Color.appTextMuted)
+
+            Text(meetingTitle)
+                .font(.system(size: 12))
+                .foregroundStyle(Color.appTextTertiary)
+                .lineLimit(1)
 
             Spacer()
 
-            // Actions
-            if task.status == .failed {
-                VStack(spacing: 4) {
-                    if let onRetry {
-                        Button("Retry") { onRetry() }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.mini)
-                    }
-                    if let onClear {
-                        Button("Clear") { onClear() }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            if task.status == .running {
+                ProgressView().controlSize(.mini)
+            } else if task.status == .pending {
+                Text("Priority \(task.priority)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.appTextMuted)
+            } else if let completed = task.completedAt {
+                RelativeTimestampLabel(date: completed)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.appTextMuted)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(Color.appSeparator, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 
     @ViewBuilder
     private var statusIcon: some View {
+        ZStack {
+            Circle()
+                .fill(iconBg)
+                .frame(width: 16, height: 16)
+            Image(systemName: iconName)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(iconColor)
+        }
+    }
+
+    private var iconName: String {
         switch task.status {
-        case .running:
-            Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
-                .font(.body)
-                .foregroundStyle(Color.appAccent)
-        case .pending:
-            Image(systemName: "clock")
-                .font(.body)
-                .foregroundStyle(Color.appTextTertiary)
-        case .failed:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.body)
-                .foregroundStyle(.red)
-        case .completed:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.body)
-                .foregroundStyle(Color.appSuccess)
+        case .running:   return "arrow.trianglehead.2.clockwise.rotate.90"
+        case .pending:   return "clock"
+        case .completed: return "checkmark"
+        default:         return "circle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch task.status {
+        case .running:   return Color.appAccentLight
+        case .pending:   return Color.appTextMuted
+        case .completed: return Color.appSuccess
+        default:         return Color.appTextMuted
+        }
+    }
+
+    private var iconBg: Color {
+        switch task.status {
+        case .running:   return Color.appAccentSubtle
+        case .pending:   return Color.appSurfaceSecondary
+        case .completed: return Color.appSuccessSubtle
+        default:         return Color.appSurfaceSecondary
         }
     }
 }

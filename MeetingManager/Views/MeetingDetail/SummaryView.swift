@@ -49,6 +49,7 @@ struct SummaryView: View {
     @State private var transcriptCount = 0
     @State private var recipes: [Recipe] = []
     @State private var selectedRecipe: Recipe? = nil
+    @State private var previousSessions: [Meeting] = []
 
     private let exportService = ExportService()
     private let richShareService = RichShareService()
@@ -104,6 +105,9 @@ struct SummaryView: View {
             async let metaLoad: () = loadEmptyStateMeta()
             await summaryLoad
             await metaLoad
+            if let m = meeting {
+                previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
+            }
         }
         .sheet(isPresented: $showHistory) {
             SummaryHistoryView(meetingId: meetingId)
@@ -259,22 +263,9 @@ struct SummaryView: View {
         VStack(spacing: 0) {
             // Toolbar
             HStack(spacing: 12) {
-                if let model = summary.modelUsed {
-                    Label(model, systemImage: "cpu")
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextTertiary)
-                }
-
-                Text("Generated \(DateFormatting.fullDateTime(from: summary.generatedAt))")
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextTertiary)
-
-                // "Edited" badge — driven by live edit state, so it appears as
-                // soon as the user diverges from the AI text.
                 if isEdited {
                     Text("Edited")
-                        .font(.caption2)
-                        .fontWeight(.semibold)
+                        .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -282,7 +273,6 @@ struct SummaryView: View {
                         .clipShape(Capsule())
                 }
 
-                // Subtle "Saved" flash after each debounced auto-save.
                 if showSavedFlash {
                     Label("Saved", systemImage: "checkmark")
                         .labelStyle(.titleAndIcon)
@@ -291,14 +281,12 @@ struct SummaryView: View {
                         .transition(.opacity)
                 }
 
-                // Smaller inline regen indicator (NOT a full-screen replacement).
                 if isRegenerating {
                     HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
+                        ProgressView().controlSize(.small)
                         Text("Regenerating…")
                             .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
+                            .foregroundStyle(Color.appTextTertiary)
                     }
                 }
 
@@ -307,61 +295,93 @@ struct SummaryView: View {
                 standardToolbar(summary)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
 
-            Divider()
-                .foregroundStyle(Color.appSeparator)
+            Rectangle()
+                .fill(Color.appSeparator)
+                .frame(height: 1)
 
             if let error = regenerateError {
                 regenerateErrorBanner(error)
             }
 
-            // Always-mounted inline editor + inline action items (P1-T04 + P1-T02).
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    TextEditor(text: $editableContent)
-                        .font(.body)
-                        .foregroundStyle(Color.appTextPrimary)
-                        .scrollContentBackground(.hidden)
-                        .lineSpacing(4)
-                        .frame(minHeight: 240)
-                        .background(Color.appBackground)
+                    let parsed = SummaryParser.parse(editableContent)
 
-                    Divider()
-                        .padding(.vertical, 16)
+                    // TL;DR card
+                    if !parsed.tldr.isEmpty {
+                        TLDRCard(lines: parsed.tldr)
+                            .padding(.bottom, 22)
+                    }
 
+                    // Two-column section grid
+                    if !parsed.sections.isEmpty {
+                        SkimFirstSectionGrid(sections: parsed.sections)
+                            .padding(.bottom, 28)
+                    } else if !parsed.tldr.isEmpty {
+                        // Has structured TL;DR but no sections — show raw text
+                        rawEditorBlock
+                            .padding(.bottom, 16)
+                    } else {
+                        // No structure at all — show raw text
+                        rawEditorBlock
+                            .padding(.bottom, 16)
+                    }
+
+                    // Action items
+                    SkimSectionLabel(kind: .decisions, title: "Action items")
+                        .padding(.bottom, 8)
                     InlineActionItemsSection(meetingId: meetingId)
+                        .padding(.bottom, 28)
 
-                    Divider()
-                        .padding(.vertical, 16)
+                    // Previous sessions strip — populated from meeting series
+                    if !previousSessions.isEmpty {
+                        PreviousSessionsStrip(
+                            sessions: previousSessions,
+                            onSelect: { id in
+                                appState.selectedMeetingId = id
+                            }
+                        )
+                        .padding(.bottom, 16)
+                    }
 
-                    // "View raw transcript" link (P1-T01) — secondary, de-emphasized.
-                    // Posts the existing .switchTab notification rather than threading
-                    // a binding through; MeetingDetailView already listens for this.
+                    // Transcript link
                     Button {
                         NotificationCenter.default.post(name: .switchTab, object: "transcript")
                     } label: {
                         Label("View raw transcript", systemImage: "text.quote")
                             .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
+                            .foregroundStyle(Color.appTextTertiary)
                     }
                     .buttonStyle(.plain)
                     .padding(.bottom, 8)
                 }
-                .padding(16)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
+                .padding(.bottom, 12)
             }
         }
         .onAppear { loadEditorIfNeeded(from: summary) }
         .onChange(of: summary.id) { _, _ in
-            // A different summary version landed (regen complete) — reload editor.
             hasLoadedEditor = false
             loadEditorIfNeeded(from: summary)
         }
         .onChange(of: editableContent) { _, _ in
-            // Skip the initial load assignment.
             guard hasLoadedEditor else { return }
             scheduleSave()
         }
+    }
+
+    @ViewBuilder
+    private var rawEditorBlock: some View {
+        TextEditor(text: $editableContent)
+            .font(.system(size: 13))
+            .foregroundStyle(Color.appTextPrimary)
+            .scrollContentBackground(.hidden)
+            .lineSpacing(4)
+            .frame(minHeight: 200)
+            .background(Color.appBackground)
     }
 
     @ViewBuilder
@@ -723,6 +743,278 @@ struct SummaryView: View {
         }
     }
 
+}
+
+// MARK: - TL;DR Card
+
+private struct TLDRCard: View {
+    let lines: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.appAccentLight)
+                Text("TL;DR")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(Color.appAccentLight)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+            }
+            .padding(.bottom, 8)
+
+            ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
+                Text(line)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineSpacing(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, idx < lines.count - 1 ? 6 : 0)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            LinearGradient(
+                colors: [Color.appAccentSubtle, Color.clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.appAccentSubtleStrong, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - Skim-First Section Grid
+
+private struct SkimFirstSectionGrid: View {
+    let sections: [SummaryParser.Section]
+
+    var body: some View {
+        let left = sections.indices.filter { $0 % 2 == 0 }.map { sections[$0] }
+        let right = sections.indices.filter { $0 % 2 == 1 }.map { sections[$0] }
+
+        HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 24) {
+                ForEach(left) { SectionCard(section: $0) }
+            }
+            VStack(alignment: .leading, spacing: 24) {
+                ForEach(right) { SectionCard(section: $0) }
+            }
+        }
+    }
+}
+
+private struct SectionCard: View {
+    let section: SummaryParser.Section
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SkimSectionLabel(kind: section.kind, title: section.title, count: section.items.count)
+                .padding(.bottom, 12)
+
+            ForEach(Array(section.items.enumerated()), id: \.offset) { idx, item in
+                Group {
+                    if let entity = item.entity {
+                        Text(entity).fontWeight(.semibold).foregroundStyle(Color.appTextPrimary)
+                        + Text(" \u{2014} ").foregroundStyle(Color.appTextTertiary)
+                        + Text(item.body).foregroundStyle(Color.appTextTertiary)
+                    } else {
+                        Text(item.body).foregroundStyle(Color.appTextTertiary)
+                    }
+                }
+                .font(.system(size: 12.5))
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+                .overlay(alignment: .bottom) {
+                    if idx < section.items.count - 1 {
+                        Rectangle()
+                            .fill(Color.appSeparator)
+                            .frame(height: 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Section Label
+
+enum SectionKind { case decisions, followups, notes, outcomes }
+
+struct SkimSectionLabel: View {
+    let kind: SectionKind
+    var title: String
+    var count: Int? = nil
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 7, height: 7)
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.appTextTertiary)
+                .tracking(0.6)
+            if let count {
+                Text("\(count)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appTextMuted)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private var dotColor: Color {
+        switch kind {
+        case .decisions: return Color.appAccentMid
+        case .followups: return Color.appWarning
+        case .notes:     return Color.appTextMuted
+        case .outcomes:  return Color.appViolet
+        }
+    }
+}
+
+// MARK: - Previous Sessions Strip
+
+private struct PreviousSessionsStrip: View {
+    let sessions: [Meeting]
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 14))
+                .foregroundStyle(Color.appTextMuted)
+            Text("Previous sessions")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.appTextTertiary)
+                .textCase(.uppercase)
+                .tracking(0.4)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(sessions.prefix(5)) { prev in
+                        Button {
+                            onSelect(prev.id)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(
+                                    prev.scheduledStartDate ?? prev.startDate ?? prev.createdAt,
+                                    format: .dateTime.month(.abbreviated).day()
+                                )
+                                Text("·")
+                                Text(prev.title)
+                                Text("→")
+                            }
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color.appAccentLight)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color.appSurface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.appSeparator, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Summary Parser
+
+enum SummaryParser {
+    struct Item {
+        var entity: String?
+        var body: String
+    }
+
+    struct Section: Identifiable {
+        let id = UUID()
+        var kind: SectionKind
+        var title: String
+        var items: [Item]
+    }
+
+    struct ParsedSummary {
+        var tldr: [String]
+        var sections: [Section]
+    }
+
+    static func parse(_ text: String) -> ParsedSummary {
+        let lines = text.components(separatedBy: "\n")
+        var tldr: [String] = []
+        var sections: [Section] = []
+        var currentSection: Section? = nil
+        var preSectionLines: [String] = []
+        var seenFirstHeading = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            if trimmed.hasPrefix("## ") || trimmed.hasPrefix("# ") {
+                if let sec = currentSection { sections.append(sec) }
+                seenFirstHeading = true
+                let raw = trimmed.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+                currentSection = Section(kind: sectionKind(for: raw), title: raw, items: [])
+            } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                let body = String(trimmed.dropFirst(2))
+                let item = parseItem(body)
+                if currentSection != nil {
+                    currentSection!.items.append(item)
+                }
+            } else if !seenFirstHeading {
+                preSectionLines.append(trimmed)
+            }
+        }
+        if let sec = currentSection { sections.append(sec) }
+
+        tldr = Array(preSectionLines.prefix(2))
+
+        if tldr.isEmpty && !sections.isEmpty {
+            let counts = sections.map { "\($0.items.count) \($0.title.lowercased())" }.joined(separator: " · ")
+            tldr = [counts]
+        }
+
+        return ParsedSummary(tldr: tldr, sections: sections)
+    }
+
+    private static func parseItem(_ text: String) -> Item {
+        // "**Entity** — body"
+        if text.hasPrefix("**") {
+            let parts = text.components(separatedBy: "**")
+            if parts.count >= 3 {
+                let entity = parts[1]
+                let tail = parts[2...].joined()
+                    .trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: "^\\s*[—\\-–:]+\\s*", with: "", options: .regularExpression)
+                if !entity.isEmpty && !tail.isEmpty {
+                    return Item(entity: entity, body: tail)
+                }
+            }
+        }
+        return Item(entity: nil, body: text)
+    }
+
+    private static func sectionKind(for title: String) -> SectionKind {
+        let lower = title.lowercased()
+        if lower.contains("decision") { return .decisions }
+        if lower.contains("follow") || lower.contains("action") { return .followups }
+        if lower.contains("outcome") || lower.contains("result") { return .outcomes }
+        return .notes
+    }
 }
 
 // MARK: - Preview

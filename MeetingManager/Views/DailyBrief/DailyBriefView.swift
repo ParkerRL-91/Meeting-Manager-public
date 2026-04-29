@@ -82,38 +82,33 @@ struct DailyBriefView: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Daily Brief")
-                    .font(.title2.weight(.bold))
+                    .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(Color.appTextPrimary)
+                    .tracking(-0.4)
                 Text(date, format: .dateTime.weekday(.wide).month(.wide).day())
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextSecondary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.appTextTertiary)
             }
 
             Spacer()
 
-            // Stats badges
             if let brief = dailyBrief, !brief.meetings.isEmpty {
-                HStack(spacing: 8) {
-                    statBadge(
-                        value: brief.meetings.count,
-                        label: brief.meetings.count == 1 ? "meeting" : "meetings",
-                        icon: "calendar",
-                        color: Color.appAccent
-                    )
-
-                    if brief.totalOpenItems > 0 {
-                        statBadge(
-                            value: brief.totalOpenItems,
-                            label: brief.totalOpenItems == 1 ? "open item" : "open items",
-                            icon: "checkmark.circle",
-                            color: Color.appWarning
-                        )
-                    }
+                // Meetings count chip
+                HStack(spacing: 5) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 11))
+                    Text("\(brief.meetings.count) \(brief.meetings.count == 1 ? "meeting" : "meetings")")
+                        .font(.system(size: 12))
                 }
-            }
+                .foregroundStyle(Color.appTextTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.appSurfaceSecondary)
+                .overlay(
+                    Capsule().strokeBorder(Color.appBorderStrong, lineWidth: 1)
+                )
+                .clipShape(Capsule())
 
-            // Generate AI Brief button
-            if let brief = dailyBrief, !brief.meetings.isEmpty {
                 generateButton
             }
         }
@@ -143,24 +138,23 @@ struct DailyBriefView: View {
         Button {
             Task { await generateAIBrief() }
         } label: {
-            if isGeneratingBrief {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    Text("Generating...")
-                        .font(.subheadline.weight(.medium))
+            HStack(spacing: 6) {
+                if isGeneratingBrief {
+                    ProgressView().controlSize(.mini).tint(.white)
+                } else {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12))
                 }
-            } else if !isAIConfigured {
-                Label("Set Up AI →", systemImage: "sparkles")
-                    .font(.subheadline.weight(.medium))
-            } else {
-                Label(aiBriefText == nil ? "Generate AI Brief" : "Regenerate", systemImage: "sparkles")
-                    .font(.subheadline.weight(.medium))
+                Text(isGeneratingBrief ? "Generating…" : (isAIConfigured ? (aiBriefText == nil ? "Generate AI brief" : "Regenerate") : "Set up AI →"))
+                    .font(.system(size: 12.5, weight: .semibold))
             }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(Color.appAccent)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
         }
-        .buttonStyle(.borderedProminent)
-        .tint(Color.appAccent)
-        .controlSize(.regular)
+        .buttonStyle(.plain)
         .disabled(isGeneratingBrief)
     }
 
@@ -247,63 +241,106 @@ struct DailyBriefView: View {
         .padding(.top, 80)
     }
 
-    // MARK: - Meetings List
+    // MARK: - Meetings List (timeline)
 
     private func meetingsList(brief: DailyBrief) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Today's Schedule")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color.appTextTertiary)
+            Text("Today's schedule")
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(Color.appTextMuted)
                 .textCase(.uppercase)
-                .tracking(0.8)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
+                .tracking(0.6)
+                .padding(.horizontal, 32)
+                .padding(.bottom, 12)
 
-            VStack(spacing: 8) {
-                ForEach(brief.meetings, id: \.meeting.id) { entry in
-                    briefEntryRow(entry: entry)
+            // Timeline: time rail + rows
+            ZStack(alignment: .topLeading) {
+                // Vertical time rail line at x=64+17/2 ≈ 72.5
+                Rectangle()
+                    .fill(Color.appSeparator)
+                    .frame(width: 1)
+                    .padding(.leading, 72)
+                    .padding(.top, 8)
+
+                VStack(spacing: 16) {
+                    ForEach(brief.meetings, id: \.meeting.id) { entry in
+                        timelineRow(entry: entry)
+                    }
                 }
             }
             .padding(.horizontal, 20)
         }
     }
 
-    /// Renders a single brief entry row with category dot overlay + inline expansion.
-    private func briefEntryRow(entry: DailyBriefEntry) -> some View {
+    private func timelineRow(entry: DailyBriefEntry) -> some View {
         let isExpanded = Binding<Bool>(
             get: { expandedMeetingIds.contains(entry.meeting.id) },
             set: { newValue in
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    if newValue {
-                        expandedMeetingIds.insert(entry.meeting.id)
-                    } else {
-                        expandedMeetingIds.remove(entry.meeting.id)
-                    }
+                    if newValue { expandedMeetingIds.insert(entry.meeting.id) }
+                    else { expandedMeetingIds.remove(entry.meeting.id) }
                 }
             }
         )
+        let dotColor = categoryColor(for: entry.category)
 
-        return ZStack(alignment: .leading) {
+        return HStack(alignment: .top, spacing: 0) {
+            // Time column — 56px, right-aligned, monospaced
+            VStack(alignment: .trailing, spacing: 2) {
+                if let start = entry.meeting.scheduledStartDate ?? entry.meeting.startDate {
+                    Text(start, format: .dateTime.hour().minute())
+                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.appTextSecondary)
+                }
+                if let end = entry.meeting.scheduledEndDate {
+                    Text(end, format: .dateTime.hour().minute())
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Color.appTextMuted)
+                }
+            }
+            .frame(width: 56, alignment: .trailing)
+            .padding(.top, 2)
+
+            // Dot — 17px wide, centered
+            ZStack {
+                Circle()
+                    .fill(Color.appBackground)
+                    .frame(width: 15, height: 15)
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 9, height: 9)
+                    .shadow(color: dotColor.opacity(0), radius: 3)
+            }
+            .frame(width: 17)
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
+
+            // Card
             MeetingPrepCardView(
                 meeting: entry.meeting,
                 prepBrief: entry.prepBrief,
                 now: Date(),
                 isExpanded: isExpanded
             )
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(dotColor)
+                    .frame(width: 2)
+                    .clipShape(RoundedRectangle(cornerRadius: 1))
+            }
+        }
+    }
 
-            // Category status dot overlaid near the time column
-            categoryDot(for: entry.category)
-                .offset(x: 6, y: -12)
+    private func categoryColor(for category: MeetingPrepCategory) -> Color {
+        switch category {
+        case .carryOver: return Color.appRecording
+        case .followUp:  return Color.appWarning
+        case .new:       return Color.appAccentMid
         }
     }
 
     private func categoryDot(for category: MeetingPrepCategory) -> some View {
-        let color: Color
-        switch category {
-        case .carryOver: color = Color.appRecording    // red/orange — needs attention
-        case .followUp:  color = Color.appWarning      // yellow — has context
-        case .new:       color = Color.appSuccess      // green — fresh
-        }
+        let color = categoryColor(for: category)
         return Circle()
             .fill(color)
             .frame(width: 7, height: 7)

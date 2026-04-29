@@ -109,34 +109,44 @@ struct SidebarView: View {
 
             // MARK: - New Meeting + Action Items
 
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Button {
                     createAdHocMeeting()
                 } label: {
-                    Label("New Meeting", systemImage: "plus")
-                        .frame(maxWidth: .infinity)
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("New Meeting")
+                            .font(.system(size: 12.5, weight: .medium))
+                    }
+                    .foregroundStyle(Color.appTextSecondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 30)
+                    .background(Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                            .foregroundStyle(Color.appBorderStrongest)
+                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.appAccent)
-                .controlSize(.large)
+                .buttonStyle(.plain)
                 .help("New Meeting (⌘N)")
                 // ⌘N is registered at the app level via `CommandGroup` in
                 // MeetingManagerApp; binding it locally too caused a duplicate
                 // registration with non-deterministic responder-chain behaviour.
 
-                HStack {
-                    Spacer()
-                    Button {
-                        showAllActionItems = true
-                    } label: {
-                        Label("Action Items", systemImage: "checklist")
-                            .font(.subheadline)
-                    }
-                    .buttonStyle(.borderless)
+                Button {
+                    showAllActionItems = true
+                } label: {
+                    Label("Action Items", systemImage: "checklist")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.appTextMuted)
                 }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
 
             Divider()
 
@@ -190,14 +200,14 @@ private struct SpacesSidebarSection: View {
             } label: {
                 HStack(spacing: 4) {
                     Text("My Notes")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.appTextTertiary)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.appTextMuted)
                         .textCase(.uppercase)
-                        .tracking(0.7)
+                        .tracking(0.4)
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.appTextTertiary)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.appTextMuted)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -225,10 +235,10 @@ private struct SidebarSectionHeader: View {
     let title: String
     var body: some View {
         Text(title)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(Color.appTextTertiary)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(Color.appTextMuted)
             .textCase(.uppercase)
-            .tracking(0.7)
+            .tracking(0.4)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -242,35 +252,39 @@ private struct FolderNavItem: View {
     let current: SidebarDestination
     let action: () -> Void
 
+    @State private var isHovered = false
     private var isSelected: Bool { current == .folder(folder.key) }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "folder.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(isSelected ? Color.appAccent : Color.appTextSecondary)
-                    .frame(width: 18)
+            HStack(spacing: 9) {
+                Image(systemName: "folder")
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? Color.appAccentLight : Color.appTextMuted)
+                    .frame(width: 16)
                 Text(folder.displayName)
-                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    .font(.system(size: 12.5))
                     .foregroundStyle(isSelected ? Color.appTextPrimary : Color.appTextSecondary)
                     .lineLimit(1)
                 Spacer()
                 Text("\(folder.meetingCount)")
-                    .font(.caption2)
-                    .foregroundStyle(Color.appTextTertiary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.appSurfaceSecondary)
-                    .clipShape(Capsule())
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Color.appTextMuted)
+                    .monospacedDigit()
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(isSelected ? Color.appAccent.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .frame(minHeight: 28)
+            .background(
+                isSelected
+                    ? Color.appSurfaceElevated
+                    : (isHovered ? Color.appSurfaceSecondary : Color.clear)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -284,36 +298,40 @@ private struct NavItem: View {
     let current: SidebarDestination
     let action: () -> Void
 
+    @State private var isHovered = false
     private var isSelected: Bool { current == destination }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 9) {
                 Image(systemName: icon)
-                    .font(.subheadline)
-                    .foregroundStyle(isSelected ? Color.appAccent : Color.appTextSecondary)
-                    .frame(width: 18)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? Color.appAccentLight : Color.appTextTertiary)
+                    .frame(width: 16)
                 Text(label)
-                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.appTextPrimary : Color.appTextSecondary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.appAccentLight : Color.appTextSecondary)
                 Spacer()
                 if badge > 0 {
                     Text("\(badge)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.appAccent)
-                        .clipShape(Capsule())
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(Color.appTextMuted)
+                        .monospacedDigit()
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(isSelected ? Color.appAccent.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(minHeight: 28)
+            .background(
+                isSelected
+                    ? Color.appAccentSubtle
+                    : (isHovered ? Color.appSurfaceSecondary : Color.clear)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 

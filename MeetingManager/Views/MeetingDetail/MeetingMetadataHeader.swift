@@ -1,12 +1,12 @@
 import SwiftUI
 
+/// Compact single-row header: title · date/time/duration · status pill · action buttons
+/// Matches Design B spec: 10px vertical, 16px horizontal, bottom border.
 struct MeetingMetadataHeader: View {
     let meeting: Meeting
     var onEdit: (() -> Void)?
     @Environment(AppState.self) private var appState
 
-    // Click-to-edit title state (exec ask). Mirrors NotepadPaneView's debounce
-    // pattern: 1s debounce while editing, immediate flush on commit/blur.
     @State private var isEditingTitle = false
     @State private var titleDraft: String = ""
     @State private var titleSaveTask: Task<Void, Never>?
@@ -15,98 +15,60 @@ struct MeetingMetadataHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    if isEditingTitle {
-                        TextField("Meeting title", text: $titleDraft)
-                            .textFieldStyle(.plain)
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Color.appTextPrimary)
-                            .focused($titleFieldFocused)
-                            .onSubmit { commitTitle() }
-                            .onChange(of: titleDraft) { _, _ in scheduleTitleSave() }
-                            .onChange(of: titleFieldFocused) { _, focused in
-                                if !focused { commitTitle() }
-                            }
-                    } else {
-                        Text(meeting.title)
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Color.appTextPrimary)
-                            .lineLimit(2)
-                            .onTapGesture(count: 2) { beginEditingTitle() }
-                            .help("Double-click to rename")
+
+            // Title (inline-editable)
+            if isEditingTitle {
+                TextField("Meeting title", text: $titleDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .focused($titleFieldFocused)
+                    .onSubmit { commitTitle() }
+                    .onChange(of: titleDraft) { _, _ in scheduleTitleSave() }
+                    .onChange(of: titleFieldFocused) { _, focused in
+                        if !focused { commitTitle() }
                     }
-
-                    if !isEditingTitle {
-                        Button {
-                            beginEditingTitle()
-                        } label: {
-                            Image(systemName: "pencil")
-                                .font(.caption)
-                                .foregroundStyle(Color.appTextSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Rename meeting")
-                    }
-
-                    if showTitleSavedFlash {
-                        Label("Saved", systemImage: "checkmark")
-                            .labelStyle(.titleAndIcon)
-                            .font(.caption)
-                            .foregroundStyle(Color.appSuccess)
-                            .transition(.opacity)
-                    }
-
-                    if !isEditingTitle, let onEdit {
-                        Button {
-                            onEdit()
-                        } label: {
-                            Image(systemName: "calendar.badge.clock")
-                                .font(.caption)
-                                .foregroundStyle(Color.appTextSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Edit meeting time and details")
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    Image(systemName: "calendar")
-                        .imageScale(.small)
-                    Text(DateFormatting.relativeDate(from: meeting.effectiveDate))
-
-                    Text("at")
-                        .foregroundStyle(Color.appTextTertiary)
-
-                    Image(systemName: "clock")
-                        .imageScale(.small)
-                    Text(DateFormatting.timeOnly(from: meeting.effectiveDate))
-                }
-                .font(.subheadline)
-                .foregroundStyle(Color.appTextSecondary)
+            } else {
+                Text(meeting.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
+                    .onTapGesture(count: 2) { beginEditingTitle() }
+                    .help("Double-click to rename")
             }
+
+            // Inline meta: · Today 12:59 · 58 min
+            HStack(spacing: 4) {
+                Text("·")
+                Text(DateFormatting.relativeDate(from: meeting.effectiveDate))
+                Text(DateFormatting.timeOnly(from: meeting.effectiveDate))
+                if meeting.duration != nil {
+                    Text("·")
+                    Text(meeting.formattedDuration)
+                }
+            }
+            .font(.system(size: 11.5))
+            .foregroundStyle(Color.appTextMuted)
+
+            // Status pill
+            CompactStatusPill(status: meeting.status)
 
             Spacer()
 
-            StatusBadge(status: meeting.status)
-
-            // "Start Early" button — shown next to the Scheduled badge
+            // Start Early button (scheduled meetings only)
             if meeting.status == .scheduled || meeting.status == .notified {
                 Button {
                     appState.startRecording(for: meeting)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "play.fill")
-                            .font(.caption2)
+                            .font(.system(size: 10))
                         Text("Start Early")
-                            .font(.caption)
-                            .fontWeight(.semibold)
+                            .font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, 4)
                     .background(Color.appAccent)
                     .clipShape(Capsule())
                 }
@@ -114,27 +76,53 @@ struct MeetingMetadataHeader: View {
                 .help("Start recording this meeting now")
             }
 
-            if meeting.duration != nil {
-                Text(meeting.formattedDuration)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundStyle(Color.appTextSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.appSurfaceSecondary)
-                    .clipShape(Capsule())
+            // Saved flash
+            if showTitleSavedFlash {
+                Label("Saved", systemImage: "checkmark")
+                    .labelStyle(.titleAndIcon)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appSuccess)
+                    .transition(.opacity)
+            }
+
+            // Edit / more actions
+            if let onEdit {
+                headerIconButton(icon: "calendar.badge.clock", help: "Edit meeting time") {
+                    onEdit()
+                }
+            }
+
+            headerIconButton(icon: "pencil", help: "Rename meeting") {
+                beginEditingTitle()
             }
         }
-        .padding(16)
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding(.horizontal, 16)
-        .padding(.top, 16)
+        .padding(.vertical, 10)
+        .background(Color.appBackground)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.appSeparator)
+                .frame(height: 1)
+        }
         .onDisappear {
             titleSaveTask?.cancel()
-            // Best-effort flush on disappear.
             if isEditingTitle { commitTitle() }
         }
+    }
+
+    @ViewBuilder
+    private func headerIconButton(icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.appTextMuted)
+                .frame(width: 26, height: 26)
+                .background(Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     // MARK: - Title editing
@@ -162,7 +150,6 @@ struct MeetingMetadataHeader: View {
     @MainActor
     private func persistTitle(forceCommit: Bool = false) async {
         let trimmed = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Reject empty rename — keep the field open with the original value.
         guard !trimmed.isEmpty else {
             if forceCommit {
                 titleDraft = meeting.title
@@ -170,13 +157,10 @@ struct MeetingMetadataHeader: View {
             }
             return
         }
-
-        // No-op if unchanged.
         guard trimmed != meeting.title else {
             if forceCommit { isEditingTitle = false }
             return
         }
-
         var updated = meeting
         updated.title = trimmed
         do {
@@ -186,24 +170,70 @@ struct MeetingMetadataHeader: View {
             if forceCommit { isEditingTitle = false }
             try? await Task.sleep(for: .milliseconds(800))
             withAnimation(.easeInOut(duration: 0.3)) { showTitleSavedFlash = false }
-        } catch {
-            // On failure, surface via the broader meeting view's error path
-            // by leaving the draft visible; the parent will reload meeting data
-            // on next refresh.
-        }
+        } catch {}
     }
 }
 
-// MARK: - Previews
+// MARK: - Compact Status Pill
 
-// #Preview("Completed Meeting") {
-//     MeetingMetadataHeader(meeting: Meeting(
-//         title: "Weekly Design Sync",
-//         startDate: Date().addingTimeInterval(-7200),
-//         endDate: Date().addingTimeInterval(-3600),
-//         scheduledStartDate: Date().addingTimeInterval(-7200),
-//         status: .complete
-//     ))
-//     .padding()
-//     .background(Color.appBackground)
-// }
+private struct CompactStatusPill: View {
+    let status: MeetingStatus
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if status == .complete || status == .transcribing {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 6, height: 6)
+            }
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(textColor)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(bgColor)
+        .clipShape(Capsule())
+    }
+
+    private var label: String {
+        switch status {
+        case .complete:     return "Complete"
+        case .recording:    return "Recording"
+        case .transcribing: return "Transcribing"
+        case .summarizing:  return "Summarizing"
+        case .scheduled:    return "Scheduled"
+        case .notified:     return "Up next"
+        case .cancelled:    return "Cancelled"
+        case .archived:     return "Archived"
+        default:            return status.rawValue.capitalized
+        }
+    }
+
+    private var dotColor: Color {
+        switch status {
+        case .complete: return Color.appSuccess
+        default:        return Color.appAccent
+        }
+    }
+
+    private var textColor: Color {
+        switch status {
+        case .complete:     return Color.appSuccess
+        case .recording:    return Color.appRecording
+        case .transcribing, .summarizing: return Color.appAccentLight
+        case .scheduled, .notified: return Color.appAccentLight
+        default:            return Color.appTextMuted
+        }
+    }
+
+    private var bgColor: Color {
+        switch status {
+        case .complete:     return Color.appSuccessSubtle
+        case .recording:    return Color.appRecordingSubtle
+        case .transcribing, .summarizing: return Color.appAccentSubtle
+        case .scheduled, .notified: return Color.appAccentSubtle
+        default:            return Color.appSurfaceSecondary
+        }
+    }
+}
