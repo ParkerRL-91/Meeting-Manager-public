@@ -1,10 +1,8 @@
 import SwiftUI
-import Sparkle
 
 /// Top-level settings container using a tab-based layout.
 struct SettingsView: View {
 
-    @ObservedObject var updateService: UpdateService
     @Environment(AppState.self) private var appState
     @State private var selectedTab = 0
 
@@ -42,8 +40,8 @@ struct SettingsView: View {
                 .tabItem { Label("Templates", systemImage: "doc.text.fill") }
                 .tag(7)
 
-            UpdateSettingsView(updater: updateService.updater)
-                .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
+            AboutSettingsView()
+                .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(8)
         }
         .frame(width: 750, height: 500)
@@ -55,9 +53,3 @@ struct SettingsView: View {
         }
     }
 }
-
-// MARK: - Preview
-
-// #Preview("Settings") {
-//     SettingsView(updateService: UpdateService())
-// }

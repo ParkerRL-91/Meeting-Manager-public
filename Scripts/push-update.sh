@@ -16,16 +16,14 @@
 #   SKIP_NOTARIZE=1 ./Scripts/push-update.sh 1.2.0  # override (not recommended)
 #
 # The script will:
-#   1. Pre-flight: git state check + Keychain key check + notarization guard
+#   1. Pre-flight: git state check + notarization guard
 #   2. Bump version in Info.plist (atomically: reverts on build failure)
 #   3. Build release binary via swift build
 #   4. Assemble a signed .app bundle
 #   5. Notarize and staple (required unless SKIP_NOTARIZE=1)
 #   6. Create a signed DMG and print SHA-256 checksum
-#   7. Download previous release DMG for delta generation
-#   8. Generate and sign appcast.xml for Sparkle (with .delta files)
-#   9. Push appcast.xml to docs/ (GitHub Pages) — only if changed
-#  10. Create a GitHub Release with the DMG attached
+#   7. Commit version bump and push
+#   8. Create a GitHub Release with the DMG attached
 
 set -euo pipefail
 
@@ -36,9 +34,6 @@ APP_NAME="Meeting Manager"
 BUNDLE_ID="com.meetingmanager.app"
 EXECUTABLE="MeetingManager"
 BUILD_DIR="${REPO_DIR}/build"
-SPARKLE_BIN="${REPO_DIR}/.build/artifacts/sparkle/Sparkle/bin"
-GENERATE_APPCAST="${SPARKLE_BIN}/generate_appcast"
-SIGN_UPDATE="${SPARKLE_BIN}/sign_update"
 NOTARIZE="${NOTARIZE:-0}"
 SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
@@ -93,20 +88,6 @@ if [[ ${#MISSING_ENV[@]} -gt 0 ]]; then
 fi
 echo "  [OK] signing env vars present"
 
-# 3. Sparkle EdDSA key must be accessible in Keychain before we spend 3min building.
-# Sparkle's generate_keys tool stores the key with service="https://sparkle-project.org"
-# and account="ed25519".
-SPARKLE_KEY_SERVICE="https://sparkle-project.org"
-SPARKLE_KEY_ACCOUNT="ed25519"
-if ! security find-generic-password -s "${SPARKLE_KEY_SERVICE}" -a "${SPARKLE_KEY_ACCOUNT}" &>/dev/null; then
-    echo "ERROR: Sparkle EdDSA private key not found in Keychain."
-    echo "  Expected: service='${SPARKLE_KEY_SERVICE}' account='${SPARKLE_KEY_ACCOUNT}'"
-    echo "  Run: ${SPARKLE_BIN}/generate_keys  (then copy the public key to Info.plist SUPublicEDKey)"
-    echo "  Or:  ./Scripts/setup-signing.sh"
-    exit 1
-fi
-echo "  [OK] Sparkle EdDSA key found in Keychain"
-
 # 3. Current version
 ORIGINAL_VERSION="$(plutil -extract CFBundleShortVersionString raw "${PLIST}")"
 echo "  [OK] Current version: ${ORIGINAL_VERSION} → new version: ${VERSION}"
@@ -135,7 +116,6 @@ echo ""
 if [[ "${DRY_RUN}" == "1" ]]; then
     echo "=== DRY RUN — all checks passed. Would release v${VERSION}. ==="
     echo "  git state:         clean"
-    echo "  Sparkle key:       found (service='${SPARKLE_KEY_SERVICE}')"
     echo "  Current version:   ${ORIGINAL_VERSION}"
     echo "  New version:       ${VERSION}"
     echo "  Notarize:          ${NOTARIZE}"
@@ -202,19 +182,6 @@ if [[ -d "${REPO_DIR}/MeetingManager/Resources" ]]; then
     rsync -a --exclude="Info.plist" "${REPO_DIR}/MeetingManager/Resources/" "${RESOURCES_DIR}/"
 fi
 
-# Sparkle framework
-SPARKLE_FRAMEWORK_SRC="$(find "${REPO_DIR}/.build/artifacts" -name "Sparkle.framework" -maxdepth 5 | head -1)"
-if [[ -z "${SPARKLE_FRAMEWORK_SRC}" ]]; then
-    SPARKLE_FRAMEWORK_SRC="$(find "${REPO_DIR}/.build/checkouts" -name "Sparkle.framework" -maxdepth 5 | head -1)"
-fi
-if [[ -n "${SPARKLE_FRAMEWORK_SRC}" ]]; then
-    cp -R "${SPARKLE_FRAMEWORK_SRC}" "${FRAMEWORKS_DIR}/"
-    install_name_tool -add_rpath "@executable_path/../Frameworks" \
-        "${MACOS_DIR}/${EXECUTABLE}" 2>/dev/null || true
-    echo "Sparkle framework bundled."
-else
-    echo "Warning: Sparkle.framework not found — update checks will not work."
-fi
 
 # ──────────────────────────────────────────────────
 # Step 4: Sign
@@ -298,60 +265,22 @@ echo "DMG: ${DMG_PATH}"
 echo "SHA-256: ${DMG_SHA}"
 
 # ──────────────────────────────────────────────────
-# Step 7: Fetch previous release DMG for delta generation
+# Step 7: Commit version bump and create GitHub Release
 # ──────────────────────────────────────────────────
-echo "Generating appcast (with delta support)..."
-APPCAST_BUILD_DIR="${BUILD_DIR}/appcast"
-mkdir -p "${APPCAST_BUILD_DIR}"
-
-# Download previous release DMG so generate_appcast can create .delta files
-# (80-90% smaller downloads for minor releases)
-PREV_TAG="$(git -C "${REPO_DIR}" describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")"
-if [[ -n "${PREV_TAG}" ]]; then
-    echo "  Downloading ${PREV_TAG} DMG for delta generation..."
-    if gh release download "${PREV_TAG}" --pattern "*.dmg" --dir "${APPCAST_BUILD_DIR}" 2>/dev/null; then
-        echo "  Downloaded ${PREV_TAG} DMG — deltas will be generated."
-    else
-        echo "  Could not download ${PREV_TAG} DMG — delta updates disabled for this release."
-    fi
-fi
-
-# Copy current DMG into staging (must be alongside previous for delta generation)
-cp "${DMG_PATH}" "${APPCAST_BUILD_DIR}/"
-
-# ──────────────────────────────────────────────────
-# Step 8: Generate appcast.xml (signs with EdDSA key from Keychain)
-# ──────────────────────────────────────────────────
-"${GENERATE_APPCAST}" \
-    --download-url-prefix "https://github.com/ParkerRL-91/Meeting-Manager/releases/download/v${VERSION}/" \
-    --link "https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v${VERSION}" \
-    "${APPCAST_BUILD_DIR}"
-
-echo "Appcast generated."
-
-# ──────────────────────────────────────────────────
-# Step 9: Publish appcast to GitHub Pages (only if changed)
-# ──────────────────────────────────────────────────
-echo "Publishing appcast to GitHub Pages..."
-DOCS_DIR="${REPO_DIR}/docs"
-mkdir -p "${DOCS_DIR}"
-cp "${APPCAST_BUILD_DIR}/appcast.xml" "${DOCS_DIR}/appcast.xml"
-
 cd "${REPO_DIR}"
-git add docs/appcast.xml MeetingManager/Resources/Info.plist
+git add MeetingManager/Resources/Info.plist
 
 if git diff --cached --quiet; then
-    echo "appcast.xml unchanged — skipping commit."
+    echo "Info.plist unchanged — skipping commit."
 else
     git commit -m "Release v${VERSION}
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
     git push
-    echo "Appcast pushed to GitHub Pages."
 fi
 
 # ──────────────────────────────────────────────────
-# Step 10: Create GitHub Release
+# Step 8: Create GitHub Release
 # ──────────────────────────────────────────────────
 echo "Creating GitHub Release v${VERSION}..."
 gh release create "v${VERSION}" \

@@ -1,5 +1,4 @@
 import SwiftUI
-import Sparkle
 
 @main
 struct MeetingManagerApp: App {
@@ -7,7 +6,6 @@ struct MeetingManagerApp: App {
     @State private var appState = AppState()
     @State private var onboardingManager = OnboardingManager()
     @State private var permissionsReady = false
-    @StateObject private var updateService = UpdateService()
 
     var body: some Scene {
         WindowGroup {
@@ -33,12 +31,6 @@ struct MeetingManagerApp: App {
         .defaultSize(width: 1200, height: 800)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates...") {
-                    updateService.checkForUpdates()
-                }
-
-                Divider()
-
                 Button("Reset Onboarding (Testing)") {
                     onboardingManager.reset()
                 }
@@ -100,7 +92,7 @@ struct MeetingManagerApp: App {
         }
 
         Settings {
-            SettingsView(updateService: updateService)
+            SettingsView()
                 .environment(appState)
                 .preferredColorScheme(.dark)
         }
