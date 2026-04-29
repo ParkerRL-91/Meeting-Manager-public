@@ -77,6 +77,20 @@ final class TranscriptRepository {
         }
     }
 
+    /// Bulk-update speaker labels from a diarization alignment pass.
+    /// Only rows present in the mapping are written; all others are untouched.
+    func updateSpeakerLabels(_ mapping: [Int64: String]) async throws {
+        guard !mapping.isEmpty else { return }
+        try await database.writer.write { db in
+            for (transcriptId, label) in mapping {
+                try db.execute(
+                    sql: "UPDATE transcript SET speakerLabel = ? WHERE id = ?",
+                    arguments: [label, transcriptId]
+                )
+            }
+        }
+    }
+
     func deleteForMeeting(_ meetingId: String) async throws {
         try await database.writer.write { db in
             _ = try Transcript

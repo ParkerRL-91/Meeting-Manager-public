@@ -76,6 +76,8 @@ final class AudioBufferManager {
     private var micSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
     private var systemSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
     private var audioFile: AVAudioFile?
+    /// Separate file capturing only system audio — used as input for speaker diarization.
+    private var systemAudioFile: AVAudioFile?
     private let sampleRate: Double = 16000
 
     /// Maximum recording duration in seconds. Prevents unbounded memory growth
@@ -171,8 +173,24 @@ final class AudioBufferManager {
             forWriting: outputURL,
             settings: format.settings
         )
+
+        // Write system-only audio alongside the mixed file for speaker diarization.
+        let systemURL = Self.systemAudioURL(for: outputURL)
+        systemAudioFile = try? AVAudioFile(
+            forWriting: systemURL,
+            settings: format.settings
+        )
+
         consecutiveWriteFailures = 0
         startMemoryPressureMonitoring()
+    }
+
+    /// Returns the system-audio-only WAV URL derived from the mixed audio URL.
+    /// e.g. `.../abc123.wav` → `.../abc123_system.wav`
+    static func systemAudioURL(for mixedURL: URL) -> URL {
+        let stem = mixedURL.deletingPathExtension().lastPathComponent
+        return mixedURL.deletingLastPathComponent()
+            .appendingPathComponent("\(stem)_system.wav")
     }
 
     func appendMicBuffer(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
@@ -211,6 +229,7 @@ final class AudioBufferManager {
         lock.unlock()
 
         writeToFile(buffer)
+        writeSystemToFile(buffer)
     }
 
     /// Returns the next mixed audio chunk for transcription, or nil if not enough data.
@@ -263,6 +282,7 @@ final class AudioBufferManager {
     func finishRecording() {
         lock.lock()
         audioFile = nil
+        systemAudioFile = nil
         micSamples.removeAll()
         systemSamples.removeAll()
         totalMicSamplesAppended = 0
@@ -275,6 +295,14 @@ final class AudioBufferManager {
     }
 
     // MARK: - Private
+
+    private func writeSystemToFile(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        let file = systemAudioFile
+        lock.unlock()
+        guard let file else { return }
+        try? file.write(from: buffer)
+    }
 
     private func writeToFile(_ buffer: AVAudioPCMBuffer) {
         lock.lock()

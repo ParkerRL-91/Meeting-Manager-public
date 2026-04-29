@@ -19,6 +19,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
 
     enum TaskType: String, Codable, CaseIterable {
         case transcription
+        case diarization
         case summary
         case enrichment
         case regeneration
@@ -35,11 +36,12 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
     /// Human-readable description of what this task does.
     var displayName: String {
         switch type {
-        case .transcription: return "Transcribe"
-        case .summary:       return "Summarize"
-        case .enrichment:    return "Enrich"
-        case .regeneration:        return "Regenerate Summary"
-        case .contextEnrichment:   return "Finding Related Meetings"
+        case .transcription:    return "Transcribe"
+        case .diarization:      return "Identify Speakers"
+        case .summary:          return "Summarize"
+        case .enrichment:       return "Enrich"
+        case .regeneration:     return "Regenerate Summary"
+        case .contextEnrichment: return "Finding Related Meetings"
         }
     }
 

@@ -23,6 +23,8 @@ final class TaskQueueManager {
 
     /// Closures injected by AppState to execute actual work.
     var transcriptionHandler: ((String, URL?) async throws -> Void)?
+    /// Speaker diarization handler — meetingId, system audio URL (may be nil if not recorded).
+    var diarizationHandler: ((String, URL?) async throws -> Void)?
     var summaryHandler: ((String) async throws -> Void)?
     var enrichmentHandler: ((String) async throws -> Void)?
     /// Regeneration handler — meetingId + optional recipeId from task metadata.
@@ -264,15 +266,18 @@ final class TaskQueueManager {
                     }
                 }
 
-                // Auto-enqueue summary after transcription — but only if segments exist
+                // Auto-enqueue diarization + summary after transcription — but only if segments exist
                 if next.type == .transcription {
                     let hasSegments = (try? await database.writer.read { db in
                         try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript WHERE meetingId = ?", arguments: [next.meetingId])
                     } ?? 0) ?? 0
                     if hasSegments > 0 {
+                        // Diarization runs before summary so speaker names are in the transcript
+                        // when the summarizer prompt is built.
+                        await enqueue(type: .diarization, meetingId: next.meetingId, priority: 4)
                         await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
                     } else {
-                        Logger.general.info("TaskQueue: transcription produced 0 segments for \(next.meetingId) — skipping summary")
+                        Logger.general.info("TaskQueue: transcription produced 0 segments for \(next.meetingId) — skipping diarization + summary")
                     }
                 }
             } catch {
@@ -312,6 +317,18 @@ final class TaskQueueManager {
                 return URL(fileURLWithPath: path)
             }
             try await handler(task.meetingId, audioURL)
+
+        case .diarization:
+            guard let handler = diarizationHandler else {
+                throw TaskQueueError.noHandler("diarization")
+            }
+            let systemAudioURL: URL? = try? await database.writer.read { db in
+                guard let meeting = try Meeting.fetchOne(db, key: task.meetingId),
+                      let path = meeting.audioFilePath else { return nil }
+                let mixedURL = URL(fileURLWithPath: path)
+                return AudioBufferManager.systemAudioURL(for: mixedURL)
+            }
+            try await handler(task.meetingId, systemAudioURL)
 
         case .summary:
             guard let handler = summaryHandler else {

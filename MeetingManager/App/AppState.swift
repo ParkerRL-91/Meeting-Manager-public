@@ -375,6 +375,12 @@ final class AppState {
             self.loadMeetings()
         }
 
+        taskQueueManager.diarizationHandler = { [weak self] meetingId, systemAudioURL in
+            guard let self else { return }
+            self.fileLog("TaskQueue: diarization starting for \(meetingId)")
+            await self.runDiarization(meetingId: meetingId, systemAudioURL: systemAudioURL)
+        }
+
         taskQueueManager.enrichmentHandler = { [weak self] meetingId in
             guard let self else { return }
             self.fileLog("TaskQueue: enrichment placeholder for \(meetingId)")
@@ -1222,6 +1228,81 @@ final class AppState {
         updated.setSpeakerMap(mapping)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
+    }
+
+    // MARK: - Speaker Diarization
+
+    /// Run SpeakerKit diarization on the system audio file, update transcript speaker
+    /// labels in the DB, then run LLM attribution to map cluster IDs → real names.
+    private func runDiarization(meetingId: String, systemAudioURL: URL?) async {
+        let service = SpeakerDiarizationService.shared
+        let transcriptRepo = TranscriptRepository(database: database)
+
+        guard let audioURL = systemAudioURL,
+              FileManager.default.fileExists(atPath: audioURL.path) else {
+            fileLog("Diarization: no system audio file for \(meetingId) — skipping")
+            return
+        }
+
+        // Load the meeting to know how many remote participants to hint the clusterer.
+        let meeting = try? await database.writer.read { db in
+            try Meeting.fetchOne(db, key: meetingId)
+        }
+        let participantCount: Int? = {
+            guard let m = meeting else { return nil }
+            let count = m.participantList.count
+            return count > 0 ? count : nil
+        }()
+
+        do {
+            let result = try await service.diarize(
+                systemAudioURL: audioURL,
+                participantCount: participantCount
+            )
+            guard result.speakerCount > 0 else {
+                fileLog("Diarization: 0 speakers detected for \(meetingId)")
+                return
+            }
+
+            // Fetch all system-audio transcript rows for alignment.
+            let transcripts = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
+            let systemTranscripts = transcripts.filter {
+                ($0.speakerLabel ?? "").lowercased() == "system"
+            }
+            guard !systemTranscripts.isEmpty else {
+                fileLog("Diarization: no system-audio transcript rows for \(meetingId)")
+                return
+            }
+
+            // Align diarization segments → transcript rows → "Speaker N" labels.
+            let mapping = service.alignToTranscripts(systemTranscripts, result: result)
+            guard !mapping.isEmpty else {
+                fileLog("Diarization: alignment produced no matches for \(meetingId)")
+                return
+            }
+
+            try await transcriptRepo.updateSpeakerLabels(mapping)
+            fileLog("Diarization: labelled \(mapping.count) transcript rows for \(meetingId) (\(result.speakerCount) speakers)")
+
+            // Now run LLM attribution on the newly-labelled transcripts.
+            if let m = meeting {
+                let relabelled = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
+                let (_, attributed) = await applySpeakerAttribution(
+                    transcripts: relabelled,
+                    meeting: m
+                )
+                // Persist the updated speakerMap on the meeting.
+                try? await database.writer.write { db in
+                    var updated = attributed
+                    try updated.update(db)
+                }
+            }
+
+            loadMeetings()
+        } catch {
+            fileLog("Diarization: failed for \(meetingId): \(error.localizedDescription)")
+            Logger.general.error("Diarization failed for \(meetingId): \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Transcription Lifecycle
