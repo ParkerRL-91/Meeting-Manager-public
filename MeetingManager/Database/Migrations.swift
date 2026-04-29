@@ -628,5 +628,20 @@ enum Migrations {
                 columns: ["seriesKey"]
             )
         }
+
+        // v3.3 Phase 3: persistent per-person voice fingerprints.
+        // Each row is a 40-dim mel-spectrum embedding averaged over all meetings
+        // where this person was identified. Keyed by personName (unique). Used
+        // by VoiceProfileService to recognise known participants before the LLM
+        // attribution step, so familiar voices are assigned instantly.
+        migrator.registerMigration("v26-voice-profile") { db in
+            try db.create(table: "voiceProfile") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("personName", .text).notNull().unique()
+                t.column("embeddingData", .blob).notNull()
+                t.column("sampleCount", .integer).notNull().defaults(to: 0)
+                t.column("lastUpdatedAt", .datetime).notNull()
+            }
+        }
     }
 }

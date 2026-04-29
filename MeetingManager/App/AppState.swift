@@ -1203,13 +1203,19 @@ final class AppState {
             uniquingKeysWith: { _, new in new }
         )
 
+        let claudeForAttribution: ClaudeService? = {
+            guard let key = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
+                  !key.isEmpty else { return nil }
+            return ClaudeService()
+        }()
+
         let mapping = await SpeakerAttributionService.shared.attribute(
             transcripts: transcripts,
             participantNames: participants,
             userFirstName: userFirst,
             priorAliases: priorAliases,
             ollama: ollamaService,
-            claude: nil
+            claude: claudeForAttribution
         )
 
         guard !mapping.isEmpty else { return (transcripts, meeting) }
@@ -1264,6 +1270,24 @@ final class AppState {
                 return
             }
 
+            let resultBox = DiarizationResultBox(result)
+            let profileRepo = VoiceProfileRepository(database: database)
+            let voiceService = VoiceProfileService.shared
+
+            // Phase 3 — match stored voice profiles before LLM attribution.
+            // Clusters that match a known voice are pre-assigned, skipping the LLM entirely.
+            let storedProfiles = (try? await profileRepo.allProfiles()) ?? []
+            let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
+            let voiceMatches = await voiceService.matchProfiles(
+                clusters: Array(clusterLabels),
+                audioURL: audioURL,
+                diarizationResult: resultBox,
+                stored: storedProfiles
+            )
+            if !voiceMatches.isEmpty {
+                fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
+            }
+
             // Fetch all system-audio transcript rows for alignment.
             let transcripts = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
             let systemTranscripts = transcripts.filter {
@@ -1275,26 +1299,48 @@ final class AppState {
             }
 
             // Align diarization segments → transcript rows → "Speaker N" labels.
-            let mapping = service.alignToTranscripts(systemTranscripts, result: result)
-            guard !mapping.isEmpty else {
+            var labelMapping = service.alignToTranscripts(systemTranscripts, result: result)
+            guard !labelMapping.isEmpty else {
                 fileLog("Diarization: alignment produced no matches for \(meetingId)")
                 return
             }
 
-            try await transcriptRepo.updateSpeakerLabels(mapping)
-            fileLog("Diarization: labelled \(mapping.count) transcript rows for \(meetingId) (\(result.speakerCount) speakers)")
+            // Apply voice-profile pre-assignments: replace "Speaker N" with real name
+            // where we have a confident match, so the LLM doesn't need to guess.
+            if !voiceMatches.isEmpty {
+                labelMapping = labelMapping.mapValues { label in
+                    voiceMatches[label] ?? label
+                }
+            }
 
-            // Now run LLM attribution on the newly-labelled transcripts.
+            try await transcriptRepo.updateSpeakerLabels(labelMapping)
+            fileLog("Diarization: labelled \(labelMapping.count) transcript rows for \(meetingId) (\(result.speakerCount) speakers)")
+
+            // Now run LLM attribution for any remaining "Speaker N" clusters.
             if let m = meeting {
                 let relabelled = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
                 let (_, attributed) = await applySpeakerAttribution(
                     transcripts: relabelled,
                     meeting: m
                 )
-                // Persist the updated speakerMap on the meeting.
                 try? await database.writer.write { db in
                     var updated = attributed
                     try updated.update(db)
+                }
+
+                // Phase 3 — save voice embeddings for newly-identified speakers
+                // so future meetings can match them without the LLM.
+                let finalSpeakerMap = attributed.speakerMapDictionary
+                for (clusterLabel, personName) in finalSpeakerMap {
+                    guard !personName.isEmpty else { continue }
+                    if let embedding = await voiceService.extractEmbedding(
+                        forSpeaker: clusterLabel,
+                        from: audioURL,
+                        diarizationResult: resultBox
+                    ) {
+                        try? await profileRepo.merge(personName: personName, newEmbedding: embedding)
+                        fileLog("Diarization: updated voice profile for \(personName)")
+                    }
                 }
             }
 

@@ -79,12 +79,19 @@ final class SpeakerAttributionService {
                                  priorAliases: priorAliases)
         logger.info("Attributing \(clusters.count) clusters against \(candidates.count) candidates")
 
-        // Try Ollama first; fall back to Claude if available (currently unused).
+        // Try Claude first (better reasoning for name attribution), fall back to Ollama.
         let response: String?
-        if ollama.isReachable {
+        if let claude {
+            let claudeResult = await callClaude(prompt: prompt, claude: claude)
+            if let result = claudeResult {
+                response = result
+            } else if ollama.isReachable {
+                response = await callOllama(prompt: prompt, ollama: ollama)
+            } else {
+                response = nil
+            }
+        } else if ollama.isReachable {
             response = await callOllama(prompt: prompt, ollama: ollama)
-        } else if let claude {
-            response = await callClaude(prompt: prompt, claude: claude)
         } else {
             logger.info("No LLM available — leaving Speaker N labels intact")
             return [:]
@@ -162,11 +169,17 @@ final class SpeakerAttributionService {
     }
 
     private func callClaude(prompt: String, claude: ClaudeService) async -> String? {
-        // Claude fallback intentionally unimplemented — Ollama is the primary
-        // path and a silent no-op is acceptable per the v3.1 plan. If a future
-        // Layer expands this, wire ClaudeService here.
-        _ = (prompt, claude)
-        return nil
+        do {
+            let result = try await claude.sendMessage(
+                systemPrompt: "You match anonymous speaker clusters to real attendee names. Reply with JSON only.",
+                userPrompt: prompt,
+                model: "claude-haiku-4-5"   // fast + cheap for structured extraction
+            )
+            return result
+        } catch {
+            logger.error("Claude attribution call failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - Parsing
