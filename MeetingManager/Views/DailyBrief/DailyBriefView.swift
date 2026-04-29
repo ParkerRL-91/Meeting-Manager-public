@@ -20,6 +20,10 @@ struct DailyBriefView: View {
     @State private var isGeneratingBrief = false
     @State private var aiError: String?
 
+    // Tick every 60 seconds so countdown labels ("In 5 min", "In progress") stay current
+    @State private var now = Date()
+    private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+
     private static let noAIServiceError = "no_ai_service"
 
     private let service = DailyBriefService()
@@ -73,6 +77,9 @@ struct DailyBriefView: View {
         .background(Color.appBackground)
         .task {
             await loadBrief()
+        }
+        .onReceive(timer) { date in
+            now = date
         }
     }
 
@@ -319,7 +326,7 @@ struct DailyBriefView: View {
             MeetingPrepCardView(
                 meeting: entry.meeting,
                 prepBrief: entry.prepBrief,
-                now: Date(),
+                now: now,
                 isExpanded: isExpanded
             )
             .overlay(alignment: .leading) {

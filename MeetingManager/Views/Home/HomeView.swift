@@ -6,7 +6,7 @@ import AppKit
 struct HomeView: View {
     @Environment(AppState.self) private var appState
 
-    // Tick every 30 seconds to refresh countdowns
+    // Tick every 60 seconds to refresh countdowns
     @State private var now = Date()
     @State private var showAllRecent = false
     @State private var cachedAllToday: [Meeting] = []
@@ -16,7 +16,7 @@ struct HomeView: View {
     @State private var prepBriefDebounce: DispatchWorkItem?
     @State private var authManager = GoogleAuthManager()
     @AppStorage("home.calendarBannerDismissed") private var calendarBannerDismissed: Bool = false
-    private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScrollView {

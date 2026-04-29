@@ -401,6 +401,25 @@ private struct RecordingStrip: View {
                 .foregroundStyle(Color.appTextSecondary)
 
             Spacer()
+
+            // Stop button — always visible at the top so you don't need to scroll
+            Button {
+                appState.stopRecording()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("Stop")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color.appRecording)
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Stop Recording (⌘R)")
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 8)

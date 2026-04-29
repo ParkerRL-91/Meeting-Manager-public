@@ -246,6 +246,14 @@ struct MeetingDetailView: View {
                 Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
             }
         }
+        // Refresh meeting status when recording starts or stops so "Start Early"
+        // disappears immediately instead of waiting for the next manual reload.
+        .onChange(of: appState.activeMeeting?.id) { _, _ in
+            Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
+        }
+        .onChange(of: appState.isRecording) { _, _ in
+            Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
+        }
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             // Queue context enrichment if meeting has participants but no cached context
