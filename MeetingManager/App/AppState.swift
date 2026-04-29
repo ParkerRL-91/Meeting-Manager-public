@@ -332,10 +332,10 @@ final class AppState {
             // Previously three separate writer.write calls; now a single transaction so a crash
             // between steps cannot leave transcripts saved but meeting still in .transcribing.
             if var meeting = try? await self.meetingRepository.find(id: meetingId) {
-                if let labels = speakerLabels {
-                    let existing = meeting.participants ?? ""
-                    meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
-                }
+                // Speaker labels (Speaker 1, Speaker 2, …) are intentionally NOT
+                // written to meeting.participants. That field holds real names from
+                // calendar attendees. Labels live only in transcript.speakerLabel
+                // and are mapped to real names by applySpeakerAttribution below.
 
                 // v3.1 Layer 2: try to attribute "Speaker N" clusters to real
                 // attendee names. The hook fires AFTER diarization but BEFORE
@@ -1480,10 +1480,9 @@ final class AppState {
             // Use same atomic-write pattern as transcriptionHandler
             let (rawTranscripts, speakerLabels) = await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
             if var meeting = try? await meetingRepository.find(id: meetingId) {
-                if let labels = speakerLabels {
-                    let existing = meeting.participants ?? ""
-                    meeting.participants = existing.isEmpty ? labels : "\(existing) (\(labels))"
-                }
+                // Speaker labels are NOT written to meeting.participants — real
+                // attendee names (from calendar) must not be overwritten by
+                // "Speaker N" labels. Labels live only in transcript.speakerLabel.
 
                 // v3.1 Layer 2: attribute Speaker N clusters before persistence.
                 let (transcripts, attributedMeeting) = await applySpeakerAttribution(
