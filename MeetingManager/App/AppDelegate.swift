@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Observers for dynamic menu bar updates.
     private var statusObservers: [NSObjectProtocol] = []
 
+    /// Floating pre-meeting HUD panel.
+    private var reminderWindowController: MeetingReminderWindowController?
+
     /// Timer that polls model download progress to update the menu bar.
     private var modelProgressTimer: Timer?
 
@@ -233,11 +236,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         })
 
-        // Meeting starting soon
+        // Meeting starting soon — update status bar AND show pre-meeting HUD
         statusObservers.append(nc.addObserver(
             forName: .meetingStartingSoon, object: nil, queue: .main
         ) { [weak self] notification in
             let minutes = notification.userInfo?["minutesUntilStart"] as? Int ?? 0
+            let meetingId = notification.userInfo?["meetingId"] as? String
             let text = minutes <= 1 ? "Meeting starting now" : "Meeting in \(minutes) min"
             MainActor.assumeIsolated {
                 self?.showStatusBarMessage(
@@ -245,6 +249,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     text: text,
                     tint: .systemYellow
                 )
+                // Show the floating HUD card if we can resolve the meeting
+                if let meetingId,
+                   let meeting = AppState.shared?.upcomingMeetings.first(where: { $0.id == meetingId }) {
+                    if self?.reminderWindowController == nil {
+                        self?.reminderWindowController = MeetingReminderWindowController()
+                    }
+                    self?.reminderWindowController?.show(meeting: meeting)
+                }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in
                 MainActor.assumeIsolated { self?.updateStatusBar() }
