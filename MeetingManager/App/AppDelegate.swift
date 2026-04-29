@@ -236,12 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         })
 
-        // Meeting starting soon — update status bar AND show pre-meeting HUD
+        // Meeting starting soon — update status bar only
         statusObservers.append(nc.addObserver(
             forName: .meetingStartingSoon, object: nil, queue: .main
         ) { [weak self] notification in
             let minutes = notification.userInfo?["minutesUntilStart"] as? Int ?? 0
-            let meetingId = notification.userInfo?["meetingId"] as? String
             let text = minutes <= 1 ? "Meeting starting now" : "Meeting in \(minutes) min"
             MainActor.assumeIsolated {
                 self?.showStatusBarMessage(
@@ -249,7 +248,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     text: text,
                     tint: .systemYellow
                 )
-                // Show the floating HUD card if we can resolve the meeting
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in
+                MainActor.assumeIsolated { self?.updateStatusBar() }
+            }
+        })
+
+        // 1-minute HUD: show the floating pre-meeting card (fired independently
+        // of the lead-time notification so it always appears at ~1 min before)
+        statusObservers.append(nc.addObserver(
+            forName: .meetingHUDShow, object: nil, queue: .main
+        ) { [weak self] notification in
+            let meetingId = notification.userInfo?["meetingId"] as? String
+            MainActor.assumeIsolated {
                 if let meetingId,
                    let meeting = AppState.shared?.upcomingMeetings.first(where: { $0.id == meetingId }) {
                     if self?.reminderWindowController == nil {
@@ -257,9 +268,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     }
                     self?.reminderWindowController?.show(meeting: meeting)
                 }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in
-                MainActor.assumeIsolated { self?.updateStatusBar() }
             }
         })
 
@@ -473,5 +481,6 @@ extension Notification.Name {
     static let copySummary = Notification.Name("copySummary")
     static let focusSearch = Notification.Name("focusSearch")
     static let meetingStartingSoon = Notification.Name("meetingStartingSoon")
+    static let meetingHUDShow = Notification.Name("meetingHUDShow")
     static let openUpdateSettings = Notification.Name("openUpdateSettings")
 }

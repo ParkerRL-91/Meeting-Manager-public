@@ -147,6 +147,11 @@ final class AppState {
     /// Prevents posting 4+ duplicates across timer ticks for the same meeting.
     private var notifiedMeetingIds: Set<String> = []
 
+    /// Tracks meetings for which the 1-minute HUD panel has already been shown.
+    /// Separate from notifiedMeetingIds so the HUD always fires at t-1min regardless
+    /// of the user's lead-time notification setting.
+    private var hudShownMeetingIds: Set<String> = []
+
     /// Cumulative model load attempt count across initial attempts and background retries.
     /// Hard-capped at `modelLoadHardMax` to prevent infinite retry loops on permanent failures.
     private var modelLoadTotalAttempts = 0
@@ -1885,6 +1890,7 @@ final class AppState {
         // Prune IDs that are no longer in the upcoming list
         let currentIds = Set(upcomingMeetings.map(\.id))
         notifiedMeetingIds = notifiedMeetingIds.intersection(currentIds)
+        hudShownMeetingIds  = hudShownMeetingIds.intersection(currentIds)
 
         for meeting in upcomingMeetings {
             guard let startDate = meeting.scheduledStartDate else { continue }
@@ -1900,6 +1906,20 @@ final class AppState {
                     userInfo: ["meetingId": meeting.id, "minutesUntilStart": Int(timeUntilStart / 60)]
                 )
                 Logger.general.debug("Meeting '\(meeting.title)' starting in \(Int(timeUntilStart / 60)) minutes")
+            }
+
+            // HUD panel: always show at ~1 minute before, independent of the
+            // lead-time notification setting. Window is 90s to guarantee the
+            // 30s poll catches it even if the timer drifts slightly.
+            if timeUntilStart > 0, timeUntilStart <= 90,
+               meeting.status == .scheduled,
+               hudShownMeetingIds.insert(meeting.id).inserted {
+                NotificationCenter.default.post(
+                    name: .meetingHUDShow,
+                    object: nil,
+                    userInfo: ["meetingId": meeting.id]
+                )
+                Logger.general.debug("HUD: showing pre-meeting card for '\(meeting.title)'")
             }
 
             // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
