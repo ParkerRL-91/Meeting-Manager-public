@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**Meeting-Manager-1.9.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v1.9.0) — macOS 14.4+
+[**MeetingManager-v3.2.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.2.0) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -31,80 +31,88 @@ This removes the quarantine flag so the app opens without warnings.
 
 ---
 
-## What's New in v1.9.0 — Meeting Detail UX Overhaul
+## What's New in v3.2.0 — Skim-First UI Redesign
 
-### Search & Calendar
-- **Full-width custom calendar** — modern dark-themed calendar grid with month navigation and "Today" button
-- **Calendar + meeting list split** — calendar top half, meetings for selected date below
-- **Live search** — typing in the search bar replaces the calendar with search results; clear to return to calendar
-- **Search nav item** — dedicated magnifying glass icon in the sidebar
+A complete visual overhaul tuned for people moving through 6–10 meetings a day. The new design lets you grok a meeting recap in seconds, find action items instantly, and triage across recent meetings without context-switching.
 
-### Live Meeting View (Granola-inspired)
-- **Large meeting title** at top with pill badges: "Today", attendee count, "Add to folder"
-- **Attendee popover** — click the attendees badge to see the full list with initials avatars
-- **Folder picker** — assign the meeting to a folder during recording
-- **Context brief** — collapsible section at the bottom showing relevant past meetings with excerpts
-- **Bottom bar** — stop button + "Ask anything" AI chat prompt (Cmd+J)
-- **Transcript pane removed** — notes-only view during recording (transcription runs in background)
-
-### Participants & Context
-- **Participant bar** at top of every meeting detail (initials avatars + names, clickable to People view)
-- **Related meetings section** — collapsible section showing past meetings with participant overlap
-- **Calendar-first participant detection** — attendees from Google Calendar written to meetings at sync time
-- **Screen fallback** — CGWindowList-based detection for meetings without calendar data
-
-### Notifications
-- **"Join & Record" button** — notification 1 minute before meeting includes a button that opens the video call URL AND starts recording simultaneously
-- **Meet link storage** — video URLs from Google Calendar (Meet, Zoom, Teams) saved on meetings
+### Design System
+- **New color palette** — darker, more focused backgrounds; indigo accent (from iOS blue)
+- **Hairline borders and tinted surfaces** — Linear/Granola-style density instead of heavy cards
+- **Consistent type scale** — Inter-inspired sizing with proper weight hierarchy throughout
 
 ### Sidebar
-- Cleaned up — meeting list, search bar, and archive toggle removed
-- Navigation: Home, Ask Anything, People, Search, Tasks, My Notes folders
+- **Active nav row** now uses a tinted background with accent text — was a saturated solid blue fill that read too heavy
+- **New Meeting button** is now a restrained dashed outline style — no longer dominates the sidebar chrome
+- Hover states step up one neutral surface level
 
-### Crash Recovery
-- Meetings no longer get permanently stuck as "Cancelled" after a crash
-- Crashed recordings reset to "Scheduled" so you can re-record
-- "Resume Recording" button on recoverable meetings
+### Meeting Header
+- **Compact single row** — title · date · duration · status pill all on one line
+- Removed the large card layout; a bottom border replaces the elevated card frame
+- Status pill uses semantic colors (green for complete, indigo for in-progress)
 
-### Task Queue & Infrastructure
-- Regeneration routed through persistent task queue (survives navigation)
-- All long-running AI operations audited — exempt or queued
-- `push-update.sh` hardened with fail-fast checks, atomic version bump, delta updates
-- `git-update` Claude Code skill for guided releases
+### Tab Strip
+- **Underlined tabs** replace the segmented control — cleaner, full-width
+- Model and generation timestamp caption right-aligned in the strip
+
+### Summary View — Skim-First
+- **TL;DR card** at the top — gradient background with a sparkle icon; shows the first 1–2 lines of the AI summary at a glance
+- **Two-column section grid** — Decisions, Follow-ups, Notes, Outcomes as flat lists with bold entity names, no walls of markdown text
+- **Previous sessions strip** — quick links to prior meetings in the same series
+- Falls back gracefully to the raw text editor for unstructured summaries
+
+### Activity View
+- **Collapsible failed rows** — errors are hidden by default, revealed on click; subtle red-tint border without shouting
+- Completed rows are a clean flat list with relative timestamps
+- Failed count shown in red in the header
+
+### Daily Brief
+- **Timeline layout** — vertical time rail, 56px monospaced time column, category color dots that punch through the rail
+- Meeting cards have a 2px left color border matching their prep category (carry-over red, follow-up amber, new indigo)
+
+---
+
+## What's New in v3.1.0 — Speaker Recognition
+
+- Speaker diarization (Layers 1 + 2 + 3): voice clustering, cross-session learning, custom rename sheet
+- Deterministic series key hashing (SHA-256)
 
 ---
 
 <details>
 <summary><strong>Previous Releases</strong></summary>
 
-#### v1.8.2 — Update Pipeline Test
-- First release via hardened push-update.sh
-- Sparkle appcast on GitHub Pages
+#### v3.0.1 — Stability
+- Crash fixes and database migration hardening
 
-#### v1.7.0 — Dynamic Model Selection & Recording Fixes
+#### v3.0.0 — Major Release
+- Full Granola-parity feature set
+
+#### v1.9.0 — Meeting Detail UX Overhaul
+- Calendar view with date picker, live meeting search
+- Granola-style live recording view (notes-first, transcript background)
+- Participant bar, related meetings section, calendar-first detection
+- "Join & Record" notification button, Meet/Zoom/Teams URL storage
+- Persistent task queue for regeneration; all AI ops audited
+
+#### v1.8.2 — Update Pipeline
+- First release via hardened `push-update.sh`; Sparkle appcast on GitHub Pages
+
+#### v1.7.0 — Dynamic Model Selection
 - Adaptive on-device summarization — auto-picks Ollama model by transcript size
 - Batch transcription decoupled from stop-recording flow
-- Calendar selection picker in Settings
-- Silence auto-stop raised to 5 min
 
 #### v1.6.0 — Stability & Efficiency
 - Thread-safe audio pipeline, actor-isolated WhisperEngine
-- Circular audio buffers, memory pressure monitoring
-- Exponential backoff retry for Claude/Google APIs
-- 22 test files, DatabasePool, log rotation
+- Exponential backoff, 22 test files, DatabasePool, log rotation
 
 #### v1.5.0 — Stability Sprint
-- Timer leaks & 36k Task spawns eliminated
-- Crash recovery for orphaned recordings
-- Batch database writes, FTS5 search
+- Timer leaks eliminated, crash recovery, FTS5 search
 
 #### v1.4.0 — Swift 6 & Reliability
-- All Swift 6 strict concurrency errors resolved
-- WhisperKit cache-first loading
+- All Swift 6 strict concurrency errors resolved; WhisperKit cache-first loading
 
 #### v1.1 — Dual Audio Capture
-- Mic + system audio via ScreenCaptureKit
-- Live audio level meters, smart notifications
+- Mic + system audio via ScreenCaptureKit; live audio level meters
 
 </details>
 
