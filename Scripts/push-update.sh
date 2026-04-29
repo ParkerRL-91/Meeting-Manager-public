@@ -222,26 +222,35 @@ fi
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application}"
 echo "Signing with '${SIGN_IDENTITY}'..."
 
+# Hardened runtime is required for notarization but breaks signature validation
+# on copy when using a self-signed cert (dyld rejects the framework at load time).
+# Only set it when we're actually going to notarize.
+if [[ "${NOTARIZE}" == "1" ]]; then
+    RUNTIME_OPTS="--options runtime"
+else
+    RUNTIME_OPTS=""
+fi
+
 # Sign Sparkle first (required for deep signing to work)
 if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
-    codesign --force --deep --options runtime \
+    codesign --force --deep ${RUNTIME_OPTS} \
         --sign "${SIGN_IDENTITY}" \
         "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" 2>/dev/null || true
-    codesign --force --options runtime \
+    codesign --force ${RUNTIME_OPTS} \
         --sign "${SIGN_IDENTITY}" \
         "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Autoupdate" 2>/dev/null || true
-    codesign --force --options runtime \
+    codesign --force ${RUNTIME_OPTS} \
         --sign "${SIGN_IDENTITY}" \
         "${FRAMEWORKS_DIR}/Sparkle.framework" 2>/dev/null || true
 fi
 
 # Sign the binary
-codesign --force --options runtime \
+codesign --force ${RUNTIME_OPTS} \
     --sign "${SIGN_IDENTITY}" \
     "${MACOS_DIR}/${EXECUTABLE}"
 
 # Sign the app bundle
-codesign --force --deep --options runtime \
+codesign --force --deep ${RUNTIME_OPTS} \
     --sign "${SIGN_IDENTITY}" \
     "${APP_BUNDLE}"
 
