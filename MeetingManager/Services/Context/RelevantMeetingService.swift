@@ -73,7 +73,7 @@ final class RelevantMeetingService {
             for id in meetingIds {
                 if let summary = try MeetingSummary
                     .filter(Column("meetingId") == id)
-                    .order(Column("createdAt").desc)
+                    .order(Column("generatedAt").desc)
                     .fetchOne(db) {
                     result[id] = summary.summaryText
                 }
