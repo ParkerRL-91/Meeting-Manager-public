@@ -26,9 +26,29 @@ struct MarkdownRenderer: View {
     private func blockView(_ block: Block) -> some View {
         switch block {
         case .heading(let level, let content):
-            Text(inline(content))
-                .font(.system(size: headingSize(level), weight: .bold, design: .serif))
-                .padding(.top, level <= 2 ? 4 : 2)
+            // H1-H3: size-bumped + bold (clearly visual headings).
+            // H4-H6: tinted accent color + uppercase tracking treatment so they
+            // stand out from body text even when the size delta is small.
+            // This keeps `### Decisions` and `###### Notes` distinct from prose,
+            // since the AI sometimes picks higher levels arbitrarily.
+            if level <= 3 {
+                Text(inline(content))
+                    .font(.system(size: headingSize(level), weight: .bold, design: .serif))
+                    .foregroundStyle(level == 1 ? Color.appTextPrimary : Color.appAccent)
+                    .padding(.top, level <= 2 ? 6 : 4)
+                    .padding(.bottom, 2)
+            } else {
+                // Use the raw string (not parsed inline AttributedString) so the
+                // SwiftUI font modifier wins over any font baked into the parsed
+                // attributed value. H4-H6 read as styled section labels.
+                Text(content)
+                    .font(.system(size: headingSize(level), weight: .semibold, design: .default))
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+                    .foregroundStyle(Color.appAccent.opacity(0.85))
+                    .padding(.top, 4)
+                    .padding(.bottom, 1)
+            }
         case .paragraph(let content):
             Text(inline(content))
                 .font(.system(size: baseFontSize, design: .serif))
@@ -200,9 +220,11 @@ struct MarkdownRenderer: View {
         case 1: return baseFontSize + 9
         case 2: return baseFontSize + 6
         case 3: return baseFontSize + 3
-        case 4: return baseFontSize + 2
-        case 5: return baseFontSize + 1
-        default: return baseFontSize
+        // H4-H6 render as small-caps accent labels so they're visibly distinct
+        // even when the AI overuses deep heading levels (`######` etc.).
+        case 4: return baseFontSize - 2
+        case 5: return baseFontSize - 2
+        default: return baseFontSize - 2.5
         }
     }
 }

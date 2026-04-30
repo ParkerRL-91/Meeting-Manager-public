@@ -320,16 +320,16 @@ struct SummaryView: View {
                             .padding(.bottom, 22)
                     }
 
-                    // Two-column section grid
-                    if !parsed.sections.isEmpty {
+                    // Two-column section grid (only when sections are populated;
+                    // an all-empty grid happens when the AI emits headings with
+                    // prose underneath that didn't pack into recognisable items).
+                    let hasUsefulSections = parsed.sections.contains { !$0.items.isEmpty }
+                    if hasUsefulSections {
                         SkimFirstSectionGrid(sections: parsed.sections)
                             .padding(.bottom, 28)
-                    } else if !parsed.tldr.isEmpty {
-                        // Has structured TL;DR but no sections — show raw text
-                        rawEditorBlock
-                            .padding(.bottom, 16)
                     } else {
-                        // No structure at all — show raw text
+                        // No structured content fit the grid — render the full
+                        // summary as Markdown (headings styled, syntax hidden).
                         rawEditorBlock
                             .padding(.bottom, 16)
                     }
@@ -1022,6 +1022,19 @@ enum SummaryParser {
                 if currentSection != nil {
                     currentSection!.items.append(item)
                 }
+            } else if let m = trimmed.range(of: #"^\d+\.\s+"#, options: .regularExpression) {
+                // Numbered items (`1. text`, `2. text`) — common when the AI is
+                // prompted with a numbered list rather than dash bullets.
+                let body = String(trimmed[m.upperBound...])
+                let item = parseItem(body)
+                if currentSection != nil {
+                    currentSection!.items.append(item)
+                }
+            } else if seenFirstHeading, currentSection != nil {
+                // Prose paragraph inside a section — capture as a free-form item
+                // so the structured grid renders it instead of silently dropping it.
+                let item = parseItem(trimmed)
+                currentSection!.items.append(item)
             } else if !seenFirstHeading {
                 preSectionLines.append(trimmed)
             }

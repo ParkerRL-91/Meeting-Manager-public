@@ -255,28 +255,45 @@ struct MeetingDetailView: View {
             Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
         }
         .task {
-            meeting = try? await appState.meetingRepository.find(id: meetingId)
-            // Queue context enrichment if meeting has participants but no cached context
-            if let m = meeting, !m.participantList.isEmpty, (m.contextJSON == nil || m.contextJSON!.isEmpty) {
-                await appState.taskQueueManager.enqueue(
-                    type: .contextEnrichment, meetingId: meetingId, priority: 8
-                )
-            }
-            // Load prep brief for the next upcoming meeting (for the Up Next banner)
-            if let nextMeeting = appState.nextUpcomingMeeting {
-                let prepService = MeetingPrepService(database: appState.database)
-                upNextBrief = try? await prepService.prepBrief(for: nextMeeting)
-            }
-            // P5-T02: Detect prior sessions in the same series.
-            if let m = meeting {
-                previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
-            }
-            // Load model info for tab strip caption
-            if let summary = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) {
-                let model = summary.modelUsed ?? "auto"
-                let date = DateFormatting.fullDateTime(from: summary.generatedAt)
-                summaryModelInfo = "\(model) · \(date)"
-            }
+            await loadInitialContext()
+        }
+    }
+
+    /// Initial-load helper extracted out of the `.task` closure: long inline
+    /// async chains in a SwiftUI view body trigger the Swift type-checker's
+    /// "unable to type-check this expression" timeout on clean builds.
+    private func loadInitialContext() async {
+        meeting = try? await appState.meetingRepository.find(id: meetingId)
+
+        // Queue context enrichment if meeting has participants but no cached context
+        if let m = meeting,
+           !m.participantList.isEmpty,
+           (m.contextJSON == nil || m.contextJSON!.isEmpty) {
+            await appState.taskQueueManager.enqueue(
+                type: .contextEnrichment,
+                meetingId: meetingId,
+                priority: 8
+            )
+        }
+
+        // Prep brief for the next upcoming meeting (for the Up Next banner)
+        if let nextMeeting = appState.nextUpcomingMeeting {
+            let prepService = MeetingPrepService(database: appState.database)
+            upNextBrief = try? await prepService.prepBrief(for: nextMeeting)
+        }
+
+        // P5-T02: detect prior sessions in the same series.
+        if let m = meeting {
+            previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
+        }
+
+        // Model info for tab strip caption.
+        let summaryRepo = appState.summaryRepository
+        let latest: MeetingSummary? = try? await summaryRepo.latestSummary(meetingId: meetingId)
+        if let s = latest {
+            let model: String = s.modelUsed ?? "auto"
+            let date: String = DateFormatting.fullDateTime(from: s.generatedAt)
+            summaryModelInfo = "\(model) · \(date)"
         }
     }
 
