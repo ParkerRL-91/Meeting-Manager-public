@@ -13,6 +13,39 @@ struct MeetingMetadataHeader: View {
     @State private var showTitleSavedFlash = false
     @FocusState private var titleFieldFocused: Bool
 
+    /// True when the meeting has at least one captured audio file —
+    /// indicates an earlier recording was started and stopped.
+    private var hasExistingRecording: Bool {
+        guard let path = meeting.audioFilePath, !path.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+
+    /// True when the user is opening this meeting BEFORE its scheduled start.
+    /// Before-start = "Start Early"; at-or-after = "Start" (or "Continue
+    /// Recording" if there's already an audio file).
+    private var isBeforeScheduledStart: Bool {
+        guard let start = meeting.scheduledStartDate else { return false }
+        return Date() < start
+    }
+
+    private var startButtonLabel: String {
+        if hasExistingRecording { return "Continue Recording" }
+        return isBeforeScheduledStart ? "Start Early" : "Start"
+    }
+
+    private var startButtonIcon: String {
+        hasExistingRecording ? "record.circle.fill" : "play.fill"
+    }
+
+    private var startButtonHelp: String {
+        if hasExistingRecording {
+            return "Resume recording this meeting — appends to the existing audio file"
+        }
+        return isBeforeScheduledStart
+            ? "Start recording before the scheduled time"
+            : "Start recording this meeting now"
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
 
@@ -55,15 +88,18 @@ struct MeetingMetadataHeader: View {
 
             Spacer()
 
-            // Start Early button (scheduled meetings only)
+            // Start / Start Early / Continue Recording — label depends on
+            // whether we're before the scheduled start (early), after it
+            // (regular start), or whether this meeting already has an audio
+            // file (continue an interrupted recording).
             if meeting.status == .scheduled || meeting.status == .notified {
                 Button {
                     appState.startRecording(for: meeting)
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: "play.fill")
+                        Image(systemName: startButtonIcon)
                             .font(.system(size: 10))
-                        Text("Start Early")
+                        Text(startButtonLabel)
                             .font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundStyle(.white)
@@ -73,7 +109,7 @@ struct MeetingMetadataHeader: View {
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .help("Start recording this meeting now")
+                .help(startButtonHelp)
             }
 
             // Saved flash

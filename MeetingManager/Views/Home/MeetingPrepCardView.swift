@@ -18,12 +18,23 @@ struct MeetingPrepCardView: View {
     }
 
     private var statusLabel: String {
+        // "In progress" must mean actually recording — not just "scheduled
+        // start time has passed". A scheduled meeting whose start time has
+        // passed but where no recording is running is either Now (still in
+        // its window) or Missed (past its end).
+        if meeting.status == .recording { return "In progress" }
         if meeting.isReopenable { return "Ended" }
         if meeting.status == .complete { return "Complete" }
         if meeting.status == .cancelled { return "Cancelled" }
         guard let date = scheduledDate else { return "" }
         let diff = date.timeIntervalSince(now)
-        if diff <= 0 { return "In progress" }
+        if diff <= 0 {
+            // Past start time, not recording. Within the scheduled window?
+            if let endDate = meeting.scheduledEndDate, now < endDate {
+                return "Now"
+            }
+            return "Missed"
+        }
         let mins = Int(diff / 60)
         if mins == 0 { return "Starting now" }
         if mins < 60 { return "In \(mins) min" }
@@ -33,10 +44,19 @@ struct MeetingPrepCardView: View {
     }
 
     private var statusColor: Color {
+        if meeting.status == .recording { return Color.appRecording }
         if meeting.isReopenable { return Color.appSuccess }
         if meeting.status == .complete { return Color.appTextTertiary }
         guard let date = scheduledDate else { return Color.appSuccess }
-        let mins = Int(date.timeIntervalSince(now) / 60)
+        let diff = date.timeIntervalSince(now)
+        if diff <= 0 {
+            // Past start, not recording — Now (in window) is amber, Missed is muted
+            if let endDate = meeting.scheduledEndDate, now < endDate {
+                return Color.appWarning
+            }
+            return Color.appTextTertiary
+        }
+        let mins = Int(diff / 60)
         if mins <= 5 { return Color.appRecording }
         if mins <= 60 { return Color.appWarning }
         return Color.appTextSecondary
@@ -49,12 +69,26 @@ struct MeetingPrepCardView: View {
 
     private var ctaInfo: (label: String, tint: Color)? {
         guard !meeting.isAllDay else { return nil }
+        if meeting.status == .recording { return nil }      // already recording — no CTA
         if meeting.isReopenable { return ("Re-open", Color.appAccent) }
         guard meeting.status != .complete, meeting.status != .cancelled else { return nil }
         guard let start = scheduledDate else { return nil }
         let diff = start.timeIntervalSince(now)
-        if diff > 3600 { return ("Start now", Color.appAccent) }
-        return ("Record now", isWithinHour ? Color.appWarning : Color.appRecording)
+
+        // Has an audio file already (was recorded once and stopped) →
+        // continue rather than start fresh.
+        if meeting.audioFilePath != nil { return ("Continue Recording", Color.appAccent) }
+
+        if diff > 3600 { return ("Start Early", Color.appAccent) }
+        if diff > 0    { return ("Start Early", Color.appWarning) }
+
+        // Past start — within the scheduled window we still want to nudge,
+        // past the end window we don't.
+        if let endDate = meeting.scheduledEndDate, now < endDate {
+            return ("Record now", Color.appRecording)
+        }
+        // Missed — show a low-key "Record" so a late capture is still possible.
+        return ("Record", Color.appTextTertiary)
     }
 
     // MARK: - Body
