@@ -54,6 +54,7 @@ final class MeetingChatService {
     func sendQuery(
         meetingId: String,
         question: String,
+        meeting: Meeting? = nil,
         textGenerator: (String, String) async throws -> String,
         recentTranscriptMinutes: Double = 10
     ) async throws -> String {
@@ -80,13 +81,30 @@ final class MeetingChatService {
             }.joined(separator: "\n")
         }
 
-        // 2. Build prompts
+        // 2. Pull KB excerpts relevant to the user's question + meeting topic.
+        // Empty string when no KB folder is configured.
+        let kbExcerpts: String
+        if let meeting {
+            kbExcerpts = await KnowledgeBaseService.shared.retrieveContext(
+                for: meeting,
+                chatQuery: question
+            )
+        } else {
+            kbExcerpts = ""
+        }
+        let kbBlock = kbExcerpts.isEmpty ? "" : """
+
+            Excerpts from the user's Knowledge Base (treat as authoritative reference; cite source paths when used):
+            \(kbExcerpts)
+            """
+
+        // 3. Build prompts
         let systemPrompt = """
             You are a helpful meeting assistant. Based on the meeting transcript below, \
             answer the user's question concisely.
 
             Transcript:
-            \(transcript)
+            \(transcript)\(kbBlock)
             """
 
         // 3. Save user message

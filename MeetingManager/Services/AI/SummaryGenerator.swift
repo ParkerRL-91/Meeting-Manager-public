@@ -72,12 +72,17 @@ final class SummaryGenerator {
             }.joined(separator: "\n")
         }
 
+        // Pull KB excerpts (returns "" when no folder is configured —
+        // substituteVariables falls back to "No Knowledge Base configured").
+        let kbContext = await KnowledgeBaseService.shared.retrieveContext(for: meeting)
+
         let userPrompt = promptManager.substituteVariables(
             template: template,
             meeting: meeting,
             transcript: transcript,
             notes: notes,
-            priorContext: priorContext
+            priorContext: priorContext,
+            knowledgeBase: kbContext
         )
 
         // System prompt anchors the model to the structure in the user prompt.

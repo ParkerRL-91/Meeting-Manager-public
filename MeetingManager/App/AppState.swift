@@ -260,6 +260,14 @@ final class AppState {
         // introduced in v3.4.1.
         runRetroactiveSpeakerAttributionIfNeeded()
 
+        // Knowledge Base: if the user has previously chosen a folder, start
+        // its FSEvents watcher and kick off a background re-index so the FTS
+        // table reflects any external edits made while the app was closed.
+        if let kbRoot = KnowledgeBaseService.shared.rootURL {
+            KnowledgeBaseService.shared.startWatching(url: kbRoot)
+            Task { await KnowledgeBaseService.shared.reindex() }
+        }
+
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
         AppState.isInitialized = true

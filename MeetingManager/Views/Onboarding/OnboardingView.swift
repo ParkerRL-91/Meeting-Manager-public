@@ -16,6 +16,8 @@ struct OnboardingView: View {
                     WelcomeStepView(onNext: onboardingManager.nextStep)
                 case .calendar:
                     CalendarStepView(onSkip: onboardingManager.nextStep)
+                case .knowledgeBase:
+                    KnowledgeBaseStepView(onSkip: onboardingManager.nextStep)
                 case .ready:
                     ReadyStepView(onComplete: onboardingManager.complete)
                 }
@@ -91,10 +93,12 @@ struct OnboardingView: View {
 
             Spacer()
 
-            // Next / Skip
-            if onboardingManager.currentStep == .welcome || onboardingManager.currentStep == .ready {
+            // Next / Skip — welcome and ready own their CTAs; calendar +
+            // knowledge-base steps offer a subtle "Next" link in the bar.
+            switch onboardingManager.currentStep {
+            case .welcome, .ready:
                 Spacer().frame(width: 80)
-            } else {
+            case .calendar, .knowledgeBase:
                 Button(action: onboardingManager.nextStep) {
                     Label("Next", systemImage: "chevron.right")
                         .labelStyle(TrailingIconLabelStyle())

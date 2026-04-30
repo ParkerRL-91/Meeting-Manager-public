@@ -44,9 +44,13 @@ struct SettingsView: View {
                 .tabItem { Label("Voices", systemImage: "waveform.badge.mic") }
                 .tag(8)
 
+            KnowledgeBaseSettingsView()
+                .tabItem { Label("Knowledge Base", systemImage: "books.vertical") }
+                .tag(9)
+
             AboutSettingsView()
                 .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(9)
+                .tag(10)
         }
         .frame(width: 750, height: 500)
         .onChange(of: appState.pendingSettingsTab) { _, tab in

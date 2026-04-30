@@ -43,11 +43,15 @@ final class RelevantMeetingService {
         if let synthesizer = briefSynthesizer, !related.isEmpty {
             let priorNotes = await self.gatherPriorNotes(from: related)
             let openItems = await self.gatherOpenActionItems(for: meeting)
+            // Pull KB excerpts. Empty string when no KB folder is configured —
+            // buildBriefUserPrompt handles the fallback wording.
+            let kbExcerpts = await KnowledgeBaseService.shared.retrieveContext(for: meeting)
             let userPrompt = Self.buildBriefUserPrompt(
                 meeting: meeting,
                 related: related,
                 priorNotes: priorNotes,
-                openActionItems: openItems
+                openActionItems: openItems,
+                knowledgeBase: kbExcerpts
             )
             do {
                 let raw = try await synthesizer(DefaultPrompts.preMeetingBrief, userPrompt)
@@ -113,7 +117,8 @@ final class RelevantMeetingService {
         meeting: Meeting,
         related: [RelevantMeeting],
         priorNotes: String,
-        openActionItems: String
+        openActionItems: String,
+        knowledgeBase: String = ""
     ) -> String {
         let dateStr: String = {
             let date = meeting.scheduledStartDate ?? meeting.startDate ?? Date()
@@ -134,6 +139,9 @@ final class RelevantMeetingService {
 
         let openItemsBlock = openActionItems.isEmpty ? "(none on file)" : openActionItems
         let priorNotesBlock = priorNotes.isEmpty ? "(no notes captured in prior sessions)" : priorNotes
+        let kbBlock = knowledgeBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "(no Knowledge Base configured)"
+            : knowledgeBase
 
         return """
         Upcoming meeting: \(meeting.title)
@@ -148,6 +156,9 @@ final class RelevantMeetingService {
 
         Notes captured in prior related meetings:
         \(priorNotesBlock)
+
+        Relevant excerpts from your Knowledge Base:
+        \(kbBlock)
         """
     }
 

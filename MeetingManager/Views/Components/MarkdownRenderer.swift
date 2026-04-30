@@ -72,6 +72,7 @@ struct MarkdownRenderer: View {
                     .font(.system(size: baseFontSize, design: .serif).italic())
                     .foregroundStyle(Color.secondary)
                     .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .bullet(let content):
             HStack(alignment: .top, spacing: 8) {
@@ -81,6 +82,7 @@ struct MarkdownRenderer: View {
                 Text(inline(content))
                     .font(.system(size: baseFontSize, design: .serif))
                     .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .numbered(let n, let content):
             HStack(alignment: .top, spacing: 8) {
@@ -91,6 +93,7 @@ struct MarkdownRenderer: View {
                 Text(inline(content))
                     .font(.system(size: baseFontSize, design: .serif))
                     .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .checkbox(let done, let content):
             HStack(alignment: .top, spacing: 8) {
@@ -101,6 +104,7 @@ struct MarkdownRenderer: View {
                     .strikethrough(done, color: .secondary)
                     .foregroundStyle(done ? Color.secondary : Color.primary)
                     .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .horizontalRule:
             Divider().padding(.vertical, 4)

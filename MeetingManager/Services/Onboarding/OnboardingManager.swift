@@ -29,12 +29,14 @@ final class OnboardingManager {
     enum OnboardingStep: Int, CaseIterable {
         case welcome = 0
         case calendar = 1
-        case ready = 2
+        case knowledgeBase = 2
+        case ready = 3
 
         var title: String {
             switch self {
             case .welcome: return "Welcome"
             case .calendar: return "Calendar"
+            case .knowledgeBase: return "Knowledge Base"
             case .ready: return "Ready"
             }
         }

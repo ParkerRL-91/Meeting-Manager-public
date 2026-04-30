@@ -250,7 +250,8 @@ struct MeetingChatView: View {
         sendTask = Task {
             guard let textGenerator = await buildTextGenerator() else { return }
             do {
-                try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)
+                let meeting = try? await appState.meetingRepository.find(id: meetingId)
+                try await service.sendQuery(meetingId: meetingId, question: question, meeting: meeting, textGenerator: textGenerator)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
             } catch {
@@ -266,7 +267,8 @@ struct MeetingChatView: View {
         sendTask = Task { // EXEMPT: same as sendMessage
             guard let textGenerator = await buildTextGenerator() else { return }
             do {
-                try await service.sendQuery(meetingId: meetingId, question: question, textGenerator: textGenerator)
+                let meeting = try? await appState.meetingRepository.find(id: meetingId)
+                try await service.sendQuery(meetingId: meetingId, question: question, meeting: meeting, textGenerator: textGenerator)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
             } catch {

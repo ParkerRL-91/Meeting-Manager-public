@@ -215,6 +215,10 @@ enum DefaultPrompts {
     ## Relevant notes from past meetings
     {{priorNotes}}
 
+    ## Relevant excerpts from the user's Knowledge Base
+    These are excerpts retrieved from the user's own document folder (not from prior meetings). Treat them as authoritative reference material — internal docs, OKRs, project briefs, etc. Cite the source path when you use them.
+    {{knowledgeBase}}
+
     ---
 
     Produce the brief in **exactly this structure**. Skip a section if its rule says to. Do not add sections.

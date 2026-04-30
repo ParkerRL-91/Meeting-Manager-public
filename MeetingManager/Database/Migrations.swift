@@ -643,5 +643,31 @@ enum Migrations {
                 t.column("lastUpdatedAt", .datetime).notNull()
             }
         }
+
+        // v3.6 Knowledge Base — index user's chosen folder of .md/.txt/.html/
+        // .docx files for retrieval-augmented context in meeting prep + chat.
+        // Each row is a chunk (typically a Markdown section or paragraph), not
+        // a whole file, so retrieval can pull just the relevant slices.
+        migrator.registerMigration("v27-knowledge-base") { db in
+            try db.create(table: "kbDocument") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("filePath", .text).notNull()       // absolute path on disk
+                t.column("fileName", .text).notNull()       // for display + scoring
+                t.column("relativePath", .text).notNull()   // path relative to KB root
+                t.column("chunkIndex", .integer).notNull()  // 0-based within file
+                t.column("heading", .text)                  // section heading if any
+                t.column("body", .text).notNull()           // chunk text
+                t.column("indexedAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(index: "idx_kbDocument_filePath", on: "kbDocument", columns: ["filePath"])
+
+            try db.create(virtualTable: "kbDocument_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "kbDocument")
+                t.column("body")
+                t.column("heading")
+                t.column("fileName").notIndexed()
+                t.column("relativePath").notIndexed()
+            }
+        }
     }
 }

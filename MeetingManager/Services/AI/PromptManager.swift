@@ -14,6 +14,7 @@ final class PromptManager {
         ("{{duration}}", "Formatted duration (e.g. \"45 min\")"),
         ("{{participants}}", "Comma-separated participant names"),
         ("{{priorContext}}", "Brief context from prior related meetings (auto-populated)"),
+        ("{{knowledgeBase}}", "Relevant excerpts from your Knowledge Base folder (auto-populated)"),
         ("{{transcript}}", "Full meeting transcript"),
         ("{{notes}}", "User-created notes"),
     ]
@@ -82,7 +83,8 @@ final class PromptManager {
         meeting: Meeting,
         transcript: String,
         notes: String,
-        priorContext: String = ""
+        priorContext: String = "",
+        knowledgeBase: String = ""
     ) -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .long
@@ -104,12 +106,17 @@ final class PromptManager {
             ? "No prior related meetings on file."
             : priorContext
 
+        let knowledgeBaseString = knowledgeBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "No Knowledge Base configured."
+            : knowledgeBase
+
         var result = template
         result = result.replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
         result = result.replacingOccurrences(of: "{{date}}", with: dateString)
         result = result.replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
         result = result.replacingOccurrences(of: "{{participants}}", with: participantsString)
         result = result.replacingOccurrences(of: "{{priorContext}}", with: priorContextString)
+        result = result.replacingOccurrences(of: "{{knowledgeBase}}", with: knowledgeBaseString)
         result = result.replacingOccurrences(of: "{{transcript}}", with: transcript)
         result = result.replacingOccurrences(of: "{{notes}}", with: notes)
 
