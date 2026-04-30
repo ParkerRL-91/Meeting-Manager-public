@@ -47,11 +47,9 @@ struct NotesReviewView: View {
     @ViewBuilder
     private func noteCard(_ note: MeetingNote) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(note.content)
-                .font(.system(size: 15, design: .serif))
+            MarkdownRenderer(text: note.content, baseFontSize: 15)
                 .foregroundStyle(Color.appTextPrimary)
                 .textSelection(.enabled)
-                .lineSpacing(5)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack {

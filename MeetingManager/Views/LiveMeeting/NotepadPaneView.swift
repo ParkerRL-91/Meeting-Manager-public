@@ -15,7 +15,6 @@ struct NotepadPaneView: View {
     @State private var existingNote: MeetingNote?
     @State private var saveTask: Task<Void, Never>?
     @State private var isSaving = false
-    @FocusState private var isEditorFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -38,20 +37,21 @@ struct NotepadPaneView: View {
 
             Divider()
 
-            // Text editor — serif (New York) for long-form readability;
-            // 15pt with extra line spacing reads more like a notebook than a UI label.
+            // Live Markdown editor — serif (New York) at 15pt with inline styling
+            // (bold, italic, headings, bullets, quotes, code, links) applied as
+            // the user types. Source mode: syntax characters stay visible.
             ZStack(alignment: .topLeading) {
-                TextEditor(text: $noteContent)
-                    .font(.system(size: 15, design: .serif))
-                    .lineSpacing(4)
-                    .foregroundStyle(Color.appTextPrimary)
-                    .scrollContentBackground(.hidden)
-                    .focused($isEditorFocused)
-                    .padding(8)
+                MarkdownTextEditor(
+                    text: $noteContent,
+                    baseFontSize: 15,
+                    textColor: NSColor.labelColor,
+                    insets: NSSize(width: 8, height: 8)
+                )
 
-                // Placeholder
-                if noteContent.isEmpty && !isEditorFocused {
-                    Text("Start typing your meeting notes here...\n\n- Action items\n- Key decisions\n- Follow-ups\n\nTip: type /action to capture an action item inline")
+                // Placeholder — hidden as soon as the user types anything;
+                // the editor receives clicks underneath via allowsHitTesting(false).
+                if noteContent.isEmpty {
+                    Text("Start typing your meeting notes here…\n\nFormat with Markdown:\n# Heading   **bold**   *italic*   `code`\n- bullet · 1. numbered · - [ ] task · > quote\n\nTip: type /action to capture an action item inline")
                         .font(.system(size: 15, design: .serif))
                         .lineSpacing(4)
                         .foregroundStyle(Color.appTextTertiary)
