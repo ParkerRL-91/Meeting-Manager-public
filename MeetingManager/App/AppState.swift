@@ -1349,7 +1349,7 @@ final class AppState {
             return ClaudeService()
         }()
 
-        var mapping = await SpeakerAttributionService.shared.attribute(
+        let outcome = await SpeakerAttributionService.shared.attribute(
             transcripts: transcripts,
             participantNames: participants,
             userFirstName: userFirst,
@@ -1357,6 +1357,8 @@ final class AppState {
             ollama: ollamaService,
             claude: claudeForAttribution
         )
+
+        var mapping = outcome.mapping
 
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
         // labelled "mic" by the capture pipeline, never "Speaker N", so they
@@ -1368,7 +1370,15 @@ final class AppState {
             mapping["mic"] = displayName
         }
 
-        guard !mapping.isEmpty else { return (transcripts, meeting) }
+        // Persist the diagnostic reason to the in-memory cache so the
+        // FullTranscriptView banner can surface a specific message instead of
+        // a generic "couldn't attribute". Keyed by meeting id.
+        Self.lastAttributionReason[meeting.id] = outcome.reason
+
+        guard !mapping.isEmpty else {
+            Logger.general.info("Speaker attribution outcome=\(String(describing: outcome.reason), privacy: .public) for meeting \(meeting.id, privacy: .public)")
+            return (transcripts, meeting)
+        }
 
         // Rewrite each transcript's speakerLabel in place when the cluster id
         // is in the map. Clusters that came back "Unknown" stay as Speaker N.
@@ -1382,9 +1392,16 @@ final class AppState {
 
         var updated = meeting
         updated.setSpeakerMap(mapping)
-        Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) for meeting \(meeting.id, privacy: .public)")
+        Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
     }
+
+    /// In-memory cache of the most recent attribution outcome per meeting.
+    /// Read by FullTranscriptView's diagnostic banner. Not persisted — rebuilt
+    /// on each attribution run, which is fine because the banner is only
+    /// meaningful right after a run.
+    @MainActor
+    static var lastAttributionReason: [String: AttributionReason] = [:]
 
     // MARK: - Speaker Diarization
 

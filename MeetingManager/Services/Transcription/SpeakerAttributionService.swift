@@ -36,25 +36,45 @@ final class SpeakerAttributionService {
         priorAliases: [String: String] = [:],
         ollama: OllamaService,
         claude: ClaudeService?
-    ) async -> [String: String] {
+    ) async -> AttributionOutcome {
         // Filter transcripts: only the system-stream turns matter (user turns
         // are tagged "mic" — we already know who they are).
         let systemTurns = transcripts.filter { ($0.speakerLabel ?? "").lowercased() != "mic" }
-        guard !systemTurns.isEmpty else { return [:] }
+        guard !systemTurns.isEmpty else {
+            return AttributionOutcome(mapping: [:], reason: .noNonMicTurns)
+        }
 
-        // Group by cluster id (Speaker 1, Speaker 2, ...). Skip "system" and
-        // "mic" labels — those aren't diarization clusters.
+        // Group by cluster id (Speaker 1, Speaker 2, ...). Treat "system" as a
+        // single attributable cluster when no Speaker N labels exist (i.e.
+        // diarization didn't split or wasn't run). With ≥1 candidate the LLM
+        // can still pick the most likely speaker.
         let grouped = Dictionary(grouping: systemTurns) { $0.speakerLabel ?? "Unknown" }
-        let clusters = grouped.keys.filter { id in
+        var clusters = grouped.keys.filter { id in
             let lower = id.lowercased()
             return lower != "system" && lower != "mic" && lower != "unknown"
         }
-        guard !clusters.isEmpty else { return [:] }
+        // System-cluster fallback: if there are no Speaker N clusters but a
+        // system bucket exists, attribute the system cluster as a single
+        // unknown. The same cluster id is used for the final mapping key.
+        let systemKey = "system"
+        let systemHasTurns = (grouped[systemKey]?.isEmpty == false)
+            || grouped.keys.contains(where: { $0.lowercased() == systemKey })
+        if clusters.isEmpty, systemHasTurns {
+            clusters.append(systemKey)
+            logger.info("No Speaker N clusters — treating 'system' bucket as a single attributable cluster")
+        }
+        guard !clusters.isEmpty else {
+            return AttributionOutcome(mapping: [:], reason: .noClusters)
+        }
 
         // For each cluster, take up to ~20 turns or 1500 characters of context.
+        // System cluster reads from the case-insensitive "system" key.
         var clusterPreviews: [String: String] = [:]
         for clusterId in clusters {
-            let turns = grouped[clusterId, default: []]
+            let key = clusterId.lowercased() == systemKey
+                ? grouped.keys.first(where: { $0.lowercased() == systemKey }) ?? clusterId
+                : clusterId
+            let turns = grouped[key, default: []]
                 .sorted { $0.startTime < $1.startTime }
                 .prefix(20)
                 .map { "  [\(formatTime($0.startTime))] \($0.text)" }
@@ -71,7 +91,7 @@ final class SpeakerAttributionService {
 
         guard !candidates.isEmpty else {
             logger.info("No non-user participants to attribute against — skipping")
-            return [:]
+            return AttributionOutcome(mapping: [:], reason: .noCandidates)
         }
 
         let prompt = buildPrompt(candidates: candidates,
@@ -79,28 +99,84 @@ final class SpeakerAttributionService {
                                  priorAliases: priorAliases)
         logger.info("Attributing \(clusters.count) clusters against \(candidates.count) candidates")
 
-        // Try Claude first (better reasoning for name attribution), fall back to Ollama.
-        let response: String?
+        // Two-tier model strategy. Cheap pass first (Claude haiku if available,
+        // else Ollama). If the cheap pass returns empty/all-Unknown AND we
+        // have a Claude key, escalate to a more capable Claude model.
+        let validClusters = Set(clusters)
+        let validNames = Set(candidates)
+
+        let cheapResponse: String?
+        let cheapReason: AttributionReason
         if let claude {
-            let claudeResult = await callClaude(prompt: prompt, claude: claude)
-            if let result = claudeResult {
-                response = result
-            } else if ollama.isReachable {
-                response = await callOllama(prompt: prompt, ollama: ollama)
-            } else {
-                response = nil
-            }
+            let result = await callClaude(prompt: prompt, claude: claude, model: "claude-haiku-4-5")
+            cheapResponse = result
+            cheapReason = (result == nil) ? .llmCallFailed("Claude haiku call failed") : .ok
         } else if ollama.isReachable {
-            response = await callOllama(prompt: prompt, ollama: ollama)
+            let result = await callOllama(prompt: prompt, ollama: ollama)
+            cheapResponse = result
+            cheapReason = (result == nil) ? .llmCallFailed("Ollama call failed") : .ok
         } else {
             logger.info("No LLM available — leaving Speaker N labels intact")
-            return [:]
+            return AttributionOutcome(mapping: [:], reason: .noLLMAvailable)
         }
 
+        var mapping = parseIfNonEmpty(
+            response: cheapResponse,
+            validClusters: validClusters,
+            validNames: validNames
+        )
+
+        // Escalation: if the cheap pass yielded nothing useful AND we have a
+        // Claude key, retry once with a more capable model. Worth the cost —
+        // attribution is a one-shot per-meeting expense and getting names
+        // right is high-leverage.
+        if mapping.isEmpty, let claude {
+            logger.info("Cheap pass returned 0 mappings; escalating to claude-sonnet-4-6")
+            let escalated = await callClaude(
+                prompt: prompt,
+                claude: claude,
+                model: "claude-sonnet-4-6"
+            )
+            mapping = parseIfNonEmpty(
+                response: escalated,
+                validClusters: validClusters,
+                validNames: validNames
+            )
+            if mapping.isEmpty {
+                return AttributionOutcome(
+                    mapping: [:],
+                    reason: .llmReturnedAllUnknown
+                )
+            }
+            return AttributionOutcome(mapping: mapping, reason: .okEscalated)
+        }
+
+        if mapping.isEmpty {
+            // Cheap pass returned nothing useful, no escalation available.
+            // Reason depends on whether the response itself was empty.
+            let r: AttributionReason = (cheapResponse?.isEmpty ?? true)
+                ? cheapReason
+                : .llmReturnedAllUnknown
+            return AttributionOutcome(mapping: [:], reason: r)
+        }
+
+        return AttributionOutcome(mapping: mapping, reason: .ok)
+    }
+
+    /// Helper: parse a (possibly nil) raw LLM response and return the
+    /// validated cluster→name mapping. Returns an empty dictionary when the
+    /// response is nil/empty or when no entry passed validation.
+    private func parseIfNonEmpty(
+        response: String?,
+        validClusters: Set<String>,
+        validNames: Set<String>
+    ) -> [String: String] {
         guard let raw = response, !raw.isEmpty else { return [:] }
-        return parse(rawResponse: raw,
-                     validClusters: Set(clusters),
-                     validNames: Set(candidates))
+        return parse(
+            rawResponse: raw,
+            validClusters: validClusters,
+            validNames: validNames
+        )
     }
 
     // MARK: - Prompt
@@ -168,16 +244,16 @@ final class SpeakerAttributionService {
         }
     }
 
-    private func callClaude(prompt: String, claude: ClaudeService) async -> String? {
+    private func callClaude(prompt: String, claude: ClaudeService, model: String) async -> String? {
         do {
             let result = try await claude.sendMessage(
                 systemPrompt: "You match anonymous speaker clusters to real attendee names. Reply with JSON only.",
                 userPrompt: prompt,
-                model: "claude-haiku-4-5"   // fast + cheap for structured extraction
+                model: model
             )
             return result
         } catch {
-            logger.error("Claude attribution call failed: \(error.localizedDescription)")
+            logger.error("Claude attribution call failed (\(model, privacy: .public)): \(error.localizedDescription)")
             return nil
         }
     }
@@ -269,5 +345,58 @@ final class SpeakerAttributionService {
     private func formatTime(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+}
+
+// MARK: - Outcome types
+
+/// Structured result of a single attribution attempt. The reason field lets
+/// the UI surface a specific cause when no mappings landed (e.g. "no LLM
+/// available", "all clusters returned Unknown") instead of a generic banner.
+struct AttributionOutcome: Sendable {
+    let mapping: [String: String]
+    let reason: AttributionReason
+}
+
+enum AttributionReason: Sendable, Equatable {
+    /// Cheap-pass succeeded with at least one mapping.
+    case ok
+    /// Cheap pass returned 0 mappings; escalated to a more capable model and
+    /// that produced at least one mapping.
+    case okEscalated
+    /// No LLM backend could be reached (Ollama unreachable + no Claude key).
+    case noLLMAvailable
+    /// The meeting had no diarization clusters at all (no Speaker N rows and
+    /// no system bucket either).
+    case noClusters
+    /// Every transcript turn was tagged "mic" — nothing to attribute.
+    case noNonMicTurns
+    /// The user is the only attendee on the calendar invite — no candidates.
+    case noCandidates
+    /// LLM call itself failed (network / API error). Detail in associated value.
+    case llmCallFailed(String)
+    /// LLM returned a response but every cluster came back "Unknown" or
+    /// rejected by the candidate validator.
+    case llmReturnedAllUnknown
+
+    /// Human-readable summary suitable for a banner. Returns nil when the
+    /// outcome is a success and no diagnostic is needed.
+    var userFacingMessage: String? {
+        switch self {
+        case .ok, .okEscalated:
+            return nil
+        case .noLLMAvailable:
+            return "No AI configured — sign in to Claude or run Ollama to enable automatic name matching."
+        case .noClusters:
+            return "Diarization didn't split this meeting into separate speakers — try re-running attribution after the audio finishes processing."
+        case .noNonMicTurns:
+            return "Only your microphone was captured — no other speakers to attribute."
+        case .noCandidates:
+            return "No calendar attendees besides you — add attendees to the calendar invite to enable attribution."
+        case .llmCallFailed(let detail):
+            return "AI call failed (\(detail)) — check Ollama is running or Claude is reachable, then click Re-run AI."
+        case .llmReturnedAllUnknown:
+            return "AI couldn't confidently match any speaker to a calendar attendee. Click a Speaker N label below to assign one manually."
+        }
     }
 }

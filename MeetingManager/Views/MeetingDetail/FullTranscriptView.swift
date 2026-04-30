@@ -109,8 +109,11 @@ struct FullTranscriptView: View {
 
     /// Returns a thin in-list banner when the transcript still contains
     /// unattributed Speaker N rows AND the meeting actually has calendar
-    /// attendees we could've matched against. Tells the user *why* attribution
-    /// fell short and gives them a one-click retry.
+    /// attendees we could've matched against. The banner text reflects the
+    /// specific failure reason from the most recent attribution attempt
+    /// (cached on AppState.lastAttributionReason) so the user knows *why*
+    /// — Ollama down vs all-Unknown vs no LLM configured — instead of a
+    /// generic "couldn't attribute".
     @ViewBuilder
     private var attributionDiagnosticBanner: some View {
         let unconfirmedCount = transcripts.filter {
@@ -119,26 +122,44 @@ struct FullTranscriptView: View {
         let attendees = meeting?.participantList.count ?? 0
 
         if unconfirmedCount > 0 && attendees > 0 {
+            let reason = AppState.lastAttributionReason[meetingId]
+            let message = reason?.userFacingMessage
+                ?? "\(unconfirmedCount) unmatched speaker turn\(unconfirmedCount == 1 ? "" : "s") — tap a `Speaker N` label below to assign one of the \(attendees) attendee\(attendees == 1 ? "" : "s")."
+            // For the .noLLMAvailable + .noCandidates reasons, "Re-run AI" is
+            // pointless — the underlying issue isn't the AI run.
+            let retryActionable = reason != .noLLMAvailable && reason != .noCandidates
+
             HStack(spacing: 8) {
-                Image(systemName: "info.circle")
+                Image(systemName: bannerIcon(for: reason))
                     .font(.caption)
                     .foregroundStyle(Color.appAccentLight)
-                Text("\(unconfirmedCount) unmatched speaker turn\(unconfirmedCount == 1 ? "" : "s") — tap a `Speaker N` label below to assign one of the \(attendees) attendee\(attendees == 1 ? "" : "s").")
+                Text(message)
                     .font(.caption)
                     .foregroundStyle(Color.appTextSecondary)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button("Re-run AI") {
-                    Task { await rerunAttribution() }
+                if retryActionable {
+                    Button("Re-run AI") {
+                        Task { await rerunAttribution() }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(Color.appAccent.opacity(0.08))
+        }
+    }
+
+    private func bannerIcon(for reason: AttributionReason?) -> String {
+        switch reason {
+        case .noLLMAvailable, .llmCallFailed: return "exclamationmark.triangle"
+        case .noClusters, .noNonMicTurns, .noCandidates: return "info.circle"
+        case .llmReturnedAllUnknown, .none: return "questionmark.circle"
+        case .ok, .okEscalated: return "checkmark.circle"
         }
     }
 
