@@ -11,8 +11,12 @@ struct ContentView: View {
         // down and clipped sidebar nav items, which felt broken.
         NavigationSplitView {
             SidebarView()
+                // Explicit min/ideal/max so the sidebar divider is clearly
+                // draggable and remembers a sensible width across launches.
+                .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 360)
         } detail: {
             detailView
+                .navigationSplitViewColumnWidth(min: 600, ideal: 900)
         }
         .navigationSplitViewStyle(.balanced)
         .errorAlert($appState.lastUserError)

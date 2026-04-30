@@ -10,8 +10,19 @@ import SwiftUI
 /// Inline (via `AttributedString(markdown:)`): bold, italic, code, links,
 /// strikethrough.
 struct MarkdownRenderer: View {
+    /// Visual treatment for headings.
+    /// - `display`: serif, size-bumped, accent-coloured. Reads as a real
+    ///   article heading. Use for review-style read surfaces (note review,
+    ///   long-form prose).
+    /// - `label`: small uppercase, tracked letterspacing, accent foreground.
+    ///   Matches the section-label style used elsewhere in the app
+    ///   (e.g. `KEY DISCUSSION POINTS:` in SummaryView). Use for compact
+    ///   context cards where heading prominence would feel shouty.
+    enum HeadingStyle { case display, label }
+
     let text: String
     var baseFontSize: CGFloat = 15
+    var headingStyle: HeadingStyle = .display
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -26,28 +37,27 @@ struct MarkdownRenderer: View {
     private func blockView(_ block: Block) -> some View {
         switch block {
         case .heading(let level, let content):
-            // H1-H3: size-bumped + bold (clearly visual headings).
-            // H4-H6: tinted accent color + uppercase tracking treatment so they
-            // stand out from body text even when the size delta is small.
-            // This keeps `### Decisions` and `###### Notes` distinct from prose,
-            // since the AI sometimes picks higher levels arbitrarily.
-            if level <= 3 {
+            // Two styles, picked at the call site.
+            //   - .display: serif, size-bumped, accent-coloured. For long-form
+            //     read surfaces.
+            //   - .label: small uppercase tracked accent label. For compact
+            //     section cards, matching SummaryView's section header style.
+            // Within either style, H4-H6 always render as the small label form
+            // so a model that picks `######` arbitrarily doesn't disappear.
+            if headingStyle == .label || level >= 4 {
+                Text(content)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundStyle(Color.appAccentLight)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+                    .padding(.top, 6)
+                    .padding(.bottom, 1)
+            } else {
                 Text(inline(content))
                     .font(.system(size: headingSize(level), weight: .bold, design: .serif))
                     .foregroundStyle(level == 1 ? Color.appTextPrimary : Color.appAccent)
                     .padding(.top, level <= 2 ? 6 : 4)
                     .padding(.bottom, 2)
-            } else {
-                // Use the raw string (not parsed inline AttributedString) so the
-                // SwiftUI font modifier wins over any font baked into the parsed
-                // attributed value. H4-H6 read as styled section labels.
-                Text(content)
-                    .font(.system(size: headingSize(level), weight: .semibold, design: .default))
-                    .textCase(.uppercase)
-                    .tracking(0.6)
-                    .foregroundStyle(Color.appAccent.opacity(0.85))
-                    .padding(.top, 4)
-                    .padding(.bottom, 1)
             }
         case .paragraph(let content):
             Text(inline(content))

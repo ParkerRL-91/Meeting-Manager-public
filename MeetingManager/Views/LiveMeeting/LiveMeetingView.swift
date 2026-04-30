@@ -19,6 +19,11 @@ struct LiveMeetingView: View {
     @State private var notepadInitialText: String = ""
     @State private var capturedItemCount = 0
     @State private var showQuickCapture = false
+
+    /// User-controlled height for the live notepad. Persisted across launches
+    /// so dragging the resize handle "sticks" between sessions.
+    /// (Transcript pane has its own height storage inside `LiveTranscriptPane`.)
+    @AppStorage("liveMeeting.notepadHeight") private var notepadHeight: Double = 320
     @State private var editableTitle: String = ""
     @FocusState private var isTitleFocused: Bool
 
@@ -29,11 +34,14 @@ struct LiveMeetingView: View {
 
             // MARK: - Main content (scrollable)
             if showChat {
+                // HSplitView is natively draggable on macOS — explicit min/ideal/max
+                // ensures the divider has clear travel room. The chosen
+                // ideal=340 matches a typical chat-pane width.
                 HSplitView {
                     mainContent
-                        .frame(minWidth: 400)
+                        .frame(minWidth: 400, idealWidth: 720)
                     MeetingChatView(meetingId: meetingId)
-                        .frame(minWidth: 280, idealWidth: 340)
+                        .frame(minWidth: 260, idealWidth: 340, maxWidth: 600)
                 }
             } else {
                 mainContent
@@ -170,11 +178,16 @@ struct LiveMeetingView: View {
                     .padding(.bottom, 12)
                 }
 
-                // Notes area (T-021: initialText pre-populates when notepad is empty)
+                // Notes area (T-021: initialText pre-populates when notepad is empty).
+                // Height is user-adjustable via the drag handle along the bottom
+                // edge — persisted in @AppStorage so it survives navigation.
                 NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText) {
                     capturedItemCount += 1
                 }
-                .frame(minHeight: 250)
+                .frame(height: notepadHeight)
+                .overlay(alignment: .bottom) {
+                    DraggableHeightHandle(height: $notepadHeight, minHeight: 200, maxHeight: 900)
+                }
 
                 // P2-T02: Collapsible live transcript pane (collapsed by default —
                 // notes are primary, transcript is secondary).
@@ -709,6 +722,7 @@ private struct LiveTranscriptPane: View {
     let meetingId: String
     @Environment(AppState.self) private var appState
     @AppStorage("liveMeeting.transcriptExpanded") private var isExpanded = false
+    @AppStorage("liveMeeting.transcriptHeight") private var transcriptHeight: Double = 200
     @State private var segmentCount = 0
     @State private var observation: DatabaseCancellable?
 
@@ -746,7 +760,10 @@ private struct LiveTranscriptPane: View {
             if isExpanded {
                 Divider()
                 TranscriptPaneView(meetingId: meetingId)
-                    .frame(maxHeight: 200)
+                    .frame(height: transcriptHeight)
+                    .overlay(alignment: .bottom) {
+                        DraggableHeightHandle(height: $transcriptHeight, minHeight: 120, maxHeight: 700)
+                    }
             }
         }
         .background(Color.appSurface)
