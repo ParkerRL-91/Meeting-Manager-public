@@ -100,6 +100,12 @@ final class AppState {
         didSet {
             guard settings != oldValue else { return }
             persistSettings()
+            if settings.notificationLeadTimeMinutes != oldValue.notificationLeadTimeMinutes {
+                notificationService.rescheduleAll(
+                    meetings: upcomingMeetings,
+                    leadTimeMinutes: settings.notificationLeadTimeMinutes
+                )
+            }
         }
     }
 
@@ -116,6 +122,7 @@ final class AppState {
     let streamingTranscriber: StreamingTranscriber
     let appleSpeechTranscriber: AppleSpeechTranscriber
     let taskQueueManager: TaskQueueManager
+    let notificationService: NotificationService
 
     // State machine — single source of truth for meeting lifecycle
     private(set) var stateMachine: MeetingStateMachine
@@ -178,6 +185,7 @@ final class AppState {
             self.appleSpeechTranscriber = existing.appleSpeechTranscriber
             self.stateMachine = existing.stateMachine
             self.taskQueueManager = existing.taskQueueManager
+            self.notificationService = existing.notificationService
 
             // Copy mutable state from existing instance
             self.isRecording = existing.isRecording
@@ -218,6 +226,7 @@ final class AppState {
         )
 
         self.taskQueueManager = TaskQueueManager(database: database)
+        self.notificationService = NotificationService()
 
         // Auto-stop recording after sustained silence (meeting ended)
         audioCaptureService.onSilenceDetected = { [weak self] in
@@ -303,9 +312,12 @@ final class AppState {
                     self.upcomingMeetings = upcoming
                     let currentIds = Set(upcoming.map(\.id))
                     self.notifiedMeetingIds = self.notifiedMeetingIds.intersection(currentIds)
+                    self.hudShownMeetingIds = self.hudShownMeetingIds.intersection(currentIds)
                     self.pastMeetings = past
                     self.meetings = upcoming + past
                 }
+                let leadTime = await MainActor.run { self.settings.notificationLeadTimeMinutes }
+                self.notificationService.rescheduleAll(meetings: upcoming, leadTimeMinutes: leadTime)
             } catch {
                 if !Task.isCancelled {
                     Logger.database.error("Failed to load meetings: \(error.localizedDescription, privacy: .public)")
@@ -351,19 +363,28 @@ final class AppState {
                 let wasTranscribing = meeting.status == .transcribing
                 if wasTranscribing { meeting.status = .complete }
 
-                try? await self.database.writer.write { db in
-                    for var t in transcripts { try t.save(db) }
-                    try meeting.save(db)
+                let commitSucceeded: Bool
+                do {
+                    try await self.database.writer.write { db in
+                        for var t in transcripts { try t.save(db) }
+                        try meeting.save(db)
+                    }
+                    commitSucceeded = true
+                } catch {
+                    Logger.transcription.error("Failed to commit transcripts for \(meetingId): \(error.localizedDescription, privacy: .public)")
+                    commitSucceeded = false
                 }
 
-                if wasTranscribing {
+                if commitSucceeded, wasTranscribing {
                     NotificationCenter.default.post(
                         name: .meetingStateChanged,
                         object: self.stateMachine,
                         userInfo: ["meetingId": meeting.id, "status": meeting.status.rawValue]
                     )
                 }
-                Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
+                if commitSucceeded {
+                    Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
+                }
 
                 // P1-T06: auto-title ad-hoc meetings once transcripts are persisted.
                 // Calendar meetings already have a title from the event, so skip those.
@@ -1892,7 +1913,7 @@ final class AppState {
 
             // Meeting starting within the notification window — post only once per meeting
             if timeUntilStart > 0, timeUntilStart <= warningWindow,
-               meeting.status == .scheduled,
+               meeting.status == .scheduled || meeting.status == .notified,
                notifiedMeetingIds.insert(meeting.id).inserted {
                 NotificationCenter.default.post(
                     name: .meetingStartingSoon,
@@ -1905,8 +1926,10 @@ final class AppState {
             // HUD panel: always show at ~1 minute before, independent of the
             // lead-time notification setting. Window is 90s to guarantee the
             // 30s poll catches it even if the timer drifts slightly.
+            // Accepts .notified status too — a call app launch can advance the meeting
+            // to .notified well before the 90s window, which would silently skip it.
             if timeUntilStart > 0, timeUntilStart <= 90,
-               meeting.status == .scheduled,
+               meeting.status == .scheduled || meeting.status == .notified,
                hudShownMeetingIds.insert(meeting.id).inserted {
                 NotificationCenter.default.post(
                     name: .meetingHUDShow,
@@ -1918,7 +1941,10 @@ final class AppState {
 
             // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
             // The 5-minute window accommodates meetings that start slightly late.
-            if timeUntilStart >= -300 && timeUntilStart <= 0 && meeting.status == .scheduled && !isRecording && !isStartingMeeting {
+            // Accepts .notified too — call-app-launch can advance status before the start window.
+            if timeUntilStart >= -300 && timeUntilStart <= 0
+                && (meeting.status == .scheduled || meeting.status == .notified)
+                && !isRecording && !isStartingMeeting {
                 Logger.general.debug("Auto-starting recording for meeting: \(meeting.title)")
                 startRecording(for: meeting)
             }

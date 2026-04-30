@@ -56,11 +56,28 @@ final class SummaryGenerator {
         // 2. Build prompt
         progress = "Building prompt..."
         let template = promptManager.loadTemplate(settings: settings)
+
+        // Pull cached related-meetings context so the summary can weave in
+        // prior threads ("picks up where last week's pricing review left off").
+        // Empty string when no context is cached — substituteVariables handles the fallback.
+        let related = RelevantMeetingService.parseContext(from: meeting.contextJSON)
+        let priorContext: String
+        if related.isEmpty {
+            priorContext = ""
+        } else {
+            let dateFmt = DateFormatter()
+            dateFmt.dateStyle = .medium
+            priorContext = related.prefix(3).map { r in
+                "- **\(r.title)** (\(dateFmt.string(from: r.date))): \(r.summaryExcerpt)"
+            }.joined(separator: "\n")
+        }
+
         let userPrompt = promptManager.substituteVariables(
             template: template,
             meeting: meeting,
             transcript: transcript,
-            notes: notes
+            notes: notes,
+            priorContext: priorContext
         )
 
         let systemPrompt = "You are a professional meeting assistant. "

@@ -6,7 +6,6 @@ import UserNotifications
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem?
     private var callDetectionService: CallDetectionService?
-    private var notificationService: NotificationService?
 
     /// The popover shown from the menu bar status item.
     private var popover: NSPopover?
@@ -368,9 +367,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func setupNotifications() {
         UNUserNotificationCenter.current().delegate = self
         NotificationActions.registerCategories()
-        notificationService = NotificationService()
         Task {
-            _ = await notificationService?.requestAuthorization()
+            _ = await AppState.shared?.notificationService.requestAuthorization()
         }
     }
 
@@ -406,7 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         case NotificationActions.snooze:
             if let meetingId {
-                notificationService?.scheduleSnooze(meetingId: meetingId, minutes: 5)
+                AppState.shared?.notificationService.scheduleSnooze(meetingId: meetingId, minutes: 5)
             }
         case NotificationActions.prepMeeting:
             if let meetingId {

@@ -12,6 +12,8 @@ final class PromptManager {
         ("{{meetingTitle}}", "Title of the meeting"),
         ("{{date}}", "Date the meeting took place"),
         ("{{duration}}", "Formatted duration (e.g. \"45 min\")"),
+        ("{{participants}}", "Comma-separated participant names"),
+        ("{{priorContext}}", "Brief context from prior related meetings (auto-populated)"),
         ("{{transcript}}", "Full meeting transcript"),
         ("{{notes}}", "User-created notes"),
     ]
@@ -79,7 +81,8 @@ final class PromptManager {
         template: String,
         meeting: Meeting,
         transcript: String,
-        notes: String
+        notes: String,
+        priorContext: String = ""
     ) -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .long
@@ -92,10 +95,21 @@ final class PromptManager {
             dateString = "Unknown date"
         }
 
+        let participantsString: String = {
+            let list = meeting.participantList
+            return list.isEmpty ? "Not recorded" : list.joined(separator: ", ")
+        }()
+
+        let priorContextString = priorContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "No prior related meetings on file."
+            : priorContext
+
         var result = template
         result = result.replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
         result = result.replacingOccurrences(of: "{{date}}", with: dateString)
         result = result.replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
+        result = result.replacingOccurrences(of: "{{participants}}", with: participantsString)
+        result = result.replacingOccurrences(of: "{{priorContext}}", with: priorContextString)
         result = result.replacingOccurrences(of: "{{transcript}}", with: transcript)
         result = result.replacingOccurrences(of: "{{notes}}", with: notes)
 

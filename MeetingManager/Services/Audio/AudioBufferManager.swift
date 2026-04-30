@@ -288,6 +288,10 @@ final class AudioBufferManager {
         totalMicSamplesAppended = 0
         totalSystemSamplesAppended = 0
         consecutiveWriteFailures = 0
+        // Reset capacity flag — the same AudioBufferManager instance is reused
+        // across recordings, so a stale `true` from a 2-hour-cap hit would
+        // immediately auto-stop the next recording.
+        isAtCapacity = false
         lock.unlock()
 
         memoryPressureSource?.cancel()

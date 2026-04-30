@@ -48,10 +48,10 @@ struct NotesReviewView: View {
     private func noteCard(_ note: MeetingNote) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(note.content)
-                .font(.body)
+                .font(.system(size: 15, design: .serif))
                 .foregroundStyle(Color.appTextPrimary)
                 .textSelection(.enabled)
-                .lineSpacing(3)
+                .lineSpacing(5)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack {

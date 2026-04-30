@@ -236,13 +236,22 @@ final class NotificationService: NSObject {
     ///   - meetings: The list of meetings to schedule notifications for.
     ///   - leadTimeMinutes: Lead time in minutes before each meeting.
     func rescheduleAll(meetings: [Meeting], leadTimeMinutes: Int) {
-        // Remove all existing meeting notifications
-        center.removeAllPendingNotificationRequests()
-        Logger.general.info("Cleared all pending notifications, rescheduling \(meetings.count) meetings")
+        // Only remove pre-meeting reminders ("meeting-<id>"); preserve user-initiated
+        // snoozes ("meeting-snooze-<id>") and the recurring morning brief.
+        center.getPendingNotificationRequests { [weak self] requests in
+            guard let self else { return }
+            let stale = requests
+                .map(\.identifier)
+                .filter { $0.hasPrefix("meeting-") && !$0.hasPrefix("meeting-snooze-") }
+            if !stale.isEmpty {
+                self.center.removePendingNotificationRequests(withIdentifiers: stale)
+            }
+            Logger.general.info("Cleared \(stale.count) pre-meeting notifications, rescheduling \(meetings.count) meetings")
 
-        Task {
-            for meeting in meetings {
-                await scheduleNotification(for: meeting, leadTimeMinutes: leadTimeMinutes)
+            Task {
+                for meeting in meetings {
+                    await self.scheduleNotification(for: meeting, leadTimeMinutes: leadTimeMinutes)
+                }
             }
         }
     }

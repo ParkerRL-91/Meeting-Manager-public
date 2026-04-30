@@ -38,10 +38,12 @@ struct NotepadPaneView: View {
 
             Divider()
 
-            // Text editor
+            // Text editor — serif (New York) for long-form readability;
+            // 15pt with extra line spacing reads more like a notebook than a UI label.
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $noteContent)
-                    .font(.body)
+                    .font(.system(size: 15, design: .serif))
+                    .lineSpacing(4)
                     .foregroundStyle(Color.appTextPrimary)
                     .scrollContentBackground(.hidden)
                     .focused($isEditorFocused)
@@ -50,7 +52,8 @@ struct NotepadPaneView: View {
                 // Placeholder
                 if noteContent.isEmpty && !isEditorFocused {
                     Text("Start typing your meeting notes here...\n\n- Action items\n- Key decisions\n- Follow-ups\n\nTip: type /action to capture an action item inline")
-                        .font(.body)
+                        .font(.system(size: 15, design: .serif))
+                        .lineSpacing(4)
                         .foregroundStyle(Color.appTextTertiary)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 16)
