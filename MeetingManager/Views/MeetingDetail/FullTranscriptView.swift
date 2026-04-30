@@ -268,7 +268,14 @@ struct FullTranscriptView: View {
             try? await SpeakerAliasRepository(database: AppDatabase.shared)
                 .upsert(seriesKey: seriesKey, clusterId: clusterId, resolvedName: trimmed)
 
-            // 4. Reload to reflect the rewritten labels.
+            // 4. Cross-meeting learning: extract this voice's fingerprint and
+            // merge into the profile DB. The next meeting that captures this
+            // person's voice will auto-attribute without an LLM call. This is
+            // the highest-confidence signal we get — manual user rename — so
+            // it's worth feeding the profile system aggressively.
+            await appState.learnVoiceProfiles(meetingId: meeting.id)
+
+            // 5. Reload to reflect the rewritten labels.
             await loadTranscripts()
             updateFilteredTranscripts()
         }

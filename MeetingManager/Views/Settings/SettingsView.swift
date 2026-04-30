@@ -40,9 +40,13 @@ struct SettingsView: View {
                 .tabItem { Label("Templates", systemImage: "doc.text.fill") }
                 .tag(7)
 
+            VoiceProfilesSettingsView()
+                .tabItem { Label("Voices", systemImage: "waveform.badge.mic") }
+                .tag(8)
+
             AboutSettingsView()
                 .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(8)
+                .tag(9)
         }
         .frame(width: 750, height: 500)
         .onChange(of: appState.pendingSettingsTab) { _, tab in

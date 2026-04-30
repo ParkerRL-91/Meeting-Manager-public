@@ -80,6 +80,70 @@ final class VoiceProfileService {
         return melSpectrumEmbedding(samples: collected)
     }
 
+    /// Time-range variant of `extractEmbedding` — builds a fingerprint directly
+    /// from `(start, end)` second pairs, no DiarizationResult required. Used by
+    /// callers that have transcript rows (which already carry start/end times)
+    /// but no live SpeakerKit result — e.g. retroactive scans, manual rename
+    /// learning, or rebuilding the profile DB from history.
+    ///
+    /// Mirrors the diarization-result path: takes up to 60s of the longest
+    /// segments, runs the mel-spectrum pipeline, returns an L2-normalised
+    /// 40-dim embedding.
+    func extractEmbedding(
+        audioURL: URL,
+        timeRanges: [(start: Float, end: Float)]
+    ) async -> [Float]? {
+        guard let allSamples = loadSamples(from: audioURL) else { return nil }
+
+        let qualifying = timeRanges.filter { ($0.end - $0.start) >= minSegmentSeconds }
+        guard !qualifying.isEmpty else { return nil }
+
+        var collected: [Float] = []
+        let sorted = qualifying.sorted { ($0.end - $0.start) > ($1.end - $1.start) }
+        for r in sorted {
+            let start = Int(r.start * Float(sampleRate))
+            let end   = min(Int(r.end * Float(sampleRate)), allSamples.count)
+            guard start < end, end <= allSamples.count else { continue }
+            collected.append(contentsOf: allSamples[start..<end])
+            if Double(collected.count) / sampleRate >= 60 { break }
+        }
+        guard collected.count >= frameSize else { return nil }
+        return melSpectrumEmbedding(samples: collected)
+    }
+
+    /// Match per-cluster pre-computed time ranges against stored profiles.
+    /// Returns `[clusterLabel: personName]` for high-confidence matches.
+    /// Used by `applySpeakerAttribution` to skip the LLM for voices the
+    /// profile DB already recognises, even when no live DiarizationResult
+    /// is available (e.g. retro-scan, re-attribution).
+    func matchProfiles(
+        audioURL: URL,
+        clusterRanges: [String: [(start: Float, end: Float)]],
+        stored: [VoiceProfile]
+    ) async -> [String: String] {
+        guard !stored.isEmpty, !clusterRanges.isEmpty else { return [:] }
+        var matches: [String: String] = [:]
+        for (label, ranges) in clusterRanges {
+            guard let newEmb = await extractEmbedding(audioURL: audioURL, timeRanges: ranges) else { continue }
+            var bestName: String? = nil
+            var bestSim: Float = matchThreshold
+            for profile in stored {
+                let storedEmb = profile.embedding
+                guard storedEmb.count == newEmb.count else { continue }
+                let sim = cosineSimilarity(newEmb, storedEmb)
+                if sim > bestSim {
+                    bestSim = sim
+                    bestName = profile.personName
+                }
+            }
+            if let name = bestName {
+                matches[label] = name
+                logger.info("Voice match (range): \(label) → \(name) (similarity \(String(format: "%.3f", bestSim)))")
+            }
+        }
+        return matches
+    }
+
     // MARK: - Profile matching
 
     /// Compare new-meeting clusters against stored voice profiles.

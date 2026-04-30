@@ -620,6 +620,11 @@ final class AppState {
         } catch {
             Logger.general.error("rerunSpeakerAttribution: persist failed: \(error.localizedDescription, privacy: .public)")
         }
+
+        // Cross-meeting learning: feed any newly-confirmed names into the
+        // voice-profile DB so future meetings recognise them without an LLM
+        // call. No-op when the meeting has no system audio file.
+        await learnVoiceProfiles(meetingId: meetingId)
     }
 
     /// One-time retroactive speaker-attribution scan. Runs at most once per
@@ -1353,16 +1358,58 @@ final class AppState {
             return ClaudeService()
         }()
 
+        // Voice-profile pre-match — checks each Speaker N cluster against the
+        // stored voice fingerprint DB before the LLM is invoked. A cosine
+        // similarity ≥ 0.82 against a known person collapses the mapping to
+        // that name with zero LLM cost. The matched names are passed to the
+        // LLM as priorAliases (rather than written directly to the mapping)
+        // so the LLM can still override if it disagrees, but in practice the
+        // pre-match wins ~all of the time.
+        var voiceMatches: [String: String] = [:]
+        if let audioPath = meeting.audioFilePath {
+            let systemURL = AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: audioPath))
+            if FileManager.default.fileExists(atPath: systemURL.path) {
+                // Group time ranges by Speaker N cluster id (skip mic/system/other).
+                var clusterRanges: [String: [(start: Float, end: Float)]] = [:]
+                for t in transcripts {
+                    let raw = (t.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
+                    guard raw.lowercased().hasPrefix("speaker ") else { continue }
+                    clusterRanges[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
+                }
+                if !clusterRanges.isEmpty {
+                    let stored = (try? await VoiceProfileRepository(database: database).allProfiles()) ?? []
+                    voiceMatches = await VoiceProfileService.shared.matchProfiles(
+                        audioURL: systemURL,
+                        clusterRanges: clusterRanges,
+                        stored: stored
+                    )
+                    if !voiceMatches.isEmpty {
+                        Logger.general.info("Voice pre-match: \(voiceMatches.count) cluster(s) recognised before LLM for meeting \(meeting.id, privacy: .public)")
+                    }
+                }
+            }
+        }
+
+        // Merge prior-aliases (series memory) with voice matches. Voice wins on
+        // collision because it's audio-grounded, not just label-name memory.
+        var combinedPriorAliases = priorAliases
+        for (cluster, name) in voiceMatches { combinedPriorAliases[cluster] = name }
+
         let outcome = await SpeakerAttributionService.shared.attribute(
             transcripts: transcripts,
             participantNames: participants,
             userFirstName: userFirst,
-            priorAliases: priorAliases,
+            priorAliases: combinedPriorAliases,
             ollama: ollamaService,
             claude: claudeForAttribution
         )
 
+        // Voice-pre-matches are authoritative on their own. Even if the LLM
+        // skipped a cluster, if the profile DB matched it, we still apply that.
         var mapping = outcome.mapping
+        for (cluster, name) in voiceMatches where mapping[cluster] == nil {
+            mapping[cluster] = name
+        }
 
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
         // labelled "mic" by the capture pipeline, never "Speaker N", so they
@@ -1398,6 +1445,78 @@ final class AppState {
         updated.setSpeakerMap(mapping)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
+    }
+
+    /// Learn voice profiles from a meeting's *confirmed* speakers. Walks the
+    /// transcript rows, groups by speakerLabel where the label is a real name
+    /// (not a generic cluster id like "Speaker N", "system", "mic"), and
+    /// extracts a mel-spectrum embedding from each name's audio segments.
+    /// Merges via VoiceProfileRepository.merge so repeated calls compound the
+    /// fingerprint via EMA rather than overwriting.
+    ///
+    /// Safe to call any time. No-op when:
+    ///   - the meeting has no system audio file
+    ///   - no transcript row carries a real name
+    ///   - audio segments for a name are < 3s total (handled inside the service)
+    func learnVoiceProfiles(meetingId: String) async {
+        guard let meeting = try? await meetingRepository.find(id: meetingId),
+              let firstAudioPath = meeting.audioFilePath,
+              !firstAudioPath.isEmpty else { return }
+
+        // Voice profiles are extracted from the SYSTEM audio (other speakers) —
+        // never from the mixed mic+system file. The system file is derived
+        // alongside the mixed file with a "_system" suffix. Skip when missing.
+        let mixedURL = URL(fileURLWithPath: firstAudioPath)
+        let systemURL = AudioBufferManager.systemAudioURL(for: mixedURL)
+        guard FileManager.default.fileExists(atPath: systemURL.path) else { return }
+
+        let transcripts = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 10_000)) ?? []
+        guard !transcripts.isEmpty else { return }
+
+        // Group time ranges by confirmed speaker name. We define "confirmed" as
+        // any label that isn't a generic cluster bucket — no Speaker N, no
+        // system, no mic, no Unknown, and not the user themselves (their
+        // turns are tagged "mic" anyway, but be defensive).
+        let userFirst = NSFullUserName()
+            .components(separatedBy: .whitespacesAndNewlines).first?.lowercased() ?? ""
+
+        var rangesByName: [String: [(start: Float, end: Float)]] = [:]
+        for t in transcripts {
+            let raw = (t.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
+            guard !raw.isEmpty else { continue }
+            let lower = raw.lowercased()
+            if lower.hasPrefix("speaker ") { continue }
+            if lower == "system" || lower == "mic" || lower == "unknown" || lower == "other" || lower == "them" { continue }
+            if !userFirst.isEmpty, lower.contains(userFirst) { continue }
+            // Treat the speaker name as the canonical key.
+            rangesByName[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
+        }
+        guard !rangesByName.isEmpty else { return }
+
+        let voiceService = VoiceProfileService.shared
+        let repo = VoiceProfileRepository(database: database)
+        for (name, ranges) in rangesByName {
+            guard let embedding = await voiceService.extractEmbedding(audioURL: systemURL, timeRanges: ranges) else { continue }
+            try? await repo.merge(personName: name, newEmbedding: embedding)
+            Logger.general.info("Voice profile learned: \(name, privacy: .public) (\(ranges.count) range(s)) for meeting \(meetingId, privacy: .public)")
+        }
+    }
+
+    /// One-shot rebuild of the entire voice-profile database from history.
+    /// Walks every meeting, extracts embeddings for every confirmed speaker,
+    /// merges into the profile DB. Useful after a v3.5.0 upgrade so the
+    /// previously-collected manual renames suddenly pay off as cross-meeting
+    /// recognition. Polite 200ms delay between meetings.
+    func rebuildVoiceProfilesFromHistory() async -> Int {
+        let allMeetings = meetings.filter { $0.audioFilePath != nil }
+        var processed = 0
+        for m in allMeetings {
+            await learnVoiceProfiles(meetingId: m.id)
+            processed += 1
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        Logger.general.info("Voice profile rebuild: processed \(processed) meeting(s)")
+        return processed
     }
 
     /// In-memory cache of the most recent attribution outcome per meeting.
