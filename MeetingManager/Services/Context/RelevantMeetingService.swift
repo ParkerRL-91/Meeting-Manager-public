@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import os
 
 /// Finds past meetings related to a given meeting based on participant overlap or title similarity.
 /// Results are cached as JSON in `Meeting.contextJSON`.
@@ -12,23 +13,55 @@ final class RelevantMeetingService {
 
     // MARK: - Public
 
-    /// Find and cache relevant past meetings for the given meeting.
-    /// Writes results to `meeting.contextJSON` in the database.
-    func enrichContext(meetingId: String) async throws {
-        // Load the target meeting
+    /// Find and cache relevant past meetings for the given meeting, plus an
+    /// optional LLM-synthesized prep brief.
+    ///
+    /// - Parameters:
+    ///   - meetingId: target meeting whose context to enrich
+    ///   - briefSynthesizer: closure that takes (system prompt, user prompt) and
+    ///     returns the synthesized brief. When nil, only the structured list is
+    ///     cached (no AI backend available).
+    func enrichContext(
+        meetingId: String,
+        briefSynthesizer: ((String, String) async throws -> String)? = nil
+    ) async throws {
         guard let meeting = try await database.writer.read({ db in
             try Meeting.fetchOne(db, key: meetingId)
         }) else { return }
 
-        // Skip if context already cached
-        if meeting.contextJSON != nil && !meeting.contextJSON!.isEmpty { return }
+        // Skip if a brief is already cached. An old bare-array cache still
+        // counts as "needs upgrade" — re-run so the user gets a brief.
+        let existing = Self.parseCachedContext(from: meeting.contextJSON)
+        if existing.brief != nil, !existing.relatedMeetings.isEmpty { return }
 
         let related = try await findRelated(for: meeting)
 
-        // Serialize and save
+        // Synthesize a prose brief when a backend is provided AND we have at
+        // least one related meeting to feed it. Brief failures are non-fatal —
+        // we still cache the related list.
+        var brief: String? = nil
+        if let synthesizer = briefSynthesizer, !related.isEmpty {
+            let priorNotes = await self.gatherPriorNotes(from: related)
+            let openItems = await self.gatherOpenActionItems(for: meeting)
+            let userPrompt = Self.buildBriefUserPrompt(
+                meeting: meeting,
+                related: related,
+                priorNotes: priorNotes,
+                openActionItems: openItems
+            )
+            do {
+                let raw = try await synthesizer(DefaultPrompts.preMeetingBrief, userPrompt)
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { brief = trimmed }
+            } catch {
+                Logger.ai.warning("Pre-meeting brief synthesis failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        let envelope = CachedContext(brief: brief, relatedMeetings: related)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        let jsonData = try encoder.encode(related)
+        let jsonData = try encoder.encode(envelope)
         let jsonString = String(data: jsonData, encoding: .utf8)
 
         try await database.writer.write { db in
@@ -38,13 +71,107 @@ final class RelevantMeetingService {
         }
     }
 
-    /// Parse cached context JSON back into `RelevantMeeting` array.
-    static func parseContext(from jsonString: String?) -> [RelevantMeeting] {
+    // MARK: - Brief inputs
+
+    /// Pull notes from each related meeting, capped to keep the LLM context
+    /// manageable. Returns "" when nothing relevant exists.
+    private func gatherPriorNotes(from related: [RelevantMeeting]) async -> String {
+        let perNoteCap = 1200
+        let noteRepo = NoteRepository(database: database)
+        var blocks: [String] = []
+        for r in related.prefix(5) {
+            let combined = (try? await noteRepo.combinedNotes(meetingId: r.meetingId)) ?? ""
+            let trimmed = combined.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let slice = trimmed.count > perNoteCap
+                ? String(trimmed.prefix(perNoteCap)) + "…"
+                : trimmed
+            let dateStr = DateFormatter.localizedString(from: r.date, dateStyle: .medium, timeStyle: .none)
+            blocks.append("### \(r.title) — \(dateStr)\n\(slice)")
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+
+    /// Pull open action items owned by participants in this meeting. Caps at 20
+    /// to keep the prompt focused.
+    private func gatherOpenActionItems(for meeting: Meeting) async -> String {
+        let participants = meeting.participantList
+        guard !participants.isEmpty else { return "" }
+        let repo = ActionItemRepository(database: database)
+        let items = (try? await repo.openItemsForParticipants(participants)) ?? []
+        guard !items.isEmpty else { return "" }
+        return items.prefix(20).map { item in
+            let owner = item.assignee ?? "—"
+            let due = item.dueDate.map { DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .none) } ?? "no date"
+            return "- [\(owner)] \(item.title) (due: \(due))"
+        }.joined(separator: "\n")
+    }
+
+    /// Build the user prompt that the synthesizer receives, with all variables
+    /// substituted. The system prompt is `DefaultPrompts.preMeetingBrief` itself.
+    private static func buildBriefUserPrompt(
+        meeting: Meeting,
+        related: [RelevantMeeting],
+        priorNotes: String,
+        openActionItems: String
+    ) -> String {
+        let dateStr: String = {
+            let date = meeting.scheduledStartDate ?? meeting.startDate ?? Date()
+            return DateFormatter.localizedString(from: date, dateStyle: .full, timeStyle: .short)
+        }()
+
+        let participantsStr = meeting.participantList.isEmpty
+            ? "Not recorded"
+            : meeting.participantList.joined(separator: ", ")
+
+        let relatedBlock: String = {
+            guard !related.isEmpty else { return "(none on file)" }
+            return related.prefix(5).map { r in
+                let d = DateFormatter.localizedString(from: r.date, dateStyle: .medium, timeStyle: .none)
+                return "- **\(r.title)** (\(d)): \(r.summaryExcerpt)"
+            }.joined(separator: "\n")
+        }()
+
+        let openItemsBlock = openActionItems.isEmpty ? "(none on file)" : openActionItems
+        let priorNotesBlock = priorNotes.isEmpty ? "(no notes captured in prior sessions)" : priorNotes
+
+        return """
+        Upcoming meeting: \(meeting.title)
+        When: \(dateStr)
+        Participants: \(participantsStr)
+
+        Related prior meetings:
+        \(relatedBlock)
+
+        Open commitments owned by these participants:
+        \(openItemsBlock)
+
+        Notes captured in prior related meetings:
+        \(priorNotesBlock)
+        """
+    }
+
+    /// Parse cached context JSON back into a `CachedContext`. Handles both the
+    /// new envelope shape `{ brief, relatedMeetings }` and the legacy bare-array
+    /// shape `[RelevantMeeting]` produced by pre-v3.4 caches.
+    static func parseCachedContext(from jsonString: String?) -> CachedContext {
         guard let jsonString, !jsonString.isEmpty,
-              let data = jsonString.data(using: .utf8) else { return [] }
+              let data = jsonString.data(using: .utf8) else { return CachedContext() }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([RelevantMeeting].self, from: data)) ?? []
+        if let envelope = try? decoder.decode(CachedContext.self, from: data) {
+            return envelope
+        }
+        if let legacy = try? decoder.decode([RelevantMeeting].self, from: data) {
+            return CachedContext(brief: nil, relatedMeetings: legacy)
+        }
+        return CachedContext()
+    }
+
+    /// Convenience: just the related-meetings list. Backward-compatible with
+    /// existing callers that don't care about the new brief field.
+    static func parseContext(from jsonString: String?) -> [RelevantMeeting] {
+        parseCachedContext(from: jsonString).relatedMeetings
     }
 
     // MARK: - Private
@@ -276,4 +403,19 @@ struct RelevantMeeting: Codable, Identifiable {
     let title: String
     let date: Date
     let summaryExcerpt: String
+}
+
+/// Envelope persisted in `Meeting.contextJSON`. Combines the LLM-synthesized
+/// pre-meeting brief (one or two prose paragraphs) with the structured list of
+/// source meetings used to produce it. Either field can be empty:
+/// - `brief == nil` when no AI backend is available at enrichment time
+/// - `relatedMeetings == []` when no scoring candidates passed the threshold
+struct CachedContext: Codable {
+    var brief: String?
+    var relatedMeetings: [RelevantMeeting]
+
+    init(brief: String? = nil, relatedMeetings: [RelevantMeeting] = []) {
+        self.brief = brief
+        self.relatedMeetings = relatedMeetings
+    }
 }

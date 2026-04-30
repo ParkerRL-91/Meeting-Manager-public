@@ -1,64 +1,96 @@
 import SwiftUI
 
-/// Collapsible section showing relevant past meetings with participant overlap or similar topics.
-/// Displayed at the top of MeetingDetailView between ParticipantBar and the tab picker.
+/// Compact context card mounted between ParticipantBar and the tab picker.
+/// Shows the LLM-synthesized pre-meeting brief as the primary content
+/// ("Last week you talked to John and concluded you should mow the lawn"),
+/// with a small disclosure footer that lists the source meetings on demand.
+///
+/// Intentionally short — caps at ~110pt collapsed and grows only when the user
+/// expands the source list. Falls back to the legacy meeting-list layout when
+/// the cached context is from a pre-v3.4 enrichment run that has no brief.
 struct RelatedMeetingsSection: View {
     let contextJSON: String?
     var onSelectMeeting: ((String) -> Void)?
 
-    @State private var isExpanded = true
+    @State private var isSourcesExpanded = false
 
-    private var relatedMeetings: [RelevantMeeting] {
-        RelevantMeetingService.parseContext(from: contextJSON)
+    private var cached: CachedContext {
+        RelevantMeetingService.parseCachedContext(from: contextJSON)
     }
 
     var body: some View {
-        if !relatedMeetings.isEmpty {
+        let ctx = cached
+        if ctx.brief != nil || !ctx.relatedMeetings.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                // Header with expand/collapse toggle
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextTertiary)
-                        Text("Related Meetings")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Color.appTextTertiary)
-                        Text("(\(relatedMeetings.count))")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextTertiary)
-                        Spacer()
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color.appTextTertiary)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded ? "Collapse related meetings" : "Expand related meetings")
-
-                if isExpanded {
-                    VStack(spacing: 4) {
-                        ForEach(relatedMeetings) { related in
-                            RelatedMeetingRow(meeting: related) {
-                                onSelectMeeting?(related.meetingId)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-
+                content(for: ctx)
                 Divider()
             }
         }
+    }
+
+    @ViewBuilder
+    private func content(for ctx: CachedContext) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.caption)
+                    .foregroundStyle(Color.appAccentLight)
+                Text("CONTEXT")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.appAccentLight)
+                    .tracking(0.6)
+                Spacer()
+                if !ctx.relatedMeetings.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isSourcesExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("\(ctx.relatedMeetings.count) source\(ctx.relatedMeetings.count == 1 ? "" : "s")")
+                                .font(.caption2)
+                            Image(systemName: isSourcesExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.appTextTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSourcesExpanded ? "Hide source meetings" : "Show source meetings")
+                }
+            }
+
+            // Brief (rendered Markdown — paragraphs / inline emphasis only;
+            // the synthesizer is prompt-tuned to produce ≤500 word prose).
+            if let brief = ctx.brief, !brief.isEmpty {
+                MarkdownRenderer(text: brief, baseFontSize: 13)
+                    .foregroundStyle(Color.appTextPrimary)
+                    .textSelection(.enabled)
+                    .lineLimit(nil)
+            } else {
+                // Pre-v3.4 cache — no brief was synthesized. Fall back to a
+                // short hint that the structured list is available below.
+                Text("Prior context from \(ctx.relatedMeetings.count) meeting\(ctx.relatedMeetings.count == 1 ? "" : "s") — open a source to review.")
+                    .font(.system(size: 13, design: .serif))
+                    .foregroundStyle(Color.appTextSecondary)
+                    .lineLimit(2)
+            }
+
+            // Sources (collapsed by default)
+            if isSourcesExpanded, !ctx.relatedMeetings.isEmpty {
+                VStack(spacing: 4) {
+                    ForEach(ctx.relatedMeetings) { related in
+                        RelatedMeetingRow(meeting: related) {
+                            onSelectMeeting?(related.meetingId)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 }
 
@@ -70,32 +102,30 @@ private struct RelatedMeetingRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 // Date badge
                 VStack(spacing: 0) {
                     Text(meeting.date.formatted(.dateTime.month(.abbreviated)))
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Color.appAccent)
                     Text(meeting.date.formatted(.dateTime.day()))
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.appTextPrimary)
                 }
-                .frame(width: 36)
+                .frame(width: 32)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(meeting.title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Color.appTextPrimary)
-                        .lineLimit(1)
-                    Text(meeting.summaryExcerpt)
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextSecondary)
-                        .lineLimit(2)
-                }
+                Text(meeting.title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
 
                 Spacer(minLength: 0)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.appTextTertiary)
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, 5)
             .padding(.horizontal, 8)
             .background(Color.appSurfaceSecondary.opacity(0.3))
             .clipShape(RoundedRectangle(cornerRadius: 6))

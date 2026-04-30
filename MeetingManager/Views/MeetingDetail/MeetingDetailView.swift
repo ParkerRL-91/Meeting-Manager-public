@@ -265,15 +265,22 @@ struct MeetingDetailView: View {
     private func loadInitialContext() async {
         meeting = try? await appState.meetingRepository.find(id: meetingId)
 
-        // Queue context enrichment if meeting has participants but no cached context
-        if let m = meeting,
-           !m.participantList.isEmpty,
-           (m.contextJSON == nil || m.contextJSON!.isEmpty) {
-            await appState.taskQueueManager.enqueue(
-                type: .contextEnrichment,
-                meetingId: meetingId,
-                priority: 8
-            )
+        // Queue context enrichment when:
+        //   1. There's no cache yet, OR
+        //   2. The cache exists but has no synthesized brief (e.g. legacy
+        //      pre-v3.4 cache, or a v3.4+ cache that ran when no AI backend
+        //      was available). enrichContext is idempotent for fully-cached
+        //      contexts so this is safe even on every appearance.
+        if let m = meeting, !m.participantList.isEmpty {
+            let cached = RelevantMeetingService.parseCachedContext(from: m.contextJSON)
+            let needsBrief = (m.contextJSON?.isEmpty ?? true) || cached.brief == nil
+            if needsBrief {
+                await appState.taskQueueManager.enqueue(
+                    type: .contextEnrichment,
+                    meetingId: meetingId,
+                    priority: 8
+                )
+            }
         }
 
         // Prep brief for the next upcoming meeting (for the Up Next banner)

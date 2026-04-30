@@ -416,7 +416,13 @@ final class AppState {
             guard let self else { return }
             self.fileLog("TaskQueue: finding related meetings for \(meetingId)")
             let service = RelevantMeetingService(database: AppDatabase.shared)
-            try await service.enrichContext(meetingId: meetingId)
+
+            // Build a synthesizer closure that routes to the same AI backend
+            // the user has configured for summaries (Claude key wins; falls
+            // back to Ollama if a local model is reachable). Returns nil — and
+            // the brief is skipped — when neither is available.
+            let synthesizer = await self.makeContextBriefSynthesizer()
+            try await service.enrichContext(meetingId: meetingId, briefSynthesizer: synthesizer)
             self.loadMeetings()
         }
 
@@ -577,6 +583,50 @@ final class AppState {
         )
         try await summaryRepository.save(&summary)
         fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
+    }
+
+    /// Returns a closure that synthesises pre-meeting briefs via Claude or
+    /// Ollama, picking the same backend the user's summaries use. Returns nil
+    /// when no AI backend is available — the contextEnrichment task will then
+    /// just cache the structured related-meetings list without a prose brief.
+    private func makeContextBriefSynthesizer() -> ((String, String) async throws -> String)? {
+        let claudeKey = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? nil
+        let hasClaudeKey = (claudeKey ?? "").isEmpty == false
+        let useLocal = settings.useLocalLLM
+        let claudeModel = settings.claudeModel
+        let ollamaModel = settings.ollamaModel
+        let ollama = ollamaService
+
+        if useLocal || !hasClaudeKey {
+            // Ollama path — only return a synthesizer if we can actually reach it.
+            return { [weak ollama] systemPrompt, userPrompt in
+                guard let ollama else {
+                    throw TaskQueueError.noHandler("Ollama service unavailable")
+                }
+                await ollama.refreshStatus()
+                guard ollama.isReachable else {
+                    throw TaskQueueError.noHandler("Ollama not reachable")
+                }
+                return try await ollama.generate(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: ollamaModel
+                )
+            }
+        }
+
+        if hasClaudeKey {
+            return { systemPrompt, userPrompt in
+                let claude = ClaudeService()
+                return try await claude.sendMessage(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: claudeModel
+                )
+            }
+        }
+
+        return nil
     }
 
     /// P5-T02: Loads open action items for a set of prior meetings, preserving order.
