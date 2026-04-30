@@ -629,7 +629,11 @@ final class AppState {
     /// improved fuzzy matcher + auto-mic mapping. Yields between meetings to
     /// stay polite about CPU.
     func runRetroactiveSpeakerAttributionIfNeeded() {
-        let key = "speakerAttribution.retroScan.v3.4.1"
+        // Bump the version suffix every time the attribution logic itself
+        // changes meaningfully (system-cluster fallback in 3.4.2, model
+        // escalation in 3.4.2, etc.) so existing meetings get re-scanned with
+        // the improved code path on first launch of the new version.
+        let key = "speakerAttribution.retroScan.v3.4.2"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         // Run on the main actor — `rerunSpeakerAttribution` and the helpers it
         // touches (Logger, NSFullUserName, ollamaService) are all MainActor.
