@@ -481,4 +481,5 @@ extension Notification.Name {
     static let meetingStartingSoon = Notification.Name("meetingStartingSoon")
     static let meetingHUDShow = Notification.Name("meetingHUDShow")
     static let openUpdateSettings = Notification.Name("openUpdateSettings")
+    static let calendarBackfillCompleted = Notification.Name("calendarBackfillCompleted")
 }

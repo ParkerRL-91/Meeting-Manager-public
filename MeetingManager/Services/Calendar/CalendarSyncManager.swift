@@ -145,6 +145,48 @@ final class CalendarSyncManager {
         }
     }
 
+    /// Wide-window backfill — useful as a one-shot from the Settings UI to
+    /// repopulate participants and meet links on already-completed meetings.
+    /// `upsertMeeting` always backfills empty participants regardless of
+    /// status, so this is safe to run any time and idempotent on already-
+    /// populated rows.
+    func backfillFromCalendar(daysBehind: Int = 90, daysAhead: Int = 30) async throws -> Int {
+        let source = CalendarSource.current
+        if source == .none { return 0 }
+        if (source == .googleCalendar || source == .both) && !authManager.isSignedIn {
+            throw CalendarSyncError.notSignedIn
+        }
+
+        var processed = 0
+        if source == .googleCalendar || source == .both {
+            let accessToken = try await authManager.refreshTokenIfNeeded()
+            let now = Date()
+            let from = Calendar.current.date(byAdding: .day, value: -daysBehind, to: now)!
+            let to = Calendar.current.date(byAdding: .day, value: daysAhead, to: now)!
+            let calendarId = selectedCalendarId() ?? "primary"
+            let events = try await calendarService.fetchEvents(
+                accessToken: accessToken,
+                from: from,
+                to: to,
+                calendarId: calendarId
+            )
+            for event in events {
+                try await upsertMeeting(from: event)
+                processed += 1
+            }
+        }
+
+        if source == .appleCalendar || source == .both {
+            // Apple sync currently uses its own narrower window via
+            // AppleCalendarService — not yet routed through this method.
+            // Returning the Google count is fine for the UI summary line.
+        }
+
+        await MainActor.run { self.lastSyncDate = Date() }
+        Logger.calendar.info("Backfill complete: \(processed) events from -\(daysBehind)d to +\(daysAhead)d")
+        return processed
+    }
+
     // MARK: - Sync Logic
 
     private func performSync() async {

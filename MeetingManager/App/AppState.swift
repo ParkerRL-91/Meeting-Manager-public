@@ -254,6 +254,11 @@ final class AppState {
         cleanupStuckMeetings()
         setupTaskQueue()
         startPrepContextTimer()
+        // One-shot retroactive speaker attribution scan (gated by UserDefaults
+        // flag — only runs once per app upgrade). Re-attributes existing
+        // meetings against the loosened fuzzy matcher + auto-mic mapping
+        // introduced in v3.4.1.
+        runRetroactiveSpeakerAttributionIfNeeded()
 
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
@@ -583,6 +588,70 @@ final class AppState {
         )
         try await summaryRepository.save(&summary)
         fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
+    }
+
+    /// Re-run LLM speaker attribution against an existing meeting's transcripts
+    /// and persist the result. Safe to call any time — silent no-op when the
+    /// meeting has no participants or no transcripts. Used both by the manual
+    /// "Re-run AI" button on the transcript diagnostic banner and by the
+    /// one-time retroactive scan on app upgrade.
+    func rerunSpeakerAttribution(for meetingId: String) async {
+        guard let meeting = try? await meetingRepository.find(id: meetingId),
+              !meeting.participantList.isEmpty else { return }
+        let transcripts = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 10_000)) ?? []
+        guard !transcripts.isEmpty else { return }
+
+        let (relabelled, updated) = await applySpeakerAttribution(
+            transcripts: transcripts,
+            meeting: meeting
+        )
+
+        // Persist relabelled transcripts + speakerMap update atomically.
+        do {
+            try await database.writer.write { db in
+                for t in relabelled {
+                    var copy = t
+                    try copy.update(db)
+                }
+                var m = updated
+                try m.update(db)
+            }
+            Logger.general.info("rerunSpeakerAttribution: persisted updates for \(meetingId)")
+        } catch {
+            Logger.general.error("rerunSpeakerAttribution: persist failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// One-time retroactive speaker-attribution scan. Runs at most once per
+    /// app version: a UserDefaults flag (`speakerAttribution.retroScan.<v>`)
+    /// keeps it from firing on every launch. Walks completed meetings that
+    /// still contain "Speaker N" labels and re-runs attribution against the
+    /// improved fuzzy matcher + auto-mic mapping. Yields between meetings to
+    /// stay polite about CPU.
+    func runRetroactiveSpeakerAttributionIfNeeded() {
+        let key = "speakerAttribution.retroScan.v3.4.1"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        // Run on the main actor — `rerunSpeakerAttribution` and the helpers it
+        // touches (Logger, NSFullUserName, ollamaService) are all MainActor.
+        Task { [weak self] in
+            guard let self else { return }
+            let meetingIds: [String] = (try? await AppDatabase.shared.writer.read { db in
+                let sql = """
+                    SELECT DISTINCT t.meetingId
+                    FROM transcript t
+                    WHERE t.speakerLabel LIKE 'Speaker %'
+                    """
+                return try String.fetchAll(db, sql: sql)
+            }) ?? []
+            self.fileLog("RetroScan: found \(meetingIds.count) meetings with unmatched Speaker N labels")
+            for id in meetingIds {
+                await self.rerunSpeakerAttribution(for: id)
+                try? await Task.sleep(for: .milliseconds(150))  // be polite to the LLM
+            }
+            UserDefaults.standard.set(true, forKey: key)
+            self.loadMeetings()
+            self.fileLog("RetroScan: complete")
+        }
     }
 
     /// Returns a closure that synthesises pre-meeting briefs via Claude or
@@ -1280,7 +1349,7 @@ final class AppState {
             return ClaudeService()
         }()
 
-        let mapping = await SpeakerAttributionService.shared.attribute(
+        var mapping = await SpeakerAttributionService.shared.attribute(
             transcripts: transcripts,
             participantNames: participants,
             userFirstName: userFirst,
@@ -1288,6 +1357,16 @@ final class AppState {
             ollama: ollamaService,
             claude: claudeForAttribution
         )
+
+        // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
+        // labelled "mic" by the capture pipeline, never "Speaker N", so they
+        // don't go through the LLM. Surface the user's name on those rows by
+        // mapping "mic" -> their full name (or first name if that's all we have).
+        if let userFirst = userFirst {
+            let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = fullName.isEmpty ? userFirst : fullName
+            mapping["mic"] = displayName
+        }
 
         guard !mapping.isEmpty else { return (transcripts, meeting) }
 
@@ -2021,6 +2100,15 @@ final class AppState {
         NotificationCenter.default.publisher(for: .summaryPromptTemplateDidChange)
             .sink { [weak self] _ in
                 self?.loadSettings()
+            }
+            .store(in: &cancellables)
+
+        // Calendar backfill (Settings → "Re-sync 90 days") finished — reload
+        // meetings so PeopleView and the sidebar pick up freshly-attached
+        // participants without requiring a navigation round-trip.
+        NotificationCenter.default.publisher(for: .calendarBackfillCompleted)
+            .sink { [weak self] _ in
+                self?.loadMeetings()
             }
             .store(in: &cancellables)
 

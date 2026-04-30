@@ -28,6 +28,7 @@ struct GoogleCalendarSettingsView: View {
 
     // Sync
     @State private var isSyncing = false
+    @State private var isBackfilling = false
     @State private var syncError: String?
     @State private var syncSuccess: String?
     @State private var lastSyncDate: Date?
@@ -308,7 +309,22 @@ struct GoogleCalendarSettingsView: View {
                         Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
                     }
                 }
-                .disabled(isSyncing)
+                .disabled(isSyncing || isBackfilling)
+
+                Button {
+                    backfillFromCalendar()
+                } label: {
+                    if isBackfilling {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Backfilling…")
+                        }
+                    } else {
+                        Label("Re-sync 90 days (incl. participants)", systemImage: "person.2.crop.square.stack")
+                    }
+                }
+                .disabled(isSyncing || isBackfilling)
+                .help("Wider-window sync that pulls calendar attendees onto past meetings whose participants are missing. Safe to run any time — never overwrites populated data.")
 
                 Spacer()
 
@@ -519,6 +535,40 @@ struct GoogleCalendarSettingsView: View {
                 Logger.calendar.error("Manual sync failed: \(error.localizedDescription)")
             }
             isSyncing = false
+        }
+    }
+
+    /// Wide-window calendar resync that backfills participants and meet links
+    /// onto already-completed meetings. Routed through CalendarSyncManager
+    /// (which has the proper "fill empty fields, never overwrite populated"
+    /// semantics in upsertMeeting) rather than this view's own narrower sync.
+    private func backfillFromCalendar() {
+        isBackfilling = true
+        syncError = nil
+        syncSuccess = nil
+
+        Task {
+            do {
+                let manager = CalendarSyncManager(
+                    authManager: authManager,
+                    meetingRepository: MeetingRepository(database: AppDatabase.shared)
+                )
+                let count = try await manager.backfillFromCalendar(daysBehind: 90, daysAhead: 30)
+                lastSyncDate = Date()
+                syncSuccess = "Backfilled from \(count) event\(count == 1 ? "" : "s")"
+                refreshMeetings()
+
+                // Reload AppState's in-memory meetings so PeopleView and the
+                // sidebar pick up the freshly-attached participants.
+                NotificationCenter.default.post(name: .calendarBackfillCompleted, object: nil)
+
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                syncSuccess = nil
+            } catch {
+                syncError = error.localizedDescription
+                Logger.calendar.error("Backfill failed: \(error.localizedDescription)")
+            }
+            isBackfilling = false
         }
     }
 

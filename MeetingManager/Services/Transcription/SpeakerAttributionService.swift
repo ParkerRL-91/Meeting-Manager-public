@@ -203,26 +203,67 @@ final class SpeakerAttributionService {
         }
 
         // Sanitize: only keep entries where the cluster is real and the name
-        // is a known attendee. Reject hallucinated names; fall back to a
-        // case-insensitive lookup before giving up. "Unknown" is not written
-        // to the map — those clusters stay as "Speaker N".
+        // resolves to a known attendee. We accept four match grades, in order
+        // of trust:
+        //   1. Exact match
+        //   2. Case-insensitive exact
+        //   3. Substring match in either direction (covers "Sarah Chen" ↔
+        //      "Sarah Chen <sarah.chen@…>" and similar)
+        //   4. First-token match (LLM returned just "Sarah" but only one
+        //      attendee starts with "Sarah" — accept it)
+        // Anything else is logged and rejected. "Unknown" is intentionally not
+        // written to the map — those clusters stay as "Speaker N".
         var result: [String: String] = [:]
         for (cluster, name) in decoded {
             guard validClusters.contains(cluster) else { continue }
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty || trimmed.lowercased() == "unknown" { continue }
 
-            if validNames.contains(trimmed) {
-                result[cluster] = trimmed
-            } else if let real = validNames.first(where: {
-                $0.caseInsensitiveCompare(trimmed) == .orderedSame
-            }) {
-                result[cluster] = real
+            if let resolved = Self.resolveAttendee(name: trimmed, candidates: validNames) {
+                result[cluster] = resolved
             } else {
                 logger.info("LLM returned non-attendee name \"\(trimmed, privacy: .public)\" for \(cluster, privacy: .public) — rejected")
             }
         }
         return result
+    }
+
+    /// Map an LLM-returned name onto one of the meeting's actual attendees.
+    /// Returns nil when no candidate matches with high enough confidence.
+    /// Public so the UI's manual-assign affordance can reuse the same logic.
+    static func resolveAttendee(name: String, candidates: Set<String>) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Grade 1 — exact
+        if candidates.contains(trimmed) { return trimmed }
+
+        let lowered = trimmed.lowercased()
+        // Grade 2 — case-insensitive exact
+        if let hit = candidates.first(where: { $0.lowercased() == lowered }) {
+            return hit
+        }
+        // Grade 3 — substring in either direction (handles email-suffixed names)
+        if let hit = candidates.first(where: {
+            let cand = $0.lowercased()
+            return cand.contains(lowered) || lowered.contains(cand)
+        }) {
+            return hit
+        }
+        // Grade 4 — first-token uniqueness (e.g. LLM said "Sarah" → unique
+        // attendee starting with "Sarah" wins; ambiguous "Sarah" → reject)
+        let firstToken = lowered
+            .split(separator: " ")
+            .first
+            .map(String.init) ?? lowered
+        let firstTokenMatches = candidates.filter { cand in
+            let candFirst = cand.lowercased().split(separator: " ").first.map(String.init) ?? ""
+            return candFirst == firstToken
+        }
+        if firstTokenMatches.count == 1, let only = firstTokenMatches.first {
+            return only
+        }
+        return nil
     }
 
     private func formatTime(_ seconds: Double) -> String {

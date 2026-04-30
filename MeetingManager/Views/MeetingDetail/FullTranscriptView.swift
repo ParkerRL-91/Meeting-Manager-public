@@ -73,6 +73,7 @@ struct FullTranscriptView: View {
                 )
                 Spacer()
             } else {
+                attributionDiagnosticBanner
                 transcriptList
             }
         }
@@ -102,6 +103,53 @@ struct FullTranscriptView: View {
         } message: {
             Text(renameError ?? "")
         }
+    }
+
+    // MARK: - Attribution Diagnostic Banner
+
+    /// Returns a thin in-list banner when the transcript still contains
+    /// unattributed Speaker N rows AND the meeting actually has calendar
+    /// attendees we could've matched against. Tells the user *why* attribution
+    /// fell short and gives them a one-click retry.
+    @ViewBuilder
+    private var attributionDiagnosticBanner: some View {
+        let unconfirmedCount = transcripts.filter {
+            ($0.speakerLabel ?? "").lowercased().hasPrefix("speaker")
+        }.count
+        let attendees = meeting?.participantList.count ?? 0
+
+        if unconfirmedCount > 0 && attendees > 0 {
+            HStack(spacing: 8) {
+                Image(systemName: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(Color.appAccentLight)
+                Text("\(unconfirmedCount) unmatched speaker turn\(unconfirmedCount == 1 ? "" : "s") — tap a `Speaker N` label below to assign one of the \(attendees) attendee\(attendees == 1 ? "" : "s").")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Re-run AI") {
+                    Task { await rerunAttribution() }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.appAccent.opacity(0.08))
+        }
+    }
+
+    /// Manual re-run of LLM attribution from the diagnostic banner. Reloads
+    /// transcripts after the run so any newly-mapped clusters reflect in the
+    /// UI without requiring a navigation round-trip.
+    private func rerunAttribution() async {
+        guard let meetingId = meeting?.id else { return }
+        await appState.rerunSpeakerAttribution(for: meetingId)
+        await loadTranscripts()
+        meeting = try? await appState.meetingRepository.find(id: meetingId)
     }
 
     // MARK: - Transcript List

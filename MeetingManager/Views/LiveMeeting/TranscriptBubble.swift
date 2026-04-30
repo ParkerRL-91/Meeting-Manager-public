@@ -78,6 +78,13 @@ struct TranscriptBubble: View {
 
     @ViewBuilder
     private func renderedLabel(_ name: String) -> some View {
+        // A label is "unconfirmed" when it still reads as a generic cluster id
+        // — Speaker N, Speaker, system. These should look obviously clickable
+        // when a rename menu is mounted, so the user discovers they can tap to
+        // assign an attendee.
+        let unconfirmed = Self.isUnconfirmed(name: name)
+        let canAssign = (onRename != nil)
+
         HStack(spacing: 4) {
             Text(name)
                 .font(.caption)
@@ -86,14 +93,39 @@ struct TranscriptBubble: View {
                 .foregroundStyle(
                     transcript.isMicrophone
                         ? Color.appTextPrimary
-                        : Color.appTextSecondary
+                        : (unconfirmed && canAssign
+                           ? Color.appAccent
+                           : Color.appTextSecondary)
                 )
             if isAIAttributed {
                 Image(systemName: "sparkles")
                     .font(.caption2)
                     .foregroundStyle(Color.appAccent.opacity(0.6))
             }
+            if unconfirmed && canAssign {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Color.appAccent.opacity(0.7))
+            }
         }
+        .padding(.horizontal, unconfirmed && canAssign ? 6 : 0)
+        .padding(.vertical, unconfirmed && canAssign ? 2 : 0)
+        .background(
+            (unconfirmed && canAssign)
+                ? Color.appAccent.opacity(0.08)
+                : Color.clear
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    /// True when the label still reads as a generic cluster id — i.e. attribution
+    /// didn't pin it down. Used to make the rename affordance visually obvious.
+    private static func isUnconfirmed(name: String) -> Bool {
+        let lower = name.lowercased()
+        if lower.hasPrefix("speaker") { return true }
+        if lower == "system" || lower == "other" || lower == "them" { return true }
+        if lower == "unknown" { return true }
+        return false
     }
 }
 
