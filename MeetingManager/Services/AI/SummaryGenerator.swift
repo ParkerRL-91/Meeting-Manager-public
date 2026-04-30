@@ -80,8 +80,20 @@ final class SummaryGenerator {
             priorContext: priorContext
         )
 
-        let systemPrompt = "You are a professional meeting assistant. "
-            + "Provide clear, well-structured summaries."
+        // System prompt anchors the model to the structure in the user prompt.
+        // A weak system prompt lets the model fall back to its own preferred
+        // format (### Key Discussion Points, etc.) and ignore detailed rules.
+        let systemPrompt = """
+        You are a precise meeting analyst. You output Markdown summaries that follow the exact section structure the user requests — never inventing your own sections, never substituting your preferred headings.
+
+        Hard rules — these always apply:
+        - Use the exact headings the user prompt specifies. If the prompt says `## Topic Timeline`, do not write `### Key Discussion Points`.
+        - Use Markdown heading levels exactly: `## ` for top-level sections, `### ` for sub-blocks. Never use bare `**Bold Section**` lines as a substitute for headings.
+        - Preserve and propagate timestamps from the transcript. If transcript lines start with `[HH:MM]` or `[HH:MM:SS]`, every Topic Timeline block, every decision, and every action item must reference the appropriate timestamp.
+        - Be specific. Do not write generic phrases like "the team discussed X". Capture the actual line of argument: who said what, who pushed back, what evidence was cited.
+        - Never invent content. If a fact, name, or commitment is not in the transcript or notes, omit it.
+        - Match length to substance: a dense 600-word summary beats a padded 1500-word one.
+        """
 
         // 3. Generate summary text
         progress = "Generating summary..."

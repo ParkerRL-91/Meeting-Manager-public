@@ -25,6 +25,11 @@ struct SummaryView: View {
     @State private var hasLoadedEditor = false
     @State private var errorMessage: String?
 
+    /// Free-form edit toggle for the rawEditorBlock fallback path.
+    /// When false, the body renders as Markdown with hidden syntax characters.
+    /// When true, swaps in a source-mode editor with the syntax visible (dimmed).
+    @State private var isFreeformEditing: Bool = false
+
     // Regeneration state — derived from the persistent task queue, not local @State.
     // This means regeneration survives view disappearance and navigation.
     private var isRegenerating: Bool {
@@ -375,13 +380,38 @@ struct SummaryView: View {
 
     @ViewBuilder
     private var rawEditorBlock: some View {
-        TextEditor(text: $editableContent)
-            .font(.system(size: 13))
-            .foregroundStyle(Color.appTextPrimary)
-            .scrollContentBackground(.hidden)
-            .lineSpacing(4)
-            .frame(minHeight: 200)
-            .background(Color.appBackground)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Spacer()
+                Button(isFreeformEditing ? "Done" : "Edit") {
+                    isFreeformEditing.toggle()
+                }
+                .font(.caption)
+                .foregroundStyle(Color.appAccent)
+                .buttonStyle(.plain)
+            }
+
+            if isFreeformEditing {
+                // Source-mode editor — Markdown syntax stays visible (dimmed)
+                // so the user can edit raw text. Auto-saves via the existing
+                // editableContent binding + onChange watcher.
+                MarkdownTextEditor(
+                    text: $editableContent,
+                    baseFontSize: 14,
+                    textColor: NSColor.labelColor,
+                    insets: NSSize(width: 4, height: 4)
+                )
+                .frame(minHeight: 240)
+                .background(Color.appBackground)
+            } else {
+                // Render-mode display — Markdown syntax characters hidden;
+                // headings appear as headings, **bold** appears bolded, etc.
+                MarkdownRenderer(text: editableContent, baseFontSize: 14)
+                    .foregroundStyle(Color.appTextPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     @ViewBuilder
@@ -765,7 +795,7 @@ private struct TLDRCard: View {
             .padding(.bottom, 8)
 
             ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
-                Text(line)
+                Text(Self.inlineMarkdown(line))
                     .font(.system(size: 13.5))
                     .foregroundStyle(Color.appTextPrimary)
                     .lineSpacing(4)
@@ -787,6 +817,20 @@ private struct TLDRCard: View {
                 .strokeBorder(Color.appAccentSubtleStrong, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Parse inline Markdown (bold, italic, code, link) so `**bold**` and
+    /// similar render visually instead of showing literal asterisks.
+    fileprivate static func inlineMarkdown(_ s: String) -> AttributedString {
+        if let parsed = try? AttributedString(
+            markdown: s,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace
+            )
+        ) {
+            return parsed
+        }
+        return AttributedString(s)
     }
 }
 
@@ -964,7 +1008,10 @@ enum SummaryParser {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
 
-            if trimmed.hasPrefix("## ") || trimmed.hasPrefix("# ") {
+            // Accept any ATX heading level (1–6 hashes followed by a space).
+            // Older default prompts used `### Section`; the v3.3.8 prompt uses
+            // `## Section`. Both should land in the structured grid.
+            if trimmed.range(of: #"^#{1,6}\s+"#, options: .regularExpression) != nil {
                 if let sec = currentSection { sections.append(sec) }
                 seenFirstHeading = true
                 let raw = trimmed.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)

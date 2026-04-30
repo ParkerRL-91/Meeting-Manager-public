@@ -97,6 +97,14 @@ enum DefaultPrompts {
 
     ---
 
+    **Before you start — three rules that apply to everything below:**
+
+    1. **Use the exact headings shown.** Top-level sections are `## ` (two hashes). Sub-blocks inside Topic Timeline are `### `. Never substitute `### Key Discussion Points` for `## Topic Timeline`. Never use a bare `**Bold Line**` as a heading replacement.
+    2. **Carry timestamps through.** The transcript almost always contains timestamps (`[HH:MM]` or `[HH:MM:SS]` at the start of lines). Every Topic Timeline block, every Decision, every Action Item, every Open Question, every Risk, and every Notable Quote must include the relevant timestamp. If the transcript genuinely has none, drop the bracket markers — but read it twice before concluding that.
+    3. **Be granular, not generic.** "Alex pushed for the $99 tier as a top-of-funnel hook; Sam objected that it undercuts margin; Priya proposed a 14-day trial as a compromise" is the bar. "The team discussed pricing" is not.
+
+    ---
+
     Produce a summary in **exactly this structure**, in Markdown. Omit a section only when its rule says to ("None.", "Skip if…"). Never silently drop a section.
 
     ## TL;DR
@@ -162,6 +170,18 @@ enum DefaultPrompts {
     - **Ambiguity:** If a name, term, or claim is unclear in the transcript (likely a transcription error), flag it in-line as `[unclear: original phrase]` rather than guessing.
     - **No filler.** "The team had a productive conversation about…" → cut. Lead with verbs and substance.
     - **Length:** Prefer density over breadth. A 600-word summary that captures the real argument beats a 1500-word summary that catalogues every utterance.
+
+    ---
+
+    **Worked example of a single Topic Timeline block** — match this density and timestamp discipline:
+
+    ```
+    ### [00:14–00:23] Q3 pricing tier
+    **Discussion:** Alex opened by arguing the $99 tier is "actively undercutting our margin" and proposed sunsetting it after Q3. Sam pushed back: he wanted it as a top-of-funnel hook for the SMB segment and cited the 38% conversion lift seen in March. Priya proposed a compromise — keep the tier visible but require a 14-day trial before activation, which would filter out low-intent signups. Alex agreed conditionally, contingent on Priya's capacity model showing the trial flow doesn't add support load.
+    **Outcome:** Deferred. Priya owns the capacity model; decision moves to next week's pricing sync. No commitment to sunset, no commitment to launch the trial flow.
+    ```
+
+    Two things to notice: (1) the time range bounds the block, (2) every claim is attributed to a specific speaker. Aim for that.
     """
 
     /// Pre-meeting context brief. Synthesises a focused, actionable one-page brief
