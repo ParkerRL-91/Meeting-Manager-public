@@ -25,6 +25,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case regeneration
         case contextEnrichment
         case knowledgeBaseIndex
+        case transcriptCleanup
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -44,6 +45,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .regeneration:     return "Regenerate Summary"
         case .contextEnrichment: return "Finding Related Meetings"
         case .knowledgeBaseIndex: return "Index Knowledge Base"
+        case .transcriptCleanup: return "Cleaning Transcript"
         }
     }
 

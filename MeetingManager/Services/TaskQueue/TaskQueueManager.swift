@@ -35,6 +35,8 @@ final class TaskQueueManager {
     var summaryCompletedHandler: ((String) async -> Void)?
     /// Knowledge Base index handler — no meeting context needed.
     var knowledgeBaseIndexHandler: (() async throws -> Void)?
+    /// Transcript cleanup handler — runs stitch + AI pass for one meeting.
+    var transcriptCleanupHandler: ((String) async throws -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -268,7 +270,8 @@ final class TaskQueueManager {
                     }
                 }
 
-                // Auto-enqueue diarization + summary after transcription — but only if segments exist
+                // Auto-enqueue diarization + summary + cleanup after transcription —
+                // but only if segments exist
                 if next.type == .transcription {
                     let hasSegments = (try? await database.writer.read { db in
                         try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript WHERE meetingId = ?", arguments: [next.meetingId])
@@ -278,6 +281,11 @@ final class TaskQueueManager {
                         // when the summarizer prompt is built.
                         await enqueue(type: .diarization, meetingId: next.meetingId, priority: 4)
                         await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
+                        // Transcript cleanup runs after summary — by then speaker
+                        // names are mostly resolved, so the cleaned blob shows
+                        // real names instead of "Speaker 1". Lower priority so
+                        // it doesn't gate the user-facing summary.
+                        await enqueue(type: .transcriptCleanup, meetingId: next.meetingId, priority: 3)
                     } else {
                         Logger.general.info("TaskQueue: transcription produced 0 segments for \(next.meetingId) — skipping diarization + summary")
                     }
@@ -368,6 +376,12 @@ final class TaskQueueManager {
                 throw TaskQueueError.noHandler("knowledgeBaseIndex")
             }
             try await handler()
+
+        case .transcriptCleanup:
+            guard let handler = transcriptCleanupHandler else {
+                throw TaskQueueError.noHandler("transcriptCleanup")
+            }
+            try await handler(task.meetingId)
         }
     }
 

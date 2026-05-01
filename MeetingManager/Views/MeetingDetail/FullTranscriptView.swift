@@ -15,6 +15,16 @@ struct FullTranscriptView: View {
     @State private var speakerToCustomRename: Transcript?
     @State private var renameError: String?
 
+    /// Cleaned-up version of the transcript (stitched + AI-cleaned). Loaded
+    /// from the cleanedTranscript table after segments load. May be nil if
+    /// cleanup hasn't run yet (e.g. mid-recording, or AI failed).
+    @State private var cleanedTranscript: CleanedTranscript?
+
+    /// Raw (per-segment) vs cleaned (paragraph) view. Defaults to cleaned —
+    /// the fragmented raw output is a poor reading experience. Persisted so
+    /// users who prefer raw don't get bounced back each navigation.
+    @AppStorage("transcript.showRaw") private var showRaw: Bool = false
+
     private let exportService = ExportService()
 
     var body: some View {
@@ -23,14 +33,28 @@ struct FullTranscriptView: View {
             HStack(spacing: 12) {
                 SearchBar(query: $searchQuery, placeholder: "Search transcript...")
 
+                // Cleaned vs raw toggle. Cleaned (paragraph view) is the
+                // default; raw shows the fragmented per-segment view that
+                // matches the live recording layout. Hidden when no cleaned
+                // version exists (e.g. mid-recording or model unavailable).
+                if cleanedTranscript != nil {
+                    Picker("View", selection: $showRaw) {
+                        Text("Cleaned").tag(false)
+                        Text("Raw").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+                    .help("Toggle between the AI-cleaned paragraph view and the raw per-segment transcript")
+                }
+
                 CopyButton(
-                    text: { formatTranscriptText() },
+                    text: { copyText() },
                     label: "Copy Transcript"
                 )
                 .disabled(transcripts.isEmpty)
 
                 CopyButton(
-                    text: { formatTranscriptMarkdown() },
+                    text: { copyMarkdown() },
                     label: "Copy as Markdown"
                 )
                 .disabled(transcripts.isEmpty)
@@ -64,6 +88,11 @@ struct FullTranscriptView: View {
                     subtitle: "The transcript will appear here once the meeting recording is processed."
                 )
                 Spacer()
+            } else if !showRaw, let cleaned = cleanedTranscript, searchQuery.isEmpty {
+                // Cleaned view — paragraph-rendered Markdown. We bypass the
+                // search-empty branch when in cleaned mode without a search
+                // query because cleaned text isn't indexed as segments.
+                cleanedView(cleaned)
             } else if filteredTranscripts.isEmpty {
                 Spacer()
                 EmptyStateView(
@@ -328,6 +357,68 @@ struct FullTranscriptView: View {
         isLoading = true
         defer { isLoading = false }
         transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        // Pull the cleaned blob (may be nil if cleanup hasn't run yet).
+        cleanedTranscript = try? await CleanedTranscriptRepository().cleanedTranscript(meetingId: meetingId)
+    }
+
+    // MARK: - Cleaned view
+
+    @ViewBuilder
+    private func cleanedView(_ cleaned: CleanedTranscript) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                // Method footer — small affordance so users see whether the
+                // AI pass ran or only the deterministic stitch.
+                methodFooter(cleaned.method)
+
+                MarkdownRenderer(text: cleaned.text, baseFontSize: 14, headingStyle: .neutral)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+    }
+
+    private func methodFooter(_ method: String) -> some View {
+        let (label, icon): (String, String) = {
+            switch method {
+            case "stitch+ai":  return ("AI-cleaned", "sparkles")
+            case "ai-failed":  return ("Stitched (AI cleanup unavailable)", "exclamationmark.triangle")
+            default:           return ("Stitched", "text.alignleft")
+            }
+        }()
+        return HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.caption)
+                .foregroundStyle(Color.appAccent)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(Color.appTextTertiary)
+            Spacer()
+        }
+    }
+
+    // MARK: - Copy helpers
+
+    /// Plain-text copy. When cleaned is showing, copy the cleaned text;
+    /// otherwise the per-segment text. Keeps copy behavior aligned with
+    /// what the user is looking at.
+    private func copyText() -> String {
+        if !showRaw, let cleaned = cleanedTranscript {
+            // Strip markdown for plain-text use.
+            return cleaned.text
+                .replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "_", with: "")
+        }
+        return formatTranscriptText()
+    }
+
+    private func copyMarkdown() -> String {
+        if !showRaw, let cleaned = cleanedTranscript {
+            return cleaned.text
+        }
+        return formatTranscriptMarkdown()
     }
 }
 

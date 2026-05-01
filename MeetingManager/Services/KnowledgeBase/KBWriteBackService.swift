@@ -18,8 +18,13 @@ final class KBWriteBackService {
 
     // MARK: - Write
 
-    /// Write a meeting's summary (and optional transcript) to the KB folder.
+    /// Write a meeting's summary + cleaned transcript to the KB folder.
     /// Silently no-ops if no KB root is configured.
+    ///
+    /// Prefers the cleaned transcript blob when available — that's what users
+    /// see in the app, and what they expect to find in their KB. Falls back
+    /// to a stitched-on-the-fly version of the raw segments when no cleaned
+    /// blob exists yet (e.g. cleanup task hasn't run).
     func writeMeeting(
         _ meeting: Meeting,
         summary: String,
@@ -32,22 +37,39 @@ final class KBWriteBackService {
 
         let fileURL = outputURL(for: meeting, root: root)
 
+        // Resolve the cleaned transcript text. Three sources, in order:
+        //   1. The persisted CleanedTranscript blob (preferred — matches UI)
+        //   2. An on-the-fly stitch of the raw segments (no AI, no DB read)
+        //   3. Empty (no transcript at all)
+        let cleanedText = await resolveCleanedText(meetingId: meeting.id, fallback: transcript)
+
         do {
-            // Create parent directories
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
 
-            let content = buildMarkdown(meeting: meeting, summary: summary, transcript: transcript)
+            let content = buildMarkdown(meeting: meeting, summary: summary, cleanedText: cleanedText)
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
             logger.info("KBWriteBack: wrote \(fileURL.path, privacy: .public)")
 
-            // Re-index just this file so it's immediately searchable.
             await KnowledgeBaseService.shared.reindexFile(url: fileURL)
         } catch {
             logger.error("KBWriteBack: failed to write \(fileURL.path, privacy: .public): \(error.localizedDescription)")
         }
+    }
+
+    /// Look up the cleaned blob; if absent, synthesize one from raw segments
+    /// so the KB always gets a readable transcript even when cleanup hasn't
+    /// run yet (e.g. user pushes mid-recording, or AI cleanup is queued).
+    private func resolveCleanedText(meetingId: String, fallback: [Transcript]) async -> String {
+        if let cleaned = try? await CleanedTranscriptRepository().cleanedTranscript(meetingId: meetingId),
+           !cleaned.text.isEmpty {
+            return cleaned.text
+        }
+        guard !fallback.isEmpty else { return "" }
+        let stitched = TranscriptCleanupService.stitch(fallback)
+        return TranscriptCleanupService.renderMarkdown(stitched)
     }
 
     // MARK: - Path
@@ -80,7 +102,7 @@ final class KBWriteBackService {
     private func buildMarkdown(
         meeting: Meeting,
         summary: String,
-        transcript: [Transcript]
+        cleanedText: String
     ) -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .long
@@ -115,17 +137,14 @@ final class KBWriteBackService {
             ]
         }
 
-        if !transcript.isEmpty {
+        let trimmedTranscript = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTranscript.isEmpty {
             lines += [
                 "## Transcript",
                 "",
+                trimmedTranscript,
+                "",
             ]
-            for seg in transcript {
-                let ts = seg.formattedTimestamp
-                let speaker = seg.speakerLabel ?? "Speaker"
-                lines.append("**[\(ts)] \(speaker):** \(seg.text)")
-            }
-            lines.append("")
         }
 
         return lines.joined(separator: "\n")

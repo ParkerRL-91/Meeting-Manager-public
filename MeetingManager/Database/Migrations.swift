@@ -685,5 +685,18 @@ enum Migrations {
                 t.add(column: "selectedAppleCalendarIds", .text)
             }
         }
+
+        // Cleaned per-meeting transcript blob. The raw per-segment transcript
+        // rows are preserved untouched (search/action-items/voice-profiles
+        // depend on them); this table stores the post-processed readable
+        // version that the UI shows by default and that KB write-back exports.
+        migrator.registerMigration("v30-cleaned-transcript") { db in
+            try db.create(table: "cleanedTranscript") { t in
+                t.column("meetingId", .text).primaryKey()
+                t.column("text", .text).notNull()
+                t.column("generatedAt", .datetime).notNull()
+                t.column("method", .text).notNull()
+            }
+        }
     }
 }

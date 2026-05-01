@@ -52,7 +52,19 @@ struct SettingsView: View {
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(10)
         }
-        .frame(width: 750, height: 500)
+        // Default to a comfortably wide window. Settings tabs vary in
+        // density: Prompts has a 3-pane layout (list / editor / reference)
+        // which was cramped at 750×500 — buttons truncated to "Reset to..."
+        // and the reference pane clipped tab labels at the top.
+        // min sizes let the user shrink, ideal gives a sensible default.
+        .frame(
+            minWidth: 800,
+            idealWidth: 1100,
+            maxWidth: .infinity,
+            minHeight: 560,
+            idealHeight: 760,
+            maxHeight: .infinity
+        )
         .onChange(of: appState.pendingSettingsTab) { _, tab in
             if let tab {
                 selectedTab = tab

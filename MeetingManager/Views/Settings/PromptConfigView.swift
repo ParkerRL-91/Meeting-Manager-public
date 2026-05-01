@@ -251,36 +251,47 @@ struct PromptConfigView: View {
     }
 
     private var editorHeader: some View {
-        HStack {
+        // Layout: title block on the left (allowed to shrink — Text uses
+        // .lineLimit so it truncates instead of pushing buttons off-screen).
+        // Buttons on the right at fixed intrinsic size with .layoutPriority
+        // so they never get truncated themselves.
+        HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(selectedTitle)
                     .font(.title3.bold())
                     .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
 
                 if let desc = selectedDescription {
                     Text(desc)
                         .font(.caption)
                         .foregroundStyle(Color.appTextSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer()
-
-            if selection == .summaryPrompt {
-                Button("Reset to Default") {
-                    editingTemplate = DefaultPrompts.meetingSummary
-                    hasChanges = true
+            HStack(spacing: 8) {
+                if selection == .summaryPrompt {
+                    Button("Reset to Default") {
+                        editingTemplate = DefaultPrompts.meetingSummary
+                        hasChanges = true
+                    }
+                    .buttonStyle(.bordered)
+                    .fixedSize()
                 }
-                .buttonStyle(.bordered)
-            }
 
-            if !isCurrentSelectionBuiltIn {
-                Button("Save") {
-                    saveCurrentPrompt()
+                if !isCurrentSelectionBuiltIn {
+                    Button("Save") {
+                        saveCurrentPrompt()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!hasChanges)
+                    .fixedSize()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!hasChanges)
             }
+            .layoutPriority(1)
         }
     }
 

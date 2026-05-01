@@ -12,7 +12,6 @@ struct LiveMeetingView: View {
     @State private var showChat = false
     @State private var showAttendeePopover = false
 
-    @State private var contextMeetings: [RelevantMeeting] = []
     @State private var showContextBrief = true
     @State private var carriedItems: [ActionItem] = []
     @State private var showOpenItems = true
@@ -93,17 +92,18 @@ struct LiveMeetingView: View {
             }
         }
         // Re-check context when enrichment completes in the background so the
-        // brief appears mid-meeting if it wasn't ready at start time.
+        // brief appears mid-meeting if it wasn't ready at start time. We
+        // re-fetch the meeting so its contextJSON updates and the
+        // RelatedMeetingsSection re-renders with the freshly synthesized brief.
         .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
             let justFinished = tasks.contains {
                 $0.type == .contextEnrichment && $0.meetingId == meetingId && $0.status == .completed
             }
-            if justFinished && contextMeetings.isEmpty {
+            if justFinished {
                 Task {
                     let updated = try? await appState.meetingRepository.find(id: meetingId)
-                    let found = RelevantMeetingService.parseContext(from: updated?.contextJSON)
-                    if !found.isEmpty {
-                        contextMeetings = found
+                    if let updated {
+                        meeting = updated
                         showContextBrief = true
                     }
                 }
@@ -151,14 +151,20 @@ struct LiveMeetingView: View {
                 .padding(.horizontal, 28)
                 .padding(.bottom, 20)
 
-                // Context brief — shown at the top so it's the first thing you
-                // see when the meeting starts. Pre-computed 30 min before by
-                // preComputePrepContext(); if still loading it appears once ready.
-                if !contextMeetings.isEmpty && showContextBrief {
-                    ContextBriefView(
-                        meetings: contextMeetings,
-                        participantCompany: extractCompany(),
-                        onDismiss: { showContextBrief = false },
+                // Context brief — same rich synthesized brief shown on the
+                // post-meeting detail page (RelatedMeetingsSection). Pre-
+                // computed ~30 min before by preComputePrepContext; if still
+                // loading at recording start, the .onChange watcher below
+                // re-renders once enrichment completes.
+                //
+                // Previously this used a custom ContextBriefView that only
+                // showed flat meeting excerpts — visually inconsistent with
+                // the post-meeting view and missed the LLM-synthesized
+                // sections (Why this meeting exists / What you should know /
+                // Likely discussion points / Open commitments).
+                if let json = meeting?.contextJSON, !json.isEmpty, showContextBrief {
+                    RelatedMeetingsSection(
+                        contextJSON: json,
                         onSelectMeeting: { id in
                             appState.selectedMeetingId = id
                             appState.sidebarDestination = .meetings
@@ -201,27 +207,20 @@ struct LiveMeetingView: View {
 
     // MARK: - Context Loading
 
+    /// If the meeting was started ad-hoc (no pre-meeting enrichment ran)
+    /// we kick enrichment now so the brief still appears mid-meeting once
+    /// the LLM finishes synthesizing. The .onChange task-queue watcher
+    /// re-fetches the meeting when enrichment completes.
     private func loadContext() {
         guard let meeting else { return }
-        contextMeetings = RelevantMeetingService.parseContext(from: meeting.contextJSON)
-        if contextMeetings.isEmpty && !meeting.participantList.isEmpty {
+        if (meeting.contextJSON ?? "").isEmpty && !meeting.participantList.isEmpty {
             Task {
                 let service = RelevantMeetingService(database: AppDatabase.shared)
                 try? await service.enrichContext(meetingId: meetingId)
                 let updated = try? await appState.meetingRepository.find(id: meetingId)
-                contextMeetings = RelevantMeetingService.parseContext(from: updated?.contextJSON)
+                if let updated { self.meeting = updated }
             }
         }
-    }
-
-    private func extractCompany() -> String? {
-        // Use participant names for the context header rather than title heuristics,
-        // which produce nonsensical results like "You last met with with recently".
-        guard let meeting else { return nil }
-        let participants = meeting.participantList
-        if participants.count == 1 { return participants.first }
-        if participants.count > 1 { return "\(participants[0]) and others" }
-        return nil
     }
 
     private func saveTitleIfChanged() {
@@ -531,96 +530,6 @@ private struct AttendeePopover: View {
         }
         .padding(14)
         .frame(minWidth: 200)
-    }
-}
-
-// MARK: - Context Brief (related past meetings)
-
-private struct ContextBriefView: View {
-    let meetings: [RelevantMeeting]
-    let participantCompany: String?
-    var onDismiss: () -> Void
-    var onSelectMeeting: (String) -> Void
-    @State private var isExpanded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Header
-            HStack {
-                Text(headerText)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextTertiary)
-                Spacer()
-                Button {
-                    onDismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextTertiary)
-                }
-                .buttonStyle(.plain)
-            }
-
-            // Meeting excerpts
-            ForEach(Array(displayedMeetings.enumerated()), id: \.element.meetingId) { _, related in
-                Button {
-                    onSelectMeeting(related.meetingId)
-                } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Text("From")
-                                .foregroundStyle(Color.appTextTertiary)
-                            Text(related.title)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Color.appTextPrimary)
-                            Text("(\(related.date.formatted(.relative(presentation: .named))))")
-                                .foregroundStyle(Color.appTextTertiary)
-                        }
-                        .font(.subheadline)
-
-                        Text(related.summaryExcerpt)
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
-                            .lineLimit(isExpanded ? nil : 2)
-                    }
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            // Show more/less + sources
-            HStack {
-                if meetings.count > 2 || isExpanded {
-                    Button(isExpanded ? "Show less" : "Show more") {
-                        withAnimation { isExpanded.toggle() }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextTertiary)
-                    .buttonStyle(.plain)
-                }
-
-                Spacer()
-
-                Text("\(meetings.count) Sources")
-                    .font(.caption)
-                    .foregroundStyle(Color.appTextTertiary)
-            }
-        }
-        .padding(16)
-        .background(Color.appSurface.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var headerText: String {
-        if let company = participantCompany {
-            return "You last met with \(company) recently"
-        }
-        return "Related meetings"
-    }
-
-    private var displayedMeetings: [RelevantMeeting] {
-        isExpanded ? meetings : Array(meetings.prefix(2))
     }
 }
 

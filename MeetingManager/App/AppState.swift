@@ -518,6 +518,15 @@ final class AppState {
         // Wire the KB service back to the queue so enqueueReindex() routes through it.
         KnowledgeBaseService.shared.taskQueue = taskQueueManager
 
+        // Transcript cleanup: stitch + best-effort AI pass.
+        // Runs after batch transcription completes (enqueued from the
+        // transcription handler). Best-effort AI — falls back to
+        // stitch-only when no model is configured or the call fails.
+        taskQueueManager.transcriptCleanupHandler = { [weak self] meetingId in
+            guard let self else { return }
+            await self.runTranscriptCleanup(meetingId: meetingId)
+        }
+
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
         Task {
             await taskQueueManager.startUp()
@@ -1509,6 +1518,44 @@ final class AppState {
         updated.setSpeakerMap(mapping)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
+    }
+
+    /// Run the transcript-cleanup pipeline (stitch + best-effort AI pass)
+    /// for one meeting and persist the result. Called from the TaskQueue
+    /// after batch transcription completes. Idempotent — safe to call
+    /// multiple times; replaces the previous cleaned blob.
+    func runTranscriptCleanup(meetingId: String) async {
+        let segments = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 100_000)) ?? []
+        guard !segments.isEmpty else {
+            Logger.ai.info("[TranscriptCleanup] no segments for \(meetingId, privacy: .public) — skipping")
+            return
+        }
+
+        // Best-effort AI: hand the LLM in if one is configured. Service
+        // gracefully falls back to stitch-only when nil or when the call
+        // throws.
+        let textGen = await makeTextGenerator()
+        let (text, method) = await TranscriptCleanupService.clean(
+            transcripts: segments,
+            textGenerator: textGen
+        )
+        guard !text.isEmpty else {
+            Logger.ai.warning("[TranscriptCleanup] empty output for \(meetingId, privacy: .public) — not persisting")
+            return
+        }
+
+        let cleaned = CleanedTranscript(
+            meetingId: meetingId,
+            text: text,
+            generatedAt: Date(),
+            method: method
+        )
+        do {
+            try await CleanedTranscriptRepository(database: database).save(cleaned)
+            Logger.ai.info("[TranscriptCleanup] saved for \(meetingId, privacy: .public) method=\(method, privacy: .public)")
+        } catch {
+            Logger.ai.error("[TranscriptCleanup] save failed for \(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Learn voice profiles from a meeting's *confirmed* speakers. Walks the
