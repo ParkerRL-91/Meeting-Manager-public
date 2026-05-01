@@ -33,6 +33,8 @@ final class TaskQueueManager {
     var contextEnrichmentHandler: ((String) async throws -> Void)?
     /// Called after a summary task completes — meetingId is passed so a notification can be sent.
     var summaryCompletedHandler: ((String) async -> Void)?
+    /// Knowledge Base index handler — no meeting context needed.
+    var knowledgeBaseIndexHandler: (() async throws -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -360,6 +362,12 @@ final class TaskQueueManager {
                 throw TaskQueueError.noHandler("contextEnrichment")
             }
             try await handler(task.meetingId)
+
+        case .knowledgeBaseIndex:
+            guard let handler = knowledgeBaseIndexHandler else {
+                throw TaskQueueError.noHandler("knowledgeBaseIndex")
+            }
+            try await handler()
         }
     }
 

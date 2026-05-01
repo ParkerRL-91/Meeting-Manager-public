@@ -187,6 +187,7 @@ fi
 # Step 4: Sign
 # ──────────────────────────────────────────────────
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application}"
+ENTITLEMENTS="${REPO_DIR}/MeetingManager/Resources/MeetingManager.entitlements"
 echo "Signing with '${SIGN_IDENTITY}'..."
 
 # Hardened runtime is required for notarization but breaks signature validation
@@ -211,14 +212,21 @@ if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
         "${FRAMEWORKS_DIR}/Sparkle.framework" 2>/dev/null || true
 fi
 
-# Sign the binary
+# Sign the binary (with entitlements so microphone/screen permissions aren't stripped)
+ENTITLEMENTS_OPT=""
+if [[ -f "${ENTITLEMENTS}" ]]; then
+    ENTITLEMENTS_OPT="--entitlements ${ENTITLEMENTS}"
+fi
+
 codesign --force ${RUNTIME_OPTS} \
     --sign "${SIGN_IDENTITY}" \
+    ${ENTITLEMENTS_OPT} \
     "${MACOS_DIR}/${EXECUTABLE}"
 
 # Sign the app bundle
 codesign --force --deep ${RUNTIME_OPTS} \
     --sign "${SIGN_IDENTITY}" \
+    ${ENTITLEMENTS_OPT} \
     "${APP_BUNDLE}"
 
 echo "Signed."

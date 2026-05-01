@@ -91,6 +91,10 @@ final class AppState {
     /// Updated when the Daily Brief view loads. Used for the sidebar badge.
     var dailyBriefMeetingsNeedingPrep: Int = 0
 
+    /// Persisted Ask Anything conversation. Stored here so the history survives
+    /// the user navigating away from GlobalChatView and returning.
+    var globalChatMessages: [GlobalChatMessage] = []
+
     /// When set, SettingsView will switch to this tab index and clear the value.
     /// Tab indices: 0 General, 1 Audio, 2 Transcription, 3 Calendar, 4 AI(Claude), 5 AI(Local).
     var pendingSettingsTab: Int?
@@ -451,6 +455,18 @@ final class AppState {
             let meeting = try? await self.meetingRepository.find(id: meetingId)
             let title = meeting?.title ?? "Meeting"
             self.sendSummaryReadyNotification(meetingId: meetingId, meetingTitle: title)
+
+            // Write summary + transcript back to KB folder if enabled
+            if self.settings.kbWriteBack, let meeting {
+                let summary = try? await self.summaryRepository.latestSummary(meetingId: meetingId)
+                let segments: [Transcript] = (try? await self.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+                await KBWriteBackService.shared.writeMeeting(
+                    meeting,
+                    summary: summary?.summaryText ?? "",
+                    transcript: segments
+                )
+            }
+
             if self.settings.autoFollowUpEmail {
                 let metadata = "{\"recipeId\":\"builtin-follow-up-email\"}"
                 await self.taskQueueManager.enqueue(
@@ -461,6 +477,13 @@ final class AppState {
                 )
             }
         }
+
+        taskQueueManager.knowledgeBaseIndexHandler = {
+            await KnowledgeBaseService.shared.reindex()
+        }
+
+        // Wire the KB service back to the queue so enqueueReindex() routes through it.
+        KnowledgeBaseService.shared.taskQueue = taskQueueManager
 
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
         Task {

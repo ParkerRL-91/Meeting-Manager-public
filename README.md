@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v3.2.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.2.0) — macOS 14.4+
+[**MeetingManager-v3.7.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.7.0) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -28,6 +28,34 @@ Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may 
 xattr -cr "/Applications/Meeting Manager.app"
 ```
 This removes the quarantine flag so the app opens without warnings.
+
+---
+
+## What's New in v3.7.0 — Knowledge Base & Smart Context
+
+A major upgrade to the AI context layer — every AI feature now draws on your personal Knowledge Base, conversations persist across sessions, and the KB indexer runs off the main thread so it never blocks the UI.
+
+### Knowledge Base
+- **Full subfolder indexing** — fixed enumeration bug that stopped recursion into subdirectories (e.g. Obsidian vaults); all nested `.md`/`.txt`/`.html`/`.docx` files are now indexed
+- **Background indexing** — file I/O moved off the main actor; indexing 500+ files no longer causes UI stuttering
+- **Queued indexing** — KB reindex is now routed through the TaskQueue with priority 9, same as other AI tasks
+- **KB Write-back** — new Settings toggle to auto-write meeting summaries and transcripts back into the KB as `Meeting Notes/YYYY/MM-Month/DD/Title.md`; newly written files are immediately re-indexed and searchable
+- **Smarter FTS queries** — participant list capped at 3 names to improve FTS precision and reduce noise
+
+### Ask Anything
+- **Persistent conversation** — the Ask Anything chat history now survives navigation; returning to the tab picks up exactly where you left off
+- **KB-aware responses** — queries now retrieve relevant KB excerpts and inject them into context alongside meeting notes
+- **Markdown rendering** — AI responses display with full heading/bullet/bold formatting instead of plain text
+- **Improved input bar** — always-visible pill input at the bottom with stronger contrast
+
+### AI Chat (In-Meeting & Daily Brief)
+- **KB context in chat** — the in-meeting chat sidebar now retrieves KB excerpts relevant to the user's question
+- **Daily Brief styling** — AI briefing section now uses a two-tone card with a header bar; headings render in white/grey instead of purple
+- **Stronger prompts** — all AI prompts updated to enforce structured Markdown output (headings, bullets, bold); no more walls of prose
+
+### Performance
+- **MarkdownRenderer** no longer re-parses on every layout pass; cached via `@State` + `.task(id:)` — resize is now instant
+- **KB retrieval** limits to 5 chunks per query with a 3-participant FTS query cap
 
 ---
 

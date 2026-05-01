@@ -127,17 +127,23 @@ struct MeetingChatView: View {
                     .font(.caption2)
                     .foregroundStyle(Color.appTextTertiary)
 
-                Text(message.content)
-                    .font(.body)
-                    .foregroundStyle(Color.appTextPrimary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        message.isUser
-                            ? Color.appAccent.opacity(0.2)
-                            : Color.appSurface
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                Group {
+                    if message.isUser {
+                        Text(message.content)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.appTextPrimary)
+                    } else {
+                        MarkdownRenderer(text: message.content, baseFontSize: 14)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    message.isUser
+                        ? Color.appAccent.opacity(0.2)
+                        : Color.appSurface
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             }
 
             if message.isAssistant { Spacer(minLength: 40) }

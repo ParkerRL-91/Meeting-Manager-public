@@ -357,28 +357,37 @@ struct DailyBriefView: View {
     // MARK: - AI Brief Section
 
     private func aiBriefSection(text: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("AI Briefing", systemImage: "sparkles")
-                    .font(.footnote.weight(.semibold))
+        VStack(alignment: .leading, spacing: 0) {
+            // Card header bar — matches MeetingPrepCardView's header style
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appTextTertiary)
+                Text("AI Briefing")
+                    .font(.system(size: 10.5, weight: .bold))
                     .foregroundStyle(Color.appTextTertiary)
                     .textCase(.uppercase)
-                    .tracking(0.8)
-
+                    .tracking(0.7)
                 Spacer()
-
                 CopyButton(text: { text }, label: "Copy")
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.appSurfaceSecondary)
 
-            Text(text)
-                .font(.body)
-                .foregroundStyle(Color.appTextPrimary)
-                .lineSpacing(4)
+            Divider().background(Color.appSeparator)
+
+            // Content
+            MarkdownRenderer(text: text, baseFontSize: 14, headingStyle: .neutral)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
+                .padding(16)
                 .background(Color.appSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
         }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.appBorderStrong, lineWidth: 1)
+        )
     }
 
     // MARK: - Data Loading
@@ -399,7 +408,7 @@ struct DailyBriefView: View {
         isLoading = false
     }
 
-    // MARK: - AI Generation (T-017)
+    // MARK: - AI Generation
 
     @MainActor
     private func generateAIBrief() async {
@@ -408,10 +417,15 @@ struct DailyBriefView: View {
         aiError = nil
 
         let prompt = buildPrompt(for: brief)
-        let system = "You are a meeting preparation assistant. Write clear, concise briefings."
+        let system = """
+            You are a chief-of-staff preparing a morning briefing. \
+            Respond in clean Markdown. Use ## for section headings, \
+            bullet lists for items, and **bold** for names and key phrases. \
+            Never use raw asterisks or hashes in prose. Be direct and specific — \
+            no pleasantries, no filler.
+            """
 
         do {
-            // Try Claude first (if API key exists), fall back to Ollama
             let hasClaudeKey: Bool
             if let apiKey = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
                !apiKey.isEmpty {
@@ -446,58 +460,88 @@ struct DailyBriefView: View {
 
     private func buildPrompt(for brief: DailyBrief) -> String {
         let dateStr = date.formatted(date: .long, time: .omitted)
-        var lines: [String] = [
-            "You are a meeting preparation assistant. Write a 3-5 sentence briefing for today.",
-            "",
-            "Today's date: \(dateStr)",
-            "Today's meetings:"
-        ]
-
         let timeFormatter = DateFormatter()
         timeFormatter.dateFormat = "h:mm a"
 
-        for (index, entry) in brief.meetings.enumerated() {
+        var lines: [String] = [
+            "## Today: \(dateStr)",
+            "",
+            "### Schedule",
+        ]
+
+        for entry in brief.meetings {
             let meeting = entry.meeting
             let timeStr: String
-            if let start = meeting.scheduledStartDate ?? meeting.startDate {
+            if let start = meeting.scheduledStartDate ?? meeting.startDate,
+               let end = meeting.scheduledEndDate {
+                timeStr = "\(timeFormatter.string(from: start))–\(timeFormatter.string(from: end))"
+            } else if let start = meeting.scheduledStartDate ?? meeting.startDate {
                 timeStr = timeFormatter.string(from: start)
             } else {
                 timeStr = "Time TBD"
             }
 
-            let participantCount = entry.prepBrief.participants.count
-            let participantNote = participantCount == 1 ? "1 participant" : "\(participantCount) participants"
-
-            let contextNote: String
+            let participants = entry.prepBrief.participants.prefix(4).joined(separator: ", ")
+            var row = "- **\(timeStr)** — \(meeting.title)"
+            if !participants.isEmpty { row += " · \(participants)" }
             switch entry.category {
             case .carryOver:
-                let itemCount = entry.prepBrief.openActionItems.count
-                contextNote = "carry-over: \(itemCount) open \(itemCount == 1 ? "item" : "items") from last time"
+                let n = entry.prepBrief.openActionItems.count
+                row += " ⚠️ \(n) open item\(n == 1 ? "" : "s")"
             case .followUp:
-                contextNote = "follow-up to a previous meeting"
+                row += " (follow-up)"
             case .new:
-                contextNote = "new conversation"
+                break
             }
+            lines.append(row)
 
-            lines.append("\(index + 1). \(timeStr) - \(meeting.title) (\(participantNote)) - \(contextNote)")
+            // Prior context excerpt
+            if let prev = entry.prepBrief.previousSession {
+                let excerpt = prev.summaryExcerpt?.prefix(120) ?? ""
+                if !excerpt.isEmpty {
+                    lines.append("  - *Last time (\(prev.date.formatted(date: .abbreviated, time: .omitted))): \(excerpt)…*")
+                }
+            }
         }
 
         if brief.totalOpenItems > 0 {
             lines.append("")
-            lines.append("Open action items:")
+            lines.append("### Open Action Items")
             for entry in brief.meetings {
-                for item in entry.prepBrief.openActionItems.prefix(5) {
+                for item in entry.prepBrief.openActionItems.prefix(4) {
                     var itemLine = "- "
-                    if let assignee = item.assignee { itemLine += "\(assignee): " }
+                    if let assignee = item.assignee { itemLine += "**\(assignee)** — " }
                     itemLine += item.title
-                    itemLine += " (from \(entry.meeting.title))"
+                    itemLine += " *(from \(entry.meeting.title))*"
                     lines.append(itemLine)
                 }
             }
         }
 
-        lines.append("")
-        lines.append("Write a concise briefing highlighting what needs attention today.")
+        lines.append(contentsOf: [
+            "",
+            "---",
+            "",
+            "Write a daily brief in **exactly this structure**, in Markdown:",
+            "",
+            "## One-line read",
+            "A single sentence: the most important thing about today.",
+            "",
+            "## What needs attention",
+            "2–4 bullets — only items that require action or prep before a meeting.",
+            "Each bullet names the meeting, the issue, and what to do about it.",
+            "Skip entirely if there are no carry-over items.",
+            "",
+            "## Meeting-by-meeting",
+            "One tight bullet per meeting: time, title, and the single most useful thing to know walking in.",
+            "If there's no prior context, say \"First conversation — no prior context.\"",
+            "",
+            "## Day-end goals",
+            "2–3 bullets on what a successful day looks like by 5pm, given today's schedule.",
+            "",
+            "Rules: be specific, use exact names from the schedule, no filler phrases.",
+            "Length: 150–300 words total."
+        ])
 
         return lines.joined(separator: "\n")
     }

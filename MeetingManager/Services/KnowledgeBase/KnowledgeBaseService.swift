@@ -68,8 +68,26 @@ final class KnowledgeBaseService {
     func setRoot(url: URL) async {
         UserDefaults.standard.set(url.path, forKey: folderPathKey)
         startWatching(url: url)
-        await reindex()
+        await enqueueReindex()
     }
+
+    /// Enqueue a KB index task through the TaskQueueManager (preferred call site).
+    /// Falls back to direct `reindex()` if the queue is not yet wired up.
+    func enqueueReindex() async {
+        if let queue = taskQueue {
+            await queue.enqueue(
+                type: .knowledgeBaseIndex,
+                meetingId: "__kb_index__",
+                priority: 9,
+                metadata: nil
+            )
+        } else {
+            await reindex()
+        }
+    }
+
+    /// Set by AppState after the queue is initialised.
+    weak var taskQueue: TaskQueueManager?
 
     /// Clear the configured KB and wipe the index.
     func clearRoot() async {
@@ -95,18 +113,30 @@ final class KnowledgeBaseService {
         let urls = enumerateSupportedFiles(root: root)
         logger.info("KB reindex: \(urls.count) supported file(s) found under \(root.path, privacy: .public)")
 
+        // Parse all files off the main actor so file I/O doesn't block the UI.
+        // KBDocument is a value type (Sendable); URL, Int are also Sendable.
+        let maxChars = maxChunkChars
+        let fileResults: [(path: String, chunks: [KBDocument])] = await Task.detached(priority: .utility) {
+            var out: [(String, [KBDocument])] = []
+            for url in urls {
+                if let chunks = try? KnowledgeBaseService.parseFileSync(url: url, rootURL: root, maxChunkChars: maxChars),
+                   !chunks.isEmpty {
+                    out.append((url.path, chunks))
+                }
+            }
+            return out
+        }.value
+
+        // Persist chunks back on the main actor (GRDB operations).
         var indexedPaths: Set<String> = []
         var totalChunks = 0
-        for url in urls {
+        for (path, chunks) in fileResults {
             do {
-                let chunks = try await chunksForFile(url: url, rootURL: root)
-                if !chunks.isEmpty {
-                    try await repo.replaceChunks(filePath: url.path, with: chunks)
-                    indexedPaths.insert(url.path)
-                    totalChunks += chunks.count
-                }
+                try await repo.replaceChunks(filePath: path, with: chunks)
+                indexedPaths.insert(path)
+                totalChunks += chunks.count
             } catch {
-                logger.error("KB index: failed for \(url.path, privacy: .public): \(error.localizedDescription)")
+                logger.error("KB index: failed to save \(path, privacy: .public): \(error.localizedDescription)")
             }
         }
 
@@ -119,8 +149,8 @@ final class KnowledgeBaseService {
         logger.info("KB reindex complete: \(indexedPaths.count) file(s), \(totalChunks) chunk(s)")
     }
 
-    /// Re-index a single file (used by the FSEvents watcher).
-    private func reindexFile(url: URL) async {
+    /// Re-index a single file. Used by FSEvents watcher and KBWriteBackService.
+    func reindexFile(url: URL) async {
         guard let root = rootURL else { return }
         guard supportedExtensions.contains(url.pathExtension.lowercased()) else { return }
         do {
@@ -151,9 +181,16 @@ final class KnowledgeBaseService {
         ) else { return [] }
 
         for case let fileURL as URL in enumerator {
-            // Skip hidden files (.DS_Store, .git, dotfile dirs)
             let name = fileURL.lastPathComponent
-            if name.hasPrefix(".") { enumerator.skipDescendants(); continue }
+            if name.hasPrefix(".") {
+                // Only skip descendants for hidden DIRECTORIES (e.g. .git, .obsidian).
+                // Calling skipDescendants() on a file (like .DS_Store) incorrectly
+                // causes the enumerator to skip the remaining items in the parent
+                // directory, which was preventing recursion into subfolders.
+                let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir { enumerator.skipDescendants() }
+                continue
+            }
 
             guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true else { continue }
@@ -165,55 +202,46 @@ final class KnowledgeBaseService {
 
     // MARK: - Parsing + chunking
 
-    /// Reads the file, extracts plain text by format, splits into chunks.
-    /// The result is fully-formed `KBDocument` rows ready to insert.
+    /// Instance wrapper used by `reindexFile` (single-file path, already async).
     private func chunksForFile(url: URL, rootURL: URL) async throws -> [KBDocument] {
+        try Self.parseFileSync(url: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
+    }
+
+    /// Static sync version — safe to call from `Task.detached` (no actor capture).
+    /// Reads file content synchronously; call only from a non-main-actor context.
+    nonisolated private static func parseFileSync(url: URL, rootURL: URL, maxChunkChars: Int) throws -> [KBDocument] {
         let ext = url.pathExtension.lowercased()
-        let plainText: String
         switch ext {
         case "md", "markdown":
-            plainText = try String(contentsOf: url, encoding: .utf8)
-            return chunkMarkdown(text: plainText, fileURL: url, rootURL: rootURL)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            return chunkMarkdown(text: text, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
         case "txt", "text":
-            plainText = try String(contentsOf: url, encoding: .utf8)
-            return chunkPlainText(text: plainText, fileURL: url, rootURL: rootURL)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            return chunkPlainText(text: text, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
         case "html", "htm":
-            plainText = try extractHTML(url: url)
-            return chunkPlainText(text: plainText, fileURL: url, rootURL: rootURL)
+            let data = try Data(contentsOf: url)
+            let opts: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+                .documentType: NSAttributedString.DocumentType.html,
+                .characterEncoding: String.Encoding.utf8.rawValue,
+            ]
+            let attr = try NSAttributedString(data: data, options: opts, documentAttributes: nil)
+            return chunkPlainText(text: attr.string, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
         case "docx":
-            plainText = try extractDocx(url: url)
-            return chunkPlainText(text: plainText, fileURL: url, rootURL: rootURL)
+            let data = try Data(contentsOf: url)
+            let opts: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+                .documentType: NSAttributedString.DocumentType.officeOpenXML,
+            ]
+            let attr = try NSAttributedString(data: data, options: opts, documentAttributes: nil)
+            return chunkPlainText(text: attr.string, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
         default:
             return []
         }
     }
 
-    /// Use NSAttributedString's HTML reader (available on macOS) to strip
-    /// markup and return readable plain text.
-    private func extractHTML(url: URL) throws -> String {
-        let data = try Data(contentsOf: url)
-        let opts: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.html,
-            .characterEncoding: String.Encoding.utf8.rawValue,
-        ]
-        let attr = try NSAttributedString(data: data, options: opts, documentAttributes: nil)
-        return attr.string
-    }
-
-    /// Same trick for `.docx` — Office Open XML has a built-in reader.
-    private func extractDocx(url: URL) throws -> String {
-        let data = try Data(contentsOf: url)
-        let opts: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.officeOpenXML,
-        ]
-        let attr = try NSAttributedString(data: data, options: opts, documentAttributes: nil)
-        return attr.string
-    }
-
     /// Split Markdown on `# ` / `## ` / `### ` headings. Each section is one
     /// chunk; the heading is captured separately so it can boost FTS scoring.
     /// Sections that are too long get further split on blank lines.
-    private func chunkMarkdown(text: String, fileURL: URL, rootURL: URL) -> [KBDocument] {
+    nonisolated private static func chunkMarkdown(text: String, fileURL: URL, rootURL: URL, maxChunkChars: Int) -> [KBDocument] {
         let relPath = relativePath(of: fileURL, root: rootURL)
         let fileName = fileURL.lastPathComponent
         let now = Date()
@@ -243,14 +271,14 @@ final class KnowledgeBaseService {
 
         // If the document had no headings, fall back to plain-text chunking.
         if sections.count == 1 && sections.first?.heading == nil {
-            return chunkPlainText(text: text, fileURL: fileURL, rootURL: rootURL)
+            return chunkPlainText(text: text, fileURL: fileURL, rootURL: rootURL, maxChunkChars: maxChunkChars)
         }
 
         var chunks: [KBDocument] = []
         var idx = 0
         for (heading, body) in sections {
             // Long sections still get further split on blank lines.
-            for piece in splitIfTooLong(body) {
+            for piece in splitIfTooLong(body, maxChunkChars: maxChunkChars) {
                 chunks.append(KBDocument(
                     id: nil,
                     filePath: fileURL.path,
@@ -269,7 +297,7 @@ final class KnowledgeBaseService {
 
     /// Plain-text + .txt + extracted HTML/docx all flow through here. Splits
     /// on blank lines and caps chunk size at `maxChunkChars`.
-    private func chunkPlainText(text: String, fileURL: URL, rootURL: URL) -> [KBDocument] {
+    nonisolated private static func chunkPlainText(text: String, fileURL: URL, rootURL: URL, maxChunkChars: Int) -> [KBDocument] {
         let relPath = relativePath(of: fileURL, root: rootURL)
         let fileName = fileURL.lastPathComponent
         let now = Date()
@@ -297,7 +325,7 @@ final class KnowledgeBaseService {
         // Final pass: any single chunk that's *still* too long gets hard-split.
         var expanded: [String] = []
         for c in chunks {
-            expanded.append(contentsOf: splitIfTooLong(c))
+            expanded.append(contentsOf: splitIfTooLong(c, maxChunkChars: maxChunkChars))
         }
 
         return expanded.enumerated().map { idx, body in
@@ -314,7 +342,7 @@ final class KnowledgeBaseService {
         }
     }
 
-    private func splitIfTooLong(_ s: String) -> [String] {
+    nonisolated private static func splitIfTooLong(_ s: String, maxChunkChars: Int) -> [String] {
         guard s.count > maxChunkChars else { return [s] }
         var pieces: [String] = []
         var i = s.startIndex
@@ -326,7 +354,7 @@ final class KnowledgeBaseService {
         return pieces
     }
 
-    private func relativePath(of url: URL, root: URL) -> String {
+    nonisolated private static func relativePath(of url: URL, root: URL) -> String {
         let full = url.path
         let prefix = root.path
         if full.hasPrefix(prefix) {
@@ -379,7 +407,7 @@ final class KnowledgeBaseService {
         debounceTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
-            await self?.reindex()
+            await self?.enqueueReindex()
         }
     }
 
@@ -395,7 +423,8 @@ final class KnowledgeBaseService {
 
         var queryParts: [String] = []
         queryParts.append(meeting.title)
-        queryParts.append(contentsOf: meeting.participantList)
+        // Limit to 3 participants — more tokens reduce FTS precision without adding value.
+        queryParts.append(contentsOf: meeting.participantList.prefix(3))
         if let extra = additionalQuery, !extra.isEmpty { queryParts.append(extra) }
 
         let query = queryParts
@@ -403,7 +432,15 @@ final class KnowledgeBaseService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return "" }
 
-        let hits = (try? await repo.search(query: query, limit: 6)) ?? []
+        let hits = (try? await repo.search(query: query, limit: 5)) ?? []
+        return Self.formatChunks(hits)
+    }
+
+    /// Free-form retrieval — used by GlobalChatView where there is no specific
+    /// meeting to anchor the query. Searches across all indexed KB documents.
+    func retrieveContext(query: String) async -> String {
+        guard rootURL != nil, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        let hits = (try? await repo.search(query: query, limit: 5)) ?? []
         return Self.formatChunks(hits)
     }
 

@@ -100,8 +100,16 @@ final class MeetingChatService {
 
         // 3. Build prompts
         let systemPrompt = """
-            You are a helpful meeting assistant. Based on the meeting transcript below, \
-            answer the user's question concisely.
+            You are a helpful meeting assistant. Answer questions about this meeting \
+            based strictly on the transcript and context below.
+
+            Formatting rules — always follow these:
+            - Respond in Markdown.
+            - Use bullet lists for facts, names, action items, and decisions.
+            - Use **bold** for names, key phrases, and decisions.
+            - Use ## headings when an answer has multiple distinct parts.
+            - Keep answers concise — 100–250 words unless depth is clearly needed.
+            - Never write walls of unbroken prose.
 
             Transcript:
             \(transcript)\(kbBlock)

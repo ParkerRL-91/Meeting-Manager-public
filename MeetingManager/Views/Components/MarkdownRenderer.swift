@@ -18,40 +18,57 @@ struct MarkdownRenderer: View {
     ///   Matches the section-label style used elsewhere in the app
     ///   (e.g. `KEY DISCUSSION POINTS:` in SummaryView). Use for compact
     ///   context cards where heading prominence would feel shouty.
-    enum HeadingStyle { case display, label }
+    /// - `neutral`: serif, size-bumped, neutral colour (no purple). H1 uses
+    ///   `appTextPrimary`; H2-H6 use `appTextSecondary`. Use for AI-generated
+    ///   briefings where accent colour would feel garish.
+    enum HeadingStyle { case display, label, neutral }
 
     let text: String
     var baseFontSize: CGFloat = 15
     var headingStyle: HeadingStyle = .display
 
+    // Cached parse result — only re-runs when `text` changes, not on every
+    // layout pass (window resize, scroll, etc.). This avoids repeated regex
+    // evaluation and AttributedString parsing during resize.
+    @State private var cachedBlocks: [Block] = []
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(parseBlocks().enumerated()), id: \.offset) { _, block in
+            ForEach(Array(cachedBlocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: text) {
+            // Parse off the initial render if text is already set, then again
+            // whenever text changes (streaming updates, regeneration, etc.)
+            cachedBlocks = parseBlocks()
+        }
     }
 
     @ViewBuilder
     private func blockView(_ block: Block) -> some View {
         switch block {
         case .heading(let level, let content):
-            // Two styles, picked at the call site.
-            //   - .display: serif, size-bumped, accent-coloured. For long-form
-            //     read surfaces.
-            //   - .label: small uppercase tracked accent label. For compact
-            //     section cards, matching SummaryView's section header style.
-            // Within either style, H4-H6 always render as the small label form
-            // so a model that picks `######` arbitrarily doesn't disappear.
+            // Three styles, picked at the call site.
+            //   - .display: serif, size-bumped, accent-coloured.
+            //   - .label: small uppercase tracked accent label.
+            //   - .neutral: serif, size-bumped, neutral colour (white/grey, no purple).
+            // Within any style, H4-H6 always render as the small label form.
             if headingStyle == .label || level >= 4 {
                 Text(content)
                     .font(.system(size: 10.5, weight: .bold))
-                    .foregroundStyle(Color.appAccentLight)
+                    .foregroundStyle(headingStyle == .neutral ? Color.appTextSecondary : Color.appAccentLight)
                     .textCase(.uppercase)
                     .tracking(0.6)
                     .padding(.top, 6)
                     .padding(.bottom, 1)
+            } else if headingStyle == .neutral {
+                Text(inline(content))
+                    .font(.system(size: headingSize(level), weight: .bold, design: .serif))
+                    .foregroundStyle(level == 1 ? Color.appTextPrimary : Color.appTextSecondary)
+                    .padding(.top, level <= 2 ? 6 : 4)
+                    .padding(.bottom, 2)
             } else {
                 Text(inline(content))
                     .font(.system(size: headingSize(level), weight: .bold, design: .serif))

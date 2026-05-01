@@ -8,6 +8,8 @@ import AppKit
 /// and images being skipped.
 struct KnowledgeBaseSettingsView: View {
 
+    @Environment(AppState.self) private var appState
+
     @State private var rootURL: URL?
     @State private var fileCount: Int = 0
     @State private var chunkCount: Int = 0
@@ -121,6 +123,29 @@ struct KnowledgeBaseSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Section("Write-back") {
+                Toggle(isOn: Binding(
+                    get: { appState.settings.kbWriteBack },
+                    set: { newValue in appState.settings.kbWriteBack = newValue }
+                )) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Auto-save meeting notes to Knowledge Base")
+                            .font(.callout)
+                        Text("After each summary is generated, a Markdown file is written to your Knowledge Base under **Meeting Notes/YYYY/MM-Month/DD/**. It includes the summary and full transcript, making it instantly searchable alongside your other docs.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .disabled(rootURL == nil)
+
+                if rootURL == nil {
+                    Text("Select a Knowledge Base folder above to enable write-back.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("How it's used") {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Pre-meeting briefs pull in excerpts that match the meeting's title, participants, and prior discussion threads.", systemImage: "sparkles")
@@ -160,7 +185,7 @@ struct KnowledgeBaseSettingsView: View {
 
     private func reindexNow() {
         Task {
-            await KnowledgeBaseService.shared.reindex()
+            await KnowledgeBaseService.shared.enqueueReindex()
             await refresh()
         }
     }

@@ -5,7 +5,7 @@ import SwiftUI
 struct GlobalChatView: View {
     @Environment(AppState.self) private var appState
 
-    @State private var messages: [GlobalChatMessage] = []
+    // messages live in AppState so they survive navigation away and back
     @State private var inputText = ""
     @State private var isProcessing = false
     @State private var error: String?
@@ -30,7 +30,7 @@ struct GlobalChatView: View {
                         .foregroundStyle(Color.appTextSecondary)
                 }
                 Spacer()
-                if !messages.isEmpty {
+                if !appState.globalChatMessages.isEmpty {
                     Button {
                         showClearConfirm = true
                     } label: {
@@ -41,7 +41,7 @@ struct GlobalChatView: View {
                     .buttonStyle(.plain)
                     .help("Clear conversation")
                     .confirmationDialog("Clear conversation?", isPresented: $showClearConfirm, titleVisibility: .visible) {
-                        Button("Clear", role: .destructive) { withAnimation { messages = [] } }
+                        Button("Clear", role: .destructive) { withAnimation { appState.globalChatMessages = [] } }
                         Button("Cancel", role: .cancel) {}
                     }
                 }
@@ -52,45 +52,50 @@ struct GlobalChatView: View {
             Divider().background(Color.appSeparator)
 
             // MARK: - Message Area
-            if messages.isEmpty {
-                GlobalChatEmptyState(onSuggest: { suggestion in
-                    inputText = suggestion
-                    // EXEMPT from TaskQueue: interactive conversational AI chat.
-                    // User expects streaming, immediate responses, and cancellation via Stop button.
-                    // Chat history is managed in-view; routing through TaskQueue adds no value here.
-                    Task { await sendMessage() }
-                })
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(messages) { message in
-                                GlobalChatBubble(message: message)
-                                    .id(message.id)
+            // Wrap in a Group with maxHeight:.infinity so this region is flexible
+            // and the input bar at the bottom always gets its natural height.
+            Group {
+                if appState.globalChatMessages.isEmpty {
+                    GlobalChatEmptyState(onSuggest: { suggestion in
+                        inputText = suggestion
+                        // EXEMPT from TaskQueue: interactive conversational AI chat.
+                        // User expects streaming, immediate responses, and cancellation via Stop button.
+                        // Chat history managed in AppState; routing through TaskQueue adds no value here.
+                        Task { await sendMessage() }
+                    })
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(appState.globalChatMessages) { message in
+                                    GlobalChatBubble(message: message)
+                                        .id(message.id)
+                                }
+                                if isProcessing {
+                                    ThinkingBubble()
+                                        .id("thinking-indicator")
+                                }
                             }
-                            if isProcessing {
-                                ThinkingBubble()
-                                    .id("thinking-indicator")
-                            }
+                            .padding(.vertical, 12)
                         }
-                        .padding(.vertical, 12)
-                    }
-                    .onChange(of: messages.count) {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            if let lastId = messages.last?.id {
-                                proxy.scrollTo(lastId, anchor: .bottom)
-                            }
-                        }
-                    }
-                    .onChange(of: isProcessing) {
-                        if isProcessing {
+                        .onChange(of: appState.globalChatMessages.count) {
                             withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo("thinking-indicator", anchor: .bottom)
+                                if let lastId = appState.globalChatMessages.last?.id {
+                                    proxy.scrollTo(lastId, anchor: .bottom)
+                                }
+                            }
+                        }
+                        .onChange(of: isProcessing) {
+                            if isProcessing {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    proxy.scrollTo("thinking-indicator", anchor: .bottom)
+                                }
                             }
                         }
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // MARK: - Error Banner
             if let error {
@@ -112,13 +117,14 @@ struct GlobalChatView: View {
                 .background(Color.appWarning.opacity(0.08))
             }
 
-            Divider().background(Color.appSeparator)
-
             // MARK: - Input
+            // Floating pill input — always visible, strong background so it
+            // reads clearly regardless of window size.
             HStack(spacing: 10) {
                 TextField("Ask about your meetings…", text: $inputText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
+                    .foregroundStyle(Color.appTextPrimary)
                     .lineLimit(1...5)
                     .focused($isInputFocused)
                     .onSubmit {
@@ -140,7 +146,7 @@ struct GlobalChatView: View {
                     Image(systemName: isProcessing ? "stop.circle.fill" : "arrow.up.circle.fill")
                         .font(.title2)
                         .foregroundStyle(
-                            inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isProcessing
                                 ? Color.appTextTertiary
                                 : Color.appAccent
                         )
@@ -148,10 +154,20 @@ struct GlobalChatView: View {
                 .buttonStyle(.plain)
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isProcessing)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.appBorderStrong, lineWidth: 1)
+            )
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.bottom, 16)
+            .padding(.top, 10)
         }
         .background(Color.appBackground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { isInputFocused = true }
     }
 
@@ -165,7 +181,7 @@ struct GlobalChatView: View {
         error = nil
 
         let userMsg = GlobalChatMessage(role: .user, content: query)
-        withAnimation { messages.append(userMsg) }
+        withAnimation { appState.globalChatMessages.append(userMsg) }
 
         isProcessing = true
         defer { isProcessing = false }
@@ -176,32 +192,49 @@ struct GlobalChatView: View {
         }
 
         do {
-            // Build cross-meeting context from recent transcripts
-            let context = try await buildContext()
-            let systemPrompt = """
-                You are a helpful meeting assistant for \(getDisplayName()). \
-                You have access to notes and transcripts from their recent meetings. \
-                Answer questions concisely and accurately based only on the provided context. \
-                If information isn't available in the provided meetings, say so clearly. \
-                Format responses clearly — use bullet points for lists.
+            let (meetingContext, kbContext) = try await buildContext(query: query)
 
-                \(context)
+            var systemPrompt = """
+                You are a helpful meeting assistant for \(getDisplayName()). \
+                You have access to notes and transcripts from their recent meetings \
+                and excerpts from their personal Knowledge Base.
+
+                **Formatting rules — always follow these:**
+                - Respond in Markdown.
+                - Use ## for section headings when the answer has multiple parts.
+                - Use bullet lists (- item) for lists of facts, people, or action items.
+                - Use **bold** for names, decisions, and key phrases.
+                - Never write walls of plain prose. Structure the answer so it can be skimmed.
+                - Keep answers concise — prefer 150–300 words unless depth is clearly needed.
+
+                Answer accurately based only on the context provided. \
+                If information isn't available, say so clearly rather than guessing.
+
+                \(meetingContext)
                 """
+
+            if !kbContext.isEmpty {
+                systemPrompt += """
+
+
+                    Knowledge Base excerpts (authoritative reference material — cite source path when used):
+                    \(kbContext)
+                    """
+            }
 
             let response = try await textGen(systemPrompt, query)
             let assistantMsg = GlobalChatMessage(role: .assistant, content: response)
-            withAnimation { messages.append(assistantMsg) }
+            withAnimation { appState.globalChatMessages.append(assistantMsg) }
         } catch {
             self.error = error.localizedDescription
         }
     }
 
-    private func buildContext() async throws -> String {
-        let db = appState.database
+    private func buildContext(query: String) async throws -> (meetings: String, kb: String) {
         let transcriptRepo = appState.transcriptRepository
         let summaryRepo = appState.summaryRepository
 
-        // Take recent 15 meetings (with summaries preferred, transcript fallback)
+        // Meeting context — recent 15, summaries preferred
         let recentMeetings = Array(appState.pastMeetings.prefix(15))
         var contextParts: [String] = []
 
@@ -213,26 +246,27 @@ struct GlobalChatView: View {
                 parts.append("Participants: \(meeting.participantList.joined(separator: ", "))")
             }
 
-            // Prefer summary over raw transcript for context length
             if let summary = try? await summaryRepo.latestSummary(meetingId: meeting.id),
                !summary.summaryText.isEmpty {
-                let truncated = String(summary.summaryText.prefix(600))
-                parts.append("Notes: \(truncated)")
+                parts.append("Notes: \(String(summary.summaryText.prefix(600)))")
             } else {
                 let segments = try await transcriptRepo.transcriptsForMeeting(meeting.id)
                 if !segments.isEmpty {
                     let text = segments.map { $0.text }.joined(separator: " ")
-                    let truncated = String(text.prefix(500))
-                    parts.append("Transcript excerpt: \(truncated)…")
+                    parts.append("Transcript excerpt: \(String(text.prefix(500)))…")
                 }
             }
             contextParts.append(parts.joined(separator: "\n"))
         }
 
-        if contextParts.isEmpty {
-            return "Context: No recorded meetings available yet."
-        }
-        return "Meeting context (most recent first):\n\n" + contextParts.joined(separator: "\n\n---\n\n")
+        let meetingContext = contextParts.isEmpty
+            ? "Context: No recorded meetings available yet."
+            : "Meeting context (most recent first):\n\n" + contextParts.joined(separator: "\n\n---\n\n")
+
+        // KB context — retrieve using the user's query
+        let kbContext = await KnowledgeBaseService.shared.retrieveContext(query: query)
+
+        return (meetingContext, kbContext)
     }
 
     private func getDisplayName() -> String {
@@ -315,7 +349,7 @@ private struct GlobalChatEmptyState: View {
             Spacer()
         }
         .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -327,9 +361,9 @@ struct GlobalChatBubble: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             if message.role == .user {
-                Spacer(minLength: 40)
+                Spacer(minLength: 60)
                 Text(message.content)
-                    .font(.subheadline)
+                    .font(.system(size: 14))
                     .foregroundStyle(Color.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -345,22 +379,22 @@ struct GlobalChatBubble: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color.appAccent)
                 }
-                .padding(.top, 2)
+                .padding(.top, 4)
 
-                Text(message.content)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextPrimary)
+                // Render Markdown so headings, bullets, bold etc. display properly
+                MarkdownRenderer(text: message.content, baseFontSize: 14)
                     .textSelection(.enabled)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(Color.appSurface)
                     .clipShape(BubbleShape(isUser: false))
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer(minLength: 40)
+                Spacer(minLength: 16)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
     }
 }
 

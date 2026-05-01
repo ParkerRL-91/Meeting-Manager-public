@@ -48,6 +48,11 @@ struct AppSettings: Codable, Equatable {
     /// Minute (0-59) for the morning briefing notification.
     var morningBriefMinute: Int = 30
 
+    /// When true, automatically write meeting summaries and transcripts back to
+    /// the Knowledge Base folder after a summary is generated.
+    /// Files are written as Markdown under <KB root>/Meeting Notes/YYYY/MM-Month/DD/Title.md
+    var kbWriteBack: Bool = false
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -72,6 +77,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case autoGenerateSummary, defaultRecipeId
         case autoFollowUpEmail
         case morningBriefEnabled, morningBriefHour, morningBriefMinute
+        case kbWriteBack
     }
 }
 

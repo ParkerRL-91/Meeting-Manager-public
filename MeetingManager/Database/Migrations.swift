@@ -669,5 +669,11 @@ enum Migrations {
                 t.column("relativePath").notIndexed()
             }
         }
+
+        migrator.registerMigration("v28-kb-write-back") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "kbWriteBack", .boolean).notNull().defaults(to: false)
+            }
+        }
     }
 }
