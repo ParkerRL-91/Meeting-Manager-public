@@ -282,6 +282,10 @@ final class AppState {
         setupTaskQueue()
         startPrepContextTimer()
         startCalendarSync()
+        // Prime the Ollama reachability check so views that gate on
+        // `ollamaService.isReachable` (DailyBriefView, ActionItemsView, etc.)
+        // don't render "Set up AI →" before the first lazy refresh fires.
+        Task { await self.ollamaService.refreshStatus() }
         // One-shot retroactive speaker attribution scan (gated by UserDefaults
         // flag — only runs once per app upgrade). Re-attributes existing
         // meetings against the loosened fuzzy matcher + auto-mic mapping
