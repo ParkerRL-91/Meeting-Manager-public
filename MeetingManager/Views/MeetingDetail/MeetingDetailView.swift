@@ -70,9 +70,15 @@ struct MeetingDetailView: View {
                     showingEditor = true
                 })
 
-                ParticipantBar(participants: meeting.participantList) { name in
-                    appState.sidebarDestination = .people
-                }
+                ParticipantBar(
+                    participants: meeting.participantList,
+                    onTap: { _ in
+                        appState.sidebarDestination = .people
+                    },
+                    onAddParticipant: { newName in
+                        addParticipantToMeeting(newName)
+                    }
+                )
 
                 RelatedMeetingsSection(
                     contextJSON: meeting.contextJSON,
@@ -268,6 +274,32 @@ struct MeetingDetailView: View {
     /// Initial-load helper extracted out of the `.task` closure: long inline
     /// async chains in a SwiftUI view body trigger the Swift type-checker's
     /// "unable to type-check this expression" timeout on clean builds.
+    /// Append a manually-entered name to the meeting's participant list and
+    /// persist. Does nothing if the name is already present (case-insensitive).
+    /// Manual additions help when calendar invites missed someone (drop-ins,
+    /// folks invited verbally, partners on the call) — these names then flow
+    /// through every downstream signal: voice attribution, vocative mining,
+    /// the Speakers tab suggestions, etc.
+    private func addParticipantToMeeting(_ rawName: String) {
+        guard var m = meeting else { return }
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Dedup with format-tolerance: "dave@acme.com", "Dave Smith",
+        // and "Dave" all share the canonical key "dave". Prevents adding a
+        // duplicate when calendar already lists the email and the user
+        // types the display name (or vice versa).
+        let newKey = VocativeMiningService.canonicalKey(for: trimmed)
+        let existingKeys = m.participantList.map { VocativeMiningService.canonicalKey(for: $0) }
+        guard !existingKeys.contains(newKey) else { return }
+        var list = m.participantList
+        list.append(trimmed)
+        m.participants = list.joined(separator: ", ")
+        meeting = m
+        Task {
+            try? await appState.meetingRepository.update(m)
+        }
+    }
+
     private func loadInitialContext() async {
         meeting = try? await appState.meetingRepository.find(id: meetingId)
 

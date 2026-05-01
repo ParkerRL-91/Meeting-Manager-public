@@ -1474,10 +1474,54 @@ final class AppState {
             }
         }
 
+        // ─── L1: Calendar-attendance gate ──────────────────────────────
+        // A poisoned voice profile (e.g. user mislabelled their own voice
+        // as "Sam" in a past meeting) will return high-similarity matches
+        // for "Sam" in EVERY future meeting, even ones Sam isn't part
+        // of. Reject any voice match whose name isn't a calendar attendee
+        // of THIS meeting. Drop-ins are a rare false-negative — the user
+        // can still apply the name manually via the Speakers tab.
+        //
+        // Comparison is case-insensitive and tolerant of partial matches
+        // ("Sam" matches "Sam Carter <sam@…>" and vice versa).
+        let attendeeNamesLower = participants.map { $0.lowercased() }
+        let userFirstLower = userFirst?.lowercased()
+        let droppedMatches = voiceMatches.filter { (_, name) in
+            let lower = name.lowercased()
+            // Always allow the user — mic channel is ground truth.
+            if let uf = userFirstLower, lower.contains(uf) { return false }
+            // Keep when name fuzzy-matches any attendee.
+            let isAttendee = attendeeNamesLower.contains { att in
+                att.contains(lower) || lower.contains(att)
+            }
+            return !isAttendee
+        }
+        for (cluster, name) in droppedMatches {
+            Logger.general.warning("[AttendanceGate] dropping voice match \(cluster, privacy: .public) → \(name, privacy: .public) — not in attendees \(participants.joined(separator: ", "), privacy: .public)")
+            voiceMatches.removeValue(forKey: cluster)
+        }
+
         // Merge prior-aliases (series memory) with voice matches. Voice wins on
         // collision because it's audio-grounded, not just label-name memory.
         var combinedPriorAliases = priorAliases
         for (cluster, name) in voiceMatches { combinedPriorAliases[cluster] = name }
+
+        // ─── Vocative mining (transcript-grounded identification) ──────
+        // Scan the transcript for "Hey Dana" / "Thanks Sam" / "Priya, can
+        // you…" patterns. The next utterance from a different cluster is
+        // overwhelmingly likely to be that named person. Hallucination-proof
+        // because names come only from the calendar attendee list — the
+        // model isn't picking from training data.
+        let vocativeMatches = VocativeMiningService.attribute(
+            transcripts: transcripts,
+            attendees: participants,
+            userFirstName: userFirst,
+            existingMapping: combinedPriorAliases
+        )
+        for (cluster, name) in vocativeMatches where combinedPriorAliases[cluster] == nil {
+            Logger.general.info("[Vocative] mined \(cluster, privacy: .public) → \(name, privacy: .public)")
+            combinedPriorAliases[cluster] = name
+        }
 
         let outcome = await SpeakerAttributionService.shared.attribute(
             transcripts: transcripts,

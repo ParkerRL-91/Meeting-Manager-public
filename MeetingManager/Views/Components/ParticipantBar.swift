@@ -4,12 +4,23 @@ import SwiftUI
 
 /// Horizontal row of participant avatars + names, displayed at the top of meeting views.
 /// Tapping a participant triggers `onTap` with the participant's name.
+///
+/// When `onAddParticipant` is provided, an "Add" chip is rendered on the
+/// right of the row. Clicking it opens a popover with a name field.
+/// On submit, the closure is called with the trimmed name. The caller is
+/// responsible for persisting the addition to the meeting record.
 struct ParticipantBar: View {
     let participants: [String]
     var onTap: ((String) -> Void)?
+    var onAddParticipant: ((String) -> Void)?
+
+    @State private var showAddPopover = false
+    @State private var newName: String = ""
 
     var body: some View {
-        if !participants.isEmpty {
+        // Always render the bar when an add-callback is provided so users
+        // can populate an empty participants list (e.g. ad-hoc meetings).
+        if !participants.isEmpty || onAddParticipant != nil {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
                     Image(systemName: "person.2.fill")
@@ -26,10 +37,73 @@ struct ParticipantBar: View {
                             onTap?(name)
                         }
                     }
+                    if onAddParticipant != nil {
+                        AddParticipantChip(isOpen: $showAddPopover, name: $newName) { trimmed in
+                            onAddParticipant?(trimmed)
+                            newName = ""
+                            showAddPopover = false
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+        }
+    }
+}
+
+// MARK: - Add Participant Chip
+
+/// "+ Add" chip with popover. Caller passes a closure that handles the
+/// submission. The chip itself manages its own popover state but the
+/// text field is bound to a parent-owned `@State` so the parent can
+/// clear it after a successful add.
+private struct AddParticipantChip: View {
+    @Binding var isOpen: Bool
+    @Binding var name: String
+    let onSubmit: (String) -> Void
+
+    var body: some View {
+        Button { isOpen = true } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "plus")
+                    .font(.caption)
+                    .foregroundStyle(Color.appAccent)
+                Text("Add")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appAccent)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .overlay(
+                Capsule().strokeBorder(Color.appAccent.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3]))
+            )
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add participant")
+                    .font(.subheadline.weight(.semibold))
+                TextField("Name or email", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 240)
+                    .onSubmit {
+                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { onSubmit(trimmed) }
+                    }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { isOpen = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Add") {
+                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { onSubmit(trimmed) }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(14)
         }
     }
 }

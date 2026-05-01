@@ -177,7 +177,25 @@ struct LiveMeetingView: View {
                         Spacer()
                     }
                     .padding(.horizontal, 28)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, 8)
+
+                    // Full participant bar with the "+ Add" affordance —
+                    // shows below the pill row so users can add a drop-in
+                    // name during the meeting. Names added here flow into
+                    // every downstream identification signal (vocative
+                    // mining, voice profile attribution, Speakers tab
+                    // suggestions).
+                    if let meeting {
+                        ParticipantBar(
+                            participants: meeting.participantList,
+                            onTap: { _ in },
+                            onAddParticipant: { name in
+                                addParticipantInline(name)
+                            }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                    }
 
                     // Context brief — same RelatedMeetingsSection used on the
                     // post-meeting detail view, now rendered with the same
@@ -247,6 +265,27 @@ struct LiveMeetingView: View {
             try? await service.enrichContext(meetingId: meetingId, briefSynthesizer: textGen)
             let updated = try? await appState.meetingRepository.find(id: meetingId)
             if let updated { self.meeting = updated }
+        }
+    }
+
+    /// Append a manually-entered name to the meeting's participant list and
+    /// persist. Used by the "+ Add" chip in the participant bar — drop-ins
+    /// or verbally-invited folks who aren't on the calendar invite.
+    private func addParticipantInline(_ rawName: String) {
+        guard var m = meeting else { return }
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Format-tolerant dedup via canonical key — see MeetingDetailView's
+        // implementation for the rationale.
+        let newKey = VocativeMiningService.canonicalKey(for: trimmed)
+        let existingKeys = m.participantList.map { VocativeMiningService.canonicalKey(for: $0) }
+        guard !existingKeys.contains(newKey) else { return }
+        var list = m.participantList
+        list.append(trimmed)
+        m.participants = list.joined(separator: ", ")
+        meeting = m
+        Task {
+            try? await appState.meetingRepository.update(m)
         }
     }
 
