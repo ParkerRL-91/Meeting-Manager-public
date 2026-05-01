@@ -62,38 +62,17 @@ struct GeneralSettingsView: View {
     // MARK: - Sections
 
     private var appearanceSection: some View {
-        // Custom binding intercepts the setter directly. We do this instead of
-        // .onChange because:
-        //  1. .onChange fires AFTER state has changed, leading to brief visual
-        //     flicker where the picker shows "Light" before snapping back.
-        //  2. Some SwiftUI runs consolidate sequential state mutations and skip
-        //     the .onChange callback entirely (this was the v3.8.0–3.8.2 bug).
-        //  3. Custom binding setters are guaranteed to run on every interaction.
-        let themeBinding = Binding<String>(
-            get: { selectedTheme },
-            set: { newValue in
-                Logger.ui.info("[ThemePicker] setter received: \(newValue, privacy: .public) (current: \(selectedTheme, privacy: .public))")
-                guard newValue != "dark" else {
-                    selectedTheme = newValue
-                    persistSetting { $0.theme = newValue }
-                    Logger.ui.info("[ThemePicker] persisted theme=dark")
-                    return
-                }
-                // Refuse the change. selectedTheme stays "dark" — the picker
-                // re-renders with Dark selected, and the user never has any
-                // chance to live in the light.
-                Logger.ui.info("[ThemePicker] refusing theme=\(newValue, privacy: .public); presenting NSAlert")
-                showLightModeRefusal(attempted: newValue)
+        // Three explicit Buttons replace the previous segmented Picker. Picker
+        // bindings on macOS Settings windows turned out not to fire reliably
+        // — likely because the Settings scene's auto-managed state observation
+        // intercepts the binding before our setter runs. Buttons guarantee a
+        // tap → handler invocation with zero ambiguity.
+        Section {
+            HStack(spacing: 8) {
+                themeButton(label: "Dark", value: "dark")
+                themeButton(label: "Light", value: "light")
+                themeButton(label: "System", value: "system")
             }
-        )
-
-        return Section {
-            Picker("Theme", selection: themeBinding) {
-                Text("Dark").tag("dark")
-                Text("Light").tag("light")
-                Text("System").tag("system")
-            }
-            .pickerStyle(.segmented)
 
             // Permanent reminder so the bit lands even before any clicks.
             Text("We live our life in the dark. Light mode is not coming.")
@@ -103,6 +82,36 @@ struct GeneralSettingsView: View {
         } header: {
             Text("Appearance")
         }
+    }
+
+    /// One of the three theme buttons. Dark commits the change; Light/System
+    /// trigger the refusal alert.
+    @ViewBuilder
+    private func themeButton(label: String, value: String) -> some View {
+        let isSelected = (selectedTheme == value)
+        Button {
+            Logger.ui.info("[themeButton] tapped value=\(value, privacy: .public)")
+            if value == "dark" {
+                selectedTheme = "dark"
+                persistSetting { $0.theme = "dark" }
+                Logger.ui.info("[themeButton] persisted theme=dark")
+            } else {
+                showLightModeRefusal(attempted: value)
+            }
+        } label: {
+            Text(label)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isSelected ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(isSelected ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private var startupSection: some View {

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UserNotifications
+import os
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -379,50 +380,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     ) {
         let meetingId = response.notification.request.content.userInfo["meetingId"] as? String
         let meetLink = response.notification.request.content.userInfo["meetLink"] as? String
+        let categoryId = response.notification.request.content.categoryIdentifier
+        let identifier = response.notification.request.identifier
+        Logger.notifications.info("[didReceive] action=\(response.actionIdentifier, privacy: .public) category=\(categoryId, privacy: .public) id=\(identifier, privacy: .public) meetingId=\(meetingId ?? "nil", privacy: .public) hasLink=\(meetLink != nil)")
 
         switch response.actionIdentifier {
         case NotificationActions.joinMeeting:
+            Logger.notifications.info("[didReceive] joinMeeting tapped — opening link + starting recording")
             // Open the video call URL in the default browser
             if let meetLink, let url = URL(string: meetLink) {
-                NSWorkspace.shared.open(url)
+                let opened = NSWorkspace.shared.open(url)
+                Logger.notifications.info("[didReceive] NSWorkspace.open(\(url.absoluteString, privacy: .public)) returned \(opened)")
+            } else {
+                Logger.notifications.warning("[didReceive] joinMeeting: no meetLink in userInfo — recording will start but no URL to open")
             }
             // Also start recording
             if let meetingId {
+                Logger.notifications.info("[didReceive] posting .startRecording for meeting=\(meetingId, privacy: .public)")
                 NotificationCenter.default.post(
                     name: .startRecording,
                     object: nil,
                     userInfo: ["meetingId": meetingId]
                 )
+            } else {
+                Logger.notifications.error("[didReceive] joinMeeting: no meetingId in userInfo — cannot start recording")
             }
         case NotificationActions.startRecording:
+            Logger.notifications.info("[didReceive] startRecording tapped")
             if let meetingId {
                 NotificationCenter.default.post(
                     name: .startRecording,
                     object: nil,
                     userInfo: ["meetingId": meetingId]
                 )
+            } else {
+                Logger.notifications.error("[didReceive] startRecording: no meetingId")
             }
         case NotificationActions.snooze:
+            Logger.notifications.info("[didReceive] snooze tapped")
             if let meetingId {
                 AppState.shared?.notificationService.scheduleSnooze(meetingId: meetingId, minutes: 5)
             }
         case NotificationActions.prepMeeting:
+            Logger.notifications.info("[didReceive] prepMeeting tapped")
             if let meetingId {
                 AppState.shared?.selectedMeetingId = meetingId
             }
         case NotificationActions.sendRecap:
-            // "View Recap" action — navigate to the meeting detail
+            Logger.notifications.info("[didReceive] sendRecap tapped")
             if let meetingId {
                 AppState.shared?.selectedMeetingId = meetingId
             }
         case UNNotificationDefaultActionIdentifier:
-            // User tapped the banner itself; navigate to the meeting when it's a summary-ready notification
-            let categoryId = response.notification.request.content.categoryIdentifier
+            Logger.notifications.info("[didReceive] banner tapped (default action) category=\(categoryId, privacy: .public)")
             if categoryId == NotificationActions.summaryReadyCategory, let meetingId {
                 AppState.shared?.selectedMeetingId = meetingId
             }
+        case UNNotificationDismissActionIdentifier:
+            Logger.notifications.info("[didReceive] notification dismissed by user")
         default:
-            break
+            Logger.notifications.warning("[didReceive] unhandled action=\(response.actionIdentifier, privacy: .public)")
         }
 
         completionHandler()
@@ -433,6 +450,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        let id = notification.request.identifier
+        let category = notification.request.content.categoryIdentifier
+        Logger.notifications.info("[willPresent] notification firing id=\(id, privacy: .public) category=\(category, privacy: .public) — presenting as banner+sound")
         completionHandler([.banner, .sound])
     }
 

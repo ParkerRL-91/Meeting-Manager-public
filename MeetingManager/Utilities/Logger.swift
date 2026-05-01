@@ -32,4 +32,8 @@ extension Logger {
 
     /// General app lifecycle events.
     static let general = Logger(subsystem: subsystem, category: "general")
+
+    /// Local notification scheduling, delivery, and click-handling.
+    /// Filter in Console.app with: `subsystem == "com.meetingmanager.app" AND category == "notifications"`
+    static let notifications = Logger(subsystem: subsystem, category: "notifications")
 }

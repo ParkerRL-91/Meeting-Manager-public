@@ -294,22 +294,27 @@ final class MeetingStateMachine {
 
 
     private func handleStartRecordingNotification(_ notification: Notification) async {
+        let meetingId = notification.userInfo?["meetingId"] as? String
+        Logger.notifications.info("[StateMachine.handleStartRecordingNotification] received for meetingId=\(meetingId ?? "nil(ad-hoc)", privacy: .public)")
         // If a meeting ID is provided, look it up; otherwise create ad-hoc
-        if let meetingId = notification.userInfo?["meetingId"] as? String {
+        if let meetingId {
             do {
                 guard let meeting = try await meetingRepository.find(id: meetingId) else {
-                    Logger.general.warning("Meeting not found for start-recording notification: \(meetingId)")
+                    Logger.notifications.warning("[StateMachine] meeting not found for id=\(meetingId, privacy: .public)")
                     return
                 }
+                Logger.notifications.info("[StateMachine] starting recording for '\(meeting.title, privacy: .public)'")
                 try await startRecording(meeting: meeting)
+                Logger.notifications.info("[StateMachine] startRecording succeeded for id=\(meetingId, privacy: .public)")
             } catch {
-                Logger.general.error("Failed to start recording for meeting \(meetingId): \(error.localizedDescription)")
+                Logger.notifications.error("[StateMachine] startRecording threw for id=\(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         } else {
             do {
+                Logger.notifications.info("[StateMachine] creating ad-hoc meeting from notification")
                 _ = try await createAndStartMeeting(title: "New Meeting")
             } catch {
-                Logger.general.error("Failed to create ad-hoc meeting: \(error.localizedDescription)")
+                Logger.notifications.error("[StateMachine] ad-hoc creation failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

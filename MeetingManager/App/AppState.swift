@@ -179,6 +179,11 @@ final class AppState {
     /// of the user's lead-time notification setting.
     private var hudShownMeetingIds: Set<String> = []
 
+    /// Tracks meetings auto-joined by the 1-minute auto-record path so we
+    /// don't try to start recording or open the meet link more than once
+    /// per meeting across timer ticks.
+    private var autoJoinedMeetingIds: Set<String> = []
+
     /// Cumulative model load attempt count across initial attempts and background retries.
     /// Hard-capped at `modelLoadHardMax` to prevent infinite retry loops on permanent failures.
     private var modelLoadTotalAttempts = 0
@@ -2234,6 +2239,7 @@ final class AppState {
         let currentIds = Set(upcomingMeetings.map(\.id))
         notifiedMeetingIds = notifiedMeetingIds.intersection(currentIds)
         hudShownMeetingIds  = hudShownMeetingIds.intersection(currentIds)
+        autoJoinedMeetingIds = autoJoinedMeetingIds.intersection(currentIds)
 
         for meeting in upcomingMeetings {
             guard let startDate = meeting.scheduledStartDate else { continue }
@@ -2267,12 +2273,55 @@ final class AppState {
                 Logger.general.debug("HUD: showing pre-meeting card for '\(meeting.title)'")
             }
 
+            // Auto-join at lead time: if user has autoRecord on and the meeting
+            // has a meet link, proactively open the link and start recording
+            // ~60s before scheduled start. Falls back to nothing if no link
+            // (we don't auto-record offline meetings — too aggressive).
+            //
+            // Window is 75s so the 30s polling cadence catches it reliably
+            // even if a tick lands at the boundary. Once fired, the meeting
+            // goes into autoJoinedMeetingIds and won't be retriggered by
+            // the post-start auto-start path below.
+            if settings.autoRecord,
+               timeUntilStart > 0 && timeUntilStart <= 75,
+               let meetLink = meeting.meetLink, !meetLink.isEmpty,
+               (meeting.status == .scheduled || meeting.status == .notified),
+               !isRecording, !isStartingMeeting,
+               autoJoinedMeetingIds.insert(meeting.id).inserted {
+                Logger.notifications.info("[autoJoin] firing for '\(meeting.title, privacy: .public)' meetingId=\(meeting.id, privacy: .public) timeUntilStart=\(Int(timeUntilStart))s link=\(meetLink, privacy: .public)")
+                if let url = URL(string: meetLink) {
+                    let opened = NSWorkspace.shared.open(url)
+                    Logger.notifications.info("[autoJoin] NSWorkspace.open returned \(opened)")
+                } else {
+                    Logger.notifications.warning("[autoJoin] meetLink is not a valid URL: \(meetLink, privacy: .public)")
+                }
+                startRecording(for: meeting)
+            } else if settings.autoRecord,
+                      timeUntilStart > 0 && timeUntilStart <= 75,
+                      (meeting.status == .scheduled || meeting.status == .notified),
+                      !autoJoinedMeetingIds.contains(meeting.id) {
+                // autoRecord on, in window, but not joined — diagnose why.
+                let reason: String
+                if meeting.meetLink?.isEmpty != false {
+                    reason = "no meetLink on meeting"
+                } else if isRecording {
+                    reason = "already recording"
+                } else if isStartingMeeting {
+                    reason = "another start in progress"
+                } else {
+                    reason = "unknown"
+                }
+                Logger.notifications.debug("[autoJoin] skipped '\(meeting.title, privacy: .public)' timeUntilStart=\(Int(timeUntilStart))s reason=\(reason, privacy: .public)")
+            }
+
             // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
             // The 5-minute window accommodates meetings that start slightly late.
             // Accepts .notified too — call-app-launch can advance status before the start window.
+            // Skip if we already auto-joined at lead time.
             if timeUntilStart >= -300 && timeUntilStart <= 0
                 && (meeting.status == .scheduled || meeting.status == .notified)
-                && !isRecording && !isStartingMeeting {
+                && !isRecording && !isStartingMeeting
+                && !autoJoinedMeetingIds.contains(meeting.id) {
                 Logger.general.debug("Auto-starting recording for meeting: \(meeting.title)")
                 startRecording(for: meeting)
             }
