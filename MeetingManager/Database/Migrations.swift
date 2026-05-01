@@ -705,6 +705,15 @@ enum Migrations {
         // as a JSON array. VoiceProfile gains a personId FK so voice learning
         // survives renames and email-format drift.
         migrator.registerMigration("v31-person-identity") { db in
+            // Guard: remove any taskQueue rows whose meetingId contains newlines
+            // (a bulk-insert bug from the v3.8 session stored multiple UUIDs
+            // as one value). These violate the taskQueue→meeting FK and block
+            // the migration transaction from committing. Safe to delete: each
+            // affected meeting already has valid individual task rows.
+            try db.execute(sql: """
+                DELETE FROM taskQueue WHERE instr(meetingId, char(10)) > 0
+                """)
+
             try db.create(table: "person") { t in
                 t.column("id", .text).primaryKey()
                 t.column("canonicalName", .text).notNull()
@@ -718,10 +727,13 @@ enum Migrations {
                 columns: ["canonicalName"]
             )
 
-            // Add personId FK to voiceProfile so profiles can be looked up by
+            // Add personId to voiceProfile so profiles can be looked up by
             // stable identity rather than by the fragile name string.
+            // NOTE: SQLite ALTER TABLE ADD COLUMN does not support ON DELETE
+            // foreign key actions — this is a plain nullable text column. The
+            // application layer (PersonRepository.merge) handles orphan cleanup.
             try db.alter(table: "voiceProfile") { t in
-                t.add(column: "personId", .text).references("person", onDelete: .setNull)
+                t.add(column: "personId", .text)
             }
             try db.create(
                 index: "idx_voiceProfile_personId",
