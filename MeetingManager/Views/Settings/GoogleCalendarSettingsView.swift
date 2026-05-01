@@ -36,8 +36,15 @@ struct GoogleCalendarSettingsView: View {
 
     // Calendar selection
     @State private var availableCalendars: [(id: String, name: String)] = []
-    @State private var selectedCalendarId: String = "primary"
+    /// Multi-select for Google. Empty = sync the legacy single calendar (for
+    /// users who haven't migrated their preferences) or "primary" by default.
+    @State private var selectedGoogleCalendarIds: Set<String> = []
     @State private var isLoadingCalendars = false
+
+    // Apple calendar selection
+    @State private var availableAppleCalendars: [AppleCalendarService.CalendarInfo] = []
+    /// Multi-select for Apple. Empty = include all readable calendars.
+    @State private var selectedAppleCalendarIds: Set<String> = []
     /// True when the most recent calendar fetch returned 401/403, meaning the
     /// stored OAuth token doesn't grant calendar access any more (revoked,
     /// scope mismatch, or expired refresh token). UI surfaces a Reconnect CTA.
@@ -74,6 +81,9 @@ struct GoogleCalendarSettingsView: View {
 
             if appleEnabled {
                 appleSection
+                if appleAuthState == .authorized {
+                    applePickerSection
+                }
             }
 
             if googleEnabled {
@@ -98,6 +108,7 @@ struct GoogleCalendarSettingsView: View {
             UserDefaults.standard.set(newValue.rawValue, forKey: "calendar.source")
             // Refresh Apple permission state — needed if the user just enabled Apple.
             appleAuthState = AppleCalendarService.shared.authorizationState
+            if appleAuthState == .authorized { loadAppleCalendars() }
             // Notify the running CalendarSyncManager to stop/restart on the new source.
             NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
         }
@@ -244,6 +255,7 @@ struct GoogleCalendarSettingsView: View {
             isRequestingAppleAccess = false
             if appleAuthState == .authorized {
                 Logger.calendar.info("Apple Calendar access granted — kicking sync")
+                loadAppleCalendars()
                 NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
             } else {
                 Logger.calendar.info("Apple Calendar access not granted (granted=\(granted), observed=\(String(describing: observed), privacy: .public))")
@@ -453,21 +465,112 @@ struct GoogleCalendarSettingsView: View {
                         .buttonStyle(.borderless)
                 }
             } else {
-                Picker("Calendar", selection: $selectedCalendarId) {
-                    ForEach(availableCalendars, id: \.id) { calendar in
-                        Text(calendar.name).tag(calendar.id)
-                    }
+                ForEach(availableCalendars, id: \.id) { calendar in
+                    Toggle(calendar.name, isOn: bindingForGoogleCalendar(id: calendar.id))
+                        .toggleStyle(.checkbox)
                 }
-                .onChange(of: selectedCalendarId) { _, newId in
-                    persistSetting { $0.selectedCalendarId = newId == "primary" ? nil : newId }
-                    Logger.calendar.info("Selected calendar changed to \(newId)")
+                if selectedGoogleCalendarIds.isEmpty {
+                    Text("No calendars selected — sync will use your primary calendar.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
                 }
             }
         } header: {
-            Text("Google Calendar to Sync")
+            Text("Google Calendars to Sync")
         } footer: {
-            Text("Choose which Google calendar to pull meetings from. Changes apply on the next sync. Apple Calendar always pulls from every calendar you've enabled in Calendar.app.")
+            Text("Pick one or more calendars. Events from all selected calendars are merged into the meetings list. Changes apply on the next sync.")
         }
+    }
+
+    // MARK: - Apple Calendar Picker (multi-select)
+
+    private var applePickerSection: some View {
+        Section {
+            if availableAppleCalendars.isEmpty {
+                HStack {
+                    Text("No calendars found in Calendar.app")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Reload") { loadAppleCalendars() }
+                        .buttonStyle(.borderless)
+                }
+            } else {
+                // Group by source (iCloud, Exchange, Gmail, On My Mac, etc.)
+                let grouped = Dictionary(grouping: availableAppleCalendars, by: { $0.sourceTitle })
+                let sourceOrder = grouped.keys.sorted()
+                ForEach(sourceOrder, id: \.self) { sourceTitle in
+                    if let cals = grouped[sourceTitle] {
+                        DisclosureGroup(sourceTitle) {
+                            ForEach(cals) { cal in
+                                Toggle(cal.title, isOn: bindingForAppleCalendar(id: cal.id))
+                                    .toggleStyle(.checkbox)
+                            }
+                        }
+                    }
+                }
+                HStack {
+                    Button("Select All") {
+                        selectedAppleCalendarIds = Set(availableAppleCalendars.map { $0.id })
+                        persistAppleSelection()
+                    }
+                    .buttonStyle(.borderless)
+                    Button("Deselect All") {
+                        selectedAppleCalendarIds = []
+                        persistAppleSelection()
+                    }
+                    .buttonStyle(.borderless)
+                    Spacer()
+                    Button("Reload") { loadAppleCalendars() }
+                        .buttonStyle(.borderless)
+                }
+                .font(.caption)
+                .padding(.top, 4)
+            }
+        } header: {
+            Text("Apple Calendars to Sync")
+        } footer: {
+            Text("Pick which calendars to include. Leave none selected to include all of them. Subscribed calendars (birthdays, holidays, sports) are typically worth excluding.")
+        }
+    }
+
+    private func bindingForGoogleCalendar(id: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedGoogleCalendarIds.contains(id) },
+            set: { isOn in
+                if isOn { selectedGoogleCalendarIds.insert(id) }
+                else { selectedGoogleCalendarIds.remove(id) }
+                persistGoogleSelection()
+            }
+        )
+    }
+
+    private func bindingForAppleCalendar(id: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedAppleCalendarIds.contains(id) },
+            set: { isOn in
+                if isOn { selectedAppleCalendarIds.insert(id) }
+                else { selectedAppleCalendarIds.remove(id) }
+                persistAppleSelection()
+            }
+        )
+    }
+
+    private func persistGoogleSelection() {
+        let csv = selectedGoogleCalendarIds.sorted().joined(separator: ",")
+        persistSetting { $0.selectedGoogleCalendarIds = csv.isEmpty ? nil : csv }
+        Logger.calendar.info("Google multi-select updated — \(selectedGoogleCalendarIds.count) calendar(s)")
+    }
+
+    private func persistAppleSelection() {
+        let csv = selectedAppleCalendarIds.sorted().joined(separator: ",")
+        persistSetting { $0.selectedAppleCalendarIds = csv.isEmpty ? nil : csv }
+        Logger.calendar.info("Apple multi-select updated — \(selectedAppleCalendarIds.count) calendar(s)")
+    }
+
+    private func loadAppleCalendars() {
+        availableAppleCalendars = AppleCalendarService.shared.availableCalendars()
+        Logger.calendar.info("Loaded \(availableAppleCalendars.count) Apple calendar(s) for picker")
     }
 
     // MARK: - Sync Section
@@ -648,11 +751,32 @@ struct GoogleCalendarSettingsView: View {
             try AppSettings.fetchOne(db)
         }) {
             selectedSyncInterval = settings.calendarSyncIntervalMinutes
-            selectedCalendarId = settings.selectedCalendarId ?? "primary"
+
+            // Hydrate Google multi-select. Migrate the legacy single-select
+            // value the first time this user opens the new picker so they
+            // don't suddenly find their selection cleared.
+            if let csv = settings.selectedGoogleCalendarIds, !csv.isEmpty {
+                selectedGoogleCalendarIds = Set(csv.split(separator: ",").map(String.init))
+            } else if let legacy = settings.selectedCalendarId, !legacy.isEmpty {
+                selectedGoogleCalendarIds = [legacy]
+            } else {
+                selectedGoogleCalendarIds = []
+            }
+
+            // Hydrate Apple multi-select. Empty set = "all calendars" (the
+            // historical default).
+            if let csv = settings.selectedAppleCalendarIds, !csv.isEmpty {
+                selectedAppleCalendarIds = Set(csv.split(separator: ",").map(String.init))
+            } else {
+                selectedAppleCalendarIds = []
+            }
         }
 
         if authManager.isSignedIn {
             loadCalendars()
+        }
+        if appleAuthState == .authorized {
+            loadAppleCalendars()
         }
         refreshMeetings()
         // Mirror the live manager's last sync date so the UI doesn't show

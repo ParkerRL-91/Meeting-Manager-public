@@ -78,6 +78,7 @@ final class CalendarSyncManager {
     /// Holds the EventKit / UserDefaults observers for lifetime management.
     nonisolated(unsafe) private var eventStoreObserver: NSObjectProtocol?
     nonisolated(unsafe) private var sourceChangeObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var storeReplacedObserver: NSObjectProtocol?
 
     /// How far into the future to fetch events during sync.
     private let lookAheadDays: Int = 7
@@ -103,6 +104,7 @@ final class CalendarSyncManager {
         changeDebounceTask?.cancel()
         if let obs = eventStoreObserver { NotificationCenter.default.removeObserver(obs) }
         if let obs = sourceChangeObserver { NotificationCenter.default.removeObserver(obs) }
+        if let obs = storeReplacedObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
     // MARK: - Periodic Sync
@@ -139,22 +141,46 @@ final class CalendarSyncManager {
 
         installEventStoreObserverIfNeeded()
         installSourceChangeObserverIfNeeded()
+        installStoreReplacedObserverIfNeeded()
     }
 
     /// Subscribe to EventKit's change firehose so external edits show up
     /// without waiting for the next tick. Debounced to coalesce edit storms.
+    ///
+    /// Bound to `nil` instead of a specific store so it survives
+    /// `AppleCalendarService` rebuilding its `EKEventStore` after a
+    /// permission grant — the legacy approach of binding to a specific
+    /// instance silently went deaf the moment the store was replaced.
     private func installEventStoreObserverIfNeeded() {
         guard eventStoreObserver == nil else { return }
-        let store = AppleCalendarService.shared.store
         eventStoreObserver = NotificationCenter.default.addObserver(
             forName: .EKEventStoreChanged,
-            object: store,
+            object: nil,
             queue: .main
         ) { [weak self] _ in
             // .main delivers on the main thread but Swift 6 still needs an
             // explicit MainActor hop to call into @MainActor-isolated state.
             Task { @MainActor in
                 self?.scheduleDebouncedAppleSync()
+            }
+        }
+    }
+
+    /// When `AppleCalendarService` rebuilds its store after a permission
+    /// transition, kick a sync. Calendar data is now actually fetchable —
+    /// don't make the user wait for the next periodic tick to see events.
+    private func installStoreReplacedObserverIfNeeded() {
+        guard storeReplacedObserver == nil else { return }
+        storeReplacedObserver = NotificationCenter.default.addObserver(
+            forName: .appleCalendarStoreReplaced,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                let source = CalendarSource.current
+                guard source == .appleCalendar || source == .both else { return }
+                Logger.calendar.info("Apple store rebuilt — kicking immediate sync")
+                await self?.performSync()
             }
         }
     }
@@ -250,16 +276,22 @@ final class CalendarSyncManager {
             let now = Date()
             let from = Calendar.current.date(byAdding: .day, value: -daysBehind, to: now)!
             let to = Calendar.current.date(byAdding: .day, value: daysAhead, to: now)!
-            let calendarId = selectedCalendarId() ?? "primary"
-            let events = try await calendarService.fetchEvents(
-                accessToken: accessToken,
-                from: from,
-                to: to,
-                calendarId: calendarId
-            )
-            for event in events {
-                try await upsertMeeting(from: event)
-                processed += 1
+            let calendarIds = selectedGoogleCalendarIds()
+            for calendarId in calendarIds {
+                do {
+                    let events = try await calendarService.fetchEvents(
+                        accessToken: accessToken,
+                        from: from,
+                        to: to,
+                        calendarId: calendarId
+                    )
+                    for event in events {
+                        try await upsertMeeting(from: event)
+                        processed += 1
+                    }
+                } catch {
+                    Logger.calendar.error("Google backfill failed for calendar=\(calendarId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
             }
         }
 
@@ -267,6 +299,7 @@ final class CalendarSyncManager {
             // EventKit-backed wide-window pull. Mirrors the Google branch above
             // so the user-visible "Re-sync 90 days" semantics are real for
             // Apple-only users instead of a silent no-op.
+            AppleCalendarService.shared.verifyAndRefresh()
             guard AppleCalendarService.shared.isAuthorized else {
                 Logger.calendar.warning("Apple backfill skipped — calendar permission not granted")
                 if processed == 0 {
@@ -274,7 +307,8 @@ final class CalendarSyncManager {
                 }
                 return processed
             }
-            let events = await AppleCalendarService.shared.fetchEvents(daysBehind: daysBehind, daysAhead: daysAhead)
+            let selectedIds = selectedAppleCalendarIds()
+            let events = await AppleCalendarService.shared.fetchEvents(daysBehind: daysBehind, daysAhead: daysAhead, calendarIds: selectedIds)
             for event in events {
                 do {
                     let meeting = AppleCalendarService.shared.meeting(from: event)
@@ -351,18 +385,24 @@ final class CalendarSyncManager {
         let from = Calendar.current.date(byAdding: .day, value: -lookBehindDays, to: now)!
         let to = Calendar.current.date(byAdding: .day, value: lookAheadDays, to: now)!
 
-        let calendarId = selectedCalendarId() ?? "primary"
-        let events = try await calendarService.fetchEvents(
-            accessToken: accessToken,
-            from: from,
-            to: to,
-            calendarId: calendarId
-        )
-
+        let calendarIds = selectedGoogleCalendarIds()
         var synced = 0
-        for event in events {
-            try await upsertMeeting(from: event)
-            synced += 1
+        for calendarId in calendarIds {
+            do {
+                let events = try await calendarService.fetchEvents(
+                    accessToken: accessToken,
+                    from: from,
+                    to: to,
+                    calendarId: calendarId
+                )
+                for event in events {
+                    try await upsertMeeting(from: event)
+                    synced += 1
+                }
+            } catch {
+                Logger.calendar.error("Google sync failed for calendar=\(calendarId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                // One bad calendar shouldn't kill the whole sync — keep going.
+            }
         }
         return synced
     }
@@ -373,14 +413,20 @@ final class CalendarSyncManager {
     /// so an in-progress meeting that started a few minutes before the last
     /// tick is still picked up.
     private func syncApple() async -> Int {
+        // verifyAndRefresh() detects auth-state drift and rebuilds the
+        // EKEventStore if needed. This is the recovery path that lets us
+        // come back to life without an app relaunch.
+        AppleCalendarService.shared.verifyAndRefresh()
         let state = AppleCalendarService.shared.authorizationState
         guard state == .authorized else {
             Logger.calendar.warning("Apple sync skipped — authorizationState=\(String(describing: state), privacy: .public). User must grant full access in Settings → Calendar or System Settings → Privacy & Security → Calendars.")
             return 0
         }
+        let selectedIds = selectedAppleCalendarIds()
         let events = await AppleCalendarService.shared.fetchEvents(
             daysBehind: lookBehindDays,
-            daysAhead: lookAheadDays
+            daysAhead: lookAheadDays,
+            calendarIds: selectedIds
         )
         var synced = 0
         for event in events {
@@ -394,6 +440,34 @@ final class CalendarSyncManager {
         }
         Logger.calendar.info("Apple sync complete: upserted \(synced, privacy: .public) of \(events.count, privacy: .public) events")
         return synced
+    }
+
+    /// Decode the comma-separated calendar ID selection from settings.
+    /// Returns nil to mean "all enabled calendars" (user hasn't picked).
+    private func selectedAppleCalendarIds() -> Set<String>? {
+        let raw: String? = (try? AppDatabase.shared.writer.read { db in
+            try AppSettings.fetchOne(db)?.selectedAppleCalendarIds
+        }) ?? nil
+        guard let raw, !raw.isEmpty else { return nil }
+        let ids = raw.split(separator: ",").map { String($0) }
+        return ids.isEmpty ? nil : Set(ids)
+    }
+
+    /// Read the user's multi-select Google calendar IDs. Falls back to the
+    /// legacy `selectedCalendarId` single-string when the new field is unset
+    /// (preserves behaviour for users upgrading from the single-select UI).
+    private func selectedGoogleCalendarIds() -> [String] {
+        if let raw: String = (try? AppDatabase.shared.writer.read { db in
+            try AppSettings.fetchOne(db)?.selectedGoogleCalendarIds
+        }) ?? nil, !raw.isEmpty {
+            let ids = raw.split(separator: ",").map { String($0) }
+            if !ids.isEmpty { return ids }
+        }
+        // Legacy single-select fallback.
+        let legacy: String? = (try? AppDatabase.shared.writer.read { db in
+            try AppSettings.fetchOne(db)?.selectedCalendarId
+        }) ?? nil
+        return [legacy ?? "primary"]
     }
 
     /// Upserts a Meeting derived from an EKEvent. Mirrors `upsertMeeting(from:)`
@@ -448,13 +522,6 @@ final class CalendarSyncManager {
         return trimmed.isEmpty
             || trimmed == "New Meeting"
             || trimmed == "Untitled Meeting"
-    }
-
-    /// Returns the user-selected calendar ID from settings, or nil for "primary".
-    private func selectedCalendarId() -> String? {
-        try? AppDatabase.shared.writer.read { db in
-            try AppSettings.fetchOne(db)?.selectedCalendarId
-        } ?? nil
     }
 
     /// Creates or updates a `Meeting` record from a calendar event.

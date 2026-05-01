@@ -1,5 +1,6 @@
 import EventKit
 import Foundation
+import AppKit
 import os
 
 /// EventKit-backed calendar source. Sibling to `GoogleCalendarService`,
@@ -7,16 +8,64 @@ import os
 ///
 /// Note: Outlook for macOS publishes its events into the system calendar
 /// store, so this service transparently covers Outlook users on macOS.
+///
+/// ## Reliability model
+///
+/// EventKit on macOS has several edge cases that historically caused the
+/// app to look "permanently disconnected" even when TCC reported access
+/// granted. This service guards against all of them:
+///
+/// 1. The `EKEventStore` is recreated whenever auth state transitions to
+///    `.authorized` — a store created in an unauthorized state can return
+///    empty calendar lists even after the user later grants access.
+/// 2. `EKEventStoreChanged` is observed to detect external grants (user
+///    toggles permission in System Settings).
+/// 3. `NSApplication.didBecomeActive` is observed so the app re-validates
+///    the store every time it comes to the foreground — catches the case
+///    where the user grants in System Settings without quitting the app.
+/// 4. Auth state is "sticky": once we observe `.authorized`, a transient
+///    `.notDetermined` from the static API is treated as a stall, not a
+///    revocation. Real revocations come through as `.denied`.
+/// 5. `verifyAndRefresh()` is called before every read; if the store is
+///    in a bad state, it's rebuilt before returning.
 @MainActor
 final class AppleCalendarService {
     static let shared = AppleCalendarService()
 
-    /// Exposed so observers (e.g. `CalendarSyncManager`) can subscribe to
-    /// EventKit's change firehose without needing a reference to the store.
-    let store = EKEventStore()
+    /// EventKit handle. `private(set)` because it gets replaced when we
+    /// recreate the store after an auth transition; callers must always
+    /// read it fresh and never cache the reference.
+    ///
+    /// Subscribe to `Notification.Name.appleCalendarStoreReplaced` to
+    /// re-register any `EKEventStoreChanged` observers when the store
+    /// is rebuilt.
+    private(set) var store = EKEventStore()
+
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager", category: "calendar")
 
-    private init() {}
+    /// Last auth state we *observed* — used to detect transitions and to
+    /// implement the sticky-authorized rule (so a transient `.notDetermined`
+    /// from EventKit's static query doesn't make the UI bounce).
+    private var lastObservedState: AuthorizationState = .notDetermined
+
+    /// Set when we last saw `.authorized`. Used by the sticky rule.
+    private var lastAuthorizedAt: Date?
+
+    /// External-change observers we install once at first access.
+    private var didBecomeActiveObserver: NSObjectProtocol?
+    private var eventStoreChangedObserver: NSObjectProtocol?
+
+    private init() {
+        installSystemObservers()
+        // Snapshot initial state so transitions are detectable.
+        lastObservedState = currentAuthorizationStateRaw()
+        if lastObservedState == .authorized { lastAuthorizedAt = Date() }
+    }
+
+    deinit {
+        if let o = didBecomeActiveObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = eventStoreChangedObserver { NotificationCenter.default.removeObserver(o) }
+    }
 
     // MARK: - Authorization
 
@@ -31,10 +80,25 @@ final class AppleCalendarService {
         case authorized
     }
 
+    /// Public auth state. Applies the sticky-authorized rule: once we've
+    /// successfully observed `.authorized`, a follow-up `.notDetermined`
+    /// (which EventKit can transiently return) is reported as `.authorized`
+    /// for a 5-second grace window before bouncing.
     var authorizationState: AuthorizationState {
-        // Deployment target is macOS 14.4 (see Package.swift / Info.plist), so
-        // the legacy `.authorized` case is unreachable in practice but still
-        // listed for exhaustiveness.
+        let raw = currentAuthorizationStateRaw()
+        if raw == .notDetermined,
+           let lastAuth = lastAuthorizedAt,
+           Date().timeIntervalSince(lastAuth) < 5.0 {
+            logger.debug("Auth state stickied: raw=.notDetermined but lastAuthorizedAt=\(lastAuth)")
+            return .authorized
+        }
+        return raw
+    }
+
+    var isAuthorized: Bool { authorizationState == .authorized }
+
+    /// Raw state without the sticky rule.
+    private func currentAuthorizationStateRaw() -> AuthorizationState {
         switch EKEventStore.authorizationStatus(for: .event) {
         case .notDetermined: return .notDetermined
         case .denied, .restricted: return .denied
@@ -44,21 +108,27 @@ final class AppleCalendarService {
         }
     }
 
-    var isAuthorized: Bool { authorizationState == .authorized }
-
     /// Asks EventKit for full read access. Returns true on a successful grant.
     ///
-    /// Logging is intentionally verbose so a bounced-back-to-not-connected
-    /// report can be diagnosed from the unified log alone (filter by
-    /// subsystem `com.meetingmanager.app`, category `calendar`).
+    /// On success, the underlying `EKEventStore` is recreated to ensure
+    /// EventKit's internal auth cache is fresh — without this step, the
+    /// pre-grant store can stay stuck returning empty calendar lists.
     @discardableResult
     func requestAccess() async -> Bool {
         let priorStatus = EKEventStore.authorizationStatus(for: .event)
-        logger.info("Apple Calendar requestAccess() called — prior TCC status=\(priorStatus.rawValue, privacy: .public) (\(self.priorStatusDescription(priorStatus), privacy: .public))")
+        logger.info("Apple Calendar requestAccess() — prior TCC status=\(self.statusDescription(priorStatus), privacy: .public)")
         do {
             let granted = try await store.requestFullAccessToEvents()
+            // Give TCC a beat to commit the grant before re-querying.
+            try? await Task.sleep(for: .milliseconds(150))
             let postStatus = EKEventStore.authorizationStatus(for: .event)
-            logger.info("requestFullAccessToEvents returned granted=\(granted, privacy: .public); post-call TCC status=\(postStatus.rawValue, privacy: .public) (\(self.priorStatusDescription(postStatus), privacy: .public))")
+            logger.info("requestFullAccessToEvents granted=\(granted, privacy: .public); post TCC status=\(self.statusDescription(postStatus), privacy: .public)")
+
+            if granted {
+                lastAuthorizedAt = Date()
+                lastObservedState = .authorized
+                rebuildStore(reason: "post-grant")
+            }
             return granted
         } catch {
             logger.error("Apple Calendar access request threw: \(error.localizedDescription, privacy: .public)")
@@ -66,35 +136,144 @@ final class AppleCalendarService {
         }
     }
 
-    /// Map raw EKAuthorizationStatus to a readable string for logs.
-    private func priorStatusDescription(_ s: EKAuthorizationStatus) -> String {
-        switch s {
-        case .notDetermined: return "notDetermined"
-        case .restricted: return "restricted"
-        case .denied: return "denied"
-        case .authorized: return "authorized(legacy)"
-        case .writeOnly: return "writeOnly"
-        case .fullAccess: return "fullAccess"
-        @unknown default: return "unknown(\(s.rawValue))"
+    /// Verify the store is in a usable state. Detects and recovers from:
+    /// - Auth-state drift since last observation
+    /// - Store instance returning 0 calendars while auth says authorized
+    ///   (the classic "stuck instance" failure mode)
+    ///
+    /// Call this before every read path. Cheap when nothing's wrong.
+    @discardableResult
+    func verifyAndRefresh() -> Bool {
+        let raw = currentAuthorizationStateRaw()
+
+        // Detect transition into authorized — recreate the store to flush
+        // any cached unauthorized state.
+        if raw == .authorized && lastObservedState != .authorized {
+            logger.info("Auth transition: \(self.stateDescription(self.lastObservedState), privacy: .public) -> .authorized — rebuilding store")
+            lastObservedState = .authorized
+            lastAuthorizedAt = Date()
+            rebuildStore(reason: "auth-transition")
+            return true
+        }
+
+        // Update sticky timestamp on every observed-authorized hit.
+        if raw == .authorized {
+            lastAuthorizedAt = Date()
+            lastObservedState = .authorized
+            // Detect "stuck instance" — authorized but no calendars visible.
+            // EventKit will sometimes return [] from a store that was created
+            // in the unauthorized window. Rebuild and retry on this signal.
+            if store.calendars(for: .event).isEmpty {
+                logger.warning("Store reports 0 calendars while authorized — rebuilding (likely stale instance)")
+                rebuildStore(reason: "stuck-instance")
+            }
+            return true
+        }
+
+        lastObservedState = raw
+        return raw == .authorized
+    }
+
+    /// Rebuild the underlying `EKEventStore`. Posts a notification so any
+    /// observers re-register their `EKEventStoreChanged` observer against
+    /// the new instance.
+    private func rebuildStore(reason: String) {
+        store = EKEventStore()
+        logger.info("EKEventStore rebuilt — reason=\(reason, privacy: .public)")
+        NotificationCenter.default.post(name: .appleCalendarStoreReplaced, object: nil)
+    }
+
+    // MARK: - System observers
+
+    private func installSystemObservers() {
+        // Re-validate on app foreground. Catches the case where the user
+        // grants permission in System Settings while the app is running.
+        didBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                AppleCalendarService.shared.verifyAndRefresh()
+            }
+        }
+
+        // EventKit fires this when the calendar database changes — and
+        // empirically, when permission state changes too. Use it as a
+        // second signal alongside foregrounding.
+        eventStoreChangedObserver = NotificationCenter.default.addObserver(
+            forName: .EKEventStoreChanged,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                AppleCalendarService.shared.verifyAndRefresh()
+            }
+        }
+    }
+
+    // MARK: - Calendar list (for multi-select UI)
+
+    struct CalendarInfo: Identifiable, Hashable {
+        let id: String        // EKCalendar.calendarIdentifier
+        let title: String     // user-visible name, e.g. "Work"
+        let sourceTitle: String // e.g. "iCloud", "Exchange", "Google" — useful in groupings
+        let allowsContentModifications: Bool
+        let isSubscription: Bool // birthdays, holidays, sports schedules, etc.
+
+        var displayLabel: String { "\(title) — \(sourceTitle)" }
+    }
+
+    /// All calendars the user can read. Empty array means either no access
+    /// or no calendars are enabled in Calendar.app. Caller can disambiguate
+    /// by checking `authorizationState` first.
+    func availableCalendars() -> [CalendarInfo] {
+        verifyAndRefresh()
+        guard isAuthorized else { return [] }
+        let cals = store.calendars(for: .event)
+        return cals.map { c in
+            CalendarInfo(
+                id: c.calendarIdentifier,
+                title: c.title,
+                sourceTitle: c.source?.title ?? "Unknown",
+                allowsContentModifications: c.allowsContentModifications,
+                isSubscription: c.type == .subscription || c.type == .birthday
+            )
+        }.sorted { lhs, rhs in
+            if lhs.sourceTitle == rhs.sourceTitle { return lhs.title < rhs.title }
+            return lhs.sourceTitle < rhs.sourceTitle
         }
     }
 
     // MARK: - Fetch
 
-    /// Returns events spanning `[now - daysBehind, now + daysAhead]` from all
-    /// readable calendars, sorted ascending by start date.
+    /// Returns events spanning `[now - daysBehind, now + daysAhead]`.
     ///
-    /// `daysBehind` defaults to 1 so an in-progress meeting that started a
-    /// few minutes before launch is still picked up — matching the Google
-    /// path's behavior.
-    func fetchEvents(daysBehind: Int = 1, daysAhead: Int = 7) async -> [EKEvent] {
+    /// - Parameter calendarIds: When non-nil, restrict the read to these
+    ///   `EKCalendar.calendarIdentifier`s. Nil = all readable calendars.
+    func fetchEvents(
+        daysBehind: Int = 1,
+        daysAhead: Int = 7,
+        calendarIds: Set<String>? = nil
+    ) async -> [EKEvent] {
+        verifyAndRefresh()
         guard isAuthorized else {
-            logger.warning("Apple Calendar fetch skipped — not authorized (state=\(String(describing: self.authorizationState), privacy: .public))")
+            logger.warning("Apple Calendar fetch skipped — not authorized (state=\(self.stateDescription(self.authorizationState), privacy: .public))")
             return []
         }
-        let cals = store.calendars(for: .event)
+        let allCals = store.calendars(for: .event)
+        let cals: [EKCalendar]
+        if let calendarIds {
+            cals = allCals.filter { calendarIds.contains($0.calendarIdentifier) }
+            if cals.isEmpty && !allCals.isEmpty {
+                logger.warning("Selected calendar IDs don't match any current calendars — falling back to all (\(allCals.count, privacy: .public))")
+                return await fetchEvents(daysBehind: daysBehind, daysAhead: daysAhead, calendarIds: nil)
+            }
+        } else {
+            cals = allCals
+        }
         guard !cals.isEmpty else {
-            logger.warning("Apple Calendar fetch returned 0 events — store reports zero readable calendars (TCC may have granted writeOnly or the user has no enabled calendars in Calendar.app)")
+            logger.warning("Apple Calendar fetch returned 0 events — 0 readable calendars (no calendars enabled in Calendar.app, or writeOnly grant)")
             return []
         }
 
@@ -104,7 +283,7 @@ final class AppleCalendarService {
         let end = cal.date(byAdding: .day, value: max(1, daysAhead), to: now) ?? now
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: cals)
         let events = store.events(matching: predicate).sorted { $0.startDate < $1.startDate }
-        logger.info("Apple Calendar fetch: \(events.count, privacy: .public) events from \(cals.count, privacy: .public) calendar(s) over -\(daysBehind, privacy: .public)d / +\(daysAhead, privacy: .public)d")
+        logger.info("Apple Calendar fetch: \(events.count, privacy: .public) events from \(cals.count, privacy: .public)/\(allCals.count, privacy: .public) calendar(s) over -\(daysBehind, privacy: .public)d/+\(daysAhead, privacy: .public)d")
         return events
     }
 
@@ -161,4 +340,36 @@ final class AppleCalendarService {
               let url = match.url else { return nil }
         return url.absoluteString
     }
+
+    // MARK: - Logging helpers
+
+    private func statusDescription(_ s: EKAuthorizationStatus) -> String {
+        switch s {
+        case .notDetermined: return "notDetermined"
+        case .restricted: return "restricted"
+        case .denied: return "denied"
+        case .authorized: return "authorized(legacy)"
+        case .writeOnly: return "writeOnly"
+        case .fullAccess: return "fullAccess"
+        @unknown default: return "unknown(\(s.rawValue))"
+        }
+    }
+
+    private func stateDescription(_ s: AuthorizationState) -> String {
+        switch s {
+        case .notDetermined: return "notDetermined"
+        case .denied: return "denied"
+        case .writeOnly: return "writeOnly"
+        case .authorized: return "authorized"
+        }
+    }
+}
+
+// MARK: - Notifications
+
+extension Notification.Name {
+    /// Posted on `MainActor` when `AppleCalendarService.shared.store` is
+    /// replaced. Observers should re-register any `EKEventStoreChanged`
+    /// listeners against the new store instance.
+    static let appleCalendarStoreReplaced = Notification.Name("appleCalendarStoreReplaced")
 }

@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v3.7.2.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.7.2) — macOS 14.4+
+[**MeetingManager-v3.8.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.8.0) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -28,6 +28,26 @@ Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may 
 xattr -cr "/Applications/Meeting Manager.app"
 ```
 This removes the quarantine flag so the app opens without warnings.
+
+---
+
+## What's New in v3.8.0 — Calendar Reliability & Multi-Select
+
+### Apple Calendar reliability — six fixes
+The "iCloud keeps losing access" problem is gone. Six independent failure modes have been addressed:
+
+- **Store rebuild after grant** — `EKEventStore` is now recreated when the auth state transitions to authorized, fixing the "stuck instance" bug where a store created before TCC resolved would keep returning empty calendar lists even after the user granted access
+- **External-grant detection** — the app listens to `EKEventStoreChanged` and `NSApplication.didBecomeActive` so grants applied via System Settings (without quitting the app) are picked up immediately
+- **Sticky authorization** — once we've observed `.authorized`, transient `.notDetermined` returns from the EventKit API are treated as stalls (not revocations) within a 5-second window, eliminating the UI bouncing back to "not connected" mid-grant
+- **Self-healing sync path** — every Apple sync runs `verifyAndRefresh()` first, which detects bad store state and rebuilds it without an app restart
+- **Survivable observers** — `EKEventStoreChanged` observer is now bound globally instead of to a specific store instance, so it survives store rebuilds (previously it went deaf the moment the store was replaced)
+- **Auto-sync on rebuild** — when the store is rebuilt after a grant, sync runs immediately so the user doesn't wait for the next periodic tick
+
+### Multi-calendar selection (Apple + Google)
+- **Apple Calendar** — new picker grouped by source (iCloud, Exchange, On My Mac, etc.) with per-calendar checkboxes; leave none selected to include all
+- **Google Calendar** — single-select dropdown replaced with multi-select checkboxes; events from all selected calendars are merged
+- Subscribed calendars (birthdays, holidays, sports schedules) can now be excluded
+- Database migration v29 adds the new fields; legacy single-calendar selection auto-migrates on first open
 
 ---
 

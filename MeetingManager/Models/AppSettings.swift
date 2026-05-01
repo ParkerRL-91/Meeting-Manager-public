@@ -19,8 +19,21 @@ struct AppSettings: Codable, Equatable {
     /// Ignored if autoRecord is true (auto-record takes precedence).
     var autoInvite: Bool = true
 
-    /// The Google Calendar ID to sync. nil = use the primary calendar.
+    /// Legacy single-Google-calendar selection. Read as a fallback when
+    /// `selectedGoogleCalendarIds` is empty. New code should write to the
+    /// multi-select field instead.
     var selectedCalendarId: String? = nil
+
+    /// Comma-separated list of Google calendar IDs to sync. Empty/nil = fall
+    /// back to `selectedCalendarId` (or "primary" if that's also unset).
+    /// Stored as a comma-separated string rather than JSON for migration
+    /// simplicity — Google calendar IDs never contain commas.
+    var selectedGoogleCalendarIds: String? = nil
+
+    /// Comma-separated list of `EKCalendar.calendarIdentifier`s to include
+    /// in Apple Calendar sync. Empty/nil = include all readable calendars.
+    /// Apple calendar identifiers are UUIDs and never contain commas.
+    var selectedAppleCalendarIds: String? = nil
 
     /// When true, meeting summaries are generated on-device using a local LLM instead of the Claude API.
     var useLocalLLM: Bool = false
@@ -78,6 +91,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case autoFollowUpEmail
         case morningBriefEnabled, morningBriefHour, morningBriefMinute
         case kbWriteBack
+        case selectedGoogleCalendarIds, selectedAppleCalendarIds
     }
 }
 

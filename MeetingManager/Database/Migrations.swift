@@ -675,5 +675,15 @@ enum Migrations {
                 t.add(column: "kbWriteBack", .boolean).notNull().defaults(to: false)
             }
         }
+
+        // Multi-calendar selection. Both columns are nullable text holding
+        // a comma-separated list of calendar IDs. NULL/empty means "use the
+        // legacy single-select fallback" (Google) or "all enabled" (Apple).
+        migrator.registerMigration("v29-multi-calendar-selection") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "selectedGoogleCalendarIds", .text)
+                t.add(column: "selectedAppleCalendarIds", .text)
+            }
+        }
     }
 }
