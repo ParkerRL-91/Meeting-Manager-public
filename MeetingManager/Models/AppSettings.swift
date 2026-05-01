@@ -66,6 +66,11 @@ struct AppSettings: Codable, Equatable {
     /// Files are written as Markdown under <KB root>/Meeting Notes/YYYY/MM-Month/DD/Title.md
     var kbWriteBack: Bool = false
 
+    /// When true, import contacts from macOS Contacts to improve speaker ID.
+    /// Requires Contacts permission. Imported contacts create Person records
+    /// but do NOT store contact details beyond name and email address.
+    var contactsImportEnabled: Bool = false
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -92,6 +97,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case morningBriefEnabled, morningBriefHour, morningBriefMinute
         case kbWriteBack
         case selectedGoogleCalendarIds, selectedAppleCalendarIds
+        case contactsImportEnabled
     }
 }
 

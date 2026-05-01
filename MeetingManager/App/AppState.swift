@@ -1472,7 +1472,9 @@ final class AppState {
                     clusterRanges[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
                 }
                 if !clusterRanges.isEmpty {
-                    let stored = (try? await VoiceProfileRepository(database: database).allProfiles()) ?? []
+                    let vpRepo = VoiceProfileRepository(database: database)
+                    let pRepo  = PersonRepository(database: database)
+                    let stored = (try? await vpRepo.allProfilesResolved(personRepo: pRepo)) ?? []
                     voiceMatches = await VoiceProfileService.shared.matchProfiles(
                         audioURL: systemURL,
                         clusterRanges: clusterRanges,
@@ -1697,9 +1699,29 @@ final class AppState {
         let voiceService = VoiceProfileService.shared
         let repo = VoiceProfileRepository(database: database)
         let personRepo = PersonRepository(database: database)
+        let sampleRepo = VoiceSampleRepository(database: database)
         for (name, ranges) in rangesByName {
             guard let embedding = await voiceService.extractEmbedding(audioURL: systemURL, timeRanges: ranges) else { continue }
+            let person = try? await personRepo.findOrCreate(for: name)
             try? await repo.merge(personName: name, newEmbedding: embedding, personRepo: personRepo)
+            // Phase 4: persist the individual utterance sample for provenance
+            if let pid = person?.id, !ranges.isEmpty {
+                let span = ranges.reduce((min: Float.infinity, max: Float(0))) {
+                    (min($0.min, $1.start), max($0.max, $1.end))
+                }
+                var sample = VoiceSample(
+                    id: nil,
+                    personId: pid,
+                    meetingId: meetingId,
+                    startTime: Double(span.min),
+                    endTime: Double(span.max),
+                    embeddingData: Data(),
+                    source: "voice_match",
+                    createdAt: Date()
+                )
+                sample.embedding = embedding
+                try? await sampleRepo.save(sample)
+            }
             Logger.general.info("Voice profile learned: \(name, privacy: .public) (\(ranges.count) range(s)) for meeting \(meetingId, privacy: .public)")
         }
     }
@@ -1768,7 +1790,10 @@ final class AppState {
 
             // Phase 3 — match stored voice profiles before LLM attribution.
             // Clusters that match a known voice are pre-assigned, skipping the LLM entirely.
-            let storedProfiles = (try? await profileRepo.allProfiles()) ?? []
+            // Use allProfilesResolved so each profile's personName reflects the
+            // Person's current canonical name (Phase 2: personId-keyed matching).
+            let personRepo2 = PersonRepository(database: database)
+            let storedProfiles = (try? await profileRepo.allProfilesResolved(personRepo: personRepo2)) ?? []
             let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
             let voiceMatches = await voiceService.matchProfiles(
                 clusters: Array(clusterLabels),

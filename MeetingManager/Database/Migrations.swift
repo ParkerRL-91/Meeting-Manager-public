@@ -741,5 +741,38 @@ enum Migrations {
                 columns: ["personId"]
             )
         }
+
+        // v3.9 Phase 4: per-utterance voice sample bank. Stores individual
+        // embeddings alongside the EMA centroid in VoiceProfile so bad
+        // attributions can be rolled back and profiles rebuilt from scratch.
+        migrator.registerMigration("v32-voice-sample-bank") { db in
+            try db.create(table: "voiceSample") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("personId", .text).notNull()
+                t.column("meetingId", .text).notNull()
+                t.column("startTime", .double).notNull()
+                t.column("endTime", .double).notNull()
+                t.column("embeddingData", .blob).notNull()
+                t.column("source", .text).notNull().defaults(to: "unknown")
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(
+                index: "idx_voiceSample_personId",
+                on: "voiceSample",
+                columns: ["personId", "createdAt"]
+            )
+            try db.create(
+                index: "idx_voiceSample_meetingId",
+                on: "voiceSample",
+                columns: ["meetingId"]
+            )
+        }
+
+        // v3.9 Phase 5: opt-in Contacts import toggle.
+        migrator.registerMigration("v33-contacts-import-setting") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "contactsImportEnabled", .boolean).notNull().defaults(to: false)
+            }
+        }
     }
 }

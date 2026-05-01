@@ -49,52 +49,84 @@ final class VoiceProfileRepository {
         }
     }
 
+    /// Returns all profiles with personName resolved to the Person's current
+    /// canonicalName. Profiles without a Person link are returned unchanged.
+    /// Used by the matching flow so attributed speaker labels always reflect
+    /// the best-known display name, not the name string from when the profile
+    /// was first created.
+    func allProfilesResolved(personRepo: PersonRepository) async throws -> [VoiceProfile] {
+        let profiles = try await allProfiles()
+        let persons = try await personRepo.allPersons()
+        let personById = Dictionary(uniqueKeysWithValues: persons.map { ($0.id, $0) })
+        return profiles.map { profile in
+            guard let pid = profile.personId,
+                  let person = personById[pid],
+                  person.canonicalName != profile.personName
+            else { return profile }
+            var resolved = profile
+            resolved.personName = person.canonicalName
+            return resolved
+        }
+    }
+
     // MARK: - Write
 
     /// Merge a new embedding into the stored profile using an exponential
     /// moving average so more-recent meetings gradually dominate older ones.
     /// α = 0.3 means each new meeting contributes 30% to the profile.
     ///
-    /// Pass `personRepo` to automatically link the profile to a Person record.
+    /// When `personRepo` is supplied the repository:
+    ///   1. Finds or creates the Person for `personName`
+    ///   2. Looks up the VoiceProfile by personId first — so "dave@company.com"
+    ///      and "Dave Smith" both merge into the same fingerprint
+    ///   3. Stamps personId on any newly-created or previously-unlinked profile
     func merge(
         personName: String,
         newEmbedding: [Float],
         personRepo: PersonRepository? = nil
     ) async throws {
-        // Resolve personId if a PersonRepository is available
-        let resolvedPersonId: String?
+        let resolvedPerson: Person?
         if let repo = personRepo {
-            resolvedPersonId = try await repo.findOrCreate(for: personName).id
+            resolvedPerson = try await repo.findOrCreate(for: personName)
         } else {
-            resolvedPersonId = nil
+            resolvedPerson = nil
         }
+        let resolvedPersonId = resolvedPerson?.id
 
         try await database.writer.write { db in
             let alpha: Float = 0.3
-            if var existing = try VoiceProfile
-                .filter(VoiceProfile.Columns.personName == personName)
-                .fetchOne(db) {
-                let old = existing.embedding
-                guard old.count == newEmbedding.count else {
-                    existing.embedding = newEmbedding
-                    existing.sampleCount += 1
-                    existing.lastUpdatedAt = Date()
-                    if let pid = resolvedPersonId, existing.personId == nil {
-                        existing.personId = pid
-                    }
-                    try existing.update(db)
-                    return
+
+            // Look up by personId first so different name strings for the same
+            // person all compound into one fingerprint (Phase 2 dedup).
+            let existing: VoiceProfile? = {
+                if let pid = resolvedPersonId,
+                   let byId = try? VoiceProfile
+                    .filter(VoiceProfile.Columns.personId == pid)
+                    .fetchOne(db) {
+                    return byId
                 }
-                let merged = zip(old, newEmbedding).map { o, n in o * (1 - alpha) + n * alpha }
-                existing.embedding = merged
-                existing.sampleCount += 1
-                existing.lastUpdatedAt = Date()
-                if let pid = resolvedPersonId, existing.personId == nil {
-                    existing.personId = pid
+                return try? VoiceProfile
+                    .filter(VoiceProfile.Columns.personName == personName)
+                    .fetchOne(db)
+            }()
+
+            if var row = existing {
+                let old = row.embedding
+                if old.count == newEmbedding.count {
+                    let merged = zip(old, newEmbedding).map { o, n in o * (1 - alpha) + n * alpha }
+                    row.embedding = merged
+                } else {
+                    row.embedding = newEmbedding
                 }
-                try existing.update(db)
+                row.sampleCount += 1
+                row.lastUpdatedAt = Date()
+                if let pid = resolvedPersonId, row.personId == nil { row.personId = pid }
+                // Keep the canonical name current
+                if let person = resolvedPerson { row.personName = person.canonicalName }
+                try row.update(db)
             } else {
-                var profile = VoiceProfile.makeEmpty(personName: personName, personId: resolvedPersonId)
+                let canonicalName = resolvedPerson?.canonicalName ?? personName
+                var profile = VoiceProfile.makeEmpty(personName: canonicalName, personId: resolvedPersonId)
                 profile.embedding = newEmbedding
                 profile.sampleCount = 1
                 profile.lastUpdatedAt = Date()
@@ -107,6 +139,14 @@ final class VoiceProfileRepository {
         try await database.writer.write { db in
             _ = try VoiceProfile
                 .filter(VoiceProfile.Columns.personName == personName)
+                .deleteAll(db)
+        }
+    }
+
+    func delete(personId: String) async throws {
+        try await database.writer.write { db in
+            _ = try VoiceProfile
+                .filter(VoiceProfile.Columns.personId == personId)
                 .deleteAll(db)
         }
     }

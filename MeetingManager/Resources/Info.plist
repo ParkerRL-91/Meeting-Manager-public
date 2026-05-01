@@ -57,6 +57,8 @@
 	<string>Meeting Manager can push action items extracted from your meetings to Apple Reminders.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Meeting Manager reads meeting window titles to detect participant names. It does not capture, record, or transmit screen content.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Meeting Manager can import names and email addresses from your Contacts to improve speaker identification accuracy.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Meeting Manager uses on-device speech recognition to transcribe your meetings in real-time.</string>
 </dict>
