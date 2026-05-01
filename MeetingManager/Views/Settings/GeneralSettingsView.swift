@@ -40,6 +40,12 @@ struct GeneralSettingsView: View {
         }
         .formStyle(.grouped)
         .task {
+            // Sync local state from persisted settings. Without this,
+            // selectedTheme stays at its `AppSettings.default` initial
+            // value and the picker visually disagrees with reality.
+            selectedTheme = appState.settings.theme.isEmpty ? "dark" : appState.settings.theme
+            launchAtLogin = appState.settings.launchAtLogin
+            notificationLeadTime = appState.settings.notificationLeadTimeMinutes
             autoGenerateSummary = appState.settings.autoGenerateSummary
             defaultRecipeId = appState.settings.defaultRecipeId
             autoFollowUpEmail = appState.settings.autoFollowUpEmail
@@ -49,31 +55,51 @@ struct GeneralSettingsView: View {
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
             await refreshRemindersLists()
+            Logger.ui.info("[GeneralSettingsView] hydrated; theme=\(selectedTheme, privacy: .public)")
         }
     }
 
     // MARK: - Sections
 
     private var appearanceSection: some View {
-        Section {
-            Picker("Theme", selection: $selectedTheme) {
+        // Custom binding intercepts the setter directly. We do this instead of
+        // .onChange because:
+        //  1. .onChange fires AFTER state has changed, leading to brief visual
+        //     flicker where the picker shows "Light" before snapping back.
+        //  2. Some SwiftUI runs consolidate sequential state mutations and skip
+        //     the .onChange callback entirely (this was the v3.8.0–3.8.2 bug).
+        //  3. Custom binding setters are guaranteed to run on every interaction.
+        let themeBinding = Binding<String>(
+            get: { selectedTheme },
+            set: { newValue in
+                Logger.ui.info("[ThemePicker] setter received: \(newValue, privacy: .public) (current: \(selectedTheme, privacy: .public))")
+                guard newValue != "dark" else {
+                    selectedTheme = newValue
+                    persistSetting { $0.theme = newValue }
+                    Logger.ui.info("[ThemePicker] persisted theme=dark")
+                    return
+                }
+                // Refuse the change. selectedTheme stays "dark" — the picker
+                // re-renders with Dark selected, and the user never has any
+                // chance to live in the light.
+                Logger.ui.info("[ThemePicker] refusing theme=\(newValue, privacy: .public); presenting NSAlert")
+                showLightModeRefusal(attempted: newValue)
+            }
+        )
+
+        return Section {
+            Picker("Theme", selection: themeBinding) {
                 Text("Dark").tag("dark")
                 Text("Light").tag("light")
                 Text("System").tag("system")
             }
             .pickerStyle(.segmented)
-            .onChange(of: selectedTheme) { _, newValue in
-                // No light mode exists. Bounce back to dark with a wink.
-                // We don't bother handling .system either — it'd flip to light
-                // half the time, defeating the joke.
-                guard newValue != "dark" else {
-                    persistSetting { $0.theme = newValue }
-                    Logger.ui.info("Theme changed to \(newValue)")
-                    return
-                }
-                Logger.ui.info("User attempted theme=\(newValue) — reverting to dark")
-                showLightModeRefusal()
-            }
+
+            // Permanent reminder so the bit lands even before any clicks.
+            Text("We live our life in the dark. Light mode is not coming.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
         } header: {
             Text("Appearance")
         }
@@ -247,33 +273,32 @@ struct GeneralSettingsView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
-    /// Show a modal NSAlert refusing the light-mode selection, then revert
-    /// the picker back to dark. Uses NSAlert directly because SwiftUI's
-    /// `.alert` modifier is unreliable inside macOS Settings windows —
-    /// presentation gets silently dropped depending on the focus chain.
-    private func showLightModeRefusal() {
-        // Defer the modal beat so the picker has time to commit its visual
-        // selection — otherwise the runModal blocks the runloop before the
-        // segmented control's haptic/animation can land, which feels janky.
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Nice try."
-            alert.informativeText = "You appear to have clicked light mode. There is no reason to do this. We live our life in the dark. Reverting back to dark."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "Stay in the dark")
-            // Find the active window to attach the sheet to. Falls back to
-            // a free-floating modal if no window is found.
-            if let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
-                alert.beginSheetModal(for: window) { _ in
-                    selectedTheme = "dark"
-                    persistSetting { $0.theme = "dark" }
-                }
-            } else {
-                alert.runModal()
-                selectedTheme = "dark"
-                persistSetting { $0.theme = "dark" }
-            }
-        }
+    /// Show a modal NSAlert refusing the light-mode selection.
+    ///
+    /// Uses `runModal()` (free-floating, blocking) instead of
+    /// `beginSheetModal(for:)`. The sheet variant requires the alert to
+    /// attach to a key window, and on macOS Settings (`Settings { ... }`
+    /// scene) that lookup is racy — `NSApp.keyWindow` is sometimes nil at
+    /// the moment a Picker fires its setter because the segmented control
+    /// briefly takes first-responder focus, causing the sheet to silently
+    /// fail to present. `runModal()` doesn't care — it always shows.
+    ///
+    /// The `selectedTheme` reset isn't done here because the custom binding
+    /// setter intentionally never updates `selectedTheme` for non-dark
+    /// values — the picker re-renders with the unchanged Dark selection
+    /// the moment SwiftUI completes its layout pass.
+    private func showLightModeRefusal(attempted: String) {
+        Logger.ui.info("[showLightModeRefusal] entering for attempt=\(attempted, privacy: .public)")
+        // Bring the app forward so the modal isn't hidden behind another window.
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Nice try."
+        alert.informativeText = "You appear to have clicked \(attempted) mode. There is no reason to do this. We live our life in the dark. Reverting back to dark."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Stay in the dark")
+        Logger.ui.info("[showLightModeRefusal] calling runModal()")
+        alert.runModal()
+        Logger.ui.info("[showLightModeRefusal] modal dismissed")
     }
 
     private func persistSetting(_ mutation: (inout AppSettings) -> Void) {
