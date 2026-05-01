@@ -213,21 +213,28 @@ if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
 fi
 
 # Sign the binary (with entitlements so microphone/screen permissions aren't stripped)
-ENTITLEMENTS_OPT=""
 if [[ -f "${ENTITLEMENTS}" ]]; then
-    ENTITLEMENTS_OPT="--entitlements ${ENTITLEMENTS}"
+    codesign --force ${RUNTIME_OPTS} \
+        --sign "${SIGN_IDENTITY}" \
+        --entitlements "${ENTITLEMENTS}" \
+        "${MACOS_DIR}/${EXECUTABLE}"
+else
+    codesign --force ${RUNTIME_OPTS} \
+        --sign "${SIGN_IDENTITY}" \
+        "${MACOS_DIR}/${EXECUTABLE}"
 fi
 
-codesign --force ${RUNTIME_OPTS} \
-    --sign "${SIGN_IDENTITY}" \
-    ${ENTITLEMENTS_OPT} \
-    "${MACOS_DIR}/${EXECUTABLE}"
-
 # Sign the app bundle
-codesign --force --deep ${RUNTIME_OPTS} \
-    --sign "${SIGN_IDENTITY}" \
-    ${ENTITLEMENTS_OPT} \
-    "${APP_BUNDLE}"
+if [[ -f "${ENTITLEMENTS}" ]]; then
+    codesign --force --deep ${RUNTIME_OPTS} \
+        --sign "${SIGN_IDENTITY}" \
+        --entitlements "${ENTITLEMENTS}" \
+        "${APP_BUNDLE}"
+else
+    codesign --force --deep ${RUNTIME_OPTS} \
+        --sign "${SIGN_IDENTITY}" \
+        "${APP_BUNDLE}"
+fi
 
 echo "Signed."
 
