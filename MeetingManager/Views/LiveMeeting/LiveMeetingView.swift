@@ -19,10 +19,11 @@ struct LiveMeetingView: View {
     @State private var capturedItemCount = 0
     @State private var showQuickCapture = false
 
-    /// User-controlled height for the live notepad. Persisted across launches
-    /// so dragging the resize handle "sticks" between sessions.
-    /// (Transcript pane has its own height storage inside `LiveTranscriptPane`.)
-    @AppStorage("liveMeeting.notepadHeight") private var notepadHeight: Double = 320
+    // Notepad height is now a flex layout — it claims all remaining vertical
+    // space below the top sections and above the transcript pane. Removed
+    // the previous `liveMeeting.notepadHeight` @AppStorage since the notepad
+    // no longer has a user-draggable height (it auto-sizes with the window).
+    // Transcript pane keeps its own height storage inside `LiveTranscriptPane`.
     @State private var editableTitle: String = ""
     @FocusState private var isTitleFocused: Bool
 
@@ -114,94 +115,106 @@ struct LiveMeetingView: View {
     // MARK: - Main Content
 
     private var mainContent: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Big title (inline editable)
-                TextField("Meeting title", text: $editableTitle)
-                    .font(.title.weight(.bold))
-                    .foregroundStyle(Color.appTextPrimary)
-                    .textFieldStyle(.plain)
+        // Two-tier layout: top sections (title, badges, context brief, open
+        // items) live inside an inner ScrollView with a capped height so
+        // they compress when the window shrinks. The notepad sits below
+        // with `maxHeight: .infinity` and `layoutPriority: 1`, claiming
+        // every remaining pixel — when the window is short, you see fewer
+        // notepad lines (with internal scroll inside the notepad), while
+        // every other section stays visible.
+        //
+        // Previous design wrapped *everything* in one outer ScrollView,
+        // which meant pre-meeting context and action items would scroll
+        // off-screen as soon as the user typed past the visible notepad
+        // area. The user reported this — the layout below is the fix.
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Big title (inline editable)
+                    TextField("Meeting title", text: $editableTitle)
+                        .font(.title.weight(.bold))
+                        .foregroundStyle(Color.appTextPrimary)
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 28)
+                        .padding(.top, 20)
+                        .padding(.bottom, 10)
+                        .onSubmit { saveTitleIfChanged() }
+                        .focused($isTitleFocused)
+                        .onChange(of: isTitleFocused) { _, focused in if !focused { saveTitleIfChanged() } }
+
+                    // Pill badges row
+                    HStack(spacing: 8) {
+                        PillBadge(icon: "calendar", label: "Today")
+
+                        if let meeting, !meeting.participantList.isEmpty {
+                            Button {
+                                showAttendeePopover.toggle()
+                            } label: {
+                                PillBadge(icon: "person.2", label: "\(meeting.participantList.count) attendees")
+                            }
+                            .buttonStyle(.plain)
+                            .popover(isPresented: $showAttendeePopover, arrowEdge: .bottom) {
+                                AttendeePopover(participants: meeting.participantList)
+                            }
+                        }
+
+                        Spacer()
+                    }
                     .padding(.horizontal, 28)
-                    .padding(.top, 24)
-                    .padding(.bottom, 10)
-                    .onSubmit { saveTitleIfChanged() }
-                    .focused($isTitleFocused)
-                    .onChange(of: isTitleFocused) { _, focused in if !focused { saveTitleIfChanged() } }
+                    .padding(.bottom, 16)
 
-                // Pill badges row
-                HStack(spacing: 8) {
-                    // Today badge
-                    PillBadge(icon: "calendar", label: "Today")
-
-                    // Attendees badge
-                    if let meeting, !meeting.participantList.isEmpty {
-                        Button {
-                            showAttendeePopover.toggle()
-                        } label: {
-                            PillBadge(icon: "person.2", label: "\(meeting.participantList.count) attendees")
-                        }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $showAttendeePopover, arrowEdge: .bottom) {
-                            AttendeePopover(participants: meeting.participantList)
-                        }
+                    // Context brief — same RelatedMeetingsSection used on the
+                    // post-meeting detail view, now rendered with the same
+                    // .display heading style and 14pt base font as SummaryView
+                    // so it reads as a proper "summary" (not a sidebar widget).
+                    if let json = meeting?.contextJSON, !json.isEmpty, showContextBrief {
+                        RelatedMeetingsSection(
+                            contextJSON: json,
+                            onSelectMeeting: { id in
+                                appState.selectedMeetingId = id
+                                appState.sidebarDestination = .meetings
+                            }
+                        )
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 12)
                     }
 
-                    Spacer()
+                    // Open Items panel (T-022)
+                    if !carriedItems.isEmpty {
+                        OpenItemsPanel(
+                            items: $carriedItems,
+                            isExpanded: $showOpenItems
+                        )
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 12)
+                    }
                 }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 20)
-
-                // Context brief — same rich synthesized brief shown on the
-                // post-meeting detail page (RelatedMeetingsSection). Pre-
-                // computed ~30 min before by preComputePrepContext; if still
-                // loading at recording start, the .onChange watcher below
-                // re-renders once enrichment completes.
-                //
-                // Previously this used a custom ContextBriefView that only
-                // showed flat meeting excerpts — visually inconsistent with
-                // the post-meeting view and missed the LLM-synthesized
-                // sections (Why this meeting exists / What you should know /
-                // Likely discussion points / Open commitments).
-                if let json = meeting?.contextJSON, !json.isEmpty, showContextBrief {
-                    RelatedMeetingsSection(
-                        contextJSON: json,
-                        onSelectMeeting: { id in
-                            appState.selectedMeetingId = id
-                            appState.sidebarDestination = .meetings
-                        }
-                    )
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 12)
-                }
-
-                // Open Items panel (T-022)
-                if !carriedItems.isEmpty {
-                    OpenItemsPanel(
-                        items: $carriedItems,
-                        isExpanded: $showOpenItems
-                    )
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 12)
-                }
-
-                // Notes area (T-021: initialText pre-populates when notepad is empty).
-                // Height is user-adjustable via the drag handle along the bottom
-                // edge — persisted in @AppStorage so it survives navigation.
-                NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText) {
-                    capturedItemCount += 1
-                }
-                .frame(height: notepadHeight)
-                .overlay(alignment: .bottom) {
-                    DraggableHeightHandle(height: $notepadHeight, minHeight: 200, maxHeight: 900)
-                }
-
-                // P2-T02: Collapsible live transcript pane (collapsed by default —
-                // notes are primary, transcript is secondary).
-                LiveTranscriptPane(meetingId: meetingId)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-                    .padding(.bottom, 12)
             }
+            // Cap the top section's height so a long context brief or many
+            // open items can't push the notepad off-screen. Inner ScrollView
+            // handles overflow.
+            .frame(maxHeight: 360)
+
+            // Notes area — flexible. Takes all remaining vertical space.
+            // `layoutPriority(1)` ensures the notepad wins over the top
+            // section when the layout system has to choose who shrinks.
+            // Internal scroll is provided by NotepadPaneView itself, so
+            // typing past the visible area scrolls within the notepad.
+            NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText) {
+                capturedItemCount += 1
+            }
+            .frame(minHeight: 180, maxHeight: .infinity)
+            .layoutPriority(1)
+
+            // Collapsible live transcript pane (collapsed by default —
+            // notes are primary, transcript is secondary). Lives below the
+            // flexible notepad so it's always visible regardless of window
+            // height. Expanded transcript scrolls internally via its own
+            // height storage.
+            LiveTranscriptPane(meetingId: meetingId)
+                .padding(.horizontal, 24)
+                .padding(.top, 12)
+                .padding(.bottom, 12)
         }
     }
 

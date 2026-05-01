@@ -77,15 +77,17 @@ struct RelatedMeetingsSection: View {
             .accessibilityLabel(isExpanded ? "Collapse context" : "Expand context")
 
             if isExpanded {
-                // Brief (rendered Markdown — paragraphs / inline emphasis only;
-                // the synthesizer is prompt-tuned to produce ≤500 word prose).
-                // Uses the compact `.label` heading style so section markers read
-                // as section labels rather than oversized purple display headings.
+                // Brief (rendered Markdown). Uses the same display-style
+                // heading treatment as the post-meeting SummaryView so the
+                // pre-meeting brief reads as one coherent "summary" — same
+                // type scale, same visual rhythm — rather than a different
+                // sidebar widget. baseFontSize 14 also matches SummaryView.
                 if let brief = ctx.brief, !brief.isEmpty {
-                    MarkdownRenderer(text: brief, baseFontSize: 13, headingStyle: .label)
+                    MarkdownRenderer(text: brief, baseFontSize: 14)
                         .foregroundStyle(Color.appTextPrimary)
                         .textSelection(.enabled)
                         .lineLimit(nil)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     // Pre-v3.4 cache — no brief was synthesized. Fall back to a
                     // short hint that the structured list is available below.
@@ -109,8 +111,8 @@ struct RelatedMeetingsSection: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
     }
 }
 
