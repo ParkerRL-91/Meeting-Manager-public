@@ -134,17 +134,29 @@ struct LiveMeetingView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    // Big title (inline editable)
-                    TextField("Meeting title", text: $editableTitle)
-                        .font(.title.weight(.bold))
-                        .foregroundStyle(Color.appTextPrimary)
-                        .textFieldStyle(.plain)
-                        .padding(.horizontal, 28)
-                        .padding(.top, 20)
-                        .padding(.bottom, 10)
-                        .onSubmit { saveTitleIfChanged() }
-                        .focused($isTitleFocused)
-                        .onChange(of: isTitleFocused) { _, focused in if !focused { saveTitleIfChanged() } }
+                    // Big title (inline editable). Wrapped in an HStack with
+                    // a leading icon + hover/focus visual affordance so the
+                    // user can see at a glance that the title is editable —
+                    // the previous .plain style with `Color.appTextPrimary`
+                    // rendered an empty title invisibly against the dark
+                    // background and the placeholder used a near-invisible
+                    // system color.
+                    HStack(spacing: 6) {
+                        Image(systemName: "pencil.line")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.appTextTertiary)
+                            .opacity(isTitleFocused ? 1 : 0.6)
+                        TextField("Untitled meeting (click to rename)", text: $editableTitle)
+                            .font(.title.weight(.bold))
+                            .foregroundStyle(Color.appTextPrimary)
+                            .textFieldStyle(.plain)
+                            .onSubmit { saveTitleIfChanged() }
+                            .focused($isTitleFocused)
+                            .onChange(of: isTitleFocused) { _, focused in if !focused { saveTitleIfChanged() } }
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 20)
+                    .padding(.bottom, 10)
 
                     // Pill badges row
                     HStack(spacing: 8) {
@@ -194,21 +206,22 @@ struct LiveMeetingView: View {
                     }
                 }
             }
-            // Cap the top section's height so a long context brief or many
-            // open items can't push the notepad off-screen. Inner ScrollView
-            // handles overflow.
-            .frame(maxHeight: 360)
+            // Top section — bounded range so it's always at least 160pt
+            // (enough for title + badges + first lines of the context brief)
+            // and at most 380pt. Earlier versions only set `maxHeight: 360`,
+            // leaving the lower bound unconstrained — the notepad's
+            // layoutPriority(1) was then collapsing the top to zero,
+            // hiding the title, badges, and pre-meeting brief entirely.
+            .frame(minHeight: 160, idealHeight: 280, maxHeight: 380)
 
-            // Notes area — flexible. Takes all remaining vertical space.
-            // `layoutPriority(1)` ensures the notepad wins over the top
-            // section when the layout system has to choose who shrinks.
-            // Internal scroll is provided by NotepadPaneView itself, so
-            // typing past the visible area scrolls within the notepad.
+            // Notes area — flexible, fills remaining space. layoutPriority
+            // removed: with the top section's minHeight in place, both
+            // children negotiate space cleanly. The notepad still gets all
+            // remaining height via maxHeight: .infinity.
             NotepadPaneView(meetingId: meetingId, initialText: notepadInitialText) {
                 capturedItemCount += 1
             }
             .frame(minHeight: 180, maxHeight: .infinity)
-            .layoutPriority(1)
 
             // Live transcript pane removed — we don't actually live-transcribe
             // during the recording (transcription runs post-stop via the
