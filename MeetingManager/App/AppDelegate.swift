@@ -482,4 +482,8 @@ extension Notification.Name {
     static let meetingHUDShow = Notification.Name("meetingHUDShow")
     static let openUpdateSettings = Notification.Name("openUpdateSettings")
     static let calendarBackfillCompleted = Notification.Name("calendarBackfillCompleted")
+    /// Posted whenever the user changes which calendar source the app should
+    /// pull from. CalendarSyncManager observes this to stop/restart its timer
+    /// without an app relaunch.
+    static let calendarSourceChanged = Notification.Name("calendarSourceChanged")
 }

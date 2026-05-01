@@ -1,11 +1,16 @@
 import SwiftUI
 
 struct CalendarStepView: View {
-    /// Optional callback so the user can skip calendar setup entirely (P2-T01).
-    /// Bound to `OnboardingManager.nextStep` from the parent view.
-    var onSkip: (() -> Void)? = nil
+    /// Called when the user finishes the step — either by skipping it
+    /// outright or by successfully connecting a calendar. Bound to
+    /// `OnboardingManager.nextStep` from the parent view. Non-optional so a
+    /// successful Apple grant can never silently strand the user.
+    let onAdvance: () -> Void
 
-    @State private var authManager = GoogleAuthManager()
+    /// Use the shared `GoogleAuthManager` from AppState so the same instance
+    /// drives the running `CalendarSyncManager` after onboarding finishes.
+    @Environment(AppState.self) private var appState
+    private var authManager: GoogleAuthManager { appState.googleAuthManager }
     @State private var isConnecting = false
     @State private var connectionError: String?
     @State private var isConnectingApple = false
@@ -112,11 +117,9 @@ struct CalendarStepView: View {
             .controlSize(.regular)
             .disabled(isConnectingApple)
 
-            if let onSkip {
-                Button("Set up later", action: onSkip)
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-            }
+            Button("Set up later", action: onAdvance)
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
 
             Spacer()
         }
@@ -130,6 +133,10 @@ struct CalendarStepView: View {
         Task {
             do {
                 try await authManager.signIn()
+                // Default source is .googleCalendar already, but signing in
+                // mid-session needs to nudge the running sync manager so the
+                // first sync isn't deferred until the next periodic tick.
+                NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
             } catch {
                 connectionError = "Connection failed: \(error.localizedDescription)"
             }
@@ -146,7 +153,11 @@ struct CalendarStepView: View {
             isConnectingApple = false
             if granted {
                 UserDefaults.standard.set("appleCalendar", forKey: "calendar.source")
-                onSkip?()
+                // Tell the running CalendarSyncManager (in AppState) to start
+                // pulling Apple events immediately rather than waiting for the
+                // next launch.
+                NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
+                onAdvance()
             } else {
                 connectionError = "Apple Calendar access was not granted. You can enable it later in System Settings > Privacy & Security > Calendars."
             }

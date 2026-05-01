@@ -1,3 +1,4 @@
+import EventKit
 import Foundation
 import GRDB
 import os
@@ -65,6 +66,19 @@ final class CalendarSyncManager {
     nonisolated(unsafe) private var syncTimer: Timer?
     nonisolated(unsafe) private var syncTask: Task<Void, Never>?
 
+    /// Periodic-sync interval in seconds. Captured at `startPeriodicSync` so
+    /// the source-change handler can restart with the same cadence without
+    /// re-reading settings.
+    private var lastInterval: TimeInterval = 15 * 60
+
+    /// Debounces EventKit change notifications so an edit storm in
+    /// Calendar.app doesn't trigger N back-to-back syncs.
+    nonisolated(unsafe) private var changeDebounceTask: Task<Void, Never>?
+
+    /// Holds the EventKit / UserDefaults observers for lifetime management.
+    nonisolated(unsafe) private var eventStoreObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var sourceChangeObserver: NSObjectProtocol?
+
     /// How far into the future to fetch events during sync.
     private let lookAheadDays: Int = 7
 
@@ -86,6 +100,9 @@ final class CalendarSyncManager {
     deinit {
         syncTimer?.invalidate()
         syncTask?.cancel()
+        changeDebounceTask?.cancel()
+        if let obs = eventStoreObserver { NotificationCenter.default.removeObserver(obs) }
+        if let obs = sourceChangeObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
     // MARK: - Periodic Sync
@@ -95,11 +112,19 @@ final class CalendarSyncManager {
     /// Any existing timer is cancelled before starting the new one.
     /// The first sync runs immediately.
     ///
+    /// Also installs (idempotently) two observers:
+    /// - `EKEventStore.eventStoreChangedNotification` so edits made in
+    ///   Calendar.app trigger an immediate (debounced) sync rather than
+    ///   waiting for the next tick.
+    /// - `Notification.Name.calendarSourceChanged` so the user flipping
+    ///   `calendar.source` in Settings restarts the loop without a relaunch.
+    ///
     /// - Parameter interval: Time between syncs, in seconds.
     func startPeriodicSync(interval: TimeInterval) async {
         await stopSync()
 
-        Logger.calendar.info("Starting periodic calendar sync every \(Int(interval / 60)) minutes")
+        lastInterval = interval
+        Logger.calendar.info("Starting periodic calendar sync every \(Int(interval / 60)) minutes (source=\(CalendarSource.current.rawValue, privacy: .public))")
 
         // Fire immediately, then repeat.
         syncTask = Task { [weak self] in
@@ -109,6 +134,64 @@ final class CalendarSyncManager {
         syncTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.performSync()
+            }
+        }
+
+        installEventStoreObserverIfNeeded()
+        installSourceChangeObserverIfNeeded()
+    }
+
+    /// Subscribe to EventKit's change firehose so external edits show up
+    /// without waiting for the next tick. Debounced to coalesce edit storms.
+    private func installEventStoreObserverIfNeeded() {
+        guard eventStoreObserver == nil else { return }
+        let store = AppleCalendarService.shared.store
+        eventStoreObserver = NotificationCenter.default.addObserver(
+            forName: .EKEventStoreChanged,
+            object: store,
+            queue: .main
+        ) { [weak self] _ in
+            // .main delivers on the main thread but Swift 6 still needs an
+            // explicit MainActor hop to call into @MainActor-isolated state.
+            Task { @MainActor in
+                self?.scheduleDebouncedAppleSync()
+            }
+        }
+    }
+
+    /// Coalesce rapid `EKEventStoreChanged` posts (Calendar.app fires bursts
+    /// of them while the user is typing) into a single sync ~750ms after the
+    /// last edit lands.
+    private func scheduleDebouncedAppleSync() {
+        let source = CalendarSource.current
+        guard source == .appleCalendar || source == .both else { return }
+        changeDebounceTask?.cancel()
+        changeDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(750))
+            guard !Task.isCancelled, let self else { return }
+            Logger.calendar.debug("EventKit change detected — running Apple sync")
+            await self.performSync()
+        }
+    }
+
+    /// Listen for `calendar.source` flips so we stop / restart cleanly.
+    private func installSourceChangeObserverIfNeeded() {
+        guard sourceChangeObserver == nil else { return }
+        sourceChangeObserver = NotificationCenter.default.addObserver(
+            forName: .calendarSourceChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let interval = self.lastInterval
+                if CalendarSource.current == .none {
+                    Logger.calendar.info("Calendar source set to .none — stopping periodic sync")
+                    await self.stopSync()
+                } else {
+                    Logger.calendar.info("Calendar source changed — restarting periodic sync")
+                    await self.startPeriodicSync(interval: interval)
+                }
             }
         }
     }
@@ -177,9 +260,26 @@ final class CalendarSyncManager {
         }
 
         if source == .appleCalendar || source == .both {
-            // Apple sync currently uses its own narrower window via
-            // AppleCalendarService — not yet routed through this method.
-            // Returning the Google count is fine for the UI summary line.
+            // EventKit-backed wide-window pull. Mirrors the Google branch above
+            // so the user-visible "Re-sync 90 days" semantics are real for
+            // Apple-only users instead of a silent no-op.
+            guard AppleCalendarService.shared.isAuthorized else {
+                Logger.calendar.warning("Apple backfill skipped — calendar permission not granted")
+                if processed == 0 {
+                    throw CalendarSyncError.syncFailed("Apple Calendar access not granted. Open System Settings → Privacy & Security → Calendars to enable Meeting Manager.")
+                }
+                return processed
+            }
+            let events = await AppleCalendarService.shared.fetchEvents(daysBehind: daysBehind, daysAhead: daysAhead)
+            for event in events {
+                do {
+                    let meeting = AppleCalendarService.shared.meeting(from: event)
+                    try await upsertAppleMeeting(meeting)
+                    processed += 1
+                } catch {
+                    Logger.calendar.error("Apple Calendar backfill upsert failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
 
         await MainActor.run { self.lastSyncDate = Date() }
@@ -226,6 +326,11 @@ final class CalendarSyncManager {
             lastSyncDate = Date()
 
             Logger.calendar.info("Calendar sync complete (\(source.rawValue, privacy: .public)): \(synced) events processed")
+            if synced > 0 {
+                // AppState observes this to reload its cached meeting lists so
+                // the UI picks up freshly-synced events without a relaunch.
+                NotificationCenter.default.post(name: .calendarBackfillCompleted, object: nil)
+            }
         } catch {
             lastError = error.localizedDescription
             Logger.calendar.error("Calendar sync failed: \(error.localizedDescription)")
@@ -260,8 +365,18 @@ final class CalendarSyncManager {
 
     /// Pulls EventKit events and upserts them as Meeting rows. Dedupes by
     /// `calendarEventId` so events that also appear via Google are merged.
+    /// Window matches the Google branch (`lookBehindDays` / `lookAheadDays`)
+    /// so an in-progress meeting that started a few minutes before the last
+    /// tick is still picked up.
     private func syncApple() async -> Int {
-        let events = await AppleCalendarService.shared.fetchUpcomingEvents(daysAhead: lookAheadDays)
+        guard AppleCalendarService.shared.isAuthorized else {
+            Logger.calendar.debug("Apple sync skipped — calendar permission not granted")
+            return 0
+        }
+        let events = await AppleCalendarService.shared.fetchEvents(
+            daysBehind: lookBehindDays,
+            daysAhead: lookAheadDays
+        )
         var synced = 0
         for event in events {
             do {

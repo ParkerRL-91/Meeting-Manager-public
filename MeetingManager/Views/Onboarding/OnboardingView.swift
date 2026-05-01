@@ -15,7 +15,7 @@ struct OnboardingView: View {
                 case .welcome:
                     WelcomeStepView(onNext: onboardingManager.nextStep)
                 case .calendar:
-                    CalendarStepView(onSkip: onboardingManager.nextStep)
+                    CalendarStepView(onAdvance: onboardingManager.nextStep)
                 case .knowledgeBase:
                     KnowledgeBaseStepView(onSkip: onboardingManager.nextStep)
                 case .ready:

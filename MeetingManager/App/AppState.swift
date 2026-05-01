@@ -110,6 +110,12 @@ final class AppState {
                     leadTimeMinutes: settings.notificationLeadTimeMinutes
                 )
             }
+            if settings.calendarSyncIntervalMinutes != oldValue.calendarSyncIntervalMinutes {
+                let intervalSeconds = TimeInterval(max(1, settings.calendarSyncIntervalMinutes) * 60)
+                Task {
+                    await self.calendarSyncManager.startPeriodicSync(interval: intervalSeconds)
+                }
+            }
         }
     }
 
@@ -127,6 +133,16 @@ final class AppState {
     let appleSpeechTranscriber: AppleSpeechTranscriber
     let taskQueueManager: TaskQueueManager
     let notificationService: NotificationService
+
+    /// Single source of truth for Google OAuth state. Shared between the
+    /// running `CalendarSyncManager` and the Settings UI so signing in /
+    /// signing out from one updates the other immediately.
+    let googleAuthManager: GoogleAuthManager
+
+    /// Drives periodic Google + Apple Calendar sync. Constructed eagerly at
+    /// launch so the periodic timer fires regardless of which source the user
+    /// picked. Apple-only users no longer rely on a manual nudge from Settings.
+    let calendarSyncManager: CalendarSyncManager
 
     // State machine — single source of truth for meeting lifecycle
     private(set) var stateMachine: MeetingStateMachine
@@ -190,6 +206,8 @@ final class AppState {
             self.stateMachine = existing.stateMachine
             self.taskQueueManager = existing.taskQueueManager
             self.notificationService = existing.notificationService
+            self.googleAuthManager = existing.googleAuthManager
+            self.calendarSyncManager = existing.calendarSyncManager
 
             // Copy mutable state from existing instance
             self.isRecording = existing.isRecording
@@ -231,6 +249,11 @@ final class AppState {
 
         self.taskQueueManager = TaskQueueManager(database: database)
         self.notificationService = NotificationService()
+        self.googleAuthManager = GoogleAuthManager()
+        self.calendarSyncManager = CalendarSyncManager(
+            authManager: self.googleAuthManager,
+            meetingRepository: meetingRepository
+        )
 
         // Auto-stop recording after sustained silence (meeting ended)
         audioCaptureService.onSilenceDetected = { [weak self] in
@@ -258,6 +281,7 @@ final class AppState {
         cleanupStuckMeetings()
         setupTaskQueue()
         startPrepContextTimer()
+        startCalendarSync()
         // One-shot retroactive speaker attribution scan (gated by UserDefaults
         // flag — only runs once per app upgrade). Re-attributes existing
         // meetings against the loosened fuzzy matcher + auto-mic mapping
@@ -2418,6 +2442,26 @@ final class AppState {
                 if a.meetings.count != b.meetings.count { return a.meetings.count > b.meetings.count }
                 return a.name < b.name
             }
+    }
+
+    // MARK: - Calendar Sync Bootstrapping
+
+    /// Boots the periodic calendar sync if the user has chosen a source.
+    ///
+    /// Runs in a detached Task so it doesn't block init: the manager itself
+    /// fires its first sync immediately and schedules the recurring timer.
+    /// Also subscribes to settings changes so flipping the sync interval
+    /// restarts the timer with the new cadence.
+    private func startCalendarSync() {
+        Task {
+            let source = CalendarSource.current
+            guard source != .none else {
+                Logger.calendar.info("Calendar sync not started — source is .none")
+                return
+            }
+            let intervalSeconds = TimeInterval(max(1, self.settings.calendarSyncIntervalMinutes) * 60)
+            await self.calendarSyncManager.startPeriodicSync(interval: intervalSeconds)
+        }
     }
 }
 

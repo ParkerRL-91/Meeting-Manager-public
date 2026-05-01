@@ -11,29 +11,45 @@ import os
 final class AppleCalendarService {
     static let shared = AppleCalendarService()
 
-    private let store = EKEventStore()
+    /// Exposed so observers (e.g. `CalendarSyncManager`) can subscribe to
+    /// EventKit's change firehose without needing a reference to the store.
+    let store = EKEventStore()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager", category: "calendar")
 
     private init() {}
 
     // MARK: - Authorization
 
-    var isAuthorized: Bool {
-        let status = EKEventStore.authorizationStatus(for: .event)
-        if #available(macOS 14.0, *) {
-            return status == .fullAccess
-        }
-        return status == .authorized
+    /// Permission states surfaced to the UI. EventKit on macOS 14+ has
+    /// `.writeOnly` which is *not* enough for our reads — we treat it the
+    /// same as denied for sync purposes but expose it distinctly so the
+    /// settings UI can guide the user to upgrade.
+    enum AuthorizationState {
+        case notDetermined
+        case denied
+        case writeOnly
+        case authorized
     }
+
+    var authorizationState: AuthorizationState {
+        // Deployment target is macOS 14.4 (see Package.swift / Info.plist), so
+        // the legacy `.authorized` case is unreachable in practice but still
+        // listed for exhaustiveness.
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .notDetermined: return .notDetermined
+        case .denied, .restricted: return .denied
+        case .writeOnly: return .writeOnly
+        case .fullAccess, .authorized: return .authorized
+        @unknown default: return .denied
+        }
+    }
+
+    var isAuthorized: Bool { authorizationState == .authorized }
 
     @discardableResult
     func requestAccess() async -> Bool {
         do {
-            if #available(macOS 14.0, *) {
-                return try await store.requestFullAccessToEvents()
-            } else {
-                return try await store.requestAccess(to: .event)
-            }
+            return try await store.requestFullAccessToEvents()
         } catch {
             logger.error("Calendar access request failed: \(error.localizedDescription, privacy: .public)")
             return false
@@ -42,20 +58,32 @@ final class AppleCalendarService {
 
     // MARK: - Fetch
 
-    /// Returns events spanning `[now, now + daysAhead]` from all readable calendars,
-    /// sorted ascending by start date.
-    func fetchUpcomingEvents(daysAhead: Int = 7) async -> [EKEvent] {
+    /// Returns events spanning `[now - daysBehind, now + daysAhead]` from all
+    /// readable calendars, sorted ascending by start date.
+    ///
+    /// `daysBehind` defaults to 1 so an in-progress meeting that started a
+    /// few minutes before launch is still picked up — matching the Google
+    /// path's behavior.
+    func fetchEvents(daysBehind: Int = 1, daysAhead: Int = 7) async -> [EKEvent] {
         guard isAuthorized else {
-            logger.debug("Skipping Apple Calendar fetch — not authorized")
+            logger.debug("Skipping Apple Calendar fetch — not authorized (state=\(String(describing: self.authorizationState), privacy: .public))")
             return []
         }
         let cals = store.calendars(for: .event)
         guard !cals.isEmpty else { return [] }
 
+        let cal = Calendar.current
         let now = Date()
-        let end = Calendar.current.date(byAdding: .day, value: daysAhead, to: now) ?? now
-        let predicate = store.predicateForEvents(withStart: now, end: end, calendars: cals)
+        let start = cal.date(byAdding: .day, value: -max(0, daysBehind), to: now) ?? now
+        let end = cal.date(byAdding: .day, value: max(1, daysAhead), to: now) ?? now
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: cals)
         return store.events(matching: predicate).sorted { $0.startDate < $1.startDate }
+    }
+
+    /// Backwards-compatible alias kept for older call sites that only need
+    /// the forward-looking window.
+    func fetchUpcomingEvents(daysAhead: Int = 7) async -> [EKEvent] {
+        await fetchEvents(daysBehind: 0, daysAhead: daysAhead)
     }
 
     // MARK: - Mapping
