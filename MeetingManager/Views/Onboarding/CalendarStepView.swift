@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 struct CalendarStepView: View {
     /// Called when the user finishes the step — either by skipping it
@@ -145,11 +146,17 @@ struct CalendarStepView: View {
     }
 
     private func connectAppleCalendar() {
+        Logger.calendar.info("Onboarding: connectAppleCalendar tapped")
         isConnectingApple = true
         connectionError = nil
 
-        Task {
+        Task { @MainActor in
             let granted = await AppleCalendarService.shared.requestAccess()
+            // Tiny delay so the static authorizationStatus query reflects the
+            // grant — on macOS it lags one runloop after the user clicks Allow.
+            try? await Task.sleep(for: .milliseconds(100))
+            let observed = AppleCalendarService.shared.authorizationState
+            Logger.calendar.info("Onboarding Apple grant flow: granted=\(granted, privacy: .public) observed=\(String(describing: observed), privacy: .public)")
             isConnectingApple = false
             if granted {
                 UserDefaults.standard.set("appleCalendar", forKey: "calendar.source")

@@ -76,6 +76,10 @@ struct DailyBriefView: View {
         }
         .background(Color.appBackground)
         .task {
+            // Kick the Ollama status check in parallel so the "Set up AI"
+            // CTA doesn't appear stale on first paint. The brief itself
+            // doesn't need this to load.
+            async let _ = appState.ollamaService.refreshStatus()
             await loadBrief()
         }
         .onReceive(timer) { date in
@@ -135,10 +139,26 @@ struct DailyBriefView: View {
         .clipShape(Capsule())
     }
 
+    /// True when AI is set up. The previous version of this check gated on a
+    /// live `ollamaService.isReachable` ping that was never refreshed at app
+    /// launch, so users with on-device AI configured saw "Set up AI →" until
+    /// they opened the On-Device settings tab (which forced a refresh). The
+    /// check now also trusts the user's explicit setting choice — Ollama
+    /// reachability is verified again at brief-generation time, so a momentary
+    /// network blip can't strand the user with a misleading CTA.
     private var isAIConfigured: Bool {
         if let key = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
-           !key.isEmpty { return true }
-        return appState.ollamaService.isReachable
+           !key.isEmpty {
+            Logger.ai.debug("DailyBrief.isAIConfigured: true (Claude key present)")
+            return true
+        }
+        if appState.settings.useLocalLLM {
+            Logger.ai.debug("DailyBrief.isAIConfigured: true (settings.useLocalLLM=true)")
+            return true
+        }
+        let reachable = appState.ollamaService.isReachable
+        Logger.ai.debug("DailyBrief.isAIConfigured: \(reachable, privacy: .public) (no Claude key, useLocalLLM=false; Ollama reachable=\(reachable, privacy: .public))")
+        return reachable
     }
 
     private var generateButton: some View {

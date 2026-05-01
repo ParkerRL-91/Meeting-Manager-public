@@ -46,13 +46,36 @@ final class AppleCalendarService {
 
     var isAuthorized: Bool { authorizationState == .authorized }
 
+    /// Asks EventKit for full read access. Returns true on a successful grant.
+    ///
+    /// Logging is intentionally verbose so a bounced-back-to-not-connected
+    /// report can be diagnosed from the unified log alone (filter by
+    /// subsystem `com.meetingmanager.app`, category `calendar`).
     @discardableResult
     func requestAccess() async -> Bool {
+        let priorStatus = EKEventStore.authorizationStatus(for: .event)
+        logger.info("Apple Calendar requestAccess() called — prior TCC status=\(priorStatus.rawValue, privacy: .public) (\(self.priorStatusDescription(priorStatus), privacy: .public))")
         do {
-            return try await store.requestFullAccessToEvents()
+            let granted = try await store.requestFullAccessToEvents()
+            let postStatus = EKEventStore.authorizationStatus(for: .event)
+            logger.info("requestFullAccessToEvents returned granted=\(granted, privacy: .public); post-call TCC status=\(postStatus.rawValue, privacy: .public) (\(self.priorStatusDescription(postStatus), privacy: .public))")
+            return granted
         } catch {
-            logger.error("Calendar access request failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Apple Calendar access request threw: \(error.localizedDescription, privacy: .public)")
             return false
+        }
+    }
+
+    /// Map raw EKAuthorizationStatus to a readable string for logs.
+    private func priorStatusDescription(_ s: EKAuthorizationStatus) -> String {
+        switch s {
+        case .notDetermined: return "notDetermined"
+        case .restricted: return "restricted"
+        case .denied: return "denied"
+        case .authorized: return "authorized(legacy)"
+        case .writeOnly: return "writeOnly"
+        case .fullAccess: return "fullAccess"
+        @unknown default: return "unknown(\(s.rawValue))"
         }
     }
 
@@ -66,18 +89,23 @@ final class AppleCalendarService {
     /// path's behavior.
     func fetchEvents(daysBehind: Int = 1, daysAhead: Int = 7) async -> [EKEvent] {
         guard isAuthorized else {
-            logger.debug("Skipping Apple Calendar fetch — not authorized (state=\(String(describing: self.authorizationState), privacy: .public))")
+            logger.warning("Apple Calendar fetch skipped — not authorized (state=\(String(describing: self.authorizationState), privacy: .public))")
             return []
         }
         let cals = store.calendars(for: .event)
-        guard !cals.isEmpty else { return [] }
+        guard !cals.isEmpty else {
+            logger.warning("Apple Calendar fetch returned 0 events — store reports zero readable calendars (TCC may have granted writeOnly or the user has no enabled calendars in Calendar.app)")
+            return []
+        }
 
         let cal = Calendar.current
         let now = Date()
         let start = cal.date(byAdding: .day, value: -max(0, daysBehind), to: now) ?? now
         let end = cal.date(byAdding: .day, value: max(1, daysAhead), to: now) ?? now
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: cals)
-        return store.events(matching: predicate).sorted { $0.startDate < $1.startDate }
+        let events = store.events(matching: predicate).sorted { $0.startDate < $1.startDate }
+        logger.info("Apple Calendar fetch: \(events.count, privacy: .public) events from \(cals.count, privacy: .public) calendar(s) over -\(daysBehind, privacy: .public)d / +\(daysAhead, privacy: .public)d")
+        return events
     }
 
     /// Backwards-compatible alias kept for older call sites that only need
