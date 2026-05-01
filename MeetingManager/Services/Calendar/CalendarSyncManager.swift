@@ -164,12 +164,16 @@ final class CalendarSyncManager {
     /// last edit lands.
     private func scheduleDebouncedAppleSync() {
         let source = CalendarSource.current
-        guard source == .appleCalendar || source == .both else { return }
+        guard source == .appleCalendar || source == .both else {
+            Logger.calendar.debug("EventKit change ignored — source is \(source.rawValue, privacy: .public), not Apple")
+            return
+        }
+        Logger.calendar.debug("EventKit change received — debouncing 750ms before sync")
         changeDebounceTask?.cancel()
         changeDebounceTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(750))
             guard !Task.isCancelled, let self else { return }
-            Logger.calendar.debug("EventKit change detected — running Apple sync")
+            Logger.calendar.info("EventKit change debounce elapsed — running Apple sync")
             await self.performSync()
         }
     }
@@ -369,8 +373,9 @@ final class CalendarSyncManager {
     /// so an in-progress meeting that started a few minutes before the last
     /// tick is still picked up.
     private func syncApple() async -> Int {
-        guard AppleCalendarService.shared.isAuthorized else {
-            Logger.calendar.debug("Apple sync skipped — calendar permission not granted")
+        let state = AppleCalendarService.shared.authorizationState
+        guard state == .authorized else {
+            Logger.calendar.warning("Apple sync skipped — authorizationState=\(String(describing: state), privacy: .public). User must grant full access in Settings → Calendar or System Settings → Privacy & Security → Calendars.")
             return 0
         }
         let events = await AppleCalendarService.shared.fetchEvents(
@@ -384,9 +389,10 @@ final class CalendarSyncManager {
                 try await upsertAppleMeeting(meeting)
                 synced += 1
             } catch {
-                Logger.calendar.error("Apple Calendar upsert failed: \(error.localizedDescription, privacy: .public)")
+                Logger.calendar.error("Apple Calendar upsert failed for event '\(event.title ?? "<no title>", privacy: .public)': \(error.localizedDescription, privacy: .public)")
             }
         }
+        Logger.calendar.info("Apple sync complete: upserted \(synced, privacy: .public) of \(events.count, privacy: .public) events")
         return synced
     }
 

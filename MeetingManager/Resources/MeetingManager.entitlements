@@ -12,6 +12,8 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
     <key>com.apple.security.keychain-access-groups</key>
     <array>
         <string>$(AppIdentifierPrefix)com.meetingmanager.app</string>

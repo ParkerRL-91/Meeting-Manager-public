@@ -228,15 +228,25 @@ struct GoogleCalendarSettingsView: View {
 
     private func requestAppleAccess() {
         isRequestingAppleAccess = true
-        Task {
-            _ = await AppleCalendarService.shared.requestAccess()
-            await MainActor.run {
-                appleAuthState = AppleCalendarService.shared.authorizationState
-                isRequestingAppleAccess = false
-                // First grant — kick the sync timer so events show up immediately.
-                if appleAuthState == .authorized {
-                    NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
-                }
+        Task { @MainActor in
+            // Trust the boolean from requestFullAccessToEvents() — on macOS the
+            // static authorizationStatus(for:) can return a stale .notDetermined
+            // for one runloop after the user clicks Allow, which made the UI
+            // bounce back to "Not yet connected" even on a successful grant.
+            let granted = await AppleCalendarService.shared.requestAccess()
+            // Give TCC a beat to write the grant before re-querying so the
+            // distinction between .authorized and .writeOnly is reliable.
+            try? await Task.sleep(for: .milliseconds(100))
+            let observed = AppleCalendarService.shared.authorizationState
+            appleAuthState = granted
+                ? (observed == .notDetermined ? .authorized : observed)
+                : (observed == .notDetermined ? .denied : observed)
+            isRequestingAppleAccess = false
+            if appleAuthState == .authorized {
+                Logger.calendar.info("Apple Calendar access granted — kicking sync")
+                NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
+            } else {
+                Logger.calendar.info("Apple Calendar access not granted (granted=\(granted), observed=\(String(describing: observed), privacy: .public))")
             }
         }
     }
