@@ -1011,11 +1011,21 @@ enum SummaryParser {
             // Accept any ATX heading level (1–6 hashes followed by a space).
             // Older default prompts used `### Section`; the v3.3.8 prompt uses
             // `## Section`. Both should land in the structured grid.
+            //
+            // Also accept `**Section Title:**` (bold-with-optional-colon) on a
+            // line by itself — this is what user-customised prompts produce
+            // ("Key Discussion Points:", "Decisions Made:", etc.). Without
+            // this branch those summaries silently fell through to flat
+            // markdown and the user lost the 2-column grid layout.
             if trimmed.range(of: #"^#{1,6}\s+"#, options: .regularExpression) != nil {
                 if let sec = currentSection { sections.append(sec) }
                 seenFirstHeading = true
                 let raw = trimmed.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
                 currentSection = Section(kind: sectionKind(for: raw), title: raw, items: [])
+            } else if let boldHeading = Self.boldHeadingTitle(in: trimmed) {
+                if let sec = currentSection { sections.append(sec) }
+                seenFirstHeading = true
+                currentSection = Section(kind: sectionKind(for: boldHeading), title: boldHeading, items: [])
             } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
                 let body = String(trimmed.dropFirst(2))
                 let item = parseItem(body)
@@ -1049,6 +1059,28 @@ enum SummaryParser {
         }
 
         return ParsedSummary(tldr: tldr, sections: sections)
+    }
+
+    /// Detect a "bold-style" heading line — `**Title**` or `**Title:**` —
+    /// returning the cleaned title or nil if the line isn't a bold heading.
+    /// Allows the structured 2-column grid to render summaries that use
+    /// bold-text section headers instead of `## ` ATX headings (very common
+    /// in user-customised prompts and older defaults).
+    private static func boldHeadingTitle(in line: String) -> String? {
+        // Must start AND end with ** so we don't catch lines that have
+        // bold *inside* prose (e.g. "**Decision:** we will..." — that's
+        // a list item, not a heading).
+        guard line.hasPrefix("**"), line.hasSuffix("**") else { return nil }
+        let inner = String(line.dropFirst(2).dropLast(2))
+        // Reject lines with internal `**` — those are inline bold, not headings.
+        guard !inner.contains("**") else { return nil }
+        // Strip a trailing colon if present.
+        let cleaned = inner.hasSuffix(":") ? String(inner.dropLast()) : inner
+        let trimmed = cleaned.trimmingCharacters(in: .whitespaces)
+        // Heuristic length cap — real headings are short. Past 80 chars
+        // it's almost certainly a bolded sentence in prose.
+        guard !trimmed.isEmpty, trimmed.count <= 80 else { return nil }
+        return trimmed
     }
 
     private static func parseItem(_ text: String) -> Item {

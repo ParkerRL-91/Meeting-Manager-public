@@ -10,104 +10,117 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var appState = appState
 
+        // Top nav (Home / Daily Brief / etc + Spaces folders) scrolls
+        // independently. Bottom block (New Meeting / Action Items / status
+        // banners / model download) is pinned and always visible — when
+        // the window shrinks, the scroll region shrinks but you can still
+        // hit New Meeting and see whether you're recording. Earlier design
+        // had the entire sidebar in one VStack with a Spacer pushing the
+        // footer down, so a tall folder list pushed New Meeting off-screen.
         VStack(spacing: 0) {
 
-            // MARK: - Top Nav Items
-            VStack(spacing: 2) {
-                NavItem(
-                    icon: "house.fill",
-                    label: "Home",
-                    destination: .home,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .home
-                    appState.selectedMeetingId = nil
-                }
+            // MARK: - Top: Scrollable nav + folders
+            ScrollView {
+                VStack(spacing: 2) {
+                    NavItem(
+                        icon: "house.fill",
+                        label: "Home",
+                        destination: .home,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .home
+                        appState.selectedMeetingId = nil
+                    }
 
-                NavItem(
-                    icon: "calendar.badge.clock",
-                    label: "Daily Brief",
-                    badge: appState.dailyBriefMeetingsNeedingPrep,
-                    destination: .dailyBrief,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .dailyBrief
-                    appState.selectedMeetingId = nil
-                }
+                    NavItem(
+                        icon: "calendar.badge.clock",
+                        label: "Daily Brief",
+                        badge: appState.dailyBriefMeetingsNeedingPrep,
+                        destination: .dailyBrief,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .dailyBrief
+                        appState.selectedMeetingId = nil
+                    }
 
-                NavItem(
-                    icon: "sparkles",
-                    label: "Ask Anything",
-                    destination: .chat,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .chat
-                    appState.selectedMeetingId = nil
-                }
+                    NavItem(
+                        icon: "sparkles",
+                        label: "Ask Anything",
+                        destination: .chat,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .chat
+                        appState.selectedMeetingId = nil
+                    }
 
-                NavItem(
-                    icon: "person.2.fill",
-                    label: "People",
-                    destination: .people,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .people
-                    appState.selectedMeetingId = nil
-                }
+                    NavItem(
+                        icon: "person.2.fill",
+                        label: "People",
+                        destination: .people,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .people
+                        appState.selectedMeetingId = nil
+                    }
 
-                NavItem(
-                    icon: "magnifyingglass",
-                    label: "Search",
-                    destination: .search,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .search
-                    appState.selectedMeetingId = nil
-                }
+                    NavItem(
+                        icon: "magnifyingglass",
+                        label: "Search",
+                        destination: .search,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .search
+                        appState.selectedMeetingId = nil
+                    }
 
-                NavItem(
-                    icon: "chart.bar.xaxis",
-                    label: "Analytics",
-                    destination: .analytics,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .analytics
-                    // Intentionally preserve selectedMeetingId so the
-                    // talk-time card can target the previously-selected meeting.
-                }
+                    NavItem(
+                        icon: "chart.bar.xaxis",
+                        label: "Analytics",
+                        destination: .analytics,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .analytics
+                        // Intentionally preserve selectedMeetingId so the
+                        // talk-time card can target the previously-selected meeting.
+                    }
 
-                NavItem(
-                    icon: "checklist",
-                    label: "Activity",
-                    badge: appState.taskQueueManager.pendingCount,
-                    destination: .tasks,
-                    current: appState.sidebarDestination
-                ) {
-                    appState.sidebarDestination = .tasks
-                    appState.selectedMeetingId = nil
-                }
+                    NavItem(
+                        icon: "checklist",
+                        label: "Activity",
+                        badge: appState.taskQueueManager.pendingCount,
+                        destination: .tasks,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .tasks
+                        appState.selectedMeetingId = nil
+                    }
 
-                // MARK: - Spaces (auto-grouped meeting folders)
-                let folders = appState.meetingFolders()
-                if !folders.isEmpty {
-                    SpacesSidebarSection(
-                        folders: folders,
-                        currentDestination: appState.sidebarDestination,
-                        onSelect: { folder in
-                            appState.sidebarDestination = .folder(folder.key)
-                            appState.selectedMeetingId = nil
-                        }
-                    )
+                    // MARK: - Spaces (auto-grouped meeting folders)
+                    let folders = appState.meetingFolders()
+                    if !folders.isEmpty {
+                        SpacesSidebarSection(
+                            folders: folders,
+                            currentDestination: appState.sidebarDestination,
+                            onSelect: { folder in
+                                appState.sidebarDestination = .folder(folder.key)
+                                appState.selectedMeetingId = nil
+                            }
+                        )
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
+            // Take all available space above the pinned footer. Inner
+            // ScrollView handles overflow when many folders / a tall
+            // window-height combination would otherwise hide the footer.
+            .frame(maxHeight: .infinity)
 
             Divider()
                 .background(Color.appSeparator)
 
-            // MARK: - New Meeting + Action Items
+            // MARK: - Pinned bottom: New Meeting + Action Items + status
 
             VStack(spacing: 6) {
                 Button {
@@ -150,8 +163,9 @@ struct SidebarView: View {
 
             Divider()
 
-            // MARK: - Status Banners
-
+            // Status banners (recording bar / call-detected) sit just above
+            // the model-download footer, still inside the pinned region so
+            // a long folder list never hides the active-recording indicator.
             if appState.isRecording, let meeting = appState.activeMeeting {
                 SidebarRecordingBar(meeting: meeting)
                 Divider()
@@ -159,8 +173,6 @@ struct SidebarView: View {
                 DetectedCallBanner(appName: callApp)
                 Divider()
             }
-
-            Spacer()
 
             // Footer: model download status (slim, non-blocking — only visible while loading)
             ModelDownloadBanner()

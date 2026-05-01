@@ -2223,15 +2223,36 @@ final class AppState {
 
     // MARK: - Prep Context Pre-Computation
 
-    /// Proactively enriches context for meetings starting in the next 30 minutes.
-    /// Runs every 5 minutes so prep cards load instantly when Jordan opens HomeView.
+    /// Proactively enriches context for meetings starting in the near future
+    /// so the brief is ready BEFORE the user enters the meeting.
+    ///
+    /// Cadence (changed from every-5-min after user feedback that 5-min was
+    /// overkill — briefs only change when calendar events change):
+    ///   - Once at startup
+    ///   - Once on calendar-sync completion (new meeting? new brief)
+    ///   - Hourly safety net for cases where the sync hook didn't fire
+    ///     (long sleep/wake, app suspended, etc.)
     private func startPrepContextTimer() {
         preComputePrepContext() // Run immediately on startup
-        prepContextTimerCancellable = Timer.publish(every: 300, on: .main, in: .common)
+
+        // Hourly safety net — tighter than once-a-day so a missed sync hook
+        // doesn't leave the user without a brief for their afternoon meeting.
+        prepContextTimerCancellable = Timer.publish(every: 3600, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 self?.preComputePrepContext()
             }
+
+        // Run on every calendar sync completion. This is the primary trigger:
+        // when calendar sync brings in a new meeting, we want the brief ready
+        // by the time the user notices the meeting in the sidebar. The
+        // `.calendarBackfillCompleted` notification is posted by the existing
+        // CalendarSyncManager.performSync after upserting events.
+        NotificationCenter.default.publisher(for: .calendarBackfillCompleted)
+            .sink { [weak self] _ in
+                self?.preComputePrepContext()
+            }
+            .store(in: &cancellables)
     }
 
     @MainActor
