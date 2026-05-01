@@ -31,8 +31,13 @@ final class RelevantMeetingService {
 
         // Skip if a brief is already cached. An old bare-array cache still
         // counts as "needs upgrade" — re-run so the user gets a brief.
+        // ALSO skip if the cached brief is the placeholder text — caller
+        // can still force a re-attempt by passing a fresh briefSynthesizer
+        // and the placeholder will be replaced if real content is generated.
         let existing = Self.parseCachedContext(from: meeting.contextJSON)
-        if existing.brief != nil, !existing.relatedMeetings.isEmpty { return }
+        if existing.brief != nil,
+           existing.brief != Self.notEnoughInfoPlaceholder,
+           !existing.relatedMeetings.isEmpty { return }
 
         let related = try await findRelated(for: meeting)
 
@@ -62,7 +67,18 @@ final class RelevantMeetingService {
             }
         }
 
-        let envelope = CachedContext(brief: brief, relatedMeetings: related)
+        // If we have NEITHER a synthesized brief NOR any related meetings,
+        // there's genuinely nothing useful to cache. Write a placeholder
+        // brief so the UI can render "Not enough information…" instead of
+        // an empty card. Caller can still re-attempt later — `enrichContext`
+        // treats the placeholder as "not yet upgraded" and will retry.
+        let finalBrief: String? = {
+            if let brief, !brief.isEmpty { return brief }
+            if related.isEmpty { return Self.notEnoughInfoPlaceholder }
+            return nil // related list exists but no brief yet — leave nil
+        }()
+
+        let envelope = CachedContext(brief: finalBrief, relatedMeetings: related)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let jsonData = try encoder.encode(envelope)
@@ -74,6 +90,12 @@ final class RelevantMeetingService {
             try m?.update(db)
         }
     }
+
+    /// Standardised placeholder text used when no real brief could be
+    /// synthesized (no AI configured, no related meetings, sync failure).
+    /// Centralised here so the UI and the upgrade-skip logic both reference
+    /// the same string and stay in lock-step.
+    static let notEnoughInfoPlaceholder = "Not enough information to generate a pre-meeting summary yet. We'll try again before the meeting starts."
 
     // MARK: - Brief inputs
 

@@ -1008,6 +1008,17 @@ final class AppState {
                 self.detectedCallApp = nil
                 self.startAudioLevelPolling()
 
+                // One last attempt to refresh the pre-meeting brief now
+                // that the meeting is actually starting. If the previous
+                // attempt couldn't synthesize a brief (e.g. AI was offline,
+                // KB folder hadn't indexed yet, related meetings were just
+                // added), this catches it. Replaces the placeholder brief
+                // when real content can now be produced. Runs in the
+                // background — recording is already underway.
+                Task.detached { [weak self] in
+                    await self?.refreshContextForMeetingStart(meetingId: meeting.id)
+                }
+
                 // Surface audio write errors to the user (e.g. disk full)
                 self.audioCaptureService.onWriteError = { [weak self] error in
                     Task { @MainActor [weak self] in
@@ -2284,15 +2295,35 @@ final class AppState {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let soonMeetings = try await self.meetingRepository.meetingsStartingWithin(minutes: 30)
+                // 48-hour window — broad enough that "tomorrow's meetings"
+                // get briefed today, narrow enough that a calendar with
+                // hundreds of recurring future events doesn't flood the
+                // LLM at every sync. Meetings further out get briefed
+                // when they enter the 48-hour window via the next
+                // calendar-sync hook or the hourly safety net.
+                let upcoming = try await self.meetingRepository.meetingsStartingWithin(minutes: 48 * 60)
                 let service = RelevantMeetingService(database: self.database)
-                for meeting in soonMeetings {
-                    if meeting.contextJSON == nil || meeting.contextJSON?.isEmpty == true {
-                        try await service.enrichContext(meetingId: meeting.id)
+                let textGen = await self.makeTextGenerator()
+                var enrichedCount = 0
+                for meeting in upcoming {
+                    // Pass the LLM closure so the brief is actually
+                    // synthesized — earlier the synthesizer was nil so the
+                    // user's contextJSON had a related-meetings list but no
+                    // brief prose. enrichContext writes a "Not enough
+                    // information…" placeholder when neither brief nor
+                    // related meetings could be produced.
+                    do {
+                        try await service.enrichContext(
+                            meetingId: meeting.id,
+                            briefSynthesizer: textGen
+                        )
+                        enrichedCount += 1
+                    } catch {
+                        Logger.ai.warning("preComputePrepContext: enrich failed for \(meeting.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     }
                 }
-                if !soonMeetings.isEmpty {
-                    fileLog("Prep: enriched context for \(soonMeetings.count) upcoming meeting(s)")
+                if enrichedCount > 0 {
+                    fileLog("Prep: enriched context for \(enrichedCount)/\(upcoming.count) upcoming meeting(s)")
                 }
 
                 // Update daily brief badge so the sidebar count is accurate on launch
@@ -2304,6 +2335,23 @@ final class AppState {
             } catch {
                 fileLog("Prep: context pre-computation failed: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Force a single fresh enrichment pass for one meeting — used when
+    /// recording starts so the brief is as up-to-date as possible going
+    /// into the meeting (e.g. notes added to the calendar event in the
+    /// last hour). Replaces a prior placeholder brief if a real one can
+    /// now be synthesized.
+    @MainActor
+    func refreshContextForMeetingStart(meetingId: String) async {
+        let service = RelevantMeetingService(database: self.database)
+        let textGen = await self.makeTextGenerator()
+        do {
+            try await service.enrichContext(meetingId: meetingId, briefSynthesizer: textGen)
+            Logger.ai.info("[refreshContextForMeetingStart] enriched on start for \(meetingId, privacy: .public)")
+        } catch {
+            Logger.ai.warning("[refreshContextForMeetingStart] enrich failed for \(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

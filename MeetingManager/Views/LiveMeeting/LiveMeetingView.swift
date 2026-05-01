@@ -233,19 +233,20 @@ struct LiveMeetingView: View {
 
     // MARK: - Context Loading
 
-    /// If the meeting was started ad-hoc (no pre-meeting enrichment ran)
-    /// we kick enrichment now so the brief still appears mid-meeting once
-    /// the LLM finishes synthesizing. The .onChange task-queue watcher
-    /// re-fetches the meeting when enrichment completes.
+    /// Kick enrichment when the live meeting view opens. Always passes the
+    /// LLM closure so the brief is actually synthesized — the previous
+    /// version called enrichContext without one and left the brief nil.
+    /// enrichContext's internal guard skips when a real (non-placeholder)
+    /// brief is already cached, so this is a cheap no-op for already-
+    /// briefed meetings.
     private func loadContext() {
-        guard let meeting else { return }
-        if (meeting.contextJSON ?? "").isEmpty && !meeting.participantList.isEmpty {
-            Task {
-                let service = RelevantMeetingService(database: AppDatabase.shared)
-                try? await service.enrichContext(meetingId: meetingId)
-                let updated = try? await appState.meetingRepository.find(id: meetingId)
-                if let updated { self.meeting = updated }
-            }
+        guard meeting != nil else { return }
+        Task {
+            let service = RelevantMeetingService(database: AppDatabase.shared)
+            let textGen = await appState.makeTextGenerator()
+            try? await service.enrichContext(meetingId: meetingId, briefSynthesizer: textGen)
+            let updated = try? await appState.meetingRepository.find(id: meetingId)
+            if let updated { self.meeting = updated }
         }
     }
 
