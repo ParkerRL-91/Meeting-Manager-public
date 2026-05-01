@@ -84,16 +84,28 @@ struct RelatedMeetingsSection: View {
                 // to bury the notes pane below. When the brief is long,
                 // the user scrolls inside the card.
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        // Brief (rendered Markdown). Display-style headings
-                        // match the post-meeting SummaryView so pre- and
-                        // post-meeting reads feel consistent.
+                    VStack(alignment: .leading, spacing: 12) {
                         if let brief = ctx.brief, !brief.isEmpty {
-                            MarkdownRenderer(text: brief, baseFontSize: 14)
-                                .foregroundStyle(Color.appTextPrimary)
-                                .textSelection(.enabled)
-                                .lineLimit(nil)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            // Parse the brief using the same SummaryParser
+                            // used post-meeting, so we get the same coloured-
+                            // dot section labels (KEY POINTS / DECISIONS /
+                            // FOLLOW-UPS / etc.) and bold-entity-on-grey-body
+                            // typography. When the brief is too unstructured
+                            // for the parser to find sections, fall back to
+                            // a plain Markdown render — better one-style miss
+                            // than blanking the brief entirely.
+                            let parsed = SummaryParser.parse(brief)
+                            let usefulSections = parsed.sections.filter { !$0.items.isEmpty }
+                            if !usefulSections.isEmpty {
+                                SkimFirstSectionGrid(sections: usefulSections)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                MarkdownRenderer(text: brief, baseFontSize: 14)
+                                    .foregroundStyle(Color.appTextPrimary)
+                                    .textSelection(.enabled)
+                                    .lineLimit(nil)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         } else {
                             Text("Prior context from \(ctx.relatedMeetings.count) meeting\(ctx.relatedMeetings.count == 1 ? "" : "s") — open a source to review.")
                                 .font(.system(size: 13, design: .serif))

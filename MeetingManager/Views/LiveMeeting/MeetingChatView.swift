@@ -59,21 +59,53 @@ struct MeetingChatView: View {
 
     // MARK: - Subviews
 
+    /// Empty state for the in-meeting chat. Renders a single "starter
+    /// bubble" that visually mirrors a real assistant message — same
+    /// avatar, same surface — so the chat doesn't feel hollow when no
+    /// conversation has been started yet. Earlier version used a centered
+    /// icon-and-caption block which read as "this is broken / loading"
+    /// rather than "ready and waiting."
     private var emptyPlaceholder: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.largeTitle)
-                .foregroundStyle(Color.appTextTertiary)
-            Text("Ask questions about the meeting")
-                .font(.subheadline)
-                .foregroundStyle(Color.appTextSecondary)
-            Text("e.g. \"What decisions were made?\"")
-                .font(.caption)
-                .foregroundStyle(Color.appTextTertiary)
-            Spacer()
+        ScrollView {
+            HStack(alignment: .top, spacing: 8) {
+                // Assistant-style avatar so the starter bubble visually
+                // matches what a real assistant reply will look like once
+                // the user starts chatting.
+                ZStack {
+                    Circle()
+                        .fill(Color.appAccent.opacity(0.18))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.appAccentLight)
+                }
+                .padding(.top, 2)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Assistant")
+                        .font(.caption2)
+                        .foregroundStyle(Color.appTextTertiary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Start your chat by replying here.")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.appTextPrimary)
+                        Text("Try: \u{201C}What decisions were made?\u{201D} or \u{201C}Summarise the last 5 minutes.\u{201D}")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.appSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
+                Spacer(minLength: 16)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var messageList: some View {

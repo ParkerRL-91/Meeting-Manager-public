@@ -836,7 +836,7 @@ private struct TLDRCard: View {
 
 // MARK: - Skim-First Section Grid
 
-private struct SkimFirstSectionGrid: View {
+struct SkimFirstSectionGrid: View {
     let sections: [SummaryParser.Section]
 
     var body: some View {
@@ -854,7 +854,7 @@ private struct SkimFirstSectionGrid: View {
     }
 }
 
-private struct SectionCard: View {
+struct SectionCard: View {
     let section: SummaryParser.Section
 
     var body: some View {
