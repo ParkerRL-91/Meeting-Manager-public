@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ServiceManagement
 import EventKit
 import os
@@ -10,7 +11,6 @@ struct GeneralSettingsView: View {
 
     @Environment(AppState.self) private var appState
     @State private var selectedTheme: String = AppSettings.default.theme
-    @State private var showLightModeAlert: Bool = false
     @State private var launchAtLogin: Bool = AppSettings.default.launchAtLogin
     @State private var notificationLeadTime: Int = AppSettings.default.notificationLeadTimeMinutes
     @State private var autoGenerateSummary: Bool = false
@@ -39,21 +39,6 @@ struct GeneralSettingsView: View {
             aboutSection
         }
         .formStyle(.grouped)
-        // Alert lives at the Form level — when attached inside a Section
-        // (or worse, inside the Picker's onChange), macOS sometimes silently
-        // drops the presentation. Keeping it at the top of the view tree
-        // makes it reliably reach the window.
-        .alert("Nice try.", isPresented: $showLightModeAlert) {
-            Button("Stay in the dark", role: .cancel) {
-                // Revert AFTER the user dismisses, not before — gives the
-                // picker a moment to visually show what they clicked while
-                // the alert is up, then snaps back.
-                selectedTheme = "dark"
-                persistSetting { $0.theme = "dark" }
-            }
-        } message: {
-            Text("You appear to have clicked light mode. There is no reason to do this. We live our life in the dark. Reverting back to dark.")
-        }
         .task {
             autoGenerateSummary = appState.settings.autoGenerateSummary
             defaultRecipeId = appState.settings.defaultRecipeId
@@ -87,10 +72,7 @@ struct GeneralSettingsView: View {
                     return
                 }
                 Logger.ui.info("User attempted theme=\(newValue) — reverting to dark")
-                showLightModeAlert = true
-                // Don't revert here — the alert's dismiss button does the
-                // revert. Setting selectedTheme back to "dark" inline races
-                // the alert presentation and cancels it before it can show.
+                showLightModeRefusal()
             }
         } header: {
             Text("Appearance")
@@ -263,6 +245,35 @@ struct GeneralSettingsView: View {
 
     private var appBuild: String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    }
+
+    /// Show a modal NSAlert refusing the light-mode selection, then revert
+    /// the picker back to dark. Uses NSAlert directly because SwiftUI's
+    /// `.alert` modifier is unreliable inside macOS Settings windows —
+    /// presentation gets silently dropped depending on the focus chain.
+    private func showLightModeRefusal() {
+        // Defer the modal beat so the picker has time to commit its visual
+        // selection — otherwise the runModal blocks the runloop before the
+        // segmented control's haptic/animation can land, which feels janky.
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Nice try."
+            alert.informativeText = "You appear to have clicked light mode. There is no reason to do this. We live our life in the dark. Reverting back to dark."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Stay in the dark")
+            // Find the active window to attach the sheet to. Falls back to
+            // a free-floating modal if no window is found.
+            if let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+                alert.beginSheetModal(for: window) { _ in
+                    selectedTheme = "dark"
+                    persistSetting { $0.theme = "dark" }
+                }
+            } else {
+                alert.runModal()
+                selectedTheme = "dark"
+                persistSetting { $0.theme = "dark" }
+            }
+        }
     }
 
     private func persistSetting(_ mutation: (inout AppSettings) -> Void) {
