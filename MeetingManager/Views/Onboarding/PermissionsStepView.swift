@@ -137,6 +137,19 @@ struct PermissionsStepView: View {
             .cornerRadius(12)
             .frame(maxWidth: 500)
 
+            // Recovery affordance — same shared button as the gate and Settings.
+            // Shown during onboarding too because users sometimes have stale
+            // TCC entries from a prior install of the app, in which case the
+            // OS dialog never appears and they get stuck on this step.
+            Divider()
+                .frame(maxWidth: 500)
+
+            PermissionResetButton(style: .prominent) {
+                microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+                checkScreenRecordingPermission()
+            }
+            .frame(maxWidth: 500)
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

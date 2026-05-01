@@ -11,7 +11,6 @@ struct GeneralSettingsView: View {
 
     @Environment(AppState.self) private var appState
     @State private var selectedTheme: String = AppSettings.default.theme
-    @State private var resetMessage: String?
     @State private var launchAtLogin: Bool = AppSettings.default.launchAtLogin
     @State private var notificationLeadTime: Int = AppSettings.default.notificationLeadTimeMinutes
     @State private var autoGenerateSummary: Bool = false
@@ -259,41 +258,25 @@ struct GeneralSettingsView: View {
     }
 
     /// Troubleshooting tools — primarily the permission-reset workflow.
-    /// Beta users on unsigned/self-signed builds frequently see TCC entries
-    /// stick around in System Settings while macOS internally invalidates
-    /// the binary-hash binding after an update. Manually toggling the
-    /// permission off/on in System Settings is one fix; this button is
-    /// the one-click equivalent.
+    /// Uses the same `PermissionResetButton` component that the gate and
+    /// onboarding use, so behaviour is guaranteed identical across all three
+    /// surfaces. (Earlier versions had a bespoke implementation here; the
+    /// shared component replaces it.)
     private var troubleshootingSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("If permissions show as granted but the app reports they're missing (common after an update), reset them here. You'll be re-prompted on next use.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 12) {
+                PermissionResetButton(style: .compact)
 
-                HStack(spacing: 8) {
-                    Button {
-                        resetAppPermissions()
-                    } label: {
-                        Label("Reset App Permissions", systemImage: "arrow.counterclockwise.circle")
-                    }
-                    .help("Clears macOS TCC permissions for Microphone, Calendar, and Screen Recording. You'll be prompted to grant them again on next use.")
-
-                    Button {
-                        openPrivacySettings()
-                    } label: {
-                        Label("Open System Settings", systemImage: "gear")
-                    }
-                    .help("Opens System Settings → Privacy & Security so you can manually toggle permissions.")
+                Button {
+                    openPrivacySettings()
+                } label: {
+                    Label("Open System Settings → Privacy", systemImage: "gear")
+                        .font(.callout)
                 }
-
-                if let resetMessage {
-                    Text(resetMessage)
-                        .font(.caption)
-                        .foregroundStyle(resetMessage.starts(with: "✓") ? .green : .red)
-                }
+                .buttonStyle(.bordered)
+                .help("Opens System Settings → Privacy & Security so you can manually toggle permissions.")
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
         } header: {
             Text("Troubleshooting")
@@ -354,53 +337,6 @@ struct GeneralSettingsView: View {
         Logger.ui.info("[showLightModeRefusal] calling runModal()")
         alert.runModal()
         Logger.ui.info("[showLightModeRefusal] modal dismissed")
-    }
-
-    /// Reset the app's TCC entries via the system `tccutil` binary. Runs as
-    /// the user (no admin password required) — the bundle ID arg scopes the
-    /// reset to this app only. After a reset, macOS re-prompts for each
-    /// permission the next time the app actually needs it.
-    ///
-    /// Backstory: self-signed builds (everything before notarization is set
-    /// up) sometimes lose their TCC binding across updates because macOS
-    /// doesn't fully trust the cert chain. The toggle stays visible in
-    /// System Settings but the binary-hash binding is invalid. This is the
-    /// one-click fix: nuke the TCC rows and let the app re-request.
-    private func resetAppPermissions() {
-        Logger.ui.info("[resetAppPermissions] starting reset for com.meetingmanager.app")
-        let services = ["Microphone", "Calendar", "Reminders", "ScreenCapture"]
-        var failed: [String] = []
-        for service in services {
-            let task = Process()
-            task.launchPath = "/usr/bin/tccutil"
-            task.arguments = ["reset", service, "com.meetingmanager.app"]
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            task.standardError = pipe
-            do {
-                try task.run()
-                task.waitUntilExit()
-                if task.terminationStatus == 0 {
-                    Logger.ui.info("[resetAppPermissions] reset \(service, privacy: .public) — ok")
-                } else {
-                    Logger.ui.warning("[resetAppPermissions] reset \(service, privacy: .public) exited with \(task.terminationStatus)")
-                    failed.append(service)
-                }
-            } catch {
-                Logger.ui.error("[resetAppPermissions] failed to launch tccutil for \(service, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                failed.append(service)
-            }
-        }
-        if failed.isEmpty {
-            resetMessage = "✓ Permissions reset. macOS will re-prompt for each on next use."
-        } else {
-            resetMessage = "Reset partially failed for: \(failed.joined(separator: ", ")). Try the System Settings fallback."
-        }
-        // Auto-clear the message after 8s so it doesn't linger.
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(8))
-            resetMessage = nil
-        }
     }
 
     /// Open System Settings → Privacy & Security as a manual fallback.
