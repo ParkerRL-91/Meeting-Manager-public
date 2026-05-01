@@ -39,6 +39,21 @@ struct GeneralSettingsView: View {
             aboutSection
         }
         .formStyle(.grouped)
+        // Alert lives at the Form level — when attached inside a Section
+        // (or worse, inside the Picker's onChange), macOS sometimes silently
+        // drops the presentation. Keeping it at the top of the view tree
+        // makes it reliably reach the window.
+        .alert("Nice try.", isPresented: $showLightModeAlert) {
+            Button("Stay in the dark", role: .cancel) {
+                // Revert AFTER the user dismisses, not before — gives the
+                // picker a moment to visually show what they clicked while
+                // the alert is up, then snaps back.
+                selectedTheme = "dark"
+                persistSetting { $0.theme = "dark" }
+            }
+        } message: {
+            Text("You appear to have clicked light mode. There is no reason to do this. We live our life in the dark. Reverting back to dark.")
+        }
         .task {
             autoGenerateSummary = appState.settings.autoGenerateSummary
             defaultRecipeId = appState.settings.defaultRecipeId
@@ -66,25 +81,16 @@ struct GeneralSettingsView: View {
                 // No light mode exists. Bounce back to dark with a wink.
                 // We don't bother handling .system either — it'd flip to light
                 // half the time, defeating the joke.
-                if newValue != "dark" {
-                    showLightModeAlert = true
-                    Logger.ui.info("User attempted theme=\(newValue) — reverting to dark")
-                    // Defer the revert so the alert can attach to the new value
-                    // change cycle. Without the dispatch, the picker visually
-                    // snaps back before the alert renders.
-                    DispatchQueue.main.async {
-                        selectedTheme = "dark"
-                        persistSetting { $0.theme = "dark" }
-                    }
-                } else {
+                guard newValue != "dark" else {
                     persistSetting { $0.theme = newValue }
                     Logger.ui.info("Theme changed to \(newValue)")
+                    return
                 }
-            }
-            .alert("Nice try.", isPresented: $showLightModeAlert) {
-                Button("Stay in the dark", role: .cancel) {}
-            } message: {
-                Text("You appear to have clicked light mode. There is no reason to do this. We live our life in the dark. Reverting back to dark.")
+                Logger.ui.info("User attempted theme=\(newValue) — reverting to dark")
+                showLightModeAlert = true
+                // Don't revert here — the alert's dismiss button does the
+                // revert. Setting selectedTheme back to "dark" inline races
+                // the alert presentation and cancels it before it can show.
             }
         } header: {
             Text("Appearance")
