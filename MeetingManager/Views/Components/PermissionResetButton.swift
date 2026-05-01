@@ -37,8 +37,20 @@ struct PermissionResetButton: View {
 
     @State private var resetMessage: String?
     @State private var isResetting = false
+    @State private var showConfirmation = false
 
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager.app", category: "ui")
+
+    /// The bundle ID we'll scope tccutil to. Read from Bundle.main rather
+    /// than hardcoded so a future bundle-ID change can never accidentally
+    /// orphan this code. Falls back to the literal string if (impossibly)
+    /// Bundle.main.bundleIdentifier is nil — but `runReset` will refuse to
+    /// proceed in that case.
+    private var resolvedBundleId: String? {
+        let id = Bundle.main.bundleIdentifier
+        guard let id, !id.isEmpty, id.contains(".") else { return nil }
+        return id
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -54,7 +66,7 @@ struct PermissionResetButton: View {
             // cleaner way to apply `.borderedProminent` vs `.bordered`.
             if style == .prominent {
                 Button {
-                    runReset()
+                    showConfirmation = true
                 } label: {
                     resetButtonLabel
                 }
@@ -64,7 +76,7 @@ struct PermissionResetButton: View {
                 .disabled(isResetting)
             } else {
                 Button {
-                    runReset()
+                    showConfirmation = true
                 } label: {
                     resetButtonLabel
                 }
@@ -83,12 +95,50 @@ struct PermissionResetButton: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        // Confirmation dialog so the user explicitly acknowledges the action
+        // and sees exactly which app's permissions are being reset. Spells
+        // out the scope ("only Meeting Manager") so nobody worries that
+        // they're nuking other apps — that fear surfaced in beta.
+        .confirmationDialog(
+            "Reset Meeting Manager's permissions?",
+            isPresented: $showConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Permissions", role: .destructive) {
+                runReset()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let bundleId = resolvedBundleId {
+                Text("This clears macOS permissions for Microphone, Calendar, Reminders, and Screen Recording — but only for Meeting Manager (\(bundleId)). Other apps are not affected. macOS will re-prompt the next time Meeting Manager needs each one.")
+            } else {
+                Text("Cannot determine this app's bundle identifier — refusing to reset to avoid affecting other apps. Please reinstall the app.")
+            }
+        }
     }
 
-    /// Run `tccutil reset` for every TCC service this app uses. Bundle-ID
-    /// scoped so it only affects Meeting Manager's grants. No admin needed.
+    /// Run `tccutil reset` for every TCC service this app uses.
+    ///
+    /// Critical safety: every invocation includes the bundle ID as the
+    /// third argument. With it, tccutil scopes the reset to that bundle
+    /// only. WITHOUT it, tccutil would reset every app's grants for that
+    /// service — that's the foot-gun this method is built to prevent.
+    ///
+    /// Defenses:
+    ///   1. Resolve bundle ID via `Bundle.main.bundleIdentifier` rather
+    ///      than hardcoding — defensive if the bundle ID ever changes.
+    ///   2. If bundle ID is missing or malformed, REFUSE to run anything.
+    ///      Fail closed: better to do nothing than to do something global.
+    ///   3. Log the exact argv before exec so any future audit can
+    ///      reconstruct what ran.
     private func runReset() {
-        Self.logger.info("[PermissionResetButton] reset invoked")
+        guard let bundleId = resolvedBundleId else {
+            Self.logger.error("[PermissionResetButton] REFUSING to reset — bundleIdentifier is nil/malformed. This guards against a global reset.")
+            resetMessage = "Could not resolve this app's bundle ID — reset aborted to protect other apps."
+            return
+        }
+
+        Self.logger.info("[PermissionResetButton] reset invoked for bundleId=\(bundleId, privacy: .public)")
         isResetting = true
         let services = ["Microphone", "Calendar", "Reminders", "ScreenCapture"]
         Task { @MainActor in
@@ -96,15 +146,17 @@ struct PermissionResetButton: View {
             for service in services {
                 let task = Process()
                 task.launchPath = "/usr/bin/tccutil"
-                task.arguments = ["reset", service, "com.meetingmanager.app"]
+                let argv = ["reset", service, bundleId]
+                task.arguments = argv
+                Self.logger.info("[PermissionResetButton] exec: /usr/bin/tccutil \(argv.joined(separator: " "), privacy: .public)")
                 do {
                     try task.run()
                     task.waitUntilExit()
                     if task.terminationStatus != 0 {
                         failed.append(service)
-                        Self.logger.warning("[PermissionResetButton] tccutil reset \(service, privacy: .public) exited \(task.terminationStatus)")
+                        Self.logger.warning("[PermissionResetButton] tccutil reset \(service, privacy: .public) \(bundleId, privacy: .public) exited \(task.terminationStatus)")
                     } else {
-                        Self.logger.info("[PermissionResetButton] tccutil reset \(service, privacy: .public) ok")
+                        Self.logger.info("[PermissionResetButton] tccutil reset \(service, privacy: .public) \(bundleId, privacy: .public) ok")
                     }
                 } catch {
                     failed.append(service)
@@ -112,7 +164,7 @@ struct PermissionResetButton: View {
                 }
             }
             if failed.isEmpty {
-                resetMessage = "✓ Permissions cleared. Use the Grant / Open Settings buttons above to re-grant."
+                resetMessage = "✓ Cleared Meeting Manager's permissions only. Use Grant / Open Settings above to re-grant."
             } else {
                 resetMessage = "Reset failed for: \(failed.joined(separator: ", ")). Try the System Settings fallback."
             }
