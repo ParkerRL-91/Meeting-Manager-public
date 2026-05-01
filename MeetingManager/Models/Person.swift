@@ -47,6 +47,32 @@ struct Person: Codable, Identifiable, FetchableRecord, MutablePersistableRecord 
         aliasesJSON = (try? String(data: JSONEncoder().encode(deduped), encoding: .utf8)) ?? "[]"
     }
 
+    /// Primary email domain extracted from the first email alias, e.g. "acme.com".
+    /// Used for disambiguation when two people share the same first name but
+    /// work at different organisations.
+    var domain: String? {
+        for alias in aliases where alias.contains("@") {
+            if let d = alias.components(separatedBy: "@").last?.lowercased(), !d.isEmpty {
+                return d
+            }
+        }
+        return nil
+    }
+
+    /// Short org hint derived from domain — strips common TLDs for display.
+    /// "acme.com" → "Acme", "dave@acme.io" → "Acme"
+    var orgHint: String? {
+        guard let d = domain else { return nil }
+        let base = d.components(separatedBy: ".").first ?? d
+        return base.prefix(1).uppercased() + base.dropFirst()
+    }
+
+    /// Returns true if any alias (via canonical key) matches the given raw participant string.
+    func matches(participant rawName: String) -> Bool {
+        let key = VocativeMiningService.canonicalKey(for: rawName)
+        return !key.isEmpty && canonicalKeys.contains(key)
+    }
+
     /// All canonical keys (lowercased first names) for this person — used to
     /// match incoming raw attendee strings against existing Person records.
     var canonicalKeys: Set<String> {

@@ -47,19 +47,41 @@ final class PersonRepository {
         let key = VocativeMiningService.canonicalKey(for: rawName)
         let all = try await allPersons()
 
-        if var existing = all.first(where: { $0.canonicalKeys.contains(key) }) {
-            // Merge rawName as an alias if not already tracked
-            var currentAliases = existing.aliases
-            if !currentAliases.contains(rawName) {
-                currentAliases.append(rawName)
-                existing.setAliases(currentAliases)
-                existing.updatedAt = Date()
-                try await database.writer.write { db in
-                    try existing.update(db)
-                }
-                logger.debug("[Person] merged alias '\(rawName, privacy: .public)' into '\(existing.canonicalName, privacy: .public)'")
+        // Domain disambiguation: if rawName is an email, find ALL persons that
+        // share the same canonical key (first name) and pick the one whose domain
+        // matches. If no domain match exists, create a new person rather than
+        // collapsing two different "Dave"s from different organisations.
+        let candidates = all.filter { $0.canonicalKeys.contains(key) }
+        if !candidates.isEmpty {
+            let incomingDomain = rawName.contains("@")
+                ? rawName.components(separatedBy: "@").last?.lowercased()
+                : nil
+
+            let match: Person?
+            if let domain = incomingDomain {
+                // Prefer a candidate whose existing aliases share the same domain
+                match = candidates.first(where: { $0.domain == domain })
+                    ?? (candidates.count == 1 ? candidates.first : nil)
+                // If multiple domain-mismatched Daves exist and we can't tell
+                // which — don't merge; fall through to create a new person.
+            } else {
+                // No domain info — merge into the first matching candidate
+                match = candidates.first
             }
-            return existing
+
+            if var existing = match {
+                var currentAliases = existing.aliases
+                if !currentAliases.contains(rawName) {
+                    currentAliases.append(rawName)
+                    existing.setAliases(currentAliases)
+                    existing.updatedAt = Date()
+                    try await database.writer.write { db in try existing.update(db) }
+                    logger.debug("[Person] merged alias '\(rawName, privacy: .public)' into '\(existing.canonicalName, privacy: .public)'")
+                }
+                return existing
+            }
+            // No domain-safe match found — fall through to create a new person
+            logger.info("[Person] domain disambiguation: creating separate record for '\(rawName, privacy: .public)'")
         }
 
         // Create new person; prefer a display-name format for canonical name
