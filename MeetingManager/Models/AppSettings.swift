@@ -181,27 +181,44 @@ enum DefaultPrompts {
     ---
 
     **Rules — read carefully:**
-    - **Be specific.** "Discussed pricing" is useless; "Alex argued the $99 tier was undercutting margin while Sam pushed for it as a top-of-funnel hook; Priya proposed a 14-day trial as a compromise" is useful.
+    - **Be specific.** "Discussed pricing" is useless; "[Speaker A] argued [their actual position]; [Speaker B] pushed back on [specific grounds]; [Speaker C] proposed [actual compromise]" is the bar.
     - **Quote verbatim or don't quote.** Quotation marks indicate the exact words. If you're paraphrasing, drop the quotes.
     - **Never invent content.** If something isn't in the transcript or notes, it doesn't exist. Don't infer attendees, dates, or commitments that weren't stated.
     - **Notes vs transcript:** When user notes contradict the transcript, prefer the notes — they reflect the attendee's interpretation. Flag the contradiction in the relevant Topic block when the difference is material.
     - **Speaker labels:** Use the labels exactly as they appear in the transcript. If labels are generic ("Speaker 1") and the participants list lets you confidently disambiguate, you may map them — but only if the mapping is unambiguous from context. If unsure, keep the original label.
-    - **Prior context:** When the prior-context section is non-empty, weave references where relevant ("this picks up where last week's pricing review left off") — but never reference prior context that wasn't actually mentioned in this meeting.
+    - **Prior context:** When the prior-context section is non-empty, weave references where relevant — but never reference prior context that wasn't actually mentioned in this meeting.
     - **Ambiguity:** If a name, term, or claim is unclear in the transcript (likely a transcription error), flag it in-line as `[unclear: original phrase]` rather than guessing.
     - **No filler.** "The team had a productive conversation about…" → cut. Lead with verbs and substance.
     - **Length:** Prefer density over breadth. A 600-word summary that captures the real argument beats a 1500-word summary that catalogues every utterance.
 
     ---
 
-    **Worked example of a single Topic Timeline block** — match this density and timestamp discipline:
+    **CRITICAL ANTI-FABRICATION RULE — READ TWICE:**
+
+    The format example below uses *placeholder names and topics* in `<angle brackets>`. These are NOT real content — they are structural placeholders.
+
+    Your output must:
+    - Use **only names that appear in the actual transcript above**.
+    - Use **only topics that are genuinely discussed in the actual transcript**.
+    - Use **only timestamps that come from the actual transcript**.
+
+    If the actual transcript is short, vague, or hard to parse, produce a SHORT summary that reflects only what's actually there. **Do not invent topics, speakers, or decisions to fill out the template.** A three-line summary that's accurate is far better than a long summary that fabricates content.
+
+    Specifically: do **NOT** use any of the following words or phrases unless they appear verbatim in the transcript above — they are example artifacts only: pricing tier, top-of-funnel, capacity model, 14-day trial, conversion lift, sunset, margin debate, API spec, capacity flow, or the names Alex, Sam, or Priya.
+
+    ---
+
+    **Format example for a Topic Timeline block** — copy the *structure*, never the *content*:
 
     ```
-    ### [00:14–00:23] Q3 pricing tier
-    **Discussion:** Alex opened by arguing the $99 tier is "actively undercutting our margin" and proposed sunsetting it after Q3. Sam pushed back: he wanted it as a top-of-funnel hook for the SMB segment and cited the 38% conversion lift seen in March. Priya proposed a compromise — keep the tier visible but require a 14-day trial before activation, which would filter out low-intent signups. Alex agreed conditionally, contingent on Priya's capacity model showing the trial flow doesn't add support load.
-    **Outcome:** Deferred. Priya owns the capacity model; decision moves to next week's pricing sync. No commitment to sunset, no commitment to launch the trial flow.
+    ### [HH:MM–HH:MM] <Topic name from this transcript>
+    **Discussion:** <Speaker name from transcript> opened by <their actual argument>. <Another speaker from transcript> pushed back on <their actual counter-argument>. <Resolution attempt from transcript, with specific evidence cited>. <Conditional agreement, if any, with the actual condition stated>.
+    **Outcome:** <Was it decided? Deferred? Left open?>. <Owner from transcript> owns <task from transcript>; <next step from transcript>.
     ```
 
-    Two things to notice: (1) the time range bounds the block, (2) every claim is attributed to a specific speaker. Aim for that.
+    Two things to notice: (1) every angle-bracketed slot must be filled from the actual transcript above, (2) the structure shows you the level of *detail* expected — claim → counter-claim → evidence → resolution.
+
+    If the transcript doesn't support that level of detail for a topic, produce a shorter block. Honest abbreviation beats fabricated specificity.
     """
 
     /// Pre-meeting context brief. Synthesises a focused, actionable one-page brief
@@ -247,12 +264,12 @@ enum DefaultPrompts {
     One or two sentences. State the apparent purpose based on title, participants, and prior context. If you can't tell from the inputs, say so plainly: "Purpose unclear from available context — likely [best guess] given [signal]."
 
     ## What the user should already know walking in
-    Three to six bullets of substantive context — *not* a recap of every prior meeting. Each bullet is one fact or position the user needs loaded into working memory. Examples of good bullets:
-    - "Alex previously pushed back on the $99 tier (Mar 12 call); expect them to raise margin concerns again."
-    - "The Q3 roadmap was deferred at the last sync pending Priya's capacity model — that's still outstanding."
-    - "Sam committed to the API spec by today — worth checking whether it landed."
+    Three to six bullets of substantive context — *not* a recap of every prior meeting. Each bullet is one fact or position the user needs loaded into working memory. Bullets should follow this *shape* (placeholders only — fill from the actual inputs above):
+    - "<Person from inputs> previously pushed back on <topic from inputs>; expect them to raise <related concern> again."
+    - "<Topic from inputs> was deferred pending <blocker from inputs> — that's still outstanding."
+    - "<Person from inputs> committed to <task from inputs> by <date> — worth checking whether it landed."
 
-    Bad bullets to avoid: anything that just summarises a prior meeting without tying it to *this one*. If a prior meeting isn't actually relevant, leave it out — quality over coverage.
+    Bad bullets to avoid: anything that just summarises a prior meeting without tying it to *this one*. If a prior meeting isn't actually relevant, leave it out — quality over coverage. Never use the names Alex, Sam, or Priya, the topic "$99 tier", or any of the placeholder phrases above unless they appear verbatim in the inputs.
 
     ## Likely discussion points
     Two to four bullets predicting what will come up, ranked by likelihood. Anchor each prediction in evidence from the inputs. Format:
@@ -267,16 +284,16 @@ enum DefaultPrompts {
     Lead with items owned by participants in this meeting. Skip the section entirely if there are no relevant open items.
 
     ## Questions worth asking
-    Two to four sharp questions the user could open with or hold in reserve. Each question should advance the meeting — not generic ("any updates?") but specific to the situation:
-    - "Is the API spec ready or do we need a different unblock path?"
-    - "Did the margin pushback on the $99 tier ever get resolved, or are we still parked?"
+    Two to four sharp questions the user could open with or hold in reserve. Each question should advance the meeting — not generic ("any updates?") but specific to the situation. Shape (fill from actual inputs):
+    - "Is <specific deliverable from inputs> ready, or do we need a different unblock path?"
+    - "Did <specific issue from inputs> ever get resolved, or are we still parked?"
 
     If you don't have enough context for sharp questions, write "Insufficient context for targeted questions — start with a status round-robin."
 
     ## One-line readiness summary
-    A single italicised line capturing the user's footing as they walk in. Examples:
-    > *Caught up on the pricing thread; one open commitment from Sam to verify; expect margin debate to resume.*
-    > *Limited prior context; treat this as a discovery conversation.*
+    A single italicised line capturing the user's footing as they walk in. Shape (do NOT copy the literal example wording — substitute from the actual inputs):
+    > *<One sentence describing how prepared the user is, drawn from the actual inputs>.*
+    > *Limited prior context; treat this as a discovery conversation.*  ← use this verbatim only when prior context is genuinely empty.
 
     ---
 
