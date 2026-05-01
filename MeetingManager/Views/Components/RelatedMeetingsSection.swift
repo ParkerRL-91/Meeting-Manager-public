@@ -77,38 +77,44 @@ struct RelatedMeetingsSection: View {
             .accessibilityLabel(isExpanded ? "Collapse context" : "Expand context")
 
             if isExpanded {
-                // Brief (rendered Markdown). Uses the same display-style
-                // heading treatment as the post-meeting SummaryView so the
-                // pre-meeting brief reads as one coherent "summary" — same
-                // type scale, same visual rhythm — rather than a different
-                // sidebar widget. baseFontSize 14 also matches SummaryView.
-                if let brief = ctx.brief, !brief.isEmpty {
-                    MarkdownRenderer(text: brief, baseFontSize: 14)
-                        .foregroundStyle(Color.appTextPrimary)
-                        .textSelection(.enabled)
-                        .lineLimit(nil)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    // Pre-v3.4 cache — no brief was synthesized. Fall back to a
-                    // short hint that the structured list is available below.
-                    Text("Prior context from \(ctx.relatedMeetings.count) meeting\(ctx.relatedMeetings.count == 1 ? "" : "s") — open a source to review.")
-                        .font(.system(size: 13, design: .serif))
-                        .foregroundStyle(Color.appTextSecondary)
-                        .lineLimit(2)
-                }
+                // Body wrapped in a capped-height ScrollView so the context
+                // card never dominates the live meeting view. Default cap
+                // (240pt) is roughly half the screen height of a typical
+                // recording window — enough to read the brief, not enough
+                // to bury the notes pane below. When the brief is long,
+                // the user scrolls inside the card.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        // Brief (rendered Markdown). Display-style headings
+                        // match the post-meeting SummaryView so pre- and
+                        // post-meeting reads feel consistent.
+                        if let brief = ctx.brief, !brief.isEmpty {
+                            MarkdownRenderer(text: brief, baseFontSize: 14)
+                                .foregroundStyle(Color.appTextPrimary)
+                                .textSelection(.enabled)
+                                .lineLimit(nil)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Text("Prior context from \(ctx.relatedMeetings.count) meeting\(ctx.relatedMeetings.count == 1 ? "" : "s") — open a source to review.")
+                                .font(.system(size: 13, design: .serif))
+                                .foregroundStyle(Color.appTextSecondary)
+                                .lineLimit(2)
+                        }
 
-                // Sources sublist (independent collapse).
-                if isSourcesExpanded, !ctx.relatedMeetings.isEmpty {
-                    VStack(spacing: 4) {
-                        ForEach(ctx.relatedMeetings) { related in
-                            RelatedMeetingRow(meeting: related) {
-                                onSelectMeeting?(related.meetingId)
+                        if isSourcesExpanded, !ctx.relatedMeetings.isEmpty {
+                            VStack(spacing: 4) {
+                                ForEach(ctx.relatedMeetings) { related in
+                                    RelatedMeetingRow(meeting: related) {
+                                        onSelectMeeting?(related.meetingId)
+                                    }
+                                }
                             }
+                            .padding(.top, 4)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
-                    .padding(.top, 4)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
+                .frame(maxHeight: 240)
             }
         }
         .padding(.horizontal, 20)

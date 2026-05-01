@@ -81,14 +81,17 @@ struct TranscriptCleanupService {
     // MARK: - AI cleanup
 
     /// Run the full cleanup pipeline. Stitch always runs; AI pass runs when
-    /// `textGenerator` is provided and succeeds. On AI failure, returns the
-    /// stitched-only text with method "ai-failed" so a retry can be triggered.
+    /// `textGenerator` is provided and succeeds.
     ///
-    /// - Parameters:
-    ///   - transcripts: raw segments in chronological order.
-    ///   - textGenerator: optional LLM closure (system, user) -> text. When
-    ///     nil, only the stitch runs.
-    /// - Returns: (text, method) — text is markdown ready to display.
+    /// **Critical: speaker names and timestamps are never sent to the LLM.**
+    /// We send only the text body of each turn, get back the cleaned body,
+    /// and reassemble the speaker label + timestamp locally from the
+    /// deterministic stitch output. This guarantees the AI cannot
+    /// hallucinate speaker names — even when a small Ollama model would
+    /// otherwise pull a plausible-sounding name from training data or
+    /// nearby context. Real-world bug this fixes: a meeting with one
+    /// participant rendered with names from the user's KB on the cleaned
+    /// rows.
     static func clean(
         transcripts: [Transcript],
         textGenerator: ((String, String) async throws -> String)?
@@ -103,43 +106,99 @@ struct TranscriptCleanupService {
             return (stitchedMarkdown, "stitch")
         }
 
-        // Build the AI prompt. Sent the stitched markdown so the model has
-        // less work — turns are already grouped; the model just polishes
-        // language and removes fillers.
+        // Send the LLM only the bodies of each turn, separated by sentinel
+        // markers. The LLM never sees speaker names or timestamps — those
+        // are reattached locally after parsing the response.
+        let bodyOnlyInput = turns.enumerated().map { idx, turn in
+            "[TURN \(idx + 1)]\n\(turn.text)"
+        }.joined(separator: "\n\n")
+
         let systemPrompt = """
-            You are a transcript editor. The user provides a raw automatic transcript that has been roughly grouped into speaker turns. Your job is to produce a clean, readable version.
+            You are a transcript editor. The input is a list of speaker turns separated by `[TURN N]` markers. For each turn, you produce a cleaned version of that turn's text.
 
-            Rules — apply ALL of these:
-            - Preserve every speaker turn. Do not merge turns from different speakers. Do not skip turns.
-            - Within a turn, fix punctuation, capitalization, and obvious word-recognition errors when context makes the correction unambiguous.
+            Rules — apply ALL of them:
+            - Output exactly the same number of `[TURN N]` blocks as the input, in the same order.
+            - Each output block begins with `[TURN N]` on its own line, followed by the cleaned body on the next line(s).
+            - Inside a block, fix punctuation, capitalization, and obvious word-recognition errors when context makes the correction unambiguous.
             - Strip filler words ("um", "uh", "you know", "I mean", "like" when used as a filler) when their removal does not change meaning. Keep them when they ARE the meaning (e.g. "I'm not sure, you know?").
-            - Do NOT add content. Do NOT change meaning. Do NOT translate. Do NOT reorder.
-            - Preserve the speaker name and the timestamp at the start of each turn exactly as given.
-            - Preserve the markdown structure: each turn begins with `**Speaker Name** _[HH:MM]_` followed by a blank line and the cleaned text.
-            - Output ONLY the cleaned transcript. No preamble, no explanation, no summary.
+            - Do NOT add content. Do NOT change meaning. Do NOT translate. Do NOT reorder turns.
+            - Do NOT add speaker names. Do NOT add timestamps. Do NOT add headings. The `[TURN N]` markers are the ONLY structural elements you produce.
+            - Output ONLY the cleaned blocks. No preamble, no explanation, no summary.
 
-            If the input is empty or unintelligible, return it unchanged.
+            If a turn body is empty or unintelligible, return it unchanged.
             """
 
         let userPrompt = """
-            Clean up this transcript. Preserve every speaker turn and timestamp; fix punctuation; strip true fillers; never invent content.
+            Clean up the body of each turn below. Output `[TURN N]` followed by the cleaned body, one block per input turn, in order. Never write a name, a timestamp, or a heading.
 
-            \(stitchedMarkdown)
+            \(bodyOnlyInput)
             """
 
         do {
-            let cleaned = try await textGenerator(systemPrompt, userPrompt)
-            let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                logger.warning("[TranscriptCleanup] AI returned empty — falling back to stitch")
+            let raw = try await textGenerator(systemPrompt, userPrompt)
+            let cleanedBodies = parseTurnBodies(raw, expectedCount: turns.count)
+            // If parsing failed or the model returned the wrong number of
+            // blocks, fall back to stitched-only — strictly safer than
+            // shipping a half-cleaned transcript with potentially mismatched
+            // turn boundaries.
+            guard cleanedBodies.count == turns.count else {
+                logger.warning("[TranscriptCleanup] AI returned \(cleanedBodies.count) block(s), expected \(turns.count) — falling back to stitch")
                 return (stitchedMarkdown, "ai-failed")
             }
-            logger.info("[TranscriptCleanup] AI cleanup ok (\(turns.count) turn(s), \(trimmed.count) chars)")
-            return (trimmed, "stitch+ai")
+            // Reassemble locally: original speaker + original timestamp +
+            // cleaned body. Speaker names are never read from the LLM
+            // output. Empty cleaned body falls back to original.
+            var cleanedTurns: [StitchedTurn] = []
+            for (idx, original) in turns.enumerated() {
+                var copy = original
+                let body = cleanedBodies[idx].trimmingCharacters(in: .whitespacesAndNewlines)
+                copy.text = body.isEmpty ? original.text : body
+                cleanedTurns.append(copy)
+            }
+            let assembled = renderMarkdown(cleanedTurns)
+            logger.info("[TranscriptCleanup] AI cleanup ok (\(turns.count) turn(s), \(assembled.count) chars) — speaker labels reassembled locally")
+            return (assembled, "stitch+ai")
         } catch {
             logger.error("[TranscriptCleanup] AI threw: \(error.localizedDescription, privacy: .public) — falling back to stitch")
             return (stitchedMarkdown, "ai-failed")
         }
+    }
+
+    /// Parse the LLM's `[TURN N]` blocks into an ordered array of cleaned
+    /// bodies. Tolerant of small formatting drift — accepts `[TURN N]`,
+    /// `Turn N:`, or `Turn N` on a line by itself, and treats everything
+    /// between markers as the body. Returns blocks in input order.
+    static func parseTurnBodies(_ raw: String, expectedCount: Int) -> [String] {
+        let pattern = #"(?im)^\s*\[?\s*turn\s*(\d+)\s*[\]:\.]?\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let nsRaw = raw as NSString
+        let matches = regex.matches(in: raw, range: NSRange(location: 0, length: nsRaw.length))
+        guard !matches.isEmpty else { return [] }
+
+        var ordered: [(idx: Int, body: String)] = []
+        for (i, match) in matches.enumerated() {
+            guard match.numberOfRanges >= 2 else { continue }
+            let numRange = match.range(at: 1)
+            let num = Int(nsRaw.substring(with: numRange)) ?? -1
+            let bodyStart = match.range.location + match.range.length
+            let bodyEnd: Int
+            if i + 1 < matches.count {
+                bodyEnd = matches[i + 1].range.location
+            } else {
+                bodyEnd = nsRaw.length
+            }
+            let bodyLength = max(0, bodyEnd - bodyStart)
+            let body = nsRaw.substring(with: NSRange(location: bodyStart, length: bodyLength))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            ordered.append((num, body))
+        }
+
+        // Sort by input order index just in case the model shuffled them.
+        ordered.sort { $0.idx < $1.idx }
+        // If the model emitted exactly the expected count and they're 1..N,
+        // return in order. Otherwise return what we got — the caller will
+        // detect the mismatch and fall back.
+        return ordered.map { $0.body }
     }
 
     // MARK: - Stitched turn

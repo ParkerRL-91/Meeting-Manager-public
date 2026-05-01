@@ -1494,6 +1494,30 @@ final class AppState {
             mapping["mic"] = displayName
         }
 
+        // 2-person meeting auto-assignment. If the calendar invite has the
+        // user + exactly one other participant, AND the transcript has
+        // exactly one un-mapped cluster (everything else is mic or already
+        // resolved by voice/LLM), name that cluster the lone non-user
+        // participant. Cheap, deterministic, and removes the most common
+        // "click each fragment to label" friction for 1:1s.
+        let allClusters = Set(transcripts.compactMap { $0.speakerLabel })
+            .filter { $0 != "mic" && $0 != "system" && $0.hasPrefix("Speaker ") }
+        let unmappedClusters = allClusters.filter { mapping[$0] == nil }
+
+        if unmappedClusters.count == 1,
+           let onlyCluster = unmappedClusters.first {
+            // Calendar participants minus anyone matching the user's first name.
+            let nonUserParticipants = participants.filter { name in
+                guard let userFirst = userFirst else { return true }
+                return !name.lowercased().contains(userFirst.lowercased())
+            }
+            if nonUserParticipants.count == 1 {
+                let inferred = nonUserParticipants[0]
+                mapping[onlyCluster] = inferred
+                Logger.general.info("Auto-assigned 2-person meeting: \(onlyCluster, privacy: .public) → \(inferred, privacy: .public)")
+            }
+        }
+
         // Persist the diagnostic reason to the in-memory cache so the
         // FullTranscriptView banner can surface a specific message instead of
         // a generic "couldn't attribute". Keyed by meeting id.
