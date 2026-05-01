@@ -4,7 +4,7 @@ A native macOS app that records, transcribes, and summarizes your meetings — e
 
 ## Download
 
-[**MeetingManager-v3.7.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.7.0) — macOS 14.4+
+[**MeetingManager-v3.7.2.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.7.2) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
@@ -28,6 +28,16 @@ Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may 
 xattr -cr "/Applications/Meeting Manager.app"
 ```
 This removes the quarantine flag so the app opens without warnings.
+
+---
+
+## What's New in v3.7.2 — Apple Calendar & Permission Fixes
+
+- **Apple Calendar fully working** — end-to-end repair of iCloud/Apple Calendar sync including authorization flow, grant-bounce-back fix, and diagnostic logging
+- **Calendar entitlement added** — `com.apple.security.personal-information.calendars` now declared in the app entitlements so macOS grants stick properly
+- **Permission grants now persist across updates** — switched to a consistent code-signing identity for local builds; TCC grants for microphone, calendar, and screen recording no longer reset on reinstall
+- **Daily Brief "Set up AI" false positive fixed** — the button no longer shows "Set up AI →" when Ollama is configured but hasn't been probed yet at launch
+- **Microphone entitlement hardened** — added `com.apple.security.device.microphone` alongside the existing audio-input entitlement
 
 ---
 
