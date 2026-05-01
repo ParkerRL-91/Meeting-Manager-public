@@ -3,13 +3,17 @@ import GRDB
 import SwiftUI
 import os
 
-/// Live meeting view: notes-first, transcript secondary.
-/// Layout: Recording bar at top → Big title + pill badges → Notes area → Context brief → Bottom chat/stop bar.
+/// Live meeting view: notes + Ask Anything chat side-by-side.
+/// Layout: Recording bar (with participants + stop) → Notes left + Ask Anything right.
+/// We don't live-transcribe in this view — the transcript is generated post-recording.
 struct LiveMeetingView: View {
     let meetingId: String
     @Environment(AppState.self) private var appState
     @State private var meeting: Meeting?
-    @State private var showChat = false
+    /// Ask Anything chat is shown by default during a meeting — that's the
+    /// primary "in the moment" tool. User can collapse with Cmd+J if they
+    /// want a wider notes area, but the default is open.
+    @State private var showChat = true
     @State private var showAttendeePopover = false
 
     @State private var showContextBrief = true
@@ -206,15 +210,11 @@ struct LiveMeetingView: View {
             .frame(minHeight: 180, maxHeight: .infinity)
             .layoutPriority(1)
 
-            // Collapsible live transcript pane (collapsed by default —
-            // notes are primary, transcript is secondary). Lives below the
-            // flexible notepad so it's always visible regardless of window
-            // height. Expanded transcript scrolls internally via its own
-            // height storage.
-            LiveTranscriptPane(meetingId: meetingId)
-                .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .padding(.bottom, 12)
+            // Live transcript pane removed — we don't actually live-transcribe
+            // during the recording (transcription runs post-stop via the
+            // batch pipeline). Showing an empty / lagging transcript pane
+            // was misleading. Real transcript view lives on the post-meeting
+            // detail page under the Transcript tab.
         }
     }
 
@@ -426,6 +426,7 @@ private struct RecordingStrip: View {
     @Environment(AppState.self) private var appState
     @State private var elapsedSeconds: Int = 0
     @State private var pulse = false
+    @State private var meeting: Meeting?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -444,9 +445,21 @@ private struct RecordingStrip: View {
                 .font(.subheadline.monospaced())
                 .foregroundStyle(Color.appTextSecondary)
 
+            // Inline participant chips — small initial avatars + first names.
+            // First three then "+N" overflow so the strip doesn't blow up
+            // for big meetings.
+            if let participants = meeting?.participantList, !participants.isEmpty {
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 4)
+                participantChips(participants)
+            }
+
             Spacer()
 
-            // Stop button — always visible at the top so you don't need to scroll
+            // The single in-window Stop button. The previous duplicate in
+            // the BottomBar was removed — one stop is enough; the menu bar
+            // dropdown has its own as well.
             Button {
                 appState.stopRecording()
             } label: {
@@ -468,10 +481,62 @@ private struct RecordingStrip: View {
         .padding(.horizontal, 28)
         .padding(.vertical, 8)
         .background(Color.appSurface.opacity(0.5))
-        .onAppear { startTimer() }
+        .onAppear {
+            startTimer()
+            loadMeeting()
+        }
+        .onChange(of: appState.activeMeeting?.id) { _, _ in loadMeeting() }
         .onDisappear {
             timer?.invalidate()
             timer = nil
+        }
+    }
+
+    /// Compact chips: initial avatar circle + first name. Overflow rolls
+    /// up to a "+N" pill so a 12-person meeting doesn't squeeze the title
+    /// row off-screen.
+    @ViewBuilder
+    private func participantChips(_ participants: [String]) -> some View {
+        let visibleCap = 3
+        HStack(spacing: 6) {
+            ForEach(participants.prefix(visibleCap), id: \.self) { name in
+                HStack(spacing: 4) {
+                    InitialsAvatar(name: name, size: 18)
+                    Text(firstName(of: name))
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextSecondary)
+                        .lineLimit(1)
+                }
+                .padding(.trailing, 4)
+            }
+            if participants.count > visibleCap {
+                Text("+\(participants.count - visibleCap)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appTextTertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.appSurface)
+                    .clipShape(Capsule())
+            }
+        }
+    }
+
+    private func firstName(of name: String) -> String {
+        // Email: take the local part before "@" and split on common
+        // separators. Display name: take the first whitespace-separated token.
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if let atIndex = trimmed.firstIndex(of: "@") {
+            let local = String(trimmed[..<atIndex])
+            let parts = local.components(separatedBy: CharacterSet(charactersIn: ".-_"))
+            return parts.first?.capitalized ?? local
+        }
+        return trimmed.components(separatedBy: .whitespaces).first ?? trimmed
+    }
+
+    private func loadMeeting() {
+        Task {
+            let m = try? await appState.meetingRepository.find(id: meetingId)
+            await MainActor.run { self.meeting = m }
         }
     }
 
@@ -563,23 +628,11 @@ private struct BottomBar: View {
             AudioLevelIndicator(label: "🔊", level: appState.systemLevel, color: .appSuccess)
                 .accessibilityLabel("Speaker level")
 
-            // Stop button
-            Button {
-                appState.stopRecording()
-            } label: {
-                Image(systemName: "stop.fill")
-                    .font(.caption)
-                    .foregroundStyle(.white)
-                    .frame(width: 28, height: 28)
-                    .background(Color.appRecording)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            .buttonStyle(.plain)
-            .help("Stop Recording (⌘R)")
-            .accessibilityLabel("Stop recording")
-            // ⌘R is registered at the app level (Toggle Recording menu command).
-            // Binding it locally caused a duplicate registration with non-
-            // deterministic responder-chain behaviour.
+            // Stop button removed from the BottomBar — the canonical
+            // in-window Stop lives in the RecordingStrip at the top, and
+            // the menu bar dropdown has its own. One Stop in each surface
+            // is enough; two in the same window was visual noise.
+            // ⌘R is still registered at the app level (Toggle Recording menu).
 
             // T-025: Captured action items badge (visible when count > 0)
             if capturedItemCount > 0 {
@@ -636,83 +689,11 @@ private struct BottomBar: View {
 
 // MARK: - Live Transcript Pane (P2-T02)
 
-/// Collapsible "Live transcript" section shown below the notepad during a live
-/// meeting. Defaults to collapsed; user-pinned state persists across launches via
-/// @AppStorage. The segment count is observed live via TranscriptRepository so
-/// the header label keeps ticking even when the pane is collapsed.
-private struct LiveTranscriptPane: View {
-    let meetingId: String
-    @Environment(AppState.self) private var appState
-    @AppStorage("liveMeeting.transcriptExpanded") private var isExpanded = false
-    @AppStorage("liveMeeting.transcriptHeight") private var transcriptHeight: Double = 200
-    @State private var segmentCount = 0
-    @State private var observation: DatabaseCancellable?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.appTextSecondary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    Image(systemName: "waveform")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.appAccent)
-                    Text("Live transcript")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.appTextPrimary)
-                    Text("(\(segmentCount) \(segmentCount == 1 ? "segment" : "segments"))")
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextTertiary)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Live transcript, \(segmentCount) segments")
-            .accessibilityHint(isExpanded ? "Collapse transcript" : "Expand transcript")
-
-            if isExpanded {
-                Divider()
-                TranscriptPaneView(meetingId: meetingId)
-                    .frame(height: transcriptHeight)
-                    .overlay(alignment: .bottom) {
-                        DraggableHeightHandle(height: $transcriptHeight, minHeight: 120, maxHeight: 700)
-                    }
-            }
-        }
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.appSeparator, lineWidth: 0.5)
-        )
-        .onAppear(perform: startObserving)
-        .onDisappear(perform: stopObserving)
-    }
-
-    private func startObserving() {
-        observation = appState.transcriptRepository.observeTranscripts(
-            meetingId: meetingId
-        ) { transcripts in
-            Task { @MainActor in
-                self.segmentCount = transcripts.count
-            }
-        }
-    }
-
-    private func stopObserving() {
-        observation?.cancel()
-        observation = nil
-    }
-}
+// LiveTranscriptPane was removed in favour of a chat-and-notes-only live
+// view. Transcription happens post-stop via the batch pipeline; the
+// transcript itself is reviewed on the meeting detail page under the
+// Transcript tab. Showing a "live transcript" widget that wasn't actually
+// live (segments only appeared after stop) was misleading.
 
 // MARK: - Keyboard Shortcut Helper
 
