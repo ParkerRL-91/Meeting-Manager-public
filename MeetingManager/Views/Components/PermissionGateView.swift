@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import ScreenCaptureKit
+import os
 
 /// Lightweight permission gate shown on every app launch.
 ///
@@ -18,6 +19,7 @@ struct PermissionGateView: View {
     @State private var micGranted = false
     @State private var screenGranted = false
     @State private var checking = true
+    @State private var resetMessage: String?
 
     private let sessionManager = AudioSessionManager()
 
@@ -93,6 +95,35 @@ struct PermissionGateView: View {
             .background(Color.appSurface)
             .cornerRadius(12)
             .frame(maxWidth: 480)
+
+            // Permissions sometimes show as granted in System Settings yet
+            // the app still says they're missing — this happens after an
+            // update because macOS TCC ties grants to a binary signature
+            // that self-signed builds don't preserve. Reset clears the
+            // stale entries so macOS will re-prompt cleanly.
+            VStack(spacing: 8) {
+                Text("Stuck? If System Settings shows permissions as granted but this screen still asks for them, reset them and try again.")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 480)
+
+                Button {
+                    resetAppPermissions()
+                } label: {
+                    Label("Reset App Permissions", systemImage: "arrow.counterclockwise.circle")
+                        .font(.callout)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                if let resetMessage {
+                    Text(resetMessage)
+                        .font(.caption)
+                        .foregroundStyle(resetMessage.starts(with: "✓") ? Color.appSuccess : Color.appWarning)
+                }
+            }
+            .padding(.top, 12)
 
             Spacer()
         }
@@ -194,6 +225,46 @@ struct PermissionGateView: View {
                     NSWorkspace.shared.open(fallback)
                 }
             }
+        }
+    }
+
+    /// Wipe TCC entries for this app's bundle ID. Equivalent to clicking
+    /// the "Reset App Permissions" button in Settings → General →
+    /// Troubleshooting, but available right here on the gate where users
+    /// most often discover the broken state. Re-runs the permission check
+    /// after the reset so the UI reflects the cleared state immediately.
+    private func resetAppPermissions() {
+        Logger.ui.info("[PermissionGate] resetAppPermissions invoked")
+        let services = ["Microphone", "Calendar", "Reminders", "ScreenCapture"]
+        var failed: [String] = []
+        for service in services {
+            let task = Process()
+            task.launchPath = "/usr/bin/tccutil"
+            task.arguments = ["reset", service, "com.meetingmanager.app"]
+            do {
+                try task.run()
+                task.waitUntilExit()
+                if task.terminationStatus != 0 {
+                    failed.append(service)
+                    Logger.ui.warning("[PermissionGate] tccutil reset \(service, privacy: .public) exited \(task.terminationStatus)")
+                }
+            } catch {
+                failed.append(service)
+                Logger.ui.error("[PermissionGate] tccutil reset \(service, privacy: .public) threw: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if failed.isEmpty {
+            resetMessage = "✓ Permissions cleared. Click Grant Access / Open Settings above to re-grant."
+        } else {
+            resetMessage = "Reset failed for: \(failed.joined(separator: ", "))"
+        }
+        // Re-poll so any state changes (e.g. user already had partial grants
+        // that got cleared) reflect in the row checkmarks.
+        Task { await checkPermissions() }
+        // Auto-clear the message after 8s.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(8))
+            resetMessage = nil
         }
     }
 }
