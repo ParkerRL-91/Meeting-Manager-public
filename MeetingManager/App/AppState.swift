@@ -305,6 +305,17 @@ final class AppState {
             Task { await KnowledgeBaseService.shared.reindex() }
         }
 
+        // v3.9 Phase 1: bootstrap Person identity records from meeting history.
+        // Runs once per install in the background; subsequent runs are fast
+        // because findOrCreate is a no-op for already-known canonical keys.
+        Task {
+            let repo = PersonRepository(database: database)
+            let count = await repo.bootstrapFromMeetingHistory(db: database)
+            if count > 0 {
+                Logger.general.info("Person bootstrap: created \(count) new person records from meeting history")
+            }
+        }
+
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
         AppState.isInitialized = true
@@ -1685,9 +1696,10 @@ final class AppState {
 
         let voiceService = VoiceProfileService.shared
         let repo = VoiceProfileRepository(database: database)
+        let personRepo = PersonRepository(database: database)
         for (name, ranges) in rangesByName {
             guard let embedding = await voiceService.extractEmbedding(audioURL: systemURL, timeRanges: ranges) else { continue }
-            try? await repo.merge(personName: name, newEmbedding: embedding)
+            try? await repo.merge(personName: name, newEmbedding: embedding, personRepo: personRepo)
             Logger.general.info("Voice profile learned: \(name, privacy: .public) (\(ranges.count) range(s)) for meeting \(meetingId, privacy: .public)")
         }
     }
@@ -1811,6 +1823,7 @@ final class AppState {
                 // Phase 3 — save voice embeddings for newly-identified speakers
                 // so future meetings can match them without the LLM.
                 let finalSpeakerMap = attributed.speakerMapDictionary
+                let personRepo = PersonRepository(database: database)
                 for (clusterLabel, personName) in finalSpeakerMap {
                     guard !personName.isEmpty else { continue }
                     if let embedding = await voiceService.extractEmbedding(
@@ -1818,7 +1831,7 @@ final class AppState {
                         from: audioURL,
                         diarizationResult: resultBox
                     ) {
-                        try? await profileRepo.merge(personName: personName, newEmbedding: embedding)
+                        try? await profileRepo.merge(personName: personName, newEmbedding: embedding, personRepo: personRepo)
                         fileLog("Diarization: updated voice profile for \(personName)")
                     }
                 }

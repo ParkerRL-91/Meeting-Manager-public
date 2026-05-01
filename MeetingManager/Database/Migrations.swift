@@ -698,5 +698,36 @@ enum Migrations {
                 t.column("method", .text).notNull()
             }
         }
+
+        // v3.9 Phase 1: stable Person identity table. A Person is the canonical
+        // anchor for a real human across all name/email format variants.
+        // aliasesJSON stores every observed raw string (emails, display names)
+        // as a JSON array. VoiceProfile gains a personId FK so voice learning
+        // survives renames and email-format drift.
+        migrator.registerMigration("v31-person-identity") { db in
+            try db.create(table: "person") { t in
+                t.column("id", .text).primaryKey()
+                t.column("canonicalName", .text).notNull()
+                t.column("aliasesJSON", .text).notNull().defaults(to: "[]")
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("updatedAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(
+                index: "idx_person_canonicalName",
+                on: "person",
+                columns: ["canonicalName"]
+            )
+
+            // Add personId FK to voiceProfile so profiles can be looked up by
+            // stable identity rather than by the fragile name string.
+            try db.alter(table: "voiceProfile") { t in
+                t.add(column: "personId", .text).references("person", onDelete: .setNull)
+            }
+            try db.create(
+                index: "idx_voiceProfile_personId",
+                on: "voiceProfile",
+                columns: ["personId"]
+            )
+        }
     }
 }

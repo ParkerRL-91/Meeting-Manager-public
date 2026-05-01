@@ -11,6 +11,10 @@ struct VoiceProfile: Codable, Identifiable, FetchableRecord, MutablePersistableR
     var id: Int64?
     /// Canonical display name of the person (e.g. "Alex Chen").
     var personName: String
+    /// Stable identity FK — links this profile to a Person row so the profile
+    /// survives renames and email-format drift. Populated by PersonRepository
+    /// when a Person record is resolved for this name.
+    var personId: String?
     /// Serialised [Float32] MFCC embedding, 40 dimensions, little-endian.
     var embeddingData: Data
     /// Number of meeting-level samples that contributed to this embedding.
@@ -21,12 +25,13 @@ struct VoiceProfile: Codable, Identifiable, FetchableRecord, MutablePersistableR
     static let databaseTableName = "voiceProfile"
 
     enum CodingKeys: String, CodingKey {
-        case id, personName, embeddingData, sampleCount, lastUpdatedAt
+        case id, personName, personId, embeddingData, sampleCount, lastUpdatedAt
     }
 
     enum Columns {
         static let id            = Column(CodingKeys.id)
         static let personName    = Column(CodingKeys.personName)
+        static let personId      = Column(CodingKeys.personId)
         static let embeddingData = Column(CodingKeys.embeddingData)
         static let sampleCount   = Column(CodingKeys.sampleCount)
         static let lastUpdatedAt = Column(CodingKeys.lastUpdatedAt)
@@ -54,10 +59,11 @@ struct VoiceProfile: Codable, Identifiable, FetchableRecord, MutablePersistableR
         }
     }
 
-    static func makeEmpty(personName: String) -> VoiceProfile {
+    static func makeEmpty(personName: String, personId: String? = nil) -> VoiceProfile {
         VoiceProfile(
             id: nil,
             personName: personName,
+            personId: personId,
             embeddingData: Data(),
             sampleCount: 0,
             lastUpdatedAt: Date()
