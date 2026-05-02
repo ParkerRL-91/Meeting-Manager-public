@@ -792,6 +792,15 @@ enum Migrations {
                 t.add(column: "manualSampleCount", .integer).notNull().defaults(to: 0)
                 t.add(column: "llmSampleCount", .integer).notNull().defaults(to: 0)
             }
+            // Backfill: existing profiles were trained under the old single-α
+            // model with no source tagging — treat them all as confirmed
+            // (manualSampleCount = sampleCount). Without this, every legacy
+            // profile would suddenly need 0.87 cosine instead of 0.82 to
+            // match, silently breaking cross-meeting voice recognition for
+            // every existing user on the upgrade.
+            try db.execute(sql: """
+                UPDATE voiceProfile SET manualSampleCount = sampleCount WHERE sampleCount > 0
+                """)
         }
     }
 }

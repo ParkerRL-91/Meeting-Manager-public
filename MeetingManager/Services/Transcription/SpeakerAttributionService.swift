@@ -148,8 +148,8 @@ final class SpeakerAttributionService {
                     reason: .llmReturnedAllUnknown
                 )
             }
-            // Escalated LLM is more capable → slightly higher confidence
-            let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, Float(0.70)) })
+            // Escalated LLM is more capable → solidly above review threshold
+            let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, Float(0.78)) })
             return AttributionOutcome(mapping: mapping, reason: .okEscalated, confidenceMap: conf)
         }
 
@@ -163,8 +163,11 @@ final class SpeakerAttributionService {
         }
 
         // Cheap pass succeeded — confidence reflects model capability.
-        // Claude haiku is more reliable than Ollama, give it a small bump.
-        let cheapConfidence: Float = (claude != nil) ? 0.60 : 0.55
+        // QA finding #12: tuned so cheap-LLM attributions don't all show an
+        // amber "needs review" dot. Claude haiku is reliable enough to clear
+        // the 0.70 threshold; local Ollama stays below as a deliberate signal
+        // that those attributions warrant a glance.
+        let cheapConfidence: Float = (claude != nil) ? 0.72 : 0.62
         let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, cheapConfidence) })
         return AttributionOutcome(mapping: mapping, reason: .ok, confidenceMap: conf)
     }

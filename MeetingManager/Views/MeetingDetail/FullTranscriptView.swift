@@ -214,7 +214,8 @@ struct FullTranscriptView: View {
                         onRename: { action in
                             handleRenameAction(action, for: transcript)
                         },
-                        isAIAttributed: isAIAttributed(transcript)
+                        isAIAttributed: isAIAttributed(transcript),
+                        attributionConfidence: confidenceFor(transcript)
                     )
 
                     if transcript.id != filteredTranscripts.last?.id {
@@ -245,6 +246,30 @@ struct FullTranscriptView: View {
         if map.keys.contains(label) { return true }
         if map.values.contains(label) { return true }
         return false
+    }
+
+    /// v3.10 #2: look up the attribution confidence for a transcript row.
+    /// The confidence map is keyed by cluster id (Speaker N), so when the
+    /// transcript's speakerLabel has already been rewritten to the resolved
+    /// name we reverse-look-up via speakerMap.
+    ///
+    /// When the same name maps to multiple clusters (legitimate diarization
+    /// over-split), we surface the *minimum* confidence — the worst-case is
+    /// what the user wants to see when triaging "which labels need review".
+    /// Returns nil for legacy meetings without a confidence map.
+    private func confidenceFor(_ transcript: Transcript) -> Float? {
+        guard let label = transcript.speakerLabel,
+              let confMap = meeting?.speakerConfidenceMapDictionary,
+              !confMap.isEmpty else { return nil }
+        // Direct hit (cluster id key) — most specific signal wins.
+        if let c = confMap[label] { return c }
+        // Reverse lookup: collect every cluster whose mapping resolves to
+        // this name, return the minimum confidence among them.
+        guard let map = meeting?.speakerMapDictionary else { return nil }
+        let candidates = map
+            .filter { $0.value == label }
+            .compactMap { confMap[$0.key] }
+        return candidates.min()
     }
 
     private func handleRenameAction(_ action: TranscriptBubbleRenameAction,
@@ -282,6 +307,11 @@ struct FullTranscriptView: View {
             var map = updated.speakerMapDictionary
             map[clusterId] = trimmed
             updated.setSpeakerMap(map)
+            // v3.10 #2: manual rename is ground truth — record full confidence
+            // so the amber "needs review" dot disappears for this cluster.
+            var confMap = updated.speakerConfidenceMapDictionary
+            confMap[clusterId] = 1.0
+            updated.setSpeakerConfidenceMap(confMap)
             do {
                 try await appState.meetingRepository.update(updated)
                 self.meeting = updated

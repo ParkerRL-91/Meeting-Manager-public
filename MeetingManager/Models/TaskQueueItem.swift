@@ -26,6 +26,11 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case contextEnrichment
         case knowledgeBaseIndex
         case transcriptCleanup
+        /// v3.10 #7: re-run speaker attribution after transcript cleanup
+        /// completes, using the full transcript (not just the first 20 turns).
+        /// Triggered automatically when speakerMap still has unresolved
+        /// "Speaker N" clusters after diarization. One retry max.
+        case retryAttribution
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -38,14 +43,15 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
     /// Human-readable description of what this task does.
     var displayName: String {
         switch type {
-        case .transcription:    return "Transcribe"
-        case .diarization:      return "Identify Speakers"
-        case .summary:          return "Summarize"
-        case .enrichment:       return "Enrich"
-        case .regeneration:     return "Regenerate Summary"
-        case .contextEnrichment: return "Finding Related Meetings"
+        case .transcription:      return "Transcribe"
+        case .diarization:        return "Identify Speakers"
+        case .summary:            return "Summarize"
+        case .enrichment:         return "Enrich"
+        case .regeneration:       return "Regenerate Summary"
+        case .contextEnrichment:  return "Finding Related Meetings"
         case .knowledgeBaseIndex: return "Index Knowledge Base"
-        case .transcriptCleanup: return "Cleaning Transcript"
+        case .transcriptCleanup:  return "Cleaning Transcript"
+        case .retryAttribution:   return "Re-checking Speakers"
         }
     }
 

@@ -137,18 +137,38 @@ struct Meeting: Identifiable, Codable, Equatable {
 
     /// `participantList` minus anyone who declined the invite. This is the
     /// "real" candidate pool for speaker attribution and the speaker-count
-    /// hint passed to diarization. We use case-insensitive substring matching
-    /// because raw participant strings may be email-suffixed while the
-    /// declined list is name-only (or vice versa).
+    /// hint passed to diarization.
+    ///
+    /// Matching uses normalized identity keys derived from each side: emails
+    /// are stripped to local-part, "Alex <alex@x.com>" trims its suffix.
+    /// We deliberately do NOT use substring containment — that produced
+    /// false positives where "Samantha" declining excluded "Sam" who
+    /// accepted (see QA finding #2).
     var acceptedParticipantList: [String] {
-        let declined = declinedAttendeeList.map { $0.lowercased() }
-        guard !declined.isEmpty else { return participantList }
+        guard !declinedAttendeeList.isEmpty else { return participantList }
+        let declinedKeys = Set(declinedAttendeeList.map { Self.identityKey(for: $0) })
         return participantList.filter { name in
-            let lower = name.lowercased()
-            return !declined.contains(where: { d in
-                lower.contains(d) || d.contains(lower)
-            })
+            !declinedKeys.contains(Self.identityKey(for: name))
         }
+    }
+
+    /// Build a comparable identity key from a raw participant string.
+    ///   "alex@x.com"             → "alex"             (email → local-part)
+    ///   "Alex Chen"              → "alex chen"        (display name → lower)
+    ///   "Alex Chen <alex@x.com>" → "alex chen"        (suffix stripped first)
+    /// The asymmetry between bare-email and email-suffixed-displayname is a
+    /// known limitation — if both formats appear for the same person they
+    /// won't match here. The Person directory handles that case downstream.
+    private static func identityKey(for raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lt = s.firstIndex(of: "<"), let gt = s.lastIndex(of: ">"), lt < gt {
+            s.removeSubrange(lt...gt)
+            s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if s.contains("@"), let at = s.firstIndex(of: "@") {
+            s = String(s[..<at])
+        }
+        return s.lowercased()
     }
 
     // MARK: - Backward Compat
