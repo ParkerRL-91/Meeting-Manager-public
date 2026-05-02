@@ -1,85 +1,95 @@
 # Settings Reference
 
+Every settings tab and what it does. Open: `⌘,` or **Meeting Manager → Settings**.
+
 ## General
 
-| Setting | Description |
-|---------|-------------|
-| **Theme** | Dark, Light, or System (follows macOS appearance) |
-| **Launch at Login** | Start Meeting Manager when you log in |
-| **Remind me N min before meetings** | Desktop notification before scheduled meetings start |
-
----
+- **Theme** — dark / light. Light mode supported on macOS 14+.
+- **Launch at login** — start Meeting Manager when you sign in.
+- **Notification lead time** — minutes before a meeting starts to fire a desktop notification (default 5).
+- **Morning brief** — daily macOS notification with the day's schedule. Off by default.
+- **Auto-generate summary** — fire summary AI after recording stops. On by default.
+- **Auto-generate follow-up email** — draft email after summary. Off by default.
+- **Auto-push action items to Reminders** — push extracted items to Apple Reminders. Off by default.
 
 ## Audio
 
-| Setting | Description |
-|---------|-------------|
-| **Input Device** | Microphone to use for recording |
-| **System Audio** | Capture all Mac audio (other call participants, etc.) |
-| **Auto-Record** | Start recording automatically when a call app is detected |
-
----
+- **Microphone** — pick which input device to record from. Auto-switches when devices change.
+- **System audio** — toggle whether to capture system audio (other participants). Requires Screen Recording permission.
 
 ## Transcription
 
-| Setting | Description |
-|---------|-------------|
-| **Whisper Model** | Tiny / Base / Small / Medium — larger = more accurate, slower |
-| **Language** | Auto-detect or specify a language |
-
-Whisper models are downloaded on first use and stored locally. They run entirely on your Mac — no audio is sent anywhere.
-
----
+- **Whisper model** — `large-v3-turbo` (default), `large-v3`, `medium`, `small`. Switching downloads the new model on first use.
+- **Re-download model** — wipes and re-downloads.
+- **Real-time transcription** — show transcript live during recording.
 
 ## Calendar
 
-| Setting | Description |
-|---------|-------------|
-| **Connect Google Calendar** | OAuth flow to link your Google account |
-| **Calendars** | Select which calendars to show in the Scheduled sidebar |
-| **Auto-Invite** | Automatically join detected meetings from calendar events |
+- **Source** — Google / Apple / Both / None.
+- **Connect Google Calendar** — OAuth sign-in.
+- **Apple Calendar permission** — opens System Settings if denied.
+- **Calendar selection** — multi-select per provider.
+- **Sync interval** — 5 / 15 / 30 / 60 minutes (default 15).
 
-Meeting Manager requests read-only Calendar access. It never modifies your calendar.
+See [Calendar Integration](./calendar-integration.md).
 
----
+## AI (Claude)
 
-## Claude
+- **API key** — paste from [console.anthropic.com](https://console.anthropic.com). Stored in Keychain.
+- **Default model** — `claude-sonnet-4-6` (default), `claude-haiku-4-5`, etc.
+- **Status** — green when valid, red on auth failure.
 
-| Setting | Description |
-|---------|-------------|
-| **API Key** | Your Anthropic API key (stored in macOS Keychain, never logged) |
-| **Model** | Claude model to use for summaries (claude-sonnet-4-6 recommended) |
+## AI (Local)
 
----
+- **Use local LLM** — toggle to use Ollama as default provider.
+- **Ollama status** — reachable / unreachable + latency.
+- **Default model** — pick from installed Ollama models.
+- **Auto-pick model** — let the app choose per-task.
 
-## On-Device
-
-| Setting | Description |
-|---------|-------------|
-| **Use On-Device Summarization** | Route summaries to local Ollama instead of Claude |
-| **Model** | Which Ollama model to use (requires model to be pulled) |
-
-Enabling this toggle automatically downloads and installs Ollama if it's not present, then pulls the default model. See [On-Device AI](./on-device-ai.md) for details.
-
----
+See [On-Device AI](./on-device-ai.md).
 
 ## Prompts
 
-Customize the system prompt used when generating summaries. The default prompt instructs the AI to produce:
-- A 3–5 sentence executive summary
-- A bulleted list of action items with owners
-- Key decisions made
-- Topics discussed
+Editable templates for:
 
-You can edit this to match your team's preferred format, add company context, or change the output structure.
+- Meeting summary
+- Pre-meeting brief
+- Follow-up email
+- Default chat system prompt
+
+Each has a **Reset to default** button.
+
+## Templates
+
+- **Meeting templates** — pre-fill the notepad with structure (1:1, Standup, Planning Session, custom).
+- **Recipes** — one-off AI prompts with custom output (LinkedIn posts, Jira tickets, etc.). See [AI Summaries](./ai-summaries.md#recipes).
+
+## Voices
+
+- **Stored profiles** — every voice fingerprint with sample count + last updated.
+- **Delete profile** — remove a single fingerprint.
+- **Rebuild from history** — wipe and re-extract from confirmed-name transcripts.
+
+The People tab in the main app is a richer view — see [People Directory](./people-directory.md).
+
+## Knowledge Base
+
+- **Choose folder** — point at a folder of `.md`/`.txt`/`.html`/`.docx` files.
+- **Re-index** — force a full rebuild.
+- **Watch for changes** — FSEvents-based, on by default.
+- **Write meeting notes back** — exports completed meetings as Markdown into the KB folder.
+
+See [Knowledge Base](./knowledge-base.md).
+
+## About
+
+- App version + build
+- Reset App Permissions — clears macOS TCC entries for Meeting Manager
+- View logs / Diagnostic export
+- Check for updates (Sparkle)
 
 ---
 
-## Updates
+## Settings Storage
 
-| Setting | Description |
-|---------|-------------|
-| **Automatically check for updates** | Let Sparkle check for new versions in the background |
-| **Check for Updates Now** | Manually trigger an update check |
-
-Updates are downloaded and verified with an EdDSA signature before installation. The update feed is at `https://parkerrl-91.github.io/Meeting-Manager/appcast.xml`.
+Settings live in `~/Library/Application Support/MeetingManager/db.sqlite` (single GRDB row). API keys are in macOS Keychain. To back up: copy the database file plus the `recordings/` folder. See [Privacy → Local Storage Locations](./privacy.md#local-storage-locations).

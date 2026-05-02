@@ -1,295 +1,91 @@
 # Meeting Manager
 
-A native macOS app that records, transcribes, and summarizes your meetings — entirely on your Mac or via Claude AI.
+A native macOS app that records, transcribes, and summarizes your meetings — entirely on your Mac, via Claude AI, or both.
 
 ## Download
 
-[**MeetingManager-v3.8.0.dmg**](https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v3.8.0) — macOS 14.4+
+[**Latest release**](https://github.com/ParkerRL-91/Meeting-Manager/releases/latest) — macOS 14.4+
 
 Open the DMG, drag Meeting Manager to Applications, and launch.
 
 ### First Launch — Gatekeeper Notice
 
-Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may block the app on first launch with a message like *"Apple could not verify Meeting Manager."*
+Because Meeting Manager is not yet signed with an Apple Developer ID, macOS may block it on first launch with *"Apple could not verify Meeting Manager."*
 
-**To open the app:**
-
-1. **Right-click** (or Control-click) on Meeting Manager in Applications
-2. Click **Open** from the context menu
-3. If you still see a warning with only "Done" and "Move to Trash":
+1. **Right-click** Meeting Manager in Applications and pick **Open**
+2. If you still see only "Done" / "Move to Trash":
    - Click **Done**
-   - Go to **System Settings → Privacy & Security**
-   - Scroll down — you'll see *"Meeting Manager was blocked"*
-   - Click **Open Anyway**
-4. You only need to do this once — future launches will work normally
+   - System Settings → Privacy & Security → scroll to *"Meeting Manager was blocked"* → **Open Anyway**
 
-**Alternative (Terminal):**
-```bash
-xattr -cr "/Applications/Meeting Manager.app"
-```
-This removes the quarantine flag so the app opens without warnings.
+You only do this once.
 
 ---
 
-## What's New in v3.8.0 — Calendar Reliability & Multi-Select
+## What's New in v3.10
 
-### Apple Calendar reliability — six fixes
-The "iCloud keeps losing access" problem is gone. Six independent failure modes have been addressed:
+**Speaker identification overhaul.** Five independent signals now combine into per-cluster confidence scores so you can see at a glance which speaker labels were AI guesses vs voice-matched vs manually confirmed.
 
-- **Store rebuild after grant** — `EKEventStore` is now recreated when the auth state transitions to authorized, fixing the "stuck instance" bug where a store created before TCC resolved would keep returning empty calendar lists even after the user granted access
-- **External-grant detection** — the app listens to `EKEventStoreChanged` and `NSApplication.didBecomeActive` so grants applied via System Settings (without quitting the app) are picked up immediately
-- **Sticky authorization** — once we've observed `.authorized`, transient `.notDetermined` returns from the EventKit API are treated as stalls (not revocations) within a 5-second window, eliminating the UI bouncing back to "not connected" mid-grant
-- **Self-healing sync path** — every Apple sync runs `verifyAndRefresh()` first, which detects bad store state and rebuilds it without an app restart
-- **Survivable observers** — `EKEventStoreChanged` observer is now bound globally instead of to a specific store instance, so it survives store rebuilds (previously it went deaf the moment the store was replaced)
-- **Auto-sync on rebuild** — when the store is rebuilt after a grant, sync runs immediately so the user doesn't wait for the next periodic tick
+- **RSVP gate** — declined invitees no longer count as candidates
+- **Confidence scores per attribution** — amber dot in the transcript when a label is genuinely uncertain
+- **Adaptive voice profile learning** — manual renames weighted heavily, LLM attributions cautiously (no profile drift onto similar voices)
+- **Second-pass attribution** — automatically retries unresolved clusters after transcript cleanup with the full transcript context
+- **Cluster-count hint from RSVP** — diarization knows how many voices to expect, no over-segmentation when an invitee declined
 
-### Multi-calendar selection (Apple + Google)
-- **Apple Calendar** — new picker grouped by source (iCloud, Exchange, On My Mac, etc.) with per-calendar checkboxes; leave none selected to include all
-- **Google Calendar** — single-select dropdown replaced with multi-select checkboxes; events from all selected calendars are merged
-- Subscribed calendars (birthdays, holidays, sports schedules) can now be excluded
-- Database migration v29 adds the new fields; legacy single-calendar selection auto-migrates on first open
+**Person directory + Contacts import.** Identities are now stable UUIDs that survive name/email format changes. "dave@acme.com" and "Dave Smith" are the same Person; "Dave from Acme" is a different one.
 
----
+**Cleaned + raw transcript stay in sync** — renaming a speaker updates both the segment-by-segment transcript AND the post-processed readable view immediately.
 
-## What's New in v3.7.2 — Apple Calendar & Permission Fixes
+**+ everything from 3.9** (Person model, voice fingerprint anchoring, People page with inline identity management, opt-in macOS Contacts import, domain-based disambiguation, utterance sample bank for future provenance/rollback).
 
-- **Apple Calendar fully working** — end-to-end repair of iCloud/Apple Calendar sync including authorization flow, grant-bounce-back fix, and diagnostic logging
-- **Calendar entitlement added** — `com.apple.security.personal-information.calendars` now declared in the app entitlements so macOS grants stick properly
-- **Permission grants now persist across updates** — switched to a consistent code-signing identity for local builds; TCC grants for microphone, calendar, and screen recording no longer reset on reinstall
-- **Daily Brief "Set up AI" false positive fixed** — the button no longer shows "Set up AI →" when Ollama is configured but hasn't been probed yet at launch
-- **Microphone entitlement hardened** — added `com.apple.security.device.microphone` alongside the existing audio-input entitlement
+Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
 ---
 
-## What's New in v3.7.0 — Knowledge Base & Smart Context
+## Documentation
 
-A major upgrade to the AI context layer — every AI feature now draws on your personal Knowledge Base, conversations persist across sessions, and the KB indexer runs off the main thread so it never blocks the UI.
-
-### Knowledge Base
-- **Full subfolder indexing** — fixed enumeration bug that stopped recursion into subdirectories (e.g. Obsidian vaults); all nested `.md`/`.txt`/`.html`/`.docx` files are now indexed
-- **Background indexing** — file I/O moved off the main actor; indexing 500+ files no longer causes UI stuttering
-- **Queued indexing** — KB reindex is now routed through the TaskQueue with priority 9, same as other AI tasks
-- **KB Write-back** — new Settings toggle to auto-write meeting summaries and transcripts back into the KB as `Meeting Notes/YYYY/MM-Month/DD/Title.md`; newly written files are immediately re-indexed and searchable
-- **Smarter FTS queries** — participant list capped at 3 names to improve FTS precision and reduce noise
-
-### Ask Anything
-- **Persistent conversation** — the Ask Anything chat history now survives navigation; returning to the tab picks up exactly where you left off
-- **KB-aware responses** — queries now retrieve relevant KB excerpts and inject them into context alongside meeting notes
-- **Markdown rendering** — AI responses display with full heading/bullet/bold formatting instead of plain text
-- **Improved input bar** — always-visible pill input at the bottom with stronger contrast
-
-### AI Chat (In-Meeting & Daily Brief)
-- **KB context in chat** — the in-meeting chat sidebar now retrieves KB excerpts relevant to the user's question
-- **Daily Brief styling** — AI briefing section now uses a two-tone card with a header bar; headings render in white/grey instead of purple
-- **Stronger prompts** — all AI prompts updated to enforce structured Markdown output (headings, bullets, bold); no more walls of prose
-
-### Performance
-- **MarkdownRenderer** no longer re-parses on every layout pass; cached via `@State` + `.task(id:)` — resize is now instant
-- **KB retrieval** limits to 5 chunks per query with a 3-participant FTS query cap
+| Doc | What's in it |
+|---|---|
+| [Getting Started](./docs/user/getting-started.md) | 5-minute install + first-meeting walkthrough |
+| [Recording Meetings](./docs/user/recording-meetings.md) | Auto-detection, ad-hoc, reopen, troubleshooting recording |
+| [Calendar Integration](./docs/user/calendar-integration.md) | Google + Apple, RSVP, multi-calendar selection |
+| [Speaker Identification](./docs/user/speaker-identification.md) | How voice + calendar + AI combine to attribute clusters |
+| [People Directory](./docs/user/people-directory.md) | Managing identities, voice profiles, Contacts import |
+| [Daily Brief & Pre-Meeting Prep](./docs/user/daily-brief.md) | Pre-meeting context generation |
+| [AI Summaries](./docs/user/ai-summaries.md) | Claude vs Ollama, prompts, recipes, action items |
+| [On-Device AI](./docs/user/on-device-ai.md) | Ollama setup and tuning |
+| [Knowledge Base](./docs/user/knowledge-base.md) | Folder index for cross-meeting context |
+| [Settings Reference](./docs/user/settings.md) | Every option explained |
+| [Keyboard Shortcuts](./docs/user/keyboard-shortcuts.md) | Quick reference card |
+| [Troubleshooting](./docs/user/troubleshooting.md) | Permissions, calendar, recording, AI fixes |
+| [Privacy](./docs/user/privacy.md) | What stays local, what goes to AI providers |
 
 ---
 
-## What's New in v3.2.0 — Skim-First UI Redesign
+## Tech Stack
 
-A complete visual overhaul tuned for people moving through 6–10 meetings a day. The new design lets you grok a meeting recap in seconds, find action items instantly, and triage across recent meetings without context-switching.
+- **Swift 6** + **SwiftUI** + **macOS 14.4+**
+- **GRDB** — local SQLite for meetings, transcripts, persons, voice profiles
+- **WhisperKit** — on-device transcription (large-v3-turbo by default)
+- **SpeakerKit** — pyannote-based speaker diarization
+- **Claude API** — optional, for summarization + attribution
+- **Ollama** — optional, for fully local AI
+- **Sparkle** — auto-update channel
+- **EventKit** — Apple Calendar / Outlook for Mac
+- **Google Calendar REST** — Google Calendar
+- **Contacts framework** — opt-in identity import
 
-### Design System
-- **New color palette** — darker, more focused backgrounds; indigo accent (from iOS blue)
-- **Hairline borders and tinted surfaces** — Linear/Granola-style density instead of heavy cards
-- **Consistent type scale** — Inter-inspired sizing with proper weight hierarchy throughout
-
-### Sidebar
-- **Active nav row** now uses a tinted background with accent text — was a saturated solid blue fill that read too heavy
-- **New Meeting button** is now a restrained dashed outline style — no longer dominates the sidebar chrome
-- Hover states step up one neutral surface level
-
-### Meeting Header
-- **Compact single row** — title · date · duration · status pill all on one line
-- Removed the large card layout; a bottom border replaces the elevated card frame
-- Status pill uses semantic colors (green for complete, indigo for in-progress)
-
-### Tab Strip
-- **Underlined tabs** replace the segmented control — cleaner, full-width
-- Model and generation timestamp caption right-aligned in the strip
-
-### Summary View — Skim-First
-- **TL;DR card** at the top — gradient background with a sparkle icon; shows the first 1–2 lines of the AI summary at a glance
-- **Two-column section grid** — Decisions, Follow-ups, Notes, Outcomes as flat lists with bold entity names, no walls of markdown text
-- **Previous sessions strip** — quick links to prior meetings in the same series
-- Falls back gracefully to the raw text editor for unstructured summaries
-
-### Activity View
-- **Collapsible failed rows** — errors are hidden by default, revealed on click; subtle red-tint border without shouting
-- Completed rows are a clean flat list with relative timestamps
-- Failed count shown in red in the header
-
-### Daily Brief
-- **Timeline layout** — vertical time rail, 56px monospaced time column, category color dots that punch through the rail
-- Meeting cards have a 2px left color border matching their prep category (carry-over red, follow-up amber, new indigo)
+Architecture deep-dives in [docs/developer/](./docs/developer/).
 
 ---
 
-## What's New in v3.1.0 — Speaker Recognition
+## Privacy
 
-- Speaker diarization (Layers 1 + 2 + 3): voice clustering, cross-session learning, custom rename sheet
-- Deterministic series key hashing (SHA-256)
+Local-first by default. Audio, transcripts, voice fingerprints, and the Person directory all stay on your Mac. Anthropic / Google / Ollama / Apple are only contacted when you explicitly enable a feature that requires them.
 
----
-
-<details>
-<summary><strong>Previous Releases</strong></summary>
-
-#### v3.0.1 — Stability
-- Crash fixes and database migration hardening
-
-#### v3.0.0 — Major Release
-- Full Granola-parity feature set
-
-#### v1.9.0 — Meeting Detail UX Overhaul
-- Calendar view with date picker, live meeting search
-- Granola-style live recording view (notes-first, transcript background)
-- Participant bar, related meetings section, calendar-first detection
-- "Join & Record" notification button, Meet/Zoom/Teams URL storage
-- Persistent task queue for regeneration; all AI ops audited
-
-#### v1.8.2 — Update Pipeline
-- First release via hardened `push-update.sh`; Sparkle appcast on GitHub Pages
-
-#### v1.7.0 — Dynamic Model Selection
-- Adaptive on-device summarization — auto-picks Ollama model by transcript size
-- Batch transcription decoupled from stop-recording flow
-
-#### v1.6.0 — Stability & Efficiency
-- Thread-safe audio pipeline, actor-isolated WhisperEngine
-- Exponential backoff, 22 test files, DatabasePool, log rotation
-
-#### v1.5.0 — Stability Sprint
-- Timer leaks eliminated, crash recovery, FTS5 search
-
-#### v1.4.0 — Swift 6 & Reliability
-- All Swift 6 strict concurrency errors resolved; WhisperKit cache-first loading
-
-#### v1.1 — Dual Audio Capture
-- Mic + system audio via ScreenCaptureKit; live audio level meters
-
-</details>
+Full data-flow breakdown: [docs/user/privacy.md](./docs/user/privacy.md).
 
 ---
 
-## Features
+## Contributing / Building from Source
 
-### Recording & Transcription
-- Detects active calls (Zoom, Meet, Teams) and prompts to record
-- On-device transcription via [WhisperKit](https://github.com/argmaxinc/WhisperKit) Large v3 — no audio leaves your Mac
-- Batch transcription after recording for maximum accuracy
-- Supports both microphone and system audio capture
-
-### AI Summarization
-- Summaries, action items, and key decisions extracted from transcripts
-- **Claude AI** (cloud) — highest quality, uses your Anthropic API key
-- **On-Device AI** (Ollama) — fully local, no data leaves your Mac
-- Auto-summary option: generate summaries automatically after transcription
-
-### Recipes & Action Items
-- Custom prompt templates (Recipes) for structured output
-- AI-powered action item extraction with assignees and due dates
-- Live meeting chat — ask questions about the ongoing meeting
-
-### Calendar Integration
-- Connects to Google Calendar to pull upcoming meetings
-- Auto-names recordings from calendar events
-- Attendees from calendar invites shown as participants
-- Video call URLs (Meet, Zoom, Teams) stored for one-click join
-
-### Search & Navigation
-- **Calendar view** — browse meetings by date with a modern calendar grid
-- **Text search** — find meetings by name across all history
-- **People view** — see all meetings with a specific person
-- **Folder grouping** — recurring meetings auto-grouped by series
-
----
-
-## On-Device AI Setup
-
-Enable **Settings → On-Device → Use On-Device Summarization**. The app will automatically:
-
-1. Download and install [Ollama](https://ollama.com) (~60 MB)
-2. Pull the default model `llama3.2:3b` (~2 GB)
-3. Show progress inline — no terminal required
-
-For best results with long meetings (>30 min), also install the 8B model:
-```bash
-ollama pull llama3.1:8b
-```
-
-The **Auto (Dynamic)** model setting (default) picks the right model for each meeting. For slower Macs (≤16GB RAM), select `llama3.2:3b` explicitly to force the lighter model.
-
----
-
-## Requirements
-
-- macOS 14.4 (Sonoma) or later
-- Apple Silicon or Intel Mac
-- ~3 GB RAM for WhisperKit Large v3 transcription model
-- **For Claude summarization:** Anthropic API key (set in Settings → Claude)
-- **For Google Calendar:** Google account with Calendar access
-
----
-
-## Building from Source
-
-```bash
-git clone https://github.com/ParkerRL-91/Meeting-Manager.git
-cd Meeting-Manager
-swift build
-```
-
-**Release build:**
-```bash
-swift build -c release
-```
-
-### Dependencies (via Swift Package Manager)
-- [GRDB](https://github.com/groue/GRDB.swift) — SQLite persistence
-- [WhisperKit](https://github.com/argmaxinc/WhisperKit) — on-device speech-to-text (Large v3)
-- [Sparkle](https://github.com/sparkle-project/Sparkle) — auto-updates
-
----
-
-## Architecture
-
-```
-MeetingManager/
-├── App/           — AppState (single observable source of truth), AppDelegate
-├── Models/        — Meeting, Transcript, MeetingSummary, TaskQueueItem, AppSettings
-├── Database/      — GRDB setup, migrations (v1-v16), repositories
-├── Services/
-│   ├── AI/        — ClaudeService, OllamaService, SummaryGenerator, RecipeEngine
-│   ├── Audio/     — AudioCaptureService, AudioBufferManager
-│   ├── Calendar/  — GoogleCalendarService, GoogleAuthManager, CalendarSyncManager
-│   ├── Context/   — RelevantMeetingService (past meeting intelligence)
-│   ├── TaskQueue/ — TaskQueueManager (persistent background processing)
-│   ├── Transcription/ — WhisperKit batch transcriber
-│   └── Notifications/ — NotificationService, NotificationActions
-└── Views/
-    ├── Sidebar/   — SidebarView (nav items, spaces, banners)
-    ├── Search/    — MeetingSearchView (calendar + search)
-    ├── MeetingDetail/ — SummaryView, TranscriptView, ParticipantBar
-    ├── LiveMeeting/ — Granola-style recording view, NotepadPane, MeetingChat
-    ├── Components/ — InitialsAvatar, ParticipantBar, RelatedMeetingsSection
-    └── Settings/  — Per-tab settings views (8 tabs)
-```
-
-Data flow: `AudioCaptureService` → `BatchTranscriber` → `TranscriptRepository` → `TaskQueueManager` → `SummaryGenerator` → `SummaryRepository`
-
----
-
-## Auto-Updates
-
-Meeting Manager uses [Sparkle](https://sparkle-project.org) for automatic updates. The appcast is hosted at:
-
-```
-https://parkerrl-91.github.io/Meeting-Manager/appcast.xml
-```
-
-Updates are signed with an EdDSA key. Enable automatic checks in **Settings → Updates**.
+See [docs/developer/building.md](./docs/developer/building.md) and [docs/developer/contributing.md](./docs/developer/contributing.md).

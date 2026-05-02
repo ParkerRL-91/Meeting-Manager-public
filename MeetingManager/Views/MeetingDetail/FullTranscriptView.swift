@@ -322,19 +322,34 @@ struct FullTranscriptView: View {
                 renameError = error.localizedDescription
             }
 
-            // 3. Remember for future meetings in the same series.
+            // 3. Patch the cleaned transcript blob in place so the readable
+            //    view picks up the new name immediately. The cleaned text is
+            //    deterministic Markdown — speaker names appear only as
+            //    `**Name**` headers per turn, so a token replace is safe.
+            //    Falls back silently when no cleaned blob exists yet.
+            let cleanedRepo = CleanedTranscriptRepository(database: AppDatabase.shared)
+            if var cleaned = try? await cleanedRepo.cleanedTranscript(meetingId: meeting.id) {
+                let oldToken = "**\(clusterId)**"
+                let newToken = "**\(trimmed)**"
+                if cleaned.text.contains(oldToken) {
+                    cleaned.text = cleaned.text.replacingOccurrences(of: oldToken, with: newToken)
+                    try? await cleanedRepo.save(cleaned)
+                }
+            }
+
+            // 4. Remember for future meetings in the same series.
             let seriesKey = MeetingSeriesService.shared.seriesKey(for: meeting)
             try? await SpeakerAliasRepository(database: AppDatabase.shared)
                 .upsert(seriesKey: seriesKey, clusterId: clusterId, resolvedName: trimmed)
 
-            // 4. Cross-meeting learning: extract this voice's fingerprint and
+            // 5. Cross-meeting learning: extract this voice's fingerprint and
             // merge into the profile DB. The next meeting that captures this
             // person's voice will auto-attribute without an LLM call. This is
             // the highest-confidence signal we get — manual user rename — so
             // it's worth feeding the profile system aggressively.
             await appState.learnVoiceProfiles(meetingId: meeting.id)
 
-            // 5. Reload to reflect the rewritten labels.
+            // 6. Reload to reflect the rewritten labels.
             await loadTranscripts()
             updateFilteredTranscripts()
         }
