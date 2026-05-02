@@ -485,6 +485,11 @@ final class CalendarSyncManager {
                     existing.participants = p
                     needsUpdate = true
                 }
+                // v3.10 RSVP gate: refresh declined-attendee list every sync.
+                if existing.declinedAttendees != incoming.declinedAttendees {
+                    existing.declinedAttendees = incoming.declinedAttendees
+                    needsUpdate = true
+                }
                 if existing.meetLink == nil, let link = incoming.meetLink {
                     existing.meetLink = link
                     needsUpdate = true
@@ -543,6 +548,15 @@ final class CalendarSyncManager {
                     needsUpdate = true
                     Logger.calendar.debug("Backfilled participants for '\(event.title)': \(event.attendees.count) attendees")
                 }
+                // v3.10 RSVP gate: always refresh declined-attendee list — it
+                // can change between syncs (someone declines after accepting).
+                let declinedString = event.declinedAttendees.isEmpty
+                    ? nil
+                    : event.declinedAttendees.joined(separator: ", ")
+                if existing.declinedAttendees != declinedString {
+                    existing.declinedAttendees = declinedString
+                    needsUpdate = true
+                }
                 if existing.meetLink == nil && event.meetLink != nil {
                     existing.meetLink = event.meetLink
                     needsUpdate = true
@@ -576,9 +590,12 @@ final class CalendarSyncManager {
                 if !event.attendees.isEmpty {
                     meeting.participants = event.attendees.joined(separator: ", ")
                 }
+                if !event.declinedAttendees.isEmpty {
+                    meeting.declinedAttendees = event.declinedAttendees.joined(separator: ", ")
+                }
                 meeting.meetLink = event.meetLink
                 try meeting.insert(db)
-                Logger.calendar.debug("Created new meeting '\(event.title)' from calendar (participants: \(event.attendees.count))")
+                Logger.calendar.debug("Created new meeting '\(event.title)' from calendar (participants: \(event.attendees.count), declined: \(event.declinedAttendees.count))")
             }
         }
     }

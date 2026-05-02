@@ -60,6 +60,8 @@ private struct EventResource: Decodable, Sendable {
     struct Attendee: Decodable, Sendable {
         let email: String?
         let displayName: String?
+        /// "needsAction" / "declined" / "tentative" / "accepted"
+        let responseStatus: String?
     }
 
     struct ConferenceData: Decodable, Sendable {
@@ -249,11 +251,16 @@ final class GoogleCalendarService {
         // All-day events use a `date` field instead of `dateTime` in the API response.
         let isAllDay = resource.start?.date != nil
 
-        let attendees = (resource.attendees ?? []).compactMap { attendee in
-            attendee.displayName ?? attendee.email
-        }
+        // v3.10 RSVP gate: capture both the full attendee list and the subset
+        // who declined. Both flow through to the Meeting record so the
+        // attribution pipeline can exclude declined invitees.
+        let rawAttendees = resource.attendees ?? []
+        let attendees = rawAttendees.compactMap { $0.displayName ?? $0.email }
+        let declined = rawAttendees
+            .filter { ($0.responseStatus ?? "").lowercased() == "declined" }
+            .compactMap { $0.displayName ?? $0.email }
         if !attendees.isEmpty {
-            Logger.calendar.debug("Event '\(resource.summary ?? "untitled")' has \(attendees.count) attendees")
+            Logger.calendar.debug("Event '\(resource.summary ?? "untitled")' has \(attendees.count) attendees (\(declined.count) declined)")
         }
 
         // Prefer conference data entry point, fall back to hangoutLink.
@@ -268,6 +275,7 @@ final class GoogleCalendarService {
             endDate: endDate,
             isAllDay: isAllDay,
             attendees: attendees,
+            declinedAttendees: declined,
             meetLink: meetLink,
             description: resource.description,
             calendarId: calendarId

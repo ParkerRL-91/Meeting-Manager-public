@@ -121,27 +121,50 @@ final class VoiceProfileService {
         clusterRanges: [String: [(start: Float, end: Float)]],
         stored: [VoiceProfile]
     ) async -> [String: String] {
-        guard !stored.isEmpty, !clusterRanges.isEmpty else { return [:] }
+        let result = await matchProfilesWithConfidence(
+            audioURL: audioURL,
+            clusterRanges: clusterRanges,
+            stored: stored
+        )
+        return result.mapping
+    }
+
+    /// v3.10 — same as `matchProfiles` but also returns the cosine similarity
+    /// for each match, used by callers as a confidence score. Per-profile
+    /// dynamic threshold is applied (LLM-only profiles need higher similarity).
+    func matchProfilesWithConfidence(
+        audioURL: URL,
+        clusterRanges: [String: [(start: Float, end: Float)]],
+        stored: [VoiceProfile]
+    ) async -> (mapping: [String: String], confidence: [String: Float]) {
+        guard !stored.isEmpty, !clusterRanges.isEmpty else { return ([:], [:]) }
         var matches: [String: String] = [:]
+        var confidences: [String: Float] = [:]
         for (label, ranges) in clusterRanges {
             guard let newEmb = await extractEmbedding(audioURL: audioURL, timeRanges: ranges) else { continue }
             var bestName: String? = nil
-            var bestSim: Float = matchThreshold
+            var bestSim: Float = 0
+            var bestProfile: VoiceProfile? = nil
             for profile in stored {
                 let storedEmb = profile.embedding
                 guard storedEmb.count == newEmb.count else { continue }
                 let sim = cosineSimilarity(newEmb, storedEmb)
-                if sim > bestSim {
+                // Per-profile threshold gate: must exceed the profile's own
+                // dynamic threshold AND be the best match seen so far.
+                if sim >= profile.dynamicMatchThreshold && sim > bestSim {
                     bestSim = sim
                     bestName = profile.personName
+                    bestProfile = profile
                 }
             }
             if let name = bestName {
                 matches[label] = name
-                logger.info("Voice match (range): \(label) → \(name) (similarity \(String(format: "%.3f", bestSim)))")
+                confidences[label] = bestSim
+                let thr = bestProfile?.dynamicMatchThreshold ?? matchThreshold
+                logger.info("Voice match (range): \(label) → \(name) (sim \(String(format: "%.3f", bestSim)), thr \(String(format: "%.2f", thr)))")
             }
         }
-        return matches
+        return (matches, confidences)
     }
 
     // MARK: - Profile matching

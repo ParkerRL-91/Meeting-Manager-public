@@ -27,6 +27,14 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// attribution ran or attribution returned empty. Used by Layer 3 to
     /// pre-seed the LLM prompt for recurring meetings.
     var speakerMap: String?
+    /// v3.10 RSVP gate: comma-separated list of attendee names who explicitly
+    /// declined the calendar invite. Filtered out of the attribution candidate
+    /// pool and excluded from the diarization speaker-count hint.
+    var declinedAttendees: String?
+    /// v3.10 confidence scores: JSON `[clusterId: confidence]` for each
+    /// attribution decision. Lets the UI badge low-confidence labels for
+    /// review without retraining the user to interpret them.
+    var speakerConfidenceMap: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -46,6 +54,8 @@ struct Meeting: Identifiable, Codable, Equatable {
         meetLink: String? = nil,
         templateId: String? = nil,
         speakerMap: String? = nil,
+        declinedAttendees: String? = nil,
+        speakerConfidenceMap: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -64,6 +74,8 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.meetLink = meetLink
         self.templateId = templateId
         self.speakerMap = speakerMap
+        self.declinedAttendees = declinedAttendees
+        self.speakerConfidenceMap = speakerConfidenceMap
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -90,6 +102,52 @@ struct Meeting: Identifiable, Codable, Equatable {
         } else if let data = try? JSONEncoder().encode(map),
                   let str = String(data: data, encoding: .utf8) {
             speakerMap = str
+        }
+    }
+
+    // MARK: - Confidence Map (v3.10)
+
+    /// Decoded `[clusterId: confidence]` dict. Confidence is a float in [0, 1]
+    /// where higher is more trustworthy. Empty when no attribution has run or
+    /// the column is NULL.
+    var speakerConfidenceMapDictionary: [String: Float] {
+        guard let json = speakerConfidenceMap?.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: Float].self, from: json) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    /// Persist a per-cluster confidence map. Empty dict clears the column.
+    mutating func setSpeakerConfidenceMap(_ map: [String: Float]) {
+        if map.isEmpty {
+            speakerConfidenceMap = nil
+        } else if let data = try? JSONEncoder().encode(map),
+                  let str = String(data: data, encoding: .utf8) {
+            speakerConfidenceMap = str
+        }
+    }
+
+    // MARK: - RSVP Gate (v3.10)
+
+    /// Parsed list of attendee names who declined the calendar invite.
+    var declinedAttendeeList: [String] {
+        declinedAttendees?.components(separatedBy: ", ").filter { !$0.isEmpty } ?? []
+    }
+
+    /// `participantList` minus anyone who declined the invite. This is the
+    /// "real" candidate pool for speaker attribution and the speaker-count
+    /// hint passed to diarization. We use case-insensitive substring matching
+    /// because raw participant strings may be email-suffixed while the
+    /// declined list is name-only (or vice versa).
+    var acceptedParticipantList: [String] {
+        let declined = declinedAttendeeList.map { $0.lowercased() }
+        guard !declined.isEmpty else { return participantList }
+        return participantList.filter { name in
+            let lower = name.lowercased()
+            return !declined.contains(where: { d in
+                lower.contains(d) || d.contains(lower)
+            })
         }
     }
 
@@ -171,7 +229,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

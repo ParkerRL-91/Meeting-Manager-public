@@ -774,5 +774,24 @@ enum Migrations {
                 t.add(column: "contactsImportEnabled", .boolean).notNull().defaults(to: false)
             }
         }
+
+        // v3.10: speaker-ID signal upgrades.
+        //   - declinedAttendees: comma-separated names of invitees who declined,
+        //     so attribution and cluster-count hints can exclude them
+        //   - speakerConfidenceMap: JSON {cluster: float} produced by attribution,
+        //     so the UI can mark low-confidence attributions for review
+        //   - voiceProfile.manualSampleCount / llmSampleCount: source-quality
+        //     telemetry that lets matching raise the bar on profiles that have
+        //     only ever been confirmed by LLM (and would otherwise drift)
+        migrator.registerMigration("v34-speaker-signals") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "declinedAttendees", .text)
+                t.add(column: "speakerConfidenceMap", .text)
+            }
+            try db.alter(table: "voiceProfile") { t in
+                t.add(column: "manualSampleCount", .integer).notNull().defaults(to: 0)
+                t.add(column: "llmSampleCount", .integer).notNull().defaults(to: 0)
+            }
+        }
     }
 }

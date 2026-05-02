@@ -20,21 +20,28 @@ struct VoiceProfile: Codable, Identifiable, FetchableRecord, MutablePersistableR
     /// Number of meeting-level samples that contributed to this embedding.
     /// Used for exponential moving-average merging: newer meetings weight more.
     var sampleCount: Int
+    /// v3.10 source-quality split. Profiles built only from LLM attributions
+    /// (manualSampleCount == 0) are matched at a stricter threshold to avoid
+    /// drift; manually confirmed profiles are matched aggressively.
+    var manualSampleCount: Int = 0
+    var llmSampleCount: Int = 0
     var lastUpdatedAt: Date
 
     static let databaseTableName = "voiceProfile"
 
     enum CodingKeys: String, CodingKey {
-        case id, personName, personId, embeddingData, sampleCount, lastUpdatedAt
+        case id, personName, personId, embeddingData, sampleCount, manualSampleCount, llmSampleCount, lastUpdatedAt
     }
 
     enum Columns {
-        static let id            = Column(CodingKeys.id)
-        static let personName    = Column(CodingKeys.personName)
-        static let personId      = Column(CodingKeys.personId)
-        static let embeddingData = Column(CodingKeys.embeddingData)
-        static let sampleCount   = Column(CodingKeys.sampleCount)
-        static let lastUpdatedAt = Column(CodingKeys.lastUpdatedAt)
+        static let id                 = Column(CodingKeys.id)
+        static let personName         = Column(CodingKeys.personName)
+        static let personId           = Column(CodingKeys.personId)
+        static let embeddingData      = Column(CodingKeys.embeddingData)
+        static let sampleCount        = Column(CodingKeys.sampleCount)
+        static let manualSampleCount  = Column(CodingKeys.manualSampleCount)
+        static let llmSampleCount     = Column(CodingKeys.llmSampleCount)
+        static let lastUpdatedAt      = Column(CodingKeys.lastUpdatedAt)
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -66,7 +73,20 @@ struct VoiceProfile: Codable, Identifiable, FetchableRecord, MutablePersistableR
             personId: personId,
             embeddingData: Data(),
             sampleCount: 0,
+            manualSampleCount: 0,
+            llmSampleCount: 0,
             lastUpdatedAt: Date()
         )
+    }
+
+    /// Match threshold tuned to profile quality. Profiles whose only evidence
+    /// comes from LLM attributions are matched stricter to avoid drift onto
+    /// the wrong person. Profiles with at least one manual or voice-match
+    /// confirmation use the standard threshold.
+    var dynamicMatchThreshold: Float {
+        if manualSampleCount == 0 && sampleCount > 0 {
+            return 0.87
+        }
+        return 0.82
     }
 }
