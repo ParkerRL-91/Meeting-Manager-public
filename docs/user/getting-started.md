@@ -1,76 +1,100 @@
 # Getting Started
 
-## Installation
+A 5-minute walkthrough from download to your first recorded meeting.
 
-1. Download **MeetingManager-v1.6.0.dmg** from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases)
-2. Open the DMG and drag **Meeting Manager** to your Applications folder
-3. Launch Meeting Manager from Applications or Spotlight
+## Install
 
-On first launch, macOS may ask for microphone permission — grant it so Meeting Manager can record your meetings.
+1. Download the latest `MeetingManager-vX.Y.Z.dmg` from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases).
+2. Open the DMG and drag **Meeting Manager** to **Applications**.
+3. Launch from Applications or Spotlight (`⌘ Space` → "Meeting Manager").
 
----
+### First-launch Gatekeeper notice
 
-## First-Time Setup
+If macOS shows *"Apple could not verify Meeting Manager"*:
 
-### 1. Connect Your Calendar (Optional but Recommended)
+1. Right-click the app in Applications and choose **Open**.
+2. If prompted again, click **Done**, then go to **System Settings → Privacy & Security**, scroll to *"Meeting Manager was blocked"*, and click **Open Anyway**.
 
-**Settings → Calendar → Connect Google Calendar**
-
-Meeting Manager will pull your upcoming events and automatically name recordings based on meeting titles. You'll need to grant Google Calendar read access.
-
-### 2. Add Your Claude API Key (For AI Summaries)
-
-**Settings → Claude → API Key**
-
-Paste your Anthropic API key. Meeting Manager uses Claude to generate summaries, extract action items, and identify key decisions from your transcripts.
-
-Get an API key at [console.anthropic.com](https://console.anthropic.com).
-
-### 3. Transcription Model
-
-Meeting Manager uses WhisperKit's **Large v3** model by default — the most accurate on-device speech recognition available. The model downloads automatically on first launch (~1.5 GB) with a progress bar in the menu bar popover.
-
-If WhisperKit fails to load on your hardware, the app automatically falls back to Apple's built-in Speech Recognition.
+You only need to do this once.
 
 ---
 
-## Recording Your First Meeting
+## First-Run Permissions
 
-1. Start a call in Zoom, Google Meet, Teams, or any app
-2. Meeting Manager detects the call and shows a banner in the sidebar
-3. Click **Record** to begin
-4. Talk naturally — the transcript updates in real time
-5. Click **Stop** when the call ends
+Meeting Manager asks for the macOS permissions it needs as you use them. Granting them up front saves dialogs mid-meeting:
 
-Meeting Manager records your microphone. For system audio (to capture other participants), enable it in **Settings → Audio**.
+| Permission | Why it's needed | Where to grant |
+|---|---|---|
+| **Microphone** | Record your voice | Auto-prompt on first record |
+| **Screen Recording** | Capture system audio (other participants) + read meeting window titles | System Settings → Privacy & Security → Screen Recording |
+| **Calendar** | Show upcoming meetings, pull attendee names | Settings → Calendar |
+| **Reminders** *(optional)* | Push action items to Apple Reminders | Triggered when you enable the toggle |
+| **Contacts** *(optional)* | Import names + emails for better speaker ID | People tab → import button |
 
----
-
-## After the Meeting
-
-Once recording stops, Meeting Manager automatically:
-1. Transcribes the audio using WhisperKit (on your Mac, no data sent anywhere)
-2. Generates a summary using Claude or on-device AI
-3. Extracts action items, key decisions, and next steps
-
-You'll see the summary in the meeting detail view. You can regenerate it at any time, change the prompt, or switch between Claude and on-device AI.
+If anything ever feels stuck after a permission change, **Settings → Troubleshooting → Reset App Permissions** clears the TCC cache for Meeting Manager. See [Troubleshooting](./troubleshooting.md).
 
 ---
 
-## The Sidebar
+## Connect Your Calendar (Recommended)
 
-- **Scheduled** — upcoming calendar events and meetings you haven't started yet
-- **History** — completed meetings
-  - **Recorded** badge — meeting has audio + transcript
-  - **Completed** badge — meeting was logged but not recorded
+Calendar data is the single biggest accuracy lever for speaker identification.
 
-Both sections are collapsible. Click the section header to expand or collapse.
+**Google Calendar:** Settings → Calendar → **Connect Google Calendar** → sign in.
+**Apple Calendar / iCloud / Outlook on Mac:** Settings → Calendar → switch source to **Apple Calendar** (uses macOS EventKit, no separate sign-in).
+
+You can use either source, both, or neither. Multi-calendar selection is supported per provider — see [Calendar Integration](./calendar-integration.md).
+
+---
+
+## Set Up AI (One of these)
+
+Meeting Manager generates summaries, action items, and follow-up emails with an LLM. You have three choices:
+
+- **Claude** (recommended): Settings → AI (Claude) → paste your API key from [console.anthropic.com](https://console.anthropic.com). Best results, fastest, costs ~5¢/meeting.
+- **Local (Ollama)**: Settings → AI (Local) → install Ollama, pick a model. Free, private, slower. See [On-Device AI](./on-device-ai.md).
+- **None**: skip AI entirely; you'll still get the raw transcript.
+
+---
+
+## Record Your First Meeting
+
+1. Start a call in Zoom / Google Meet / Teams / FaceTime.
+2. The sidebar shows a "**\<App\> detected**" banner. Click **Record**.
+3. Speak naturally. Notes you take live persist alongside the recording.
+4. Click **Stop** when the call ends.
+
+After stop, Meeting Manager automatically:
+1. Transcribes the audio with WhisperKit (entirely on your Mac)
+2. Identifies who spoke when (speaker diarization + attribution)
+3. Generates a summary, action items, and a follow-up email
+
+The first meeting takes longer because WhisperKit downloads its model (~1.5 GB). Subsequent meetings start instantly.
+
+---
+
+## What's Where
+
+| UI | What it shows |
+|---|---|
+| **Home** | Today + upcoming meetings, quick actions |
+| **Daily Brief** | One-page rundown of every meeting today with prep notes |
+| **Ask Anything** | Chat across all your meetings + knowledge base |
+| **People** | Every person you've met with, voice profiles, identity management |
+| **Search** | Full-text across transcripts, summaries, and notes |
+| **Analytics** | Talk time, meeting load, etc. |
+| **Activity** | Background tasks (transcription, summarization) |
+| **Spaces** | Auto-grouped meeting folders by attendee/topic |
+| **Sidebar footer** | New Meeting button, action items, recording status |
 
 ---
 
 ## Next Steps
 
-- [Recording Meetings](./recording-meetings.md) — auto-start, manual start, ad-hoc meetings
-- [On-Device AI](./on-device-ai.md) — privacy-first local summarization with Ollama
-- [Calendar Integration](./calendar-integration.md) — connecting Google Calendar
-- [Settings Reference](./settings.md) — every setting explained
+- [Recording Meetings](./recording-meetings.md) — auto-detection, ad-hoc, reopen
+- [Calendar Integration](./calendar-integration.md) — Google, Apple, multi-select
+- [Speaker Identification](./speaker-identification.md) — how voices are matched to names
+- [People Directory](./people-directory.md) — managing identities, Contacts import
+- [AI Summaries](./ai-summaries.md) — Claude vs Ollama, prompts, recipes
+- [Settings Reference](./settings.md) — every option explained
+- [Troubleshooting](./troubleshooting.md) — permissions, calendar, recording
+- [Privacy](./privacy.md) — what stays local, what doesn't

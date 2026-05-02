@@ -105,6 +105,56 @@ enum VocativeMiningService {
         return result
     }
 
+    /// v3.10 — same logic as `attribute(...)` but also returns per-cluster
+    /// confidence based on vote counts. Confidence: 1 vote → 0.55, 2 → 0.70,
+    /// 3+ → 0.85. Confidence is omitted for clusters that didn't make the
+    /// final mapping cut.
+    static func attributeWithConfidence(
+        transcripts: [Transcript],
+        attendees: [String],
+        userFirstName: String?,
+        existingMapping: [String: String]
+    ) -> (mapping: [String: String], confidence: [String: Float]) {
+        let candidates = candidateNames(from: attendees, excluding: userFirstName)
+        guard !candidates.isEmpty else { return ([:], [:]) }
+
+        var votes: [String: [String: Int]] = [:]
+        for (idx, current) in transcripts.enumerated() {
+            guard idx + 1 < transcripts.count else { break }
+            let next = transcripts[idx + 1]
+            let currentCluster = (current.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
+            let nextCluster = (next.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
+            guard currentCluster != nextCluster else { continue }
+            guard nextCluster.lowercased().hasPrefix("speaker ") else { continue }
+            guard existingMapping[nextCluster] == nil else { continue }
+            for (firstLower, _) in candidates {
+                if textMentionsVocative(current.text, name: firstLower) {
+                    votes[nextCluster, default: [:]][firstLower, default: 0] += 1
+                }
+            }
+        }
+
+        var mapping: [String: String] = [:]
+        var confidence: [String: Float] = [:]
+        for (cluster, names) in votes {
+            let sorted = names.sorted(by: { $0.value > $1.value })
+            guard let winner = sorted.first else { continue }
+            let confident = winner.value >= 2 || sorted.count == 1
+            guard confident else { continue }
+            if let full = candidates[winner.key] {
+                mapping[cluster] = full
+                let score: Float
+                switch winner.value {
+                case 0, 1: score = 0.55
+                case 2:    score = 0.70
+                default:   score = 0.85
+                }
+                confidence[cluster] = score
+            }
+        }
+        return (mapping, confidence)
+    }
+
     /// Build a `firstName(lowercased) → fullName` map from calendar
     /// attendees. Skips the user (we never vocative-map onto self) and
     /// drops single-letter / empty first names.

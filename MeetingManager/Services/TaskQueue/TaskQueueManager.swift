@@ -37,6 +37,11 @@ final class TaskQueueManager {
     var knowledgeBaseIndexHandler: (() async throws -> Void)?
     /// Transcript cleanup handler — runs stitch + AI pass for one meeting.
     var transcriptCleanupHandler: ((String) async throws -> Void)?
+    /// v3.10 #7: second-pass speaker attribution handler. Triggered when
+    /// transcript cleanup completes and the meeting still has unresolved
+    /// "Speaker N" clusters. Runs against the full transcript with whatever
+    /// signals are now available.
+    var retryAttributionHandler: ((String) async throws -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -380,6 +385,12 @@ final class TaskQueueManager {
         case .transcriptCleanup:
             guard let handler = transcriptCleanupHandler else {
                 throw TaskQueueError.noHandler("transcriptCleanup")
+            }
+            try await handler(task.meetingId)
+
+        case .retryAttribution:
+            guard let handler = retryAttributionHandler else {
+                throw TaskQueueError.noHandler("retryAttribution")
             }
             try await handler(task.meetingId)
         }

@@ -148,7 +148,9 @@ final class SpeakerAttributionService {
                     reason: .llmReturnedAllUnknown
                 )
             }
-            return AttributionOutcome(mapping: mapping, reason: .okEscalated)
+            // Escalated LLM is more capable → solidly above review threshold
+            let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, Float(0.78)) })
+            return AttributionOutcome(mapping: mapping, reason: .okEscalated, confidenceMap: conf)
         }
 
         if mapping.isEmpty {
@@ -160,7 +162,14 @@ final class SpeakerAttributionService {
             return AttributionOutcome(mapping: [:], reason: r)
         }
 
-        return AttributionOutcome(mapping: mapping, reason: .ok)
+        // Cheap pass succeeded — confidence reflects model capability.
+        // QA finding #12: tuned so cheap-LLM attributions don't all show an
+        // amber "needs review" dot. Claude haiku is reliable enough to clear
+        // the 0.70 threshold; local Ollama stays below as a deliberate signal
+        // that those attributions warrant a glance.
+        let cheapConfidence: Float = (claude != nil) ? 0.72 : 0.62
+        let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, cheapConfidence) })
+        return AttributionOutcome(mapping: mapping, reason: .ok, confidenceMap: conf)
     }
 
     /// Helper: parse a (possibly nil) raw LLM response and return the
@@ -355,7 +364,22 @@ final class SpeakerAttributionService {
 /// available", "all clusters returned Unknown") instead of a generic banner.
 struct AttributionOutcome: Sendable {
     let mapping: [String: String]
+    /// v3.10 confidence per attributed cluster, in [0, 1]. Higher is better.
+    /// Sources: voice match → cosine similarity; vocative → vote-based
+    /// heuristic; LLM cheap pass → 0.55; LLM escalated → 0.70; manual rename
+    /// (set by AppState) → 1.0.
+    let confidenceMap: [String: Float]
     let reason: AttributionReason
+
+    init(
+        mapping: [String: String],
+        reason: AttributionReason,
+        confidenceMap: [String: Float] = [:]
+    ) {
+        self.mapping = mapping
+        self.reason = reason
+        self.confidenceMap = confidenceMap
+    }
 }
 
 enum AttributionReason: Sendable, Equatable {

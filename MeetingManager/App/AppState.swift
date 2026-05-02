@@ -536,6 +536,20 @@ final class AppState {
         taskQueueManager.transcriptCleanupHandler = { [weak self] meetingId in
             guard let self else { return }
             await self.runTranscriptCleanup(meetingId: meetingId)
+            // v3.10 #7: after cleanup completes, re-check whether attribution
+            // left any clusters unresolved. If so, enqueue a retryAttribution
+            // task. The retry runs with the same pipeline but against the
+            // full transcript — useful when the first 20-turn LLM window
+            // didn't have enough context.
+            await self.maybeEnqueueRetryAttribution(meetingId: meetingId)
+        }
+
+        // v3.10 #7: second-pass speaker attribution — runs the same flow as
+        // applySpeakerAttribution but explicitly triggered after cleanup.
+        // Limited to one retry per meeting (gated in maybeEnqueueRetryAttribution).
+        taskQueueManager.retryAttributionHandler = { [weak self] meetingId in
+            guard let self else { return }
+            await self.runRetryAttribution(meetingId: meetingId)
         }
 
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
@@ -1427,8 +1441,14 @@ final class AppState {
         transcripts: [Transcript],
         meeting: Meeting
     ) async -> (transcripts: [Transcript], meeting: Meeting) {
-        let participants = meeting.participantList
+        // v3.10 #1 RSVP gate: never consider declined attendees as candidates.
+        // Falls back to the full participant list when no RSVP data is present
+        // (manual ad-hoc meetings, calendars that don't expose responseStatus).
+        let participants = meeting.acceptedParticipantList
         guard !participants.isEmpty else { return (transcripts, meeting) }
+        if meeting.declinedAttendeeList.count > 0 {
+            Logger.general.info("[RSVP] excluding \(meeting.declinedAttendeeList.count) declined attendee(s) from attribution candidates for meeting \(meeting.id, privacy: .public)")
+        }
 
         let userFirst = NSFullUserName()
             .components(separatedBy: .whitespacesAndNewlines)
@@ -1453,13 +1473,14 @@ final class AppState {
             return ClaudeService()
         }()
 
+        // v3.10 #2: aggregate confidence per cluster from every signal.
+        // Initialised here so each branch below can contribute its score.
+        var clusterConfidence: [String: Float] = [:]
+
         // Voice-profile pre-match — checks each Speaker N cluster against the
-        // stored voice fingerprint DB before the LLM is invoked. A cosine
-        // similarity ≥ 0.82 against a known person collapses the mapping to
-        // that name with zero LLM cost. The matched names are passed to the
-        // LLM as priorAliases (rather than written directly to the mapping)
-        // so the LLM can still override if it disagrees, but in practice the
-        // pre-match wins ~all of the time.
+        // stored voice fingerprint DB before the LLM is invoked. The dynamic
+        // per-profile threshold (0.82 normally, 0.87 for LLM-only profiles)
+        // gates each match, and we capture the cosine similarity as confidence.
         var voiceMatches: [String: String] = [:]
         if let audioPath = meeting.audioFilePath {
             let systemURL = AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: audioPath))
@@ -1475,11 +1496,16 @@ final class AppState {
                     let vpRepo = VoiceProfileRepository(database: database)
                     let pRepo  = PersonRepository(database: database)
                     let stored = (try? await vpRepo.allProfilesResolved(personRepo: pRepo)) ?? []
-                    voiceMatches = await VoiceProfileService.shared.matchProfiles(
+                    let result = await VoiceProfileService.shared.matchProfilesWithConfidence(
                         audioURL: systemURL,
                         clusterRanges: clusterRanges,
                         stored: stored
                     )
+                    voiceMatches = result.mapping
+                    // Voice match confidence = cosine similarity (already in [0, 1]).
+                    for (cluster, sim) in result.confidence {
+                        clusterConfidence[cluster] = sim
+                    }
                     if !voiceMatches.isEmpty {
                         Logger.general.info("Voice pre-match: \(voiceMatches.count) cluster(s) recognised before LLM for meeting \(meeting.id, privacy: .public)")
                     }
@@ -1512,6 +1538,7 @@ final class AppState {
         for (cluster, name) in droppedMatches {
             Logger.general.warning("[AttendanceGate] dropping voice match \(cluster, privacy: .public) → \(name, privacy: .public) — not in attendees \(participants.joined(separator: ", "), privacy: .public)")
             voiceMatches.removeValue(forKey: cluster)
+            clusterConfidence.removeValue(forKey: cluster)
         }
 
         // Merge prior-aliases (series memory) with voice matches. Voice wins on
@@ -1525,15 +1552,21 @@ final class AppState {
         // overwhelmingly likely to be that named person. Hallucination-proof
         // because names come only from the calendar attendee list — the
         // model isn't picking from training data.
-        let vocativeMatches = VocativeMiningService.attribute(
+        let vocativeResult = VocativeMiningService.attributeWithConfidence(
             transcripts: transcripts,
             attendees: participants,
             userFirstName: userFirst,
             existingMapping: combinedPriorAliases
         )
-        for (cluster, name) in vocativeMatches where combinedPriorAliases[cluster] == nil {
+        for (cluster, name) in vocativeResult.mapping where combinedPriorAliases[cluster] == nil {
             Logger.general.info("[Vocative] mined \(cluster, privacy: .public) → \(name, privacy: .public)")
             combinedPriorAliases[cluster] = name
+            // Record vocative confidence (0.55 / 0.70 / 0.85) only for
+            // clusters that didn't already have a stronger voice match.
+            if clusterConfidence[cluster] == nil,
+               let conf = vocativeResult.confidence[cluster] {
+                clusterConfidence[cluster] = conf
+            }
         }
 
         let outcome = await SpeakerAttributionService.shared.attribute(
@@ -1551,6 +1584,17 @@ final class AppState {
         for (cluster, name) in voiceMatches where mapping[cluster] == nil {
             mapping[cluster] = name
         }
+        // Capture LLM confidence for clusters the LLM contributed (and which
+        // weren't already covered by a stronger voice/vocative signal).
+        for (cluster, conf) in outcome.confidenceMap where clusterConfidence[cluster] == nil {
+            clusterConfidence[cluster] = conf
+        }
+        // Pull vocative confidence into final map for clusters the LLM kept.
+        for (cluster, _) in mapping where clusterConfidence[cluster] == nil {
+            if let voc = vocativeResult.confidence[cluster] {
+                clusterConfidence[cluster] = voc
+            }
+        }
 
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
         // labelled "mic" by the capture pipeline, never "Speaker N", so they
@@ -1560,6 +1604,8 @@ final class AppState {
             let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
             let displayName = fullName.isEmpty ? userFirst : fullName
             mapping["mic"] = displayName
+            // Mic stream is ground-truth — full confidence.
+            clusterConfidence["mic"] = 1.0
         }
 
         // 2-person meeting auto-assignment. If the calendar invite has the
@@ -1582,6 +1628,8 @@ final class AppState {
             if nonUserParticipants.count == 1 {
                 let inferred = nonUserParticipants[0]
                 mapping[onlyCluster] = inferred
+                // Deterministic, single-candidate inference — high confidence.
+                clusterConfidence[onlyCluster] = 0.95
                 Logger.general.info("Auto-assigned 2-person meeting: \(onlyCluster, privacy: .public) → \(inferred, privacy: .public)")
             }
         }
@@ -1608,8 +1656,127 @@ final class AppState {
 
         var updated = meeting
         updated.setSpeakerMap(mapping)
+        // v3.10 #2: persist per-cluster confidence so the UI can surface
+        // low-trust attributions for review without re-running attribution.
+        // Only keep entries that ended up in the final mapping.
+        let finalConfidence = clusterConfidence.filter { mapping[$0.key] != nil }
+        updated.setSpeakerConfidenceMap(finalConfidence)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
+    }
+
+    // MARK: - Retry Attribution (v3.10 #7)
+
+    /// In-memory guard so a meeting's retryAttribution task is enqueued at most
+    /// once per session. Prevents an infinite loop if the retry itself produces
+    /// no new mappings. Cleared on app restart, which is fine — at worst a
+    /// meeting gets one more retry attempt the next time the user opens it.
+    @MainActor
+    private static var retryAttributionAttempted: Set<String> = []
+
+    /// Enqueue a retryAttribution task if and only if:
+    ///   1. The meeting has accepted attendees (no point retrying with no candidates)
+    ///   2. There are still "Speaker N" rows in the transcript that haven't
+    ///      been mapped to a real name
+    ///   3. We haven't already retried this meeting in the current session
+    private func maybeEnqueueRetryAttribution(meetingId: String) async {
+        if Self.retryAttributionAttempted.contains(meetingId) { return }
+
+        guard let meeting = try? await meetingRepository.find(id: meetingId),
+              !meeting.acceptedParticipantList.isEmpty else { return }
+
+        let transcripts = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 100_000)) ?? []
+        // Are there transcript rows whose label still looks like "Speaker N"?
+        let hasUnresolved = transcripts.contains { t in
+            (t.speakerLabel ?? "").lowercased().hasPrefix("speaker ")
+        }
+        guard hasUnresolved else { return }
+
+        Self.retryAttributionAttempted.insert(meetingId)
+        Logger.general.info("[RetryAttribution] enqueueing second-pass for meeting \(meetingId, privacy: .public)")
+        _ = await taskQueueManager.enqueue(
+            type: .retryAttribution,
+            meetingId: meetingId,
+            priority: 4
+        )
+    }
+
+    /// Second-pass attribution — runs `applySpeakerAttribution` against the
+    /// full, post-cleanup transcript. Same pipeline, more data.
+    ///
+    /// IMPORTANT: `applySpeakerAttribution` only attributes clusters whose
+    /// speakerLabel still starts with "Speaker N" (the voice/vocative paths
+    /// gate on this). So its returned `speakerMap` reflects ONLY the new
+    /// mappings the retry produced. We MERGE those into the existing map
+    /// rather than replacing — otherwise a 3-of-5 first-pass map would be
+    /// overwritten by a 1-entry retry-pass map, losing 2 good attributions.
+    /// (QA finding #3.)
+    func runRetryAttribution(meetingId: String) async {
+        guard let meeting = try? await meetingRepository.find(id: meetingId) else { return }
+        let transcripts = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 100_000)) ?? []
+        guard !transcripts.isEmpty else { return }
+
+        let existingMap = meeting.speakerMapDictionary
+        let existingConf = meeting.speakerConfidenceMapDictionary
+        let beforeCount = existingMap.count
+
+        let (relabelled, attributed) = await applySpeakerAttribution(
+            transcripts: transcripts,
+            meeting: meeting
+        )
+        let newMap = attributed.speakerMapDictionary
+        let newConf = attributed.speakerConfidenceMapDictionary
+
+        // Merge: retry only FILLS clusters that were unresolved on the first
+        // pass. We deliberately never overwrite an existing mapping, even
+        // with higher confidence — silent name flips ("Alice" → "Bob" with
+        // no UI signal) erode user trust faster than a slightly stale label.
+        // (VP review concern.) If the user explicitly wants to re-attribute,
+        // they can delete the speakerMap and rerun.
+        var mergedMap = existingMap
+        var mergedConf = existingConf
+        var newCount = 0
+        for (cluster, name) in newMap where mergedMap[cluster] == nil {
+            mergedMap[cluster] = name
+            if let c = newConf[cluster] { mergedConf[cluster] = c }
+            newCount += 1
+        }
+
+        guard newCount > 0 else {
+            Logger.general.info("[RetryAttribution] no new mappings for \(meetingId, privacy: .public) — keeping existing")
+            return
+        }
+
+        // Only rewrite transcript rows whose label still starts with "Speaker"
+        // — leave already-resolved (or user-renamed) labels untouched.
+        let safeRelabelled: [Transcript] = relabelled.map { t in
+            guard let oldLabel = transcripts.first(where: { $0.id == t.id })?.speakerLabel,
+                  oldLabel.lowercased().hasPrefix("speaker ") else {
+                // Not safe to overwrite — return original.
+                if let original = transcripts.first(where: { $0.id == t.id }) { return original }
+                return t
+            }
+            return t
+        }
+
+        var updatedMeeting = meeting
+        updatedMeeting.setSpeakerMap(mergedMap)
+        updatedMeeting.setSpeakerConfidenceMap(mergedConf)
+
+        do {
+            try await database.writer.write { db in
+                var m = updatedMeeting
+                try m.update(db)
+                for transcript in safeRelabelled {
+                    var t = transcript
+                    try t.update(db)
+                }
+            }
+            Logger.general.info("[RetryAttribution] mapped \(newCount) new cluster(s) for \(meetingId, privacy: .public) (total \(beforeCount + newCount))")
+            loadMeetings()
+        } catch {
+            Logger.general.error("[RetryAttribution] persist failed for \(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Run the transcript-cleanup pipeline (stitch + best-effort AI pass)
@@ -1700,10 +1867,29 @@ final class AppState {
         let repo = VoiceProfileRepository(database: database)
         let personRepo = PersonRepository(database: database)
         let sampleRepo = VoiceSampleRepository(database: database)
+
+        // v3.10 source tagging (QA finding #6): a name in this transcript
+        // could have come from a manual rename OR an LLM attribution. Only
+        // treat it as `.manual` when there's a confirmed alias row for the
+        // current series — otherwise default to `.llm` (low trust). This
+        // prevents LLM-attributed names from sneaking into the high-trust
+        // pool via the rerun/rebuild paths.
+        let seriesKey = MeetingSeriesService.shared.seriesKey(for: meeting)
+        let aliasRows = (try? await SpeakerAliasRepository(database: database)
+            .aliases(forSeriesKey: seriesKey)) ?? []
+        let manuallyConfirmedNames = Set(aliasRows.map { $0.resolvedName.lowercased() })
+
         for (name, ranges) in rangesByName {
             guard let embedding = await voiceService.extractEmbedding(audioURL: systemURL, timeRanges: ranges) else { continue }
             let person = try? await personRepo.findOrCreate(for: name)
-            try? await repo.merge(personName: name, newEmbedding: embedding, personRepo: personRepo)
+            let isManual = manuallyConfirmedNames.contains(name.lowercased())
+            let source: VoiceProfileRepository.EmbeddingSource = isManual ? .manual : .llm
+            try? await repo.merge(
+                personName: name,
+                newEmbedding: embedding,
+                personRepo: personRepo,
+                source: source
+            )
             // Phase 4: persist the individual utterance sample for provenance
             if let pid = person?.id, !ranges.isEmpty {
                 let span = ranges.reduce((min: Float.infinity, max: Float(0))) {
@@ -1768,10 +1954,16 @@ final class AppState {
         let meeting = try? await database.writer.read { db in
             try Meeting.fetchOne(db, key: meetingId)
         }
+        // v3.10 #3: cluster-count hint excludes anyone who declined, so
+        // diarization doesn't over-segment looking for a 5th voice when only
+        // 3 actually attended. Add 1 for the user themselves on the mic stream.
         let participantCount: Int? = {
             guard let m = meeting else { return nil }
-            let count = m.participantList.count
-            return count > 0 ? count : nil
+            let acceptedCount = m.acceptedParticipantList.count
+            // Conservative: prefer at least 2 (user + 1 other). Pyannote treats
+            // nil as "unknown — use clustering heuristics."
+            guard acceptedCount > 0 else { return nil }
+            return max(2, acceptedCount + 1)
         }()
 
         do {
@@ -1847,17 +2039,28 @@ final class AppState {
 
                 // Phase 3 — save voice embeddings for newly-identified speakers
                 // so future meetings can match them without the LLM.
+                // v3.10 #4: source-tag each merge. If the same cluster was in
+                // the pre-match voice dictionary, treat as voiceMatch (high
+                // trust); otherwise it came from the LLM (low trust, stricter
+                // future threshold to prevent drift).
                 let finalSpeakerMap = attributed.speakerMapDictionary
                 let personRepo = PersonRepository(database: database)
                 for (clusterLabel, personName) in finalSpeakerMap {
                     guard !personName.isEmpty else { continue }
+                    let source: VoiceProfileRepository.EmbeddingSource =
+                        voiceMatches[clusterLabel] != nil ? .voiceMatch : .llm
                     if let embedding = await voiceService.extractEmbedding(
                         forSpeaker: clusterLabel,
                         from: audioURL,
                         diarizationResult: resultBox
                     ) {
-                        try? await profileRepo.merge(personName: personName, newEmbedding: embedding, personRepo: personRepo)
-                        fileLog("Diarization: updated voice profile for \(personName)")
+                        try? await profileRepo.merge(
+                            personName: personName,
+                            newEmbedding: embedding,
+                            personRepo: personRepo,
+                            source: source
+                        )
+                        fileLog("Diarization: updated voice profile for \(personName) (source=\(source.rawValue))")
                     }
                 }
             }

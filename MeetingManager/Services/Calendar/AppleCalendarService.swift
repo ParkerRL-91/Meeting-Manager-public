@@ -298,13 +298,24 @@ final class AppleCalendarService {
     /// Maps an EKEvent into a Meeting record. The id is namespaced with an
     /// `applecal-` prefix to avoid collisions with Google calendar ids.
     func meeting(from event: EKEvent) -> Meeting {
-        let attendees: [String] = (event.attendees ?? []).compactMap { participant in
-            if let name = participant.name, !name.isEmpty { return name }
-            // Fall back to a derived URL component when the OS only exposes the URL.
-            let urlString = participant.url.absoluteString
+        // Helper closure: derive a display string for an EKParticipant the
+        // same way for both the full-attendee and declined-only passes.
+        func nameForParticipant(_ p: EKParticipant) -> String? {
+            if let name = p.name, !name.isEmpty { return name }
+            let urlString = p.url.absoluteString
             return urlString.hasPrefix("mailto:") ? String(urlString.dropFirst("mailto:".count)) : urlString
         }
+
+        let participants = event.attendees ?? []
+        let attendees: [String] = participants.compactMap(nameForParticipant)
+        // v3.10 RSVP gate — track declined attendees separately. EventKit
+        // exposes `.declined` via participantStatus; everything else is
+        // treated as "still potentially present" (conservative).
+        let declinedAttendees: [String] = participants
+            .filter { $0.participantStatus == .declined }
+            .compactMap(nameForParticipant)
         let participantsString = attendees.isEmpty ? nil : attendees.joined(separator: ", ")
+        let declinedString = declinedAttendees.isEmpty ? nil : declinedAttendees.joined(separator: ", ")
 
         // Apple Calendar exposes the meeting URL in several places depending
         // on the source:
@@ -349,7 +360,8 @@ final class AppleCalendarService {
             calendarEventId: identifier,
             isAllDay: event.isAllDay,
             participants: participantsString,
-            meetLink: meetLink
+            meetLink: meetLink,
+            declinedAttendees: declinedString
         )
     }
 

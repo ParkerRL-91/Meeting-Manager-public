@@ -214,7 +214,8 @@ struct FullTranscriptView: View {
                         onRename: { action in
                             handleRenameAction(action, for: transcript)
                         },
-                        isAIAttributed: isAIAttributed(transcript)
+                        isAIAttributed: isAIAttributed(transcript),
+                        attributionConfidence: confidenceFor(transcript)
                     )
 
                     if transcript.id != filteredTranscripts.last?.id {
@@ -245,6 +246,30 @@ struct FullTranscriptView: View {
         if map.keys.contains(label) { return true }
         if map.values.contains(label) { return true }
         return false
+    }
+
+    /// v3.10 #2: look up the attribution confidence for a transcript row.
+    /// The confidence map is keyed by cluster id (Speaker N), so when the
+    /// transcript's speakerLabel has already been rewritten to the resolved
+    /// name we reverse-look-up via speakerMap.
+    ///
+    /// When the same name maps to multiple clusters (legitimate diarization
+    /// over-split), we surface the *minimum* confidence — the worst-case is
+    /// what the user wants to see when triaging "which labels need review".
+    /// Returns nil for legacy meetings without a confidence map.
+    private func confidenceFor(_ transcript: Transcript) -> Float? {
+        guard let label = transcript.speakerLabel,
+              let confMap = meeting?.speakerConfidenceMapDictionary,
+              !confMap.isEmpty else { return nil }
+        // Direct hit (cluster id key) — most specific signal wins.
+        if let c = confMap[label] { return c }
+        // Reverse lookup: collect every cluster whose mapping resolves to
+        // this name, return the minimum confidence among them.
+        guard let map = meeting?.speakerMapDictionary else { return nil }
+        let candidates = map
+            .filter { $0.value == label }
+            .compactMap { confMap[$0.key] }
+        return candidates.min()
     }
 
     private func handleRenameAction(_ action: TranscriptBubbleRenameAction,
@@ -282,6 +307,11 @@ struct FullTranscriptView: View {
             var map = updated.speakerMapDictionary
             map[clusterId] = trimmed
             updated.setSpeakerMap(map)
+            // v3.10 #2: manual rename is ground truth — record full confidence
+            // so the amber "needs review" dot disappears for this cluster.
+            var confMap = updated.speakerConfidenceMapDictionary
+            confMap[clusterId] = 1.0
+            updated.setSpeakerConfidenceMap(confMap)
             do {
                 try await appState.meetingRepository.update(updated)
                 self.meeting = updated
@@ -292,19 +322,34 @@ struct FullTranscriptView: View {
                 renameError = error.localizedDescription
             }
 
-            // 3. Remember for future meetings in the same series.
+            // 3. Patch the cleaned transcript blob in place so the readable
+            //    view picks up the new name immediately. The cleaned text is
+            //    deterministic Markdown — speaker names appear only as
+            //    `**Name**` headers per turn, so a token replace is safe.
+            //    Falls back silently when no cleaned blob exists yet.
+            let cleanedRepo = CleanedTranscriptRepository(database: AppDatabase.shared)
+            if var cleaned = try? await cleanedRepo.cleanedTranscript(meetingId: meeting.id) {
+                let oldToken = "**\(clusterId)**"
+                let newToken = "**\(trimmed)**"
+                if cleaned.text.contains(oldToken) {
+                    cleaned.text = cleaned.text.replacingOccurrences(of: oldToken, with: newToken)
+                    try? await cleanedRepo.save(cleaned)
+                }
+            }
+
+            // 4. Remember for future meetings in the same series.
             let seriesKey = MeetingSeriesService.shared.seriesKey(for: meeting)
             try? await SpeakerAliasRepository(database: AppDatabase.shared)
                 .upsert(seriesKey: seriesKey, clusterId: clusterId, resolvedName: trimmed)
 
-            // 4. Cross-meeting learning: extract this voice's fingerprint and
+            // 5. Cross-meeting learning: extract this voice's fingerprint and
             // merge into the profile DB. The next meeting that captures this
             // person's voice will auto-attribute without an LLM call. This is
             // the highest-confidence signal we get — manual user rename — so
             // it's worth feeding the profile system aggressively.
             await appState.learnVoiceProfiles(meetingId: meeting.id)
 
-            // 5. Reload to reflect the rewritten labels.
+            // 6. Reload to reflect the rewritten labels.
             await loadTranscripts()
             updateFilteredTranscripts()
         }

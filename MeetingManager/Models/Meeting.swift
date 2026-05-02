@@ -27,6 +27,14 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// attribution ran or attribution returned empty. Used by Layer 3 to
     /// pre-seed the LLM prompt for recurring meetings.
     var speakerMap: String?
+    /// v3.10 RSVP gate: comma-separated list of attendee names who explicitly
+    /// declined the calendar invite. Filtered out of the attribution candidate
+    /// pool and excluded from the diarization speaker-count hint.
+    var declinedAttendees: String?
+    /// v3.10 confidence scores: JSON `[clusterId: confidence]` for each
+    /// attribution decision. Lets the UI badge low-confidence labels for
+    /// review without retraining the user to interpret them.
+    var speakerConfidenceMap: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -46,6 +54,8 @@ struct Meeting: Identifiable, Codable, Equatable {
         meetLink: String? = nil,
         templateId: String? = nil,
         speakerMap: String? = nil,
+        declinedAttendees: String? = nil,
+        speakerConfidenceMap: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -64,6 +74,8 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.meetLink = meetLink
         self.templateId = templateId
         self.speakerMap = speakerMap
+        self.declinedAttendees = declinedAttendees
+        self.speakerConfidenceMap = speakerConfidenceMap
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -91,6 +103,72 @@ struct Meeting: Identifiable, Codable, Equatable {
                   let str = String(data: data, encoding: .utf8) {
             speakerMap = str
         }
+    }
+
+    // MARK: - Confidence Map (v3.10)
+
+    /// Decoded `[clusterId: confidence]` dict. Confidence is a float in [0, 1]
+    /// where higher is more trustworthy. Empty when no attribution has run or
+    /// the column is NULL.
+    var speakerConfidenceMapDictionary: [String: Float] {
+        guard let json = speakerConfidenceMap?.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: Float].self, from: json) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    /// Persist a per-cluster confidence map. Empty dict clears the column.
+    mutating func setSpeakerConfidenceMap(_ map: [String: Float]) {
+        if map.isEmpty {
+            speakerConfidenceMap = nil
+        } else if let data = try? JSONEncoder().encode(map),
+                  let str = String(data: data, encoding: .utf8) {
+            speakerConfidenceMap = str
+        }
+    }
+
+    // MARK: - RSVP Gate (v3.10)
+
+    /// Parsed list of attendee names who declined the calendar invite.
+    var declinedAttendeeList: [String] {
+        declinedAttendees?.components(separatedBy: ", ").filter { !$0.isEmpty } ?? []
+    }
+
+    /// `participantList` minus anyone who declined the invite. This is the
+    /// "real" candidate pool for speaker attribution and the speaker-count
+    /// hint passed to diarization.
+    ///
+    /// Matching uses normalized identity keys derived from each side: emails
+    /// are stripped to local-part, "Alex <alex@x.com>" trims its suffix.
+    /// We deliberately do NOT use substring containment — that produced
+    /// false positives where "Samantha" declining excluded "Sam" who
+    /// accepted (see QA finding #2).
+    var acceptedParticipantList: [String] {
+        guard !declinedAttendeeList.isEmpty else { return participantList }
+        let declinedKeys = Set(declinedAttendeeList.map { Self.identityKey(for: $0) })
+        return participantList.filter { name in
+            !declinedKeys.contains(Self.identityKey(for: name))
+        }
+    }
+
+    /// Build a comparable identity key from a raw participant string.
+    ///   "alex@x.com"             → "alex"             (email → local-part)
+    ///   "Alex Chen"              → "alex chen"        (display name → lower)
+    ///   "Alex Chen <alex@x.com>" → "alex chen"        (suffix stripped first)
+    /// The asymmetry between bare-email and email-suffixed-displayname is a
+    /// known limitation — if both formats appear for the same person they
+    /// won't match here. The Person directory handles that case downstream.
+    private static func identityKey(for raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lt = s.firstIndex(of: "<"), let gt = s.lastIndex(of: ">"), lt < gt {
+            s.removeSubrange(lt...gt)
+            s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if s.contains("@"), let at = s.firstIndex(of: "@") {
+            s = String(s[..<at])
+        }
+        return s.lowercased()
     }
 
     // MARK: - Backward Compat
@@ -171,7 +249,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

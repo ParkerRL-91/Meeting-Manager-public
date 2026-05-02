@@ -71,9 +71,36 @@ final class VoiceProfileRepository {
 
     // MARK: - Write
 
+    /// Source of evidence for a new embedding. Used by `merge` to weight the
+    /// EMA blend (manual confirmations learn aggressively, LLM attributions
+    /// contribute cautiously) and to populate the source-quality counters.
+    enum EmbeddingSource: String {
+        /// User explicitly renamed a Speaker N to a real name in the UI.
+        /// Highest trust — α 0.40, increments manualSampleCount.
+        case manual
+        /// Stored fingerprint matched this cluster via cosine similarity above
+        /// threshold. High trust because it's audio-grounded — α 0.25,
+        /// increments manualSampleCount (it confirmed an existing identity).
+        case voiceMatch
+        /// LLM attributed this cluster to an attendee name via prompt. Low
+        /// trust — α 0.10, increments llmSampleCount. Profiles built only
+        /// from LLM samples are matched at the stricter 0.87 threshold.
+        case llm
+
+        var alpha: Float {
+            switch self {
+            case .manual:     return 0.40
+            case .voiceMatch: return 0.25
+            case .llm:        return 0.10
+            }
+        }
+    }
+
     /// Merge a new embedding into the stored profile using an exponential
     /// moving average so more-recent meetings gradually dominate older ones.
-    /// α = 0.3 means each new meeting contributes 30% to the profile.
+    /// The blend weight (α) and the source-quality counters depend on
+    /// `source`, so manual confirmations dominate while LLM attributions
+    /// contribute conservatively (preventing drift onto similar voices).
     ///
     /// When `personRepo` is supplied the repository:
     ///   1. Finds or creates the Person for `personName`
@@ -83,7 +110,8 @@ final class VoiceProfileRepository {
     func merge(
         personName: String,
         newEmbedding: [Float],
-        personRepo: PersonRepository? = nil
+        personRepo: PersonRepository? = nil,
+        source: EmbeddingSource = .voiceMatch
     ) async throws {
         let resolvedPerson: Person?
         if let repo = personRepo {
@@ -94,7 +122,7 @@ final class VoiceProfileRepository {
         let resolvedPersonId = resolvedPerson?.id
 
         try await database.writer.write { db in
-            let alpha: Float = 0.3
+            let alpha = source.alpha
 
             // Look up by personId first so different name strings for the same
             // person all compound into one fingerprint (Phase 2 dedup).
@@ -119,6 +147,10 @@ final class VoiceProfileRepository {
                     row.embedding = newEmbedding
                 }
                 row.sampleCount += 1
+                switch source {
+                case .manual, .voiceMatch: row.manualSampleCount += 1
+                case .llm:                 row.llmSampleCount += 1
+                }
                 row.lastUpdatedAt = Date()
                 if let pid = resolvedPersonId, row.personId == nil { row.personId = pid }
                 // Keep the canonical name current
@@ -129,6 +161,10 @@ final class VoiceProfileRepository {
                 var profile = VoiceProfile.makeEmpty(personName: canonicalName, personId: resolvedPersonId)
                 profile.embedding = newEmbedding
                 profile.sampleCount = 1
+                switch source {
+                case .manual, .voiceMatch: profile.manualSampleCount = 1
+                case .llm:                 profile.llmSampleCount = 1
+                }
                 profile.lastUpdatedAt = Date()
                 try profile.insert(db)
             }

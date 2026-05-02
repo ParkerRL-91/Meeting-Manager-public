@@ -218,24 +218,40 @@ struct SpeakerAssignmentView: View {
                 from: cluster.id,
                 to: trimmed
             )
-            // 2. Persist on the meeting's speakerMap.
+            // 2. Persist on the meeting's speakerMap (+ confidence = 1.0 since
+            //    this is a manual confirmation).
             if var updated = meeting {
                 var map = updated.speakerMapDictionary
                 map[cluster.id] = trimmed
                 updated.setSpeakerMap(map)
+                var confMap = updated.speakerConfidenceMapDictionary
+                confMap[cluster.id] = 1.0
+                updated.setSpeakerConfidenceMap(confMap)
                 try await appState.meetingRepository.update(updated)
                 meeting = updated
             }
-            // 3. Save the alias for future meetings in the same series.
+            // 3. Patch the cleaned transcript blob in place so the readable
+            //    view picks up the new name immediately (same as the
+            //    transcript-level rename in FullTranscriptView).
+            let cleanedRepo = CleanedTranscriptRepository(database: AppDatabase.shared)
+            if var cleaned = try? await cleanedRepo.cleanedTranscript(meetingId: meetingId) {
+                let oldToken = "**\(cluster.id)**"
+                let newToken = "**\(trimmed)**"
+                if cleaned.text.contains(oldToken) {
+                    cleaned.text = cleaned.text.replacingOccurrences(of: oldToken, with: newToken)
+                    try? await cleanedRepo.save(cleaned)
+                }
+            }
+            // 4. Save the alias for future meetings in the same series.
             if let m = meeting {
                 let seriesKey = MeetingSeriesService.shared.seriesKey(for: m)
                 try? await SpeakerAliasRepository(database: AppDatabase.shared)
                     .upsert(seriesKey: seriesKey, clusterId: cluster.id, resolvedName: trimmed)
             }
-            // 4. Reload — the renamed cluster drops out of the list naturally
+            // 5. Reload — the renamed cluster drops out of the list naturally
             //    (its rows no longer match "Speaker N").
             await load()
-            // 5. Cross-meeting voice learning so this name's voice fingerprint
+            // 6. Cross-meeting voice learning so this name's voice fingerprint
             //    pays off in future meetings even when the user labels here.
             await appState.learnVoiceProfiles(meetingId: meetingId)
             Self.logger.info("[SpeakerAssignment] applied \(trimmed, privacy: .public) to \(cluster.id, privacy: .public) (\(cluster.segments.count) segments)")
