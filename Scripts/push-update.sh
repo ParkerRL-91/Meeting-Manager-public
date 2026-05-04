@@ -70,42 +70,41 @@ if [[ -n "$(git -C "${REPO_DIR}" status --porcelain)" ]]; then
 fi
 echo "  [OK] git working tree is clean"
 
-# 2. Signing environment: required to produce a release-quality archive.
-#    build-release.sh silently substitutes empty strings if these are missing,
-#    which surfaces far later as cryptic xcodebuild / notarytool errors. Fail fast.
-MISSING_ENV=()
-if [[ -z "${TEAM_ID:-}" ]]; then MISSING_ENV+=("TEAM_ID"); fi
-if [[ "${SKIP_NOTARIZE:-}" != "1" && -z "${APPLE_ID:-}" ]]; then MISSING_ENV+=("APPLE_ID"); fi
-if [[ "${SKIP_NOTARIZE:-}" != "1" && -z "${APP_SPECIFIC_PASSWORD:-}" ]]; then MISSING_ENV+=("APP_SPECIFIC_PASSWORD"); fi
-if [[ ${#MISSING_ENV[@]} -gt 0 ]]; then
-    echo "ERROR: Required signing env vars not set: ${MISSING_ENV[*]}"
-    echo "  Set them in your shell profile or a .env.local (gitignored), then re-run."
-    echo "  TEAM_ID                Apple Developer team ID (10-char alphanumeric)"
-    echo "  APPLE_ID               Apple ID used for notarization"
-    echo "  APP_SPECIFIC_PASSWORD  App-specific password for notarytool"
-    echo "  (APPLE_ID / APP_SPECIFIC_PASSWORD may be omitted when SKIP_NOTARIZE=1.)"
-    exit 1
+# 2. Signing environment.
+#    With SKIP_NOTARIZE=1 (the default for users without an Apple Developer
+#    account), we self-sign with the local "MeetingManager-Dev" cert and skip
+#    the notarytool step entirely — TEAM_ID / APPLE_ID / APP_SPECIFIC_PASSWORD
+#    are unused, so we don't enforce them.
+if [[ "${NOTARIZE:-}" == "1" ]]; then
+    MISSING_ENV=()
+    if [[ -z "${TEAM_ID:-}" ]]; then MISSING_ENV+=("TEAM_ID"); fi
+    if [[ -z "${APPLE_ID:-}" ]]; then MISSING_ENV+=("APPLE_ID"); fi
+    if [[ -z "${APP_SPECIFIC_PASSWORD:-}" ]]; then MISSING_ENV+=("APP_SPECIFIC_PASSWORD"); fi
+    if [[ ${#MISSING_ENV[@]} -gt 0 ]]; then
+        echo "ERROR: NOTARIZE=1 set but signing env vars missing: ${MISSING_ENV[*]}"
+        echo "  Set them in your shell profile or a .env.local (gitignored), then re-run."
+        echo "  TEAM_ID                Apple Developer team ID (10-char alphanumeric)"
+        echo "  APPLE_ID               Apple ID used for notarization"
+        echo "  APP_SPECIFIC_PASSWORD  App-specific password for notarytool"
+        echo "  (Or unset NOTARIZE to ship without notarization.)"
+        exit 1
+    fi
+    echo "  [OK] notarization env vars present"
+else
+    echo "  [OK] skipping notarization (no Apple Developer account configured)"
 fi
-echo "  [OK] signing env vars present"
 
 # 3. Current version
 ORIGINAL_VERSION="$(plutil -extract CFBundleShortVersionString raw "${PLIST}")"
 echo "  [OK] Current version: ${ORIGINAL_VERSION} → new version: ${VERSION}"
 
-# 4. Notarization guard: enforce NOTARIZE=1 unless explicitly overriding
-if [[ "${DRY_RUN}" == "0" && "${NOTARIZE}" != "1" && "${SKIP_NOTARIZE}" != "1" ]]; then
-    echo ""
-    echo "ERROR: Notarization is required for public releases."
-    echo "  Un-notarized apps are blocked by Gatekeeper on macOS 15+ for most users."
-    echo "  Options:"
-    echo "    NOTARIZE=1 $0 ${VERSION}          # full notarization (recommended)"
-    echo "    SKIP_NOTARIZE=1 $0 ${VERSION}     # skip (internal testing only)"
-    exit 1
-fi
-if [[ "${SKIP_NOTARIZE}" == "1" && "${NOTARIZE}" != "1" ]]; then
-    echo ""
-    echo "  WARN: Shipping WITHOUT notarization (SKIP_NOTARIZE=1)."
-    echo "  Users on macOS 15+ will see Gatekeeper warnings. Use for internal testing only."
+# 4. Notarization is opt-in (NOTARIZE=1). Without it, the DMG is self-signed
+#    and users will need to right-click → Open the first time to bypass
+#    Gatekeeper's "unidentified developer" warning. That's the trade-off for
+#    not having an Apple Developer account.
+if [[ "${NOTARIZE}" != "1" ]]; then
+    echo "  NOTE: shipping without notarization. Users will see a Gatekeeper warning"
+    echo "        on first launch and need to right-click → Open to bypass."
 fi
 
 echo ""
@@ -186,7 +185,17 @@ fi
 # ──────────────────────────────────────────────────
 # Step 4: Sign
 # ──────────────────────────────────────────────────
-SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application}"
+# Pick a sane signing identity by default:
+#   - Notarized release  → real "Developer ID Application" cert (required)
+#   - Local / self-served release → "MeetingManager-Dev" self-signed cert
+#     (same one install-local.sh uses; matches what's in the user's keychain)
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+    if [[ "${NOTARIZE}" == "1" ]]; then
+        SIGN_IDENTITY="Developer ID Application"
+    else
+        SIGN_IDENTITY="MeetingManager-Dev"
+    fi
+fi
 ENTITLEMENTS="${REPO_DIR}/MeetingManager/Resources/MeetingManager.entitlements"
 echo "Signing with '${SIGN_IDENTITY}'..."
 
