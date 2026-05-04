@@ -141,6 +141,26 @@ struct GeneralSettingsView: View {
                 Logger.ui.info("Notification lead time changed to \(newValue) minutes")
             }
 
+            Button("Test Reminder HUD") {
+                let meeting = appState.upcomingMeetings.first ?? Meeting(
+                    id: "test-hud",
+                    title: "Test Meeting (HUD preview)",
+                    scheduledStartDate: Date().addingTimeInterval(60),
+                    scheduledEndDate: Date().addingTimeInterval(30 * 60),
+                    status: .scheduled,
+                    meetLink: "https://meet.google.com/test-hud"
+                )
+                NotificationCenter.default.post(
+                    name: .meetingHUDShow,
+                    object: nil,
+                    userInfo: ["meetingId": meeting.id]
+                )
+                // Stash the synthetic meeting on AppState so AppDelegate's lookup hits.
+                if !appState.upcomingMeetings.contains(where: { $0.id == meeting.id }) {
+                    appState.upcomingMeetings.append(meeting)
+                }
+            }
+
             Toggle("Morning Brief Notification", isOn: $morningBriefEnabled)
                 .onChange(of: morningBriefEnabled) { _, enabled in
                     persistSetting { $0.morningBriefEnabled = enabled }

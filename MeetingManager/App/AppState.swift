@@ -104,12 +104,10 @@ final class AppState {
         didSet {
             guard settings != oldValue else { return }
             persistSettings()
-            if settings.notificationLeadTimeMinutes != oldValue.notificationLeadTimeMinutes {
-                notificationService.rescheduleAll(
-                    meetings: upcomingMeetings,
-                    leadTimeMinutes: settings.notificationLeadTimeMinutes
-                )
-            }
+            // System banner notifications are intentionally disabled — the
+            // in-app HUD (MeetingReminderWindowController) is the only
+            // pre-meeting alert. Lead-time changes still affect the proximity
+            // warning posted to the menu bar via .meetingStartingSoon.
             if settings.calendarSyncIntervalMinutes != oldValue.calendarSyncIntervalMinutes {
                 let intervalSeconds = TimeInterval(max(1, settings.calendarSyncIntervalMinutes) * 60)
                 Task {
@@ -377,8 +375,10 @@ final class AppState {
                     self.pastMeetings = past
                     self.meetings = upcoming + past
                 }
-                let leadTime = await MainActor.run { self.settings.notificationLeadTimeMinutes }
-                self.notificationService.rescheduleAll(meetings: upcoming, leadTimeMinutes: leadTime)
+                // System banner notifications are disabled in favour of the
+                // in-app HUD. Clear any reminders scheduled by older builds
+                // so they don't fire alongside it.
+                await self.notificationService.cancelAllMeetingNotifications()
             } catch {
                 if !Task.isCancelled {
                     Logger.database.error("Failed to load meetings: \(error.localizedDescription, privacy: .public)")
@@ -2666,6 +2666,21 @@ final class AppState {
         hudShownMeetingIds  = hudShownMeetingIds.intersection(currentIds)
         autoJoinedMeetingIds = autoJoinedMeetingIds.intersection(currentIds)
 
+        // Diagnostic: log the closest upcoming meeting on every poll so we can
+        // see why the HUD isn't firing in real-world use.
+        let nearest = upcomingMeetings
+            .compactMap { m -> (Meeting, TimeInterval)? in
+                guard let s = m.scheduledStartDate else { return nil }
+                let dt = s.timeIntervalSince(now)
+                return dt > -300 ? (m, dt) : nil
+            }
+            .min(by: { $0.1 < $1.1 })
+        if let (m, dt) = nearest {
+            fileLog("Proximity poll: nearest='\(m.title)' in \(Int(dt))s status=\(m.status.rawValue) hudShown=\(hudShownMeetingIds.contains(m.id)) link=\(m.meetLink?.isEmpty == false)")
+        } else {
+            fileLog("Proximity poll: no upcoming meetings within window (\(upcomingMeetings.count) loaded)")
+        }
+
         for meeting in upcomingMeetings {
             guard let startDate = meeting.scheduledStartDate else { continue }
             let timeUntilStart = startDate.timeIntervalSince(now)
@@ -2683,11 +2698,11 @@ final class AppState {
             }
 
             // HUD panel: always show at ~1 minute before, independent of the
-            // lead-time notification setting. Window is 90s to guarantee the
-            // 30s poll catches it even if the timer drifts slightly.
-            // Accepts .notified status too — a call app launch can advance the meeting
-            // to .notified well before the 90s window, which would silently skip it.
-            if timeUntilStart > 0, timeUntilStart <= 90,
+            // lead-time notification setting. Window is 120s so the 30s poll
+            // reliably catches it even if a tick lands at the boundary or the
+            // timer drifts. Accepts .notified status too — a call app launch
+            // can advance the meeting to .notified before the window opens.
+            if timeUntilStart > 0, timeUntilStart <= 120,
                meeting.status == .scheduled || meeting.status == .notified,
                hudShownMeetingIds.insert(meeting.id).inserted {
                 NotificationCenter.default.post(
@@ -2695,7 +2710,7 @@ final class AppState {
                     object: nil,
                     userInfo: ["meetingId": meeting.id]
                 )
-                Logger.general.debug("HUD: showing pre-meeting card for '\(meeting.title)'")
+                fileLog("HUD: posted .meetingHUDShow for '\(meeting.title)' (in \(Int(timeUntilStart))s)")
             }
 
             // Auto-join at lead time: if user has autoRecord on and the meeting

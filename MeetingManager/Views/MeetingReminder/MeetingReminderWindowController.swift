@@ -41,13 +41,13 @@ final class MeetingReminderWindowController: NSWindowController {
         let width  = max(460, size.width)
         let height = max(72,  size.height)
 
-        // Position: bottom-right of the main screen, just above the Dock
+        // Position: top-right of the main screen, just below the menu bar
         let margin: CGFloat = 16
         if let screen = NSScreen.main {
             let visible = screen.visibleFrame
             panel.setFrame(NSRect(
                 x: visible.maxX - width - margin,
-                y: visible.minY + margin,
+                y: visible.maxY - height - margin,
                 width: width,
                 height: height
             ), display: false)

@@ -53,7 +53,12 @@ final class MeetingRepository {
     }
 
     func upcomingMeetings() async throws -> [Meeting] {
-        try await database.writer.read { db in
+        // Cut-off: 4 hours in the past. Anything older than that with a
+        // .scheduled status is stale (calendar event we never cleaned up,
+        // recording that crashed, etc.) and was previously hogging the
+        // 100-row cap so genuinely-upcoming meetings never loaded.
+        let cutoff = Date().addingTimeInterval(-4 * 3600)
+        return try await database.writer.read { db in
             try Meeting
                 .filter(
                     Meeting.Columns.status == MeetingStatus.scheduled.rawValue
@@ -62,6 +67,7 @@ final class MeetingRepository {
                     || Meeting.Columns.status == MeetingStatus.transcribing.rawValue
                     || Meeting.Columns.status == MeetingStatus.summarizing.rawValue
                 )
+                .filter(Meeting.Columns.scheduledStartDate >= cutoff)
                 .order(Meeting.Columns.scheduledStartDate.asc)
                 .limit(100)
                 .fetchAll(db)

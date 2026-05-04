@@ -262,6 +262,18 @@ final class NotificationService: NSObject {
 
     // MARK: - Cancel
 
+    /// Cancel every pending meeting reminder (and snooze) currently scheduled
+    /// with the system. Used when the user has opted out of system-banner
+    /// reminders in favour of the in-app HUD.
+    func cancelAllMeetingNotifications() async {
+        let pending = await pendingMeetingNotifications()
+        let ids = pending.keys.filter { $0.hasPrefix("meeting-") }
+        if !ids.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: Array(ids))
+            Logger.notifications.info("[NotificationService] cancelled \(ids.count) pending meeting notification(s)")
+        }
+    }
+
     /// Cancel a pending notification for a specific meeting.
     func cancelNotification(meetingId: String) {
         let identifiers = [
