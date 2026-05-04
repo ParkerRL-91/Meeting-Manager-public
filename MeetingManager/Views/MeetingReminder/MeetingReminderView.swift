@@ -1,8 +1,18 @@
 import SwiftUI
 import AppKit
 
+enum MeetingReminderMode {
+    /// Pre-meeting "starts in 1 min" reminder. Auto-dismisses, fires
+    /// `.startRecording`, accent red.
+    case upcoming
+    /// "You're in another meeting — switch to this one?" Persistent until
+    /// acted on, fires `.switchToMeeting`, accent orange.
+    case `switch`
+}
+
 struct MeetingReminderView: View {
     let meeting: Meeting
+    var mode: MeetingReminderMode = .upcoming
     let onDismiss: () -> Void
 
     private var timeString: String {
@@ -24,9 +34,10 @@ struct MeetingReminderView: View {
     var body: some View {
         HStack(spacing: 0) {
 
-            // Red left accent bar
+            // Left accent bar — red for an upcoming reminder, orange for
+            // a switch offer (so users can tell at a glance).
             Rectangle()
-                .fill(Color.red)
+                .fill(mode == .switch ? Color.orange : Color.red)
                 .frame(width: 4)
                 .clipShape(
                     UnevenRoundedRectangle(
@@ -37,6 +48,13 @@ struct MeetingReminderView: View {
 
             // Meeting info
             VStack(alignment: .leading, spacing: 3) {
+                if mode == .switch {
+                    Text("Switch to next meeting")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                }
                 Text(meeting.title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
@@ -52,17 +70,23 @@ struct MeetingReminderView: View {
             // Action button block
             HStack(spacing: 0) {
                 if let link = meeting.meetLink, !link.isEmpty {
-                    // Primary: Join Meeting + open app
-                    Button(action: { joinAndStart(link: link) }) {
+                    // Primary action — varies by mode.
+                    Button(action: {
+                        if mode == .switch {
+                            switchAndRecord()
+                        } else {
+                            joinAndStart(link: link)
+                        }
+                    }) {
                         HStack(spacing: 8) {
                             PlatformIcon(platform: platform)
                                 .frame(width: 22, height: 22)
 
                             VStack(alignment: .leading, spacing: 1) {
-                                Text("Join Meeting")
+                                Text(mode == .switch ? "Switch & Record" : "Join Meeting")
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundStyle(.white)
-                                Text("& open Meeting Manager")
+                                Text(mode == .switch ? "stop current, start this one" : "& open Meeting Manager")
                                     .font(.system(size: 10))
                                     .foregroundStyle(.white.opacity(0.65))
                             }
@@ -188,6 +212,16 @@ struct MeetingReminderView: View {
         NSApplication.shared.activate(ignoringOtherApps: true)
         NotificationCenter.default.post(
             name: .startRecording,
+            object: nil,
+            userInfo: ["meetingId": meeting.id]
+        )
+        onDismiss()
+    }
+
+    /// Switch-mode primary action — AppState handles the stop+start sequence.
+    private func switchAndRecord() {
+        NotificationCenter.default.post(
+            name: .switchToMeeting,
             object: nil,
             userInfo: ["meetingId": meeting.id]
         )

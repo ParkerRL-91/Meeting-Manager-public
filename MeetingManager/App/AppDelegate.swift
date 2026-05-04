@@ -20,6 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Floating pre-meeting HUD panel.
     private var reminderWindowController: MeetingReminderWindowController?
 
+    /// Floating "switch meetings" panel — separate from the reminder so the
+    /// two can coexist (rare, but possible if a 3rd meeting is on deck).
+    private var switchWindowController: MeetingReminderWindowController?
+
     /// Timer that polls model download progress to update the menu bar.
     private var modelProgressTimer: Timer?
 
@@ -271,6 +275,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         })
 
+        // Switch-meetings banner: persistent, shown when a new meeting is
+        // about to start while another is being recorded.
+        statusObservers.append(nc.addObserver(
+            forName: .meetingSwitchShow, object: nil, queue: .main
+        ) { [weak self] notification in
+            let meetingId = notification.userInfo?["meetingId"] as? String
+            MainActor.assumeIsolated {
+                guard let self,
+                      let meetingId,
+                      let meeting = AppState.shared?.upcomingMeetings.first(where: { $0.id == meetingId })
+                else { return }
+                if self.switchWindowController == nil {
+                    self.switchWindowController = MeetingReminderWindowController()
+                }
+                self.switchWindowController?.show(meeting: meeting, mode: .switch)
+            }
+        })
+
+        statusObservers.append(nc.addObserver(
+            forName: .meetingSwitchDismiss, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.switchWindowController?.dismiss()
+            }
+        })
+
         // Start recording
         statusObservers.append(nc.addObserver(
             forName: .startRecording, object: nil, queue: .main
@@ -500,6 +530,15 @@ extension Notification.Name {
     static let focusSearch = Notification.Name("focusSearch")
     static let meetingStartingSoon = Notification.Name("meetingStartingSoon")
     static let meetingHUDShow = Notification.Name("meetingHUDShow")
+    /// Posted when a different meeting is starting while one is already being
+    /// recorded — drives the persistent "Switch meetings" banner.
+    static let meetingSwitchShow = Notification.Name("meetingSwitchShow")
+    /// Posted when the switch offer should be dismissed (user acted, meeting
+    /// passed, recording stopped, etc.).
+    static let meetingSwitchDismiss = Notification.Name("meetingSwitchDismiss")
+    /// Posted by the switch banner when the user clicks "Switch & Record".
+    /// AppState handles the stop+start sequencing.
+    static let switchToMeeting = Notification.Name("switchToMeeting")
     static let openUpdateSettings = Notification.Name("openUpdateSettings")
     static let calendarBackfillCompleted = Notification.Name("calendarBackfillCompleted")
     /// Posted whenever the user changes which calendar source the app should

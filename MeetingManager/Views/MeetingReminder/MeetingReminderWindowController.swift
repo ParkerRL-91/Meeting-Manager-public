@@ -26,10 +26,19 @@ final class MeetingReminderWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(meeting: Meeting) {
+    func show(meeting: Meeting, mode: MeetingReminderMode = .upcoming) {
         guard let panel = window else { return }
 
-        let view = MeetingReminderView(meeting: meeting) { [weak self] in
+        let view = MeetingReminderView(meeting: meeting, mode: mode) { [weak self] in
+            // Switch-mode dismiss is treated as "user explicitly dismissed
+            // this offer" so AppState won't re-show it for the same meeting.
+            if mode == .switch {
+                NotificationCenter.default.post(
+                    name: .meetingSwitchDismiss,
+                    object: nil,
+                    userInfo: ["dismissedByUser": meeting.id]
+                )
+            }
             self?.dismiss()
         }
         let hosting = NSHostingView(rootView: view)
@@ -56,8 +65,12 @@ final class MeetingReminderWindowController: NSWindowController {
         panel.orderFront(nil)
 
         autoDismissTimer?.invalidate()
-        autoDismissTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.dismiss() }
+        // Upcoming reminders auto-dismiss after 30s; switch offers persist
+        // until the user acts on them or AppState clears the offer.
+        if mode == .upcoming {
+            autoDismissTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.dismiss() }
+            }
         }
     }
 

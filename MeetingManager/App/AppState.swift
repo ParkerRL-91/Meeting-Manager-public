@@ -172,6 +172,15 @@ final class AppState {
     /// Prevents posting 4+ duplicates across timer ticks for the same meeting.
     private var notifiedMeetingIds: Set<String> = []
 
+    /// The id of an upcoming meeting we've offered to switch to while
+    /// recording a different one. Drives the persistent "Switch meetings"
+    /// banner. nil when no offer is currently outstanding.
+    var pendingSwitchMeetingId: String?
+
+    /// Switch offers the user explicitly dismissed — don't re-show for the
+    /// same meeting until it drops out of the upcoming set.
+    private var dismissedSwitchMeetingIds: Set<String> = []
+
     /// Tracks meetings for which the 1-minute HUD panel has already been shown.
     /// Separate from notifiedMeetingIds so the HUD always fires at t-1min regardless
     /// of the user's lead-time notification setting.
@@ -1149,6 +1158,35 @@ final class AppState {
         } else {
             startRecording(for: meeting)
         }
+    }
+
+    /// Stop the current recording and start a new one for `meeting`.
+    /// Drives the "Switch meetings" banner — opens the new meet link and
+    /// kicks off recording in one user-visible step. Idempotent: if no
+    /// recording is active, just starts the new one.
+    func switchActiveMeeting(to meeting: Meeting) async {
+        fileLog("Switch: switching active meeting to '\(meeting.title)' (was '\(activeMeeting?.title ?? "none")')")
+
+        // Clear pending state up front so the banner dismisses immediately.
+        pendingSwitchMeetingId = nil
+        NotificationCenter.default.post(name: .meetingSwitchDismiss, object: nil)
+
+        if isRecording {
+            stopRecording()
+            // Wait for the state machine to actually flip isRecording=false
+            // before starting the new one. stopRecording is fire-and-forget
+            // (an internal Task), so poll briefly. 3s upper bound — if it
+            // hasn't flipped by then something else is wrong.
+            let deadline = Date().addingTimeInterval(3)
+            while isRecording && Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+
+        if let link = meeting.meetLink, !link.isEmpty, let url = URL(string: link) {
+            NSWorkspace.shared.open(url)
+        }
+        startRecording(for: meeting)
     }
 
     /// Stop recording — then run batch transcription on the complete audio file.
@@ -2665,6 +2703,24 @@ final class AppState {
         notifiedMeetingIds = notifiedMeetingIds.intersection(currentIds)
         hudShownMeetingIds  = hudShownMeetingIds.intersection(currentIds)
         autoJoinedMeetingIds = autoJoinedMeetingIds.intersection(currentIds)
+        dismissedSwitchMeetingIds = dismissedSwitchMeetingIds.intersection(currentIds)
+
+        // Clear an outstanding switch offer if it no longer applies.
+        if let pendingId = pendingSwitchMeetingId {
+            let stillValid: Bool = {
+                guard isRecording, activeMeeting?.id != pendingId else { return false }
+                guard let m = upcomingMeetings.first(where: { $0.id == pendingId }),
+                      let start = m.scheduledStartDate else { return false }
+                let dt = start.timeIntervalSince(now)
+                return dt > -300 && dt <= 75
+                    && (m.status == .scheduled || m.status == .notified)
+                    && (m.meetLink?.isEmpty == false)
+            }()
+            if !stillValid {
+                pendingSwitchMeetingId = nil
+                NotificationCenter.default.post(name: .meetingSwitchDismiss, object: nil)
+            }
+        }
 
         // Diagnostic: log the closest upcoming meeting on every poll so we can
         // see why the HUD isn't firing in real-world use.
@@ -2737,21 +2793,23 @@ final class AppState {
                 }
                 startRecording(for: meeting)
             } else if settings.autoRecord,
-                      timeUntilStart > 0 && timeUntilStart <= 75,
+                      timeUntilStart > -300 && timeUntilStart <= 75,
                       (meeting.status == .scheduled || meeting.status == .notified),
-                      !autoJoinedMeetingIds.contains(meeting.id) {
-                // autoRecord on, in window, but not joined — diagnose why.
-                let reason: String
-                if meeting.meetLink?.isEmpty != false {
-                    reason = "no meetLink on meeting"
-                } else if isRecording {
-                    reason = "already recording"
-                } else if isStartingMeeting {
-                    reason = "another start in progress"
-                } else {
-                    reason = "unknown"
-                }
-                Logger.notifications.debug("[autoJoin] skipped '\(meeting.title, privacy: .public)' timeUntilStart=\(Int(timeUntilStart))s reason=\(reason, privacy: .public)")
+                      meeting.meetLink?.isEmpty == false,
+                      isRecording,
+                      activeMeeting?.id != meeting.id,
+                      !dismissedSwitchMeetingIds.contains(meeting.id),
+                      pendingSwitchMeetingId != meeting.id {
+                // Already recording a different meeting; offer to switch
+                // instead of silently skipping. The banner persists until
+                // the user acts on it (handled by AppDelegate observer).
+                pendingSwitchMeetingId = meeting.id
+                fileLog("Switch: offering switch from '\(activeMeeting?.title ?? "?")' to '\(meeting.title)' (in \(Int(timeUntilStart))s)")
+                NotificationCenter.default.post(
+                    name: .meetingSwitchShow,
+                    object: nil,
+                    userInfo: ["meetingId": meeting.id]
+                )
             }
 
             // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
@@ -2778,6 +2836,31 @@ final class AppState {
                 Task { @MainActor in
                     self?.startNewMeeting()
                 }
+            }
+            .store(in: &cancellables)
+
+        // Switch banner action: stop the current recording and start the new
+        // meeting (opens its meet link too if present).
+        NotificationCenter.default.publisher(for: .switchToMeeting)
+            .sink { [weak self] notification in
+                guard let self,
+                      let meetingId = notification.userInfo?["meetingId"] as? String,
+                      let meeting = self.upcomingMeetings.first(where: { $0.id == meetingId })
+                else { return }
+                Task { @MainActor in
+                    await self.switchActiveMeeting(to: meeting)
+                }
+            }
+            .store(in: &cancellables)
+
+        // User dismissed the switch banner — remember it so we don't re-offer.
+        NotificationCenter.default.publisher(for: .meetingSwitchDismiss)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                if let id = notification.userInfo?["dismissedByUser"] as? String {
+                    self.dismissedSwitchMeetingIds.insert(id)
+                }
+                self.pendingSwitchMeetingId = nil
             }
             .store(in: &cancellables)
 
