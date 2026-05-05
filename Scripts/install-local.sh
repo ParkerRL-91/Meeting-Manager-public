@@ -58,12 +58,38 @@ codesign --force --deep --sign "${SIGN_IDENTITY}" \
     --entitlements "${ENTITLEMENTS}" \
     "${APP_BUNDLE}"
 
-# ── Kill running instance ──────────────────────────────────────────────────
-pkill -x "${EXECUTABLE}" 2>/dev/null || true
-sleep 1
+# ── Stop running instance ──────────────────────────────────────────────────
+# Two-step kill: graceful AppleScript quit first (lets the app flush state
+# and exit cleanly), then pkill -9 as a fallback. The previous single-pkill
+# version relied on SIGTERM, which a SwiftUI app's default signal handler
+# can ignore — leaving the old process alive while the binary swap below
+# happened underneath. Visible symptom: install reports success, the
+# version string on disk matches the latest commit, but the running process
+# is still pre-change because the loaded binary's file descriptor was
+# never released.
+echo "Stopping any running instance..."
+if pgrep -x "${EXECUTABLE}" >/dev/null 2>&1; then
+    osascript -e "tell application \"${APP_NAME}\" to quit" 2>/dev/null || true
+    # Poll up to 5s for graceful shutdown
+    for _ in 1 2 3 4 5; do
+        sleep 1
+        pgrep -x "${EXECUTABLE}" >/dev/null 2>&1 || break
+    done
+    # Force-kill anything still alive
+    if pgrep -x "${EXECUTABLE}" >/dev/null 2>&1; then
+        echo "  graceful quit didn't take — sending SIGKILL"
+        pkill -9 -x "${EXECUTABLE}" 2>/dev/null || true
+        sleep 1
+    fi
+fi
 
 # ── Install ────────────────────────────────────────────────────────────────
 echo "Installing to ${APP_DEST}..."
+# `ditto` overwrites files with the same name in-place. We don't `rm -rf`
+# the destination because the signed bundle in /Applications carries
+# extended attributes that block plain `rm` without elevation. The bundle
+# layout is consistent build-to-build, so a merge-overwrite is safe in
+# practice — no stale files have ever been observed from this path.
 ditto "${APP_BUNDLE}" "${APP_DEST}"
 
 VERSION=$(defaults read "${APP_DEST}/Contents/Info.plist" CFBundleShortVersionString)
@@ -73,4 +99,7 @@ echo "NOTE: TCC grants are preserved — no permission reset needed."
 echo "      If a permission prompt appears, grant it once and it will stick."
 echo ""
 
-open "${APP_DEST}"
+# ── Relaunch ───────────────────────────────────────────────────────────────
+# `-n` forces a new process even if macOS thinks the app is still around.
+# `-F` clears saved state so the relaunch is fully fresh.
+open -n -F "${APP_DEST}"
