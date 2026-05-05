@@ -98,16 +98,7 @@ struct MeetingDetailView: View {
                     modelInfo: summaryModelInfo
                 )
 
-                switch selectedTab {
-                case .summary:
-                    SummaryView(meetingId: meetingId)
-                case .transcript:
-                    FullTranscriptView(meetingId: meetingId)
-                case .notes:
-                    NotesReviewView(meetingId: meetingId)
-                case .speakers:
-                    SpeakerAssignmentView(meetingId: meetingId)
-                }
+                tabContent
             } else {
                 Spacer()
                 ProgressView("Loading meeting...")
@@ -300,8 +291,55 @@ struct MeetingDetailView: View {
         }
     }
 
+    /// Tab body extracted out of the main `body` to keep the SwiftUI type
+    /// checker under its complexity budget — see the comment on
+    /// `loadInitialContext` for why long inline switches in `body` time out.
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .summary:
+            SummaryView(meetingId: meetingId)
+        case .transcript:
+            FullTranscriptView(meetingId: meetingId)
+        case .notes:
+            // Pre-recording meetings get an editable, autosaving notepad so
+            // users can drop in agenda items / context before they hit
+            // Record. Once recording starts, the same `MeetingNote` row
+            // carries forward into LiveMeetingView's NotepadPane (both
+            // load via `noteRepository.latestNote(meetingId:)`). Post-
+            // recording meetings stay read-only via NotesReviewView.
+            if isPreRecording {
+                NotepadPaneView(meetingId: meetingId)
+            } else {
+                NotesReviewView(meetingId: meetingId)
+            }
+        case .speakers:
+            SpeakerAssignmentView(meetingId: meetingId)
+        }
+    }
+
+    /// True when this meeting hasn't been recorded yet — `.scheduled` or
+    /// `.notified`. Drives two behaviors:
+    ///   1. The Notes tab renders the editable `NotepadPaneView` instead
+    ///      of the read-only `NotesReviewView`, with autosave on every
+    ///      keystroke and a final save on disappear.
+    ///   2. The default selected tab is `.notes` rather than `.summary`,
+    ///      since pre-recording the summary/transcript/speakers tabs are
+    ///      empty and the most useful action is jotting agenda items.
+    private var isPreRecording: Bool {
+        guard let status = meeting?.status else { return false }
+        return status == .scheduled || status == .notified
+    }
+
     private func loadInitialContext() async {
         meeting = try? await appState.meetingRepository.find(id: meetingId)
+        // Land users on the Notes tab for pre-recording meetings — the
+        // summary/transcript/speakers tabs are all empty until after the
+        // meeting runs, but Notes is immediately useful for capturing
+        // agenda + context.
+        if let status = meeting?.status, status == .scheduled || status == .notified {
+            selectedTab = .notes
+        }
 
         // Queue context enrichment when:
         //   1. There's no cache yet, OR
