@@ -201,15 +201,50 @@ final class TaskQueueManager {
 
     private func enqueueOrphanedMeetings() async {
         do {
-            let needTranscription: [Meeting] = try await database.writer.read { db in
+            // Pull candidate meetings: completed/transcribing AND have an
+            // audio reference somewhere AND don't have any transcript rows.
+            // Note: we check BOTH `audioFilePath` (legacy single-path column,
+            // still populated for old meetings) and `audioFilePaths` (current
+            // JSON-array column). Without the second check, the orphan scan
+            // misses meetings recorded after the v6-ish schema change.
+            let candidates: [Meeting] = try await database.writer.read { db in
                 try Meeting.fetchAll(db, sql: """
                     SELECT m.* FROM meeting m
-                    WHERE m.audioFilePath IS NOT NULL
-                      AND m.audioFilePath != ''
+                    WHERE (
+                            (m.audioFilePath IS NOT NULL AND m.audioFilePath != '')
+                            OR (m.audioFilePaths IS NOT NULL
+                                AND m.audioFilePaths != ''
+                                AND m.audioFilePaths != '[]')
+                          )
                       AND m.status IN ('transcribing', 'complete')
                       AND NOT EXISTS (SELECT 1 FROM transcript t WHERE t.meetingId = m.id)
-                    LIMIT 20
+                    LIMIT 50
                 """)
+            }
+
+            // Filter out:
+            //   1. Meetings whose audio files no longer exist on disk —
+            //      otherwise we re-enqueue forever (transcription completes
+            //      with zero rows, orphan scan re-fires on next launch). The
+            //      proper fix is to also clear the missing path so the row
+            //      stops matching the candidate query.
+            //   2. Meetings that already have a recent transcription task —
+            //      whether running, pending, completed, or failed-with-max-
+            //      retries. The `enqueue` call itself dedups pending+running,
+            //      but it does NOT dedup against `completed` or `failed`,
+            //      which is exactly what causes the user-visible "the same
+            //      tasks every launch" loop.
+            var needTranscription: [Meeting] = []
+            for meeting in candidates {
+                if !meetingHasReachableAudio(meeting) {
+                    Logger.general.info("TaskQueue: clearing audio paths for \(meeting.id, privacy: .public) (\(meeting.title, privacy: .public)) — files missing on disk")
+                    try? await clearMissingAudioPaths(for: meeting)
+                    continue
+                }
+                if try await meetingHasRecentTranscriptionAttempt(meeting) {
+                    continue
+                }
+                needTranscription.append(meeting)
             }
 
             for meeting in needTranscription {
@@ -236,6 +271,54 @@ final class TaskQueueManager {
             }
         } catch {
             Logger.general.error("TaskQueue: enqueueOrphanedMeetings failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Orphan-scan helpers
+
+    /// True when at least one of the meeting's audio file references points
+    /// at an actual file on disk. Otherwise the orphan scan would re-enqueue
+    /// transcription forever for meetings whose audio was deleted.
+    private func meetingHasReachableAudio(_ meeting: Meeting) -> Bool {
+        let fm = FileManager.default
+        for path in meeting.audioFilePaths where !path.isEmpty {
+            if fm.fileExists(atPath: path) { return true }
+        }
+        // Legacy single-path column — last-resort check.
+        // (Meeting.audioFilePath is computed from audioFilePaths.first; this
+        // path covers rows where only the legacy column was populated and
+        // never migrated into the JSON array.)
+        return false
+    }
+
+    /// True when this meeting has had a transcription task attempted
+    /// recently — pending, running, completed, OR failed-with-max-retries.
+    /// Without this gate, every app launch re-enqueues a fresh task for
+    /// meetings whose previous transcription completed with no transcript
+    /// rows (e.g. the audio file existed but produced no segments). That's
+    /// the loop the user-facing "same set of meetings transcribing every
+    /// update" complaint comes from.
+    private func meetingHasRecentTranscriptionAttempt(_ meeting: Meeting) async throws -> Bool {
+        try await database.writer.read { db in
+            let count = try TaskQueueItem
+                .filter(TaskQueueItem.Columns.meetingId == meeting.id)
+                .filter(TaskQueueItem.Columns.type == TaskQueueItem.TaskType.transcription.rawValue)
+                .fetchCount(db)
+            return count > 0
+        }
+    }
+
+    /// Clear stale audio path references on a meeting whose files are gone.
+    /// Empties both the legacy single-path column and the JSON array so the
+    /// orphan scan stops matching this row. Doesn't change meeting status —
+    /// the row stays as `.complete` so it still appears in history; it just
+    /// no longer claims to have audio.
+    private func clearMissingAudioPaths(for meeting: Meeting) async throws {
+        try await database.writer.write { db in
+            try db.execute(
+                sql: "UPDATE meeting SET audioFilePath = NULL, audioFilePaths = '[]' WHERE id = ?",
+                arguments: [meeting.id]
+            )
         }
     }
 

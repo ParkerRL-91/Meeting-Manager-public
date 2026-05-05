@@ -80,12 +80,14 @@ struct MeetingDetailView: View {
                     }
                 )
 
-                RelatedMeetingsSection(
-                    contextJSON: meeting.contextJSON,
-                    onSelectMeeting: { relatedId in
-                        appState.selectedMeetingId = relatedId
-                    }
-                )
+                if !hideTopBriefForNotes {
+                    RelatedMeetingsSection(
+                        contextJSON: meeting.contextJSON,
+                        onSelectMeeting: { relatedId in
+                            appState.selectedMeetingId = relatedId
+                        }
+                    )
+                }
 
                 // P5-T02: Previous sessions in the same meeting series.
                 if !previousSessions.isEmpty {
@@ -304,18 +306,52 @@ struct MeetingDetailView: View {
         case .notes:
             // Pre-recording meetings get an editable, autosaving notepad so
             // users can drop in agenda items / context before they hit
-            // Record. Once recording starts, the same `MeetingNote` row
-            // carries forward into LiveMeetingView's NotepadPane (both
-            // load via `noteRepository.latestNote(meetingId:)`). Post-
-            // recording meetings stay read-only via NotesReviewView.
+            // Record. The brief lives ABOVE the editor in the same tab area,
+            // mirroring LiveMeetingView's top/bottom split — keeps the
+            // pre-meeting context visible alongside the editable notes
+            // instead of letting the notepad fill the whole tab.
+            // Once recording starts, the same `MeetingNote` row carries
+            // forward into LiveMeetingView's NotepadPane (both load via
+            // `noteRepository.latestNote(meetingId:)`).
+            // Post-recording meetings stay read-only via NotesReviewView.
             if isPreRecording {
-                NotepadPaneView(meetingId: meetingId)
+                preRecordingNotesLayout
             } else {
                 NotesReviewView(meetingId: meetingId)
             }
         case .speakers:
             SpeakerAssignmentView(meetingId: meetingId)
         }
+    }
+
+    /// Notes-tab body for pre-recording meetings. Brief on top (bounded so it
+    /// doesn't dominate), notepad fills the rest. Mirrors LiveMeetingView's
+    /// vertical split. The `RelatedMeetingsSection` rendered above the tabs
+    /// is hidden in this case via `hideTopBriefForNotes` to avoid a duplicate.
+    @ViewBuilder
+    private var preRecordingNotesLayout: some View {
+        VStack(spacing: 0) {
+            if let m = meeting {
+                ScrollView {
+                    RelatedMeetingsSection(
+                        contextJSON: m.contextJSON,
+                        onSelectMeeting: { relatedId in
+                            appState.selectedMeetingId = relatedId
+                        }
+                    )
+                }
+                .frame(minHeight: 80, idealHeight: 200, maxHeight: 280)
+            }
+            NotepadPaneView(meetingId: meetingId)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// When the Notes tab is rendering its own copy of the brief
+    /// (pre-recording), suppress the standalone brief above the tabs to
+    /// avoid showing it twice.
+    private var hideTopBriefForNotes: Bool {
+        isPreRecording && selectedTab == .notes
     }
 
     /// True when this meeting hasn't been recorded yet — `.scheduled` or
