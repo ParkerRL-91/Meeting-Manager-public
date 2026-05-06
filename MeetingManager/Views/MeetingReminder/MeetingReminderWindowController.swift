@@ -65,11 +65,25 @@ final class MeetingReminderWindowController: NSWindowController {
         panel.orderFront(nil)
 
         autoDismissTimer?.invalidate()
-        // Upcoming reminders auto-dismiss after 30s; switch offers persist
-        // until the user acts on them or AppState clears the offer.
+        // Upcoming reminders persist until the meeting is *clearly* underway
+        // (scheduled start + 60 s) OR the user acts on the button. Earlier
+        // versions auto-dismissed after 30 s, which routinely vanished
+        // before the user noticed it. Now: visible until +1 min after the
+        // scheduled start, totaling roughly 3 minutes when the HUD fires
+        // 2 min before start. Switch offers still persist indefinitely
+        // until the user acts or AppState clears the offer.
         if mode == .upcoming {
-            autoDismissTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated { self?.dismiss() }
+            let dismissAt = (meeting.scheduledStartDate ?? Date())
+                .addingTimeInterval(60)
+            let interval = dismissAt.timeIntervalSinceNow
+            if interval > 0 {
+                autoDismissTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.dismiss() }
+                }
+            } else {
+                // Meeting started > 1 min ago by the time the HUD got
+                // requested — dismiss immediately, the moment has passed.
+                dismiss()
             }
         }
     }
