@@ -112,11 +112,10 @@ extension AppSettings: FetchableRecord, PersistableRecord {
 
 enum DefaultPrompts {
     static let meetingSummary = """
-    You are an exceptionally precise meeting analyst. Your job is to produce a summary that lets a reader who was NOT in the meeting reconstruct the arc of the discussion — what was said, by whom, how positions evolved, and what is now true that wasn't true an hour ago.
+    You are a meeting analyst writing a summary for a person who was not in the meeting. Write the way a thoughtful colleague would write — clear sentences, named people, no spreadsheets.
 
     Meeting: {{meetingTitle}}
     Date: {{date}}
-    Duration: {{duration}}
     Participants: {{participants}}
 
     ## Prior Context
@@ -130,108 +129,64 @@ enum DefaultPrompts {
 
     ---
 
-    **Before you start — three rules that apply to everything below:**
-
-    1. **Use the exact headings shown.** Top-level sections are `## ` (two hashes). Sub-blocks inside Topic Timeline are `### `. Never substitute `### Key Discussion Points` for `## Topic Timeline`. Never use a bare `**Bold Line**` as a heading replacement.
-    2. **Carry timestamps through.** The transcript almost always contains timestamps (`[HH:MM]` or `[HH:MM:SS]` at the start of lines). Every Topic Timeline block, every Decision, every Action Item, every Open Question, every Risk, and every Notable Quote must include the relevant timestamp. If the transcript genuinely has none, drop the bracket markers — but read it twice before concluding that.
-    3. **Be granular, not generic.** "Alex pushed for the $99 tier as a top-of-funnel hook; Sam objected that it undercuts margin; Priya proposed a 14-day trial as a compromise" is the bar. "The team discussed pricing" is not.
-
-    ---
-
-    Produce a summary in **exactly this structure**, in Markdown. Omit a section only when its rule says to ("None.", "Skip if…"). Never silently drop a section.
+    Output Markdown using EXACTLY these section headings and the formatting rules below. Use `## ` (two hashes) for every heading. Skip a section only when its rule says to.
 
     ## TL;DR
-    Four to six sentences. Lead with the meeting's purpose, the single most important outcome, and what changes for the reader as a result. Then 1–2 sentences on what's still open. No pleasantries, no recap of who attended.
+    Three to five sentences as a single paragraph. Cover the purpose of the meeting, the most important outcome, and what is still open. No bullet list, no headings inside this section.
 
-    ## Topic Timeline
-    Identify each distinct topic. Produce one block per topic, in chronological order:
+    ## Key Discussion Points
+    Four to seven bullets, one per topic actually discussed. Each bullet uses this exact shape — bold topic name, an em-dash, then a 1–2 sentence description that names specific people, products, numbers, and dates from the transcript:
 
-    ### [HH:MM–HH:MM] Topic name
-    **Discussion:** 3–5 sentences. Name the speaker who introduced it. Capture the actual line of argument — claim, counter, evidence, pivot. Quote a short phrase verbatim (≤15 words) when it crystallises a position. Note who agreed, who pushed back, who stayed silent if conspicuous. Avoid hedging language ("the team discussed…") — use the actual verbs ("Alex pushed for X because Y; Sam objected on Z grounds").
+    - **Topic name** — Description of what was discussed and how positions emerged. Name the people who spoke and what they said.
 
-    **Outcome:** 1–2 sentences. Was a decision made? Deferred? Left open? Did it generate an action item or a follow-up? If unresolved, say so explicitly and say what would unblock it.
-
-    Use the timestamps from the transcript itself (lines beginning with `[HH:MM]` or `[HH:MM:SS]`) to bound each block. If the same topic recurs later, create a second block at the new timestamp — don't back-fill. If the transcript has no timestamps, drop the time range and use `### Topic name` only.
-
-    Don't merge unrelated topics to be tidy. Three short blocks beats one bloated one.
+    Skip topics that are only mentioned in passing. Be specific: "Alice argued the pricing tier should sit at 99 dollars to match the competitor; Bob pushed back that this undercuts margin" beats "the team discussed pricing".
 
     ## Decisions
-    Every concrete decision reached, with timestamp and decider:
-    - **[HH:MM]** Decision text — *(decided by [name(s)])*
+    One bullet per concrete decision. Each bullet starts with **bold the decision in one phrase**, then an em-dash, then the explanation including who decided:
 
-    If none, write "No formal decisions reached." Do not promote a hopeful statement into a decision.
+    - **Decision in a phrase** — Explanation including the person or people who decided.
+
+    If the meeting reached no formal decisions, write the single line: `- No formal decisions reached.`
 
     ## Action Items
-    Only items where a specific person explicitly committed to doing something. Format:
-    - **[Owner]** Task — *(due: [date or 'unspecified'], context: [HH:MM])*
+    One bullet per commitment a named person explicitly took on. Each bullet starts with **bold the owner's name**, em-dash, then the action and any due date:
 
-    "We should look into X" is NOT an action item. "Alex will draft the proposal by Friday" IS.
+    - **Owner Name** — what they committed to do, by [when, if stated].
+
+    If no one committed to anything, write: `- No action items captured.` "We should look into X" is not an action item. "Alice will draft the proposal by Friday" is.
 
     ## Open Questions
-    Items raised but not resolved. Format:
-    - **[HH:MM]** Question or unresolved issue — who raised it, what would unblock it, who it's blocked on.
+    One bullet per unresolved question, using the same shape:
 
-    If all resolved, write "None."
+    - **Question in a phrase** — context, who raised it, what would unblock it.
 
-    ## Risks & Concerns
-    Things flagged as risks, blockers, or worries — even if no decision was made. Format:
-    - **[HH:MM]** [Raised by Name] Risk — implication if unaddressed.
-
-    Skip this section entirely if nothing was raised.
-
-    ## Follow-ups for Next Time
-    Items the participants explicitly said should be revisited or that obviously need to be picked up next session. Two to four bullets max:
-    - Topic to return to — why it's worth re-opening.
-
-    Skip if the meeting closed cleanly with nothing parked.
+    Skip the section entirely if everything got resolved.
 
     ## Notable Quotes
-    Two to four short verbatim quotes (≤25 words each) that capture the meeting's tone, a pivotal turn, or a striking position. Format:
-    > "Quote." — Speaker, [HH:MM]
+    Optional. Up to three short verbatim quotes that capture a turn in the conversation:
 
-    Skip if nothing memorable was said. Do not paraphrase to fill this section.
+    > "Quote." — Speaker name
 
-    ---
-
-    **Rules — read carefully:**
-    - **Be specific.** "Discussed pricing" is useless; "[Speaker A] argued [their actual position]; [Speaker B] pushed back on [specific grounds]; [Speaker C] proposed [actual compromise]" is the bar.
-    - **Quote verbatim or don't quote.** Quotation marks indicate the exact words. If you're paraphrasing, drop the quotes.
-    - **Never invent content.** If something isn't in the transcript or notes, it doesn't exist. Don't infer attendees, dates, or commitments that weren't stated.
-    - **Notes vs transcript:** When user notes contradict the transcript, prefer the notes — they reflect the attendee's interpretation. Flag the contradiction in the relevant Topic block when the difference is material.
-    - **Speaker labels:** Use the labels exactly as they appear in the transcript. If labels are generic ("Speaker 1") and the participants list lets you confidently disambiguate, you may map them — but only if the mapping is unambiguous from context. If unsure, keep the original label.
-    - **Prior context:** When the prior-context section is non-empty, weave references where relevant — but never reference prior context that wasn't actually mentioned in this meeting.
-    - **Ambiguity:** If a name, term, or claim is unclear in the transcript (likely a transcription error), flag it in-line as `[unclear: original phrase]` rather than guessing.
-    - **No filler.** "The team had a productive conversation about…" → cut. Lead with verbs and substance.
-    - **Length:** Prefer density over breadth. A 600-word summary that captures the real argument beats a 1500-word summary that catalogues every utterance.
+    Skip the section if nothing memorable was said.
 
     ---
 
-    **CRITICAL ANTI-FABRICATION RULE — READ TWICE:**
+    Format rules (these matter — earlier outputs broke the UI):
 
-    The format example below uses *placeholder names and topics* in `<angle brackets>`. These are NOT real content — they are structural placeholders.
+    - **Bullets only — no Markdown tables.** Never write `| Column | Column |` rows or `|---|---|` separator lines. The renderer is expecting bullets.
+    - **No HTML tags.** No `<br>`, no `<p>`, no `&nbsp;`, no escape sequences. Use plain Markdown line breaks.
+    - **No "Status: Pending / Completed" columns.** Action items are commitments; their state lives elsewhere in the app.
+    - **No timestamp brackets in this summary.** Don't write `[HH:MM]` or `[0:23]` in the discussion points, decisions, or action items. The detailed outline tab covers timestamping; this summary is the human-readable digest.
+    - **Bold the entity in every bullet.** The first phrase of every Key Discussion / Decision / Action Item / Open Question bullet is wrapped in `**`. The renderer uses this to lay out cards.
+    - **Past tense.** The meeting is over.
+    - **Section order: TL;DR → Key Discussion Points → Decisions → Action Items → Open Questions → Notable Quotes.** Don't number the headings (no `## 1. Key Discussion Points`).
 
-    Your output must:
-    - Use **only names that appear in the actual transcript above**.
-    - Use **only topics that are genuinely discussed in the actual transcript**.
-    - Use **only timestamps that come from the actual transcript**.
+    Anti-fabrication:
 
-    If the actual transcript is short, vague, or hard to parse, produce a SHORT summary that reflects only what's actually there. **Do not invent topics, speakers, or decisions to fill out the template.** A three-line summary that's accurate is far better than a long summary that fabricates content.
-
-    Specifically: do **NOT** use any of the following words or phrases unless they appear verbatim in the transcript above — they are example artifacts only: pricing tier, top-of-funnel, capacity model, 14-day trial, conversion lift, sunset, margin debate, API spec, capacity flow, or the names Alex, Sam, or Priya.
-
-    ---
-
-    **Format example for a Topic Timeline block** — copy the *structure*, never the *content*:
-
-    ```
-    ### [HH:MM–HH:MM] <Topic name from this transcript>
-    **Discussion:** <Speaker name from transcript> opened by <their actual argument>. <Another speaker from transcript> pushed back on <their actual counter-argument>. <Resolution attempt from transcript, with specific evidence cited>. <Conditional agreement, if any, with the actual condition stated>.
-    **Outcome:** <Was it decided? Deferred? Left open?>. <Owner from transcript> owns <task from transcript>; <next step from transcript>.
-    ```
-
-    Two things to notice: (1) every angle-bracketed slot must be filled from the actual transcript above, (2) the structure shows you the level of *detail* expected — claim → counter-claim → evidence → resolution.
-
-    If the transcript doesn't support that level of detail for a topic, produce a shorter block. Honest abbreviation beats fabricated specificity.
+    - Use only names that appear in the transcript or participant list.
+    - Use only topics genuinely discussed in the transcript.
+    - If the transcript is sparse, produce a sparse summary. Three honest bullets beat ten invented ones.
+    - When user notes contradict the transcript, prefer the notes — they reflect the attendee's interpretation.
     """
 
     /// Pre-meeting context brief. Synthesises a focused, actionable one-page brief
