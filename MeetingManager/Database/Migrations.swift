@@ -832,5 +832,20 @@ enum Migrations {
                 UPDATE appSettings SET ollamaModel = 'auto' WHERE ollamaModel = 'llama3.2:3b'
                 """)
         }
+
+        // The pre-v37 default summary prompt produced Markdown tables with
+        // <br> tags on Qwen3 because it asked for a "## Topic Timeline" with
+        // [HH:MM–HH:MM] sub-blocks — the model collapsed that into a table.
+        // Reset stored templates that still match the old default to the new
+        // bullet-based default. Detect by the unique "## Topic Timeline"
+        // heading; any user who customised their prompt won't have that exact
+        // string and is left untouched.
+        migrator.registerMigration("v37-summary-prompt-rewrite") { db in
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET summaryPromptTemplate = ?
+                WHERE summaryPromptTemplate LIKE '%## Topic Timeline%'
+                """, arguments: [AppSettings.default.summaryPromptTemplate])
+        }
     }
 }
