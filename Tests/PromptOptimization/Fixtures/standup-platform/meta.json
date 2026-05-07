@@ -1,0 +1,27 @@
+{
+  "fixtureId": "standup-platform",
+  "meetingTitle": "Platform Engineering Standup",
+  "date": "2026-05-07",
+  "durationSeconds": 166,
+  "participants": ["Marcus Chen", "Priya Singh", "Dave Kim", "Sarah Walker"],
+  "expectedSpeakers": ["Marcus Chen", "Priya Singh", "Dave Kim", "Sarah Walker"],
+  "expectedActionItems": [
+    {"who": "Priya Singh", "what": "Draft PR for database connection pooling"},
+    {"who": "Sarah Walker", "what": "Send calendar invite for 10:30 OAuth bug repro session"},
+    {"who": "Sarah Walker", "what": "Multi-tenant data export ready for review by Wednesday"},
+    {"who": "Marcus Chen", "what": "Draft enterprise pricing document in team channel by Thursday morning"},
+    {"who": "Dave Kim", "what": "Link updated on-call runbook in engineering wiki"}
+  ],
+  "expectedDecisions": [
+    "JSON only for v1 multi-tenant data export (no CSV)"
+  ],
+  "expectedTopics": [
+    "Connection pooling work",
+    "OAuth token refresh bug",
+    "Multi-tenant data export",
+    "Enterprise pricing synthesis"
+  ],
+  "forbiddenNames": [
+    "Alice", "Bob", "Charlie", "Eve", "John Smith", "Jane Doe"
+  ]
+}

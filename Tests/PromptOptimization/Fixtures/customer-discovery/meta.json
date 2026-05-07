@@ -1,0 +1,30 @@
+{
+  "fixtureId": "customer-discovery",
+  "meetingTitle": "Customer Discovery — Henrik Olsen / LabCorp Northern",
+  "date": "2026-05-05",
+  "durationSeconds": 204,
+  "participants": ["Diana Foster", "Henrik Olsen"],
+  "expectedSpeakers": ["Diana Foster", "Henrik Olsen"],
+  "expectedActionItems": [
+    {"who": "Diana Foster", "what": "Send pricing breakdown for 80-seat tier"},
+    {"who": "Diana Foster", "what": "Send SOC 2 Type 2 report"},
+    {"who": "Diana Foster", "what": "Send required schema info for Ottawa methane assay custom mapping"},
+    {"who": "Henrik Olsen", "what": "Loop in IT lead Mara on the next call"}
+  ],
+  "expectedDecisions": [
+    "Henrik will involve IT lead Mara on next call",
+    "Pilot at one site first, validate two weeks, then roll out to others"
+  ],
+  "expectedTopics": [
+    "LIMS integration with LabWare 7.2",
+    "Custom field mapping for Ottawa methane assay",
+    "Pricing model (per-seat, tiered)",
+    "Implementation timeline (6-8 weeks)",
+    "Training program",
+    "Security and SOC 2 compliance"
+  ],
+  "forbiddenNames": [
+    "Marcus Chen", "Tomás Reyes", "Aiko Tanaka", "Sarah Walker", "Priya Singh"
+  ],
+  "namesNotInParticipantsButMentioned": ["Frank", "Mara"]
+}

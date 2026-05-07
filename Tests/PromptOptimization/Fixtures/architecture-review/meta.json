@@ -1,0 +1,31 @@
+{
+  "fixtureId": "architecture-review",
+  "meetingTitle": "Architecture Review — Recommendation Service Extraction",
+  "date": "2026-05-06",
+  "durationSeconds": 244,
+  "participants": ["Lena Park", "Tomás Reyes", "Aiko Tanaka"],
+  "expectedSpeakers": ["Lena Park", "Tomás Reyes", "Aiko Tanaka"],
+  "expectedActionItems": [
+    {"who": "Tomás Reyes", "what": "Add chaos test as hard prerequisite for Redis fallback path"},
+    {"who": "Tomás Reyes", "what": "Add rollback procedure that doesn't require a maintenance window"},
+    {"who": "Tomás Reyes", "what": "Sync with Carlos on offline batch recommender dependency"},
+    {"who": "Tomás Reyes", "what": "Updated proposal ready by next Friday"},
+    {"who": "Tomás Reyes", "what": "Add offline recommender to dependencies section of proposal"}
+  ],
+  "expectedDecisions": [
+    "Approval in principle to extract recommendation service",
+    "Q3 start timeline (Q2 stays focused on billing)",
+    "Reconvene in two weeks with updated proposal"
+  ],
+  "expectedTopics": [
+    "Service extraction proposal",
+    "Migration cost and timeline",
+    "Redis fallback risk",
+    "Q3 capacity",
+    "Carlos's offline recommender pipeline"
+  ],
+  "forbiddenNames": [
+    "Alice", "Bob", "Carlos who didn't speak", "Marcus Chen", "Sarah Walker"
+  ],
+  "namesNotInParticipantsButMentioned": ["Carlos"]
+}

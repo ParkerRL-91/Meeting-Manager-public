@@ -51,5 +51,16 @@ let package = Package(
             ],
             path: "Tools/TranscribeAudio"
         ),
+        // Developer-only prompt-optimization harness (ADR-007 follow-up).
+        // Runs candidate prompts against fixture transcripts via the local
+        // Ollama HTTP API and scores each result on deterministic rubrics.
+        // No new SPM dependencies; doesn't ship in the app bundle.
+        // Build: swift build --product prompt-eval
+        // Usage: .build/debug/prompt-eval --prompt action-item --model qwen3:8b
+        .executableTarget(
+            name: "prompt-eval",
+            path: "Tests/PromptOptimization",
+            exclude: ["Fixtures", "results"]
+        ),
     ]
 )
