@@ -30,18 +30,22 @@ Should return a JSON list (probably empty on first install).
 
 ### 2. Pull a model
 
+The default ladder Meeting Manager auto-pulls in `auto` mode is **Qwen3 4B** (small/fast tier) plus **Qwen3 8B** (larger/heavier tier for long meetings):
+
 ```bash
-ollama pull llama3.2:8b
+ollama pull qwen3:4b
+ollama pull qwen3:8b
 ```
+
+If you turn on **Use local LLM** in Settings → AI (Local), Meeting Manager pulls these for you in the background — `qwen3:4b` first (gets you productive in a few minutes) and `qwen3:8b` opportunistically afterward.
 
 Recommended starter models by Mac type:
 
 | Mac | Model | RAM needed | Quality |
 |---|---|---|---|
-| M1/M2/M3, 16GB | `llama3.2:8b` | ~5GB | Good |
-| M-series, 32GB | `llama3.1:70b-instruct-q4_K_M` | ~22GB | Excellent |
-| M3 Ultra / Mac Studio, 64GB+ | `llama3.1:70b-instruct-q8_0` | ~38GB | Excellent + faster |
-| Intel Mac | `phi3:mini` or `qwen2.5:3b` | ~2GB | Acceptable |
+| M1/M2/M3, 16GB | `qwen3:4b` (default), `qwen3:8b` for long meetings | ~3 GB / ~5.5 GB | Good / very good |
+| M-series, 32GB+ | `qwen3:8b` always, or `qwen3:14b` if available | ~5.5 GB / ~9 GB | Very good / excellent |
+| Intel Mac | `qwen3:4b` or `phi3:mini` | ~2–3 GB | Acceptable |
 
 Meeting Manager auto-detects whatever models you have installed.
 
@@ -90,7 +94,7 @@ If the labels are correct, ignore the dots — they disappear as soon as you con
 The Ollama service isn't running. Either click the Ollama menu bar icon, or in Terminal: `ollama serve`.
 
 ### "No models installed"
-Pull at least one: `ollama pull llama3.2:8b`. The picker populates within ~5 seconds.
+Pull at least one: `ollama pull qwen3:4b`. The picker populates within ~5 seconds. Meeting Manager will also pull this for you automatically the first time you enable Use Local LLM in Settings.
 
 ### Generation hangs / takes forever
 - Model loading from disk after a pull or eviction → wait 30–60s

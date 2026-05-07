@@ -70,9 +70,16 @@ struct MarkdownRenderer: View {
                     .padding(.top, level <= 2 ? 6 : 4)
                     .padding(.bottom, 2)
             } else {
+                // .display style — H1 reads primary, H2/H3 are deemphasized
+                // labels in a light grey rather than the prior purple/accent
+                // hue. Earlier versions used Color.appAccent which read as
+                // dominant violet headers throughout the brief and detailed
+                // outline; users found that visually heavy. Light grey keeps
+                // the section hierarchy legible without competing with body
+                // text for attention.
                 Text(inline(content))
-                    .font(.system(size: headingSize(level), weight: .bold, design: .serif))
-                    .foregroundStyle(level == 1 ? Color.appTextPrimary : Color.appAccent)
+                    .font(.system(size: headingSize(level), weight: .semibold, design: .serif))
+                    .foregroundStyle(level == 1 ? Color.appTextPrimary : Color.appTextSecondary)
                     .padding(.top, level <= 2 ? 6 : 4)
                     .padding(.bottom, 2)
             }
@@ -247,10 +254,14 @@ struct MarkdownRenderer: View {
     }
 
     private func headingSize(_ level: Int) -> CGFloat {
+        // Smaller increments than the original (+9/+6/+3). The previous sizes
+        // produced large display-y headers throughout the brief and detailed
+        // outline, which competed with body text. Tighter increments make
+        // section labels feel like structure markers rather than billboards.
         switch level {
-        case 1: return baseFontSize + 9
-        case 2: return baseFontSize + 6
-        case 3: return baseFontSize + 3
+        case 1: return baseFontSize + 4
+        case 2: return baseFontSize + 2
+        case 3: return baseFontSize + 1
         // H4-H6 render as small-caps accent labels so they're visibly distinct
         // even when the AI overuses deep heading levels (`######` etc.).
         case 4: return baseFontSize - 2

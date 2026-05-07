@@ -138,8 +138,18 @@ final class ClaudeService {
     ///   - systemPrompt: The system-level instruction.
     ///   - userPrompt: The user message content.
     ///   - model: The model identifier (e.g. "claude-sonnet-4-20250514").
+    ///   - maxTokens: Output token cap. Defaults to 4096 — adequate for the
+    ///     summary, follow-up email, action-item, and attribution paths.
+    ///     The detailed-outline path passes 16384 because hour-long meetings
+    ///     produce 8–12k tokens of structured output and the smaller default
+    ///     was silently truncating mid-meeting.
     /// - Returns: The text content of the first response block.
-    func sendMessage(systemPrompt: String, userPrompt: String, model: String) async throws -> String {
+    func sendMessage(
+        systemPrompt: String,
+        userPrompt: String,
+        model: String,
+        maxTokens: Int = 4096
+    ) async throws -> String {
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -165,7 +175,7 @@ final class ClaudeService {
 
         let body = ClaudeRequest(
             model: model,
-            max_tokens: 4096,
+            max_tokens: maxTokens,
             system: systemPrompt,
             messages: [ClaudeMessage(role: "user", content: userPrompt)]
         )

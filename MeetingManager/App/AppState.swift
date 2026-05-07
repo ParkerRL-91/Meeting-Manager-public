@@ -298,6 +298,13 @@ final class AppState {
         // `ollamaService.isReachable` (DailyBriefView, ActionItemsView, etc.)
         // don't render "Set up AI →" before the first lazy refresh fires.
         Task { await self.ollamaService.refreshStatus() }
+        // v3.10.4 (ADR-007): if the user is on the local-LLM path and the
+        // Qwen3 ladder isn't installed, kick off a background pull. The
+        // installer's existing phase machinery surfaces progress in the
+        // existing Settings UI without blocking app launch. No-op when
+        // both Qwen3 tier models are already present, when Ollama is
+        // unreachable, or when the user is using Claude.
+        Task { await self.verifyLocalModelsOnStartup() }
         // One-shot retroactive speaker attribution scan (gated by UserDefaults
         // flag — only runs once per app upgrade). Re-attributes existing
         // meetings against the loosened fuzzy matcher + auto-mic mapping
@@ -588,8 +595,12 @@ final class AppState {
     /// Drive `DetailedOutlineService.generate` with the user's current AI
     /// provider preference. Used by the `detailedOutlineHandler` task wire-up
     /// and by the Outline tab's "Regenerate" button via direct call.
+    ///
+    /// Output budget is bumped to 16K tokens — hour-long meetings produce
+    /// 8–12K tokens of structured outline, and the default 2K/4K caps used
+    /// by every other path were silently truncating the outline mid-meeting.
     func runDetailedOutlineGeneration(meetingId: String) async {
-        let textGen = await makeTextGenerator()
+        let textGen = await makeTextGenerator(maxOutputTokens: 16384)
         let modelLabel: String = {
             if settings.useLocalLLM { return "ollama/\(settings.ollamaModel)" }
             return settings.claudeModel
@@ -771,6 +782,29 @@ final class AppState {
     }
 
     /// One-time retroactive speaker-attribution scan. Runs at most once per
+    /// v3.10.4 (ADR-007). Triggered from `init`. If `useLocalLLM` is on and
+    /// the Qwen3 tier models aren't installed, fire a background pull so
+    /// the user picks up the new ladder without ever touching Settings.
+    /// Skips silently when:
+    ///   - Local LLM is off (user is on Claude)
+    ///   - Ollama isn't reachable (server down — Claude fallback handles it)
+    ///   - Both tier models are already present
+    func verifyLocalModelsOnStartup() async {
+        guard settings.useLocalLLM else { return }
+        await ollamaService.refreshStatus()
+        guard ollamaService.isReachable else { return }
+        // Inspect availableModels first so we don't spin up the installer
+        // when there's nothing to do.
+        let installed = Set(ollamaService.availableModels)
+        let needSmall   = !installed.contains(OllamaService.smallTier)
+        let needDefault = !installed.contains(OllamaService.defaultTier)
+        guard needSmall || needDefault else { return }
+        // The Settings UI subscribes to `ollamaInstaller.phase`; calling
+        // `verifyAndPullMissing` flips that phase through `.pulling` →
+        // `.ready` so the in-progress notice shows up automatically.
+        await ollamaInstaller.verifyAndPullMissing()
+    }
+
     /// app version: a UserDefaults flag (`speakerAttribution.retroScan.<v>`)
     /// keeps it from firing on every launch. Walks completed meetings that
     /// still contain "Speaker N" labels and re-runs attribution against the
@@ -2995,20 +3029,46 @@ final class AppState {
 
     /// Creates a text generator closure that routes to Claude or Ollama based on current settings.
     /// Used by GlobalChatView and other global AI features.
-    func makeTextGenerator() async -> ((String, String) async throws -> String)? {
+    func makeTextGenerator(
+        maxOutputTokens: Int = 2048
+    ) async -> ((String, String) async throws -> String)? {
         let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
         await ollamaService.refreshStatus()
         let ollamaReachable = ollamaService.isReachable
         let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
 
+        // Map the unified output budget to each backend's parameter:
+        //   Ollama → num_predict
+        //   Claude → max_tokens (Claude's native cap; default in API is 4096
+        //            but the new Sonnet models accept up to 64K)
+        // 2048 is fine for summary, action items, attribution, follow-up
+        // email. The detailed outline path passes 16384 because hour-long
+        // meetings produce 8–12k tokens of structured output and the prior
+        // 4096/2048 caps were silently truncating mid-meeting.
+        let claudeMaxTokens = max(maxOutputTokens, 4096)
+
         if useOllama {
             let service = ollamaService
             let ollamaModel = settings.ollamaModel
-            return { sys, usr in try await service.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel) }
+            return { sys, usr in
+                try await service.generate(
+                    systemPrompt: sys,
+                    userPrompt: usr,
+                    model: ollamaModel,
+                    maxOutputTokens: maxOutputTokens
+                )
+            }
         } else if hasClaudeKey {
             let claude = ClaudeService()
             let claudeModel = settings.claudeModel
-            return { sys, usr in try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel) }
+            return { sys, usr in
+                try await claude.sendMessage(
+                    systemPrompt: sys,
+                    userPrompt: usr,
+                    model: claudeModel,
+                    maxTokens: claudeMaxTokens
+                )
+            }
         }
         return nil
     }

@@ -26,7 +26,7 @@ struct DetailedOutline: Codable, FetchableRecord, MutablePersistableRecord {
     /// (the call threw or returned malformed Markdown, blob is the
     /// rendered error stub). Used for diagnostics + retry decisions.
     var method: String
-    /// Optional model identifier ("claude-sonnet-4-6", "ollama:llama3.2:8b",
+    /// Optional model identifier ("claude-sonnet-4-6", "ollama/qwen3:8b",
     /// etc.) so the UI can show provenance and the next regen knows which
     /// backend last produced the blob.
     var modelUsed: String?

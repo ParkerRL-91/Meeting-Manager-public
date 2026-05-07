@@ -90,6 +90,16 @@ final class OllamaInstaller {
     }
 
     /// Full setup: installs Ollama if needed, launches it, pulls the model.
+    ///
+    /// `model = "auto"` is the user-facing default and historically was a
+    /// latent bug — the literal string "auto" was passed to `ollama pull`,
+    /// which fails. Resolution:
+    ///   - "auto" → pull `OllamaService.smallTier` (e.g. qwen3:4b) in the
+    ///     foreground, mark .ready, then opportunistically pull
+    ///     `OllamaService.defaultTier` (qwen3:8b) in a detached background
+    ///     task. The user becomes productive on the small tier immediately;
+    ///     the larger tier arrives when it's done.
+    ///   - any concrete model name → pull that exact model.
     func setupIfNeeded(model: String) async {
         // Check if Ollama is already installed
         let appURL: URL
@@ -109,13 +119,70 @@ final class OllamaInstaller {
             if case .failed = phase { return }
         }
 
-        // Pull the model if not already available
+        // Resolve "auto" to the small tier for the foreground pull, and
+        // schedule the default tier as a background pull. Concrete model
+        // names go straight through.
+        let foregroundModel: String
+        let backgroundModel: String?
+        if model == "auto" {
+            foregroundModel = OllamaService.smallTier
+            backgroundModel = OllamaService.defaultTier
+        } else {
+            foregroundModel = model
+            backgroundModel = nil
+        }
+
         let available = await fetchAvailableModels()
-        if !available.contains(model) {
-            await pullModel(model)
+        if !available.contains(foregroundModel) {
+            await pullModel(foregroundModel)
         } else {
             phase = .ready
         }
+
+        // Best-effort background pull for the default tier (Qwen3 8B).
+        // Detached so we don't gate the user-visible .ready state on a
+        // multi-GB download. Errors are swallowed — the adaptive selector
+        // gracefully falls back to the small tier when the larger one is
+        // missing.
+        if let backgroundModel,
+           !available.contains(backgroundModel),
+           case .ready = phase {
+            Task.detached { [weak self] in
+                guard let self else { return }
+                await self.backgroundPullModel(backgroundModel)
+            }
+        }
+    }
+
+    /// One-shot check: re-pull any missing tier model if the user is on
+    /// `auto`. No-op when both tier models are already installed. Cheap
+    /// enough to call on every launch via `verifyLocalModelsOnStartup`.
+    func verifyAndPullMissing() async {
+        guard await isServerReachable() else { return }
+        let available = await fetchAvailableModels()
+        let missingSmall   = !available.contains(OllamaService.smallTier)
+        let missingDefault = !available.contains(OllamaService.defaultTier)
+        if !missingSmall && !missingDefault { return }
+        // Non-blocking: kick off the background fan-out. setupIfNeeded
+        // already does small-foreground + default-background.
+        await setupIfNeeded(model: "auto")
+    }
+
+    /// Background pull variant — pulls the given model without flipping the
+    /// public `phase` state away from `.ready`. The user keeps the small
+    /// tier productive while this runs.
+    private func backgroundPullModel(_ model: String) async {
+        // Reuse the same pull endpoint pattern as `pullModel` but ignore
+        // failures. Implementation kept inline to avoid restructuring the
+        // existing pull path's progress reporting.
+        guard let url = URL(string: "http://localhost:11434/api/pull") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60 * 60   // 1 hour cap for large downloads
+        let body: [String: Any] = ["name": model, "stream": false]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        _ = try? await URLSession.shared.data(for: request)
     }
 
     func retry(model: String) async {

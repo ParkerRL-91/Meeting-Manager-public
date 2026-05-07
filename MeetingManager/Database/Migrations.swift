@@ -820,5 +820,17 @@ enum Migrations {
                 t.add(column: "detailedOutlinePromptTemplate", .text)
             }
         }
+
+        // v36: shift the local-LLM ladder from Llama 3.x to Qwen3 (ADR-007).
+        // Users who never opened Settings have `ollamaModel='llama3.2:3b'`
+        // (the v9 default). Flip them to `'auto'` so they pick up the new
+        // ladder automatically. Users who explicitly chose llama3.1:8b,
+        // qwen3:*, or any other model are left untouched. Append-only per
+        // the migrations rule — v9-local-llm is not edited.
+        migrator.registerMigration("v36-qwen3-default") { db in
+            try db.execute(sql: """
+                UPDATE appSettings SET ollamaModel = 'auto' WHERE ollamaModel = 'llama3.2:3b'
+                """)
+        }
     }
 }

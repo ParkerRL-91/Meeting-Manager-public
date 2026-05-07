@@ -32,7 +32,7 @@ struct LocalModelStepView: View {
                     .foregroundStyle(Color.appAccent)
 
                 requirementRow(icon: "arrow.down.circle", text: "Ollama will be downloaded automatically (~60 MB)")
-                requirementRow(icon: "internaldrive", text: "The default model (llama3.2:3b) requires ~2 GB of disk space")
+                requirementRow(icon: "internaldrive", text: "The default model (Qwen3 4B) takes about 3 GB of disk space; an 8B model is downloaded in the background for longer meetings.")
                 requirementRow(icon: "memorychip", text: "Recommended: 8 GB+ RAM for smooth performance")
                 requirementRow(icon: "clock", text: "First download may take a few minutes depending on your connection")
                 requirementRow(icon: "lock.shield", text: "All processing happens locally — your meeting data never leaves your Mac")

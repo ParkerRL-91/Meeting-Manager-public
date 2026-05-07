@@ -63,7 +63,7 @@ enum OllamaServiceError: LocalizedError {
         case .notRunning:
             return "Ollama is not running. Start Ollama and try again."
         case .noModels:
-            return "No models found in Ollama. Run: ollama pull llama3.2:3b"
+            return "No models found in Ollama. Run: ollama pull qwen3:4b"
         case .httpError(let statusCode):
             return "Ollama returned HTTP \(statusCode)."
         case .emptyResponse:
@@ -85,18 +85,36 @@ enum OllamaServiceError: LocalizedError {
 final class OllamaService {
 
     static let baseURL = URL(string: "http://localhost:11434")!
-    static let defaultModel = "llama3.2:3b"
+
+    // MARK: Model Ladder (single source of truth)
+    //
+    // Two-tier ladder upgraded to Qwen3 in v3.10.4 (ADR-007). Qwen3 4B replaces
+    // Llama 3.2 3B as the small/fast tier; Qwen3 8B replaces Llama 3.1 8B for
+    // long transcripts. Same memory envelope on a 16GB M4 baseline; materially
+    // better instruction-following and JSON adherence (the two things this
+    // app's structured-output paths — action items, attribution — depend on).
+    //
+    // Llama 3.x is NOT removed: if the user already pulled it, the picker
+    // still exposes it and the truncation fallback (line ~145) prefers
+    // qwen3:8b but falls back to llama3.1:8b when the user has only Llama
+    // installed. ADR-007 has the rationale and migration story.
+    static let smallTier   = "qwen3:4b"
+    static let defaultTier = "qwen3:8b"
+    static let defaultModel = defaultTier
 
     /// Model tiers ranked by capability. The adaptive selector picks the best
-    /// installed model that can handle the input size.
-    /// Biased toward 3B to avoid saturating GPU/RAM alongside WhisperKit transcription.
-    /// The 8B model is only used for very large transcripts where 3B's context is too small.
+    /// installed model that can handle the input size. Top tier raised to
+    /// 131K because Qwen3 8B's native context goes to 128K — well above
+    /// Llama 3.1 8B's effective 65K limit.
     static let modelTiers: [(name: String, maxInputTokens: Int, contextWindow: Int)] = [
-        ("llama3.2:3b",  4000,   8192),   // Fast — short 1:1s
-        ("llama3.2:3b",  8000,  16384),   // Medium — standard meetings
-        ("llama3.2:3b", 14000,  32768),   // Large — extended meetings (prefer 3B to save resources)
-        ("llama3.1:8b", 20000,  32768),   // XL — only when 3B context is too small
-        ("llama3.1:8b", 40000,  65536),   // XXL — marathon sessions
+        // NOTE: explicit "qwen3:4b"/"qwen3:8b" rather than Self.smallTier — Swift
+        // won't let a static stored property reference Self in its initializer.
+        // Keep these identifiers in sync with smallTier / defaultTier above.
+        ("qwen3:4b",  4000,   8192),   // Fast — short 1:1s
+        ("qwen3:4b",  8000,  16384),   // Medium — standard meetings
+        ("qwen3:4b", 14000,  32768),   // Large — extended meetings
+        ("qwen3:8b", 22000,  32768),   // XL — long meetings, better reasoning
+        ("qwen3:8b", 60000, 131072),   // XXL — marathon sessions, native 128K context
     ]
 
     // MARK: - Status
@@ -133,10 +151,16 @@ final class OllamaService {
             }
         }
 
-        // No tier fits — use the largest available model with truncation
+        // No tier fits — use the largest available model with truncation.
+        // Prefer the new Qwen3 tier when present; fall back to the legacy
+        // Llama 3.1 8B for users who only ever pulled the old default and
+        // haven't yet picked up the Qwen upgrade.
         let bestModel: String
         let bestCtx: Int
-        if models.contains("llama3.1:8b") {
+        if models.contains(Self.defaultTier) {
+            bestModel = Self.defaultTier
+            bestCtx = 131072
+        } else if models.contains("llama3.1:8b") {
             bestModel = "llama3.1:8b"
             bestCtx = 65536
         } else {
@@ -166,7 +190,14 @@ final class OllamaService {
 
     /// Generate a response given a system prompt and user message using the specified model.
     /// When `model` is `"auto"`, adaptive selection picks the best model for the input size.
-    func generate(systemPrompt: String, userPrompt: String, model: String) async throws -> String {
+    /// `maxOutputTokens` defaults to 2048; bump to 8192+ for long structured output
+    /// (e.g. the detailed outline path, where 2048 was silently truncating mid-meeting).
+    func generate(
+        systemPrompt: String,
+        userPrompt: String,
+        model: String,
+        maxOutputTokens: Int = 2048
+    ) async throws -> String {
         let selectedModel: String
         let numCtx: Int
         let finalSystem: String
@@ -211,13 +242,13 @@ final class OllamaService {
             ],
             options: OllamaOptions(
                 temperature: 0.3,
-                num_predict: 2048,
+                num_predict: maxOutputTokens,
                 num_ctx: numCtx > 0 ? numCtx : nil
             )
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"))")
+        Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"), maxOut: \(maxOutputTokens))")
 
         let data: Data
         let response: URLResponse

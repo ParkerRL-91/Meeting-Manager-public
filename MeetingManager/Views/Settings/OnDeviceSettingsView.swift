@@ -226,16 +226,28 @@ struct OnDeviceSettingsView: View {
                 }
             }
 
+            // Description text adapts to whichever model the user picked.
+            // Branch order: auto first, then Qwen3 specifically, then a
+            // legacy Llama branch for users who explicitly stayed on it.
+            // Strings written as full sentences per the writing-style rule.
             if appState.settings.ollamaModel == "auto" {
-                Label("Automatically picks the best model for each meeting's size. Uses 8B for long meetings if installed, 3B for shorter ones.", systemImage: "wand.and.stars")
+                Label("Auto adapts to each meeting — Qwen3 4B handles short and standard meetings; Qwen3 8B takes over for marathon sessions and long transcripts.", systemImage: "wand.and.stars")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("qwen3:4b") {
+                Label("Qwen3 4B uses about 3 GB of memory and runs comfortably alongside live transcription on any Apple Silicon Mac.", systemImage: "desktopcomputer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("qwen3:8b") {
+                Label("Qwen3 8B uses about 5.5 GB of memory and produces noticeably better summaries and action items on meetings longer than 30 minutes.", systemImage: "bolt.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if appState.settings.ollamaModel.contains("3b") {
-                Label("Using 3B model only — slower but works on any Mac. Good for Macs with ≤16GB RAM.", systemImage: "desktopcomputer")
+                Label("Using a 3B Llama model — slower but works on any Mac. Switch to auto to pick up the newer Qwen3 4B/8B ladder.", systemImage: "desktopcomputer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if appState.settings.ollamaModel.contains("8b") {
-                Label("Using 8B model — better quality for long meetings. Needs ~6GB free RAM.", systemImage: "bolt.fill")
+                Label("Using an 8B Llama model — switch to auto to pick up the newer Qwen3 ladder, which is materially better at structured output.", systemImage: "bolt.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

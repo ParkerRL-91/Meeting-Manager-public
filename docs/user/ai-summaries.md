@@ -37,7 +37,7 @@ Settings → **AI (Local)** → install Ollama from [ollama.com](https://ollama.
 - Runs on your Mac, nothing sent to a remote server
 - Free
 - Slower (30s–3min depending on model and hardware)
-- Quality varies by model — `llama3.2:8b` is a reasonable starter; larger models do better summaries
+- Quality varies by model — `qwen3:8b` is the recommended default (Meeting Manager pulls this for you on first run); larger Qwen3 variants do even better on long meetings
 
 See [On-Device AI](./on-device-ai.md) for the full setup.
 
