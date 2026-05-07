@@ -847,5 +847,18 @@ enum Migrations {
                 WHERE summaryPromptTemplate LIKE '%## Topic Timeline%'
                 """, arguments: [AppSettings.default.summaryPromptTemplate])
         }
+
+        // v37 only matched the most recent old default ("## Topic Timeline").
+        // Some installs still carry the much older "1. **Key Discussion Points**"
+        // numbered-list default, which is what was producing the table layout
+        // on Qwen3. Match both legacy fingerprints and reset to the new default.
+        migrator.registerMigration("v38-summary-prompt-rewrite-legacy") { db in
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET summaryPromptTemplate = ?
+                WHERE summaryPromptTemplate LIKE '%1. **Key Discussion Points**%'
+                   OR summaryPromptTemplate LIKE '%## Topic Timeline%'
+                """, arguments: [AppSettings.default.summaryPromptTemplate])
+        }
     }
 }
