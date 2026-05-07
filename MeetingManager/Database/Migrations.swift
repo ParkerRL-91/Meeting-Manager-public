@@ -802,5 +802,23 @@ enum Migrations {
                 UPDATE voiceProfile SET manualSampleCount = sampleCount WHERE sampleCount > 0
                 """)
         }
+
+        // v35: detailed outline blob per meeting + editable prompt template
+        // for it. Mirrors `cleanedTranscript` storage. The outline sits
+        // between the one-page summary and the full transcript on the
+        // density spectrum: time-stamped, topic-segmented, prose with
+        // optional fact bullets. See `Services/AI/DetailedOutlineService.swift`.
+        migrator.registerMigration("v35-detailed-outline") { db in
+            try db.create(table: "detailedOutline") { t in
+                t.column("meetingId", .text).primaryKey()
+                t.column("text", .text).notNull()
+                t.column("generatedAt", .datetime).notNull()
+                t.column("method", .text).notNull()
+                t.column("modelUsed", .text)
+            }
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "detailedOutlinePromptTemplate", .text)
+            }
+        }
     }
 }

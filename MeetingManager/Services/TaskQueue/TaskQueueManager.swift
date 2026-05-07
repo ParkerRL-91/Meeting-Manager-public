@@ -42,6 +42,10 @@ final class TaskQueueManager {
     /// "Speaker N" clusters. Runs against the full transcript with whatever
     /// signals are now available.
     var retryAttributionHandler: ((String) async throws -> Void)?
+    /// v3.10.3+: detailed-outline generation. Auto-enqueued after a summary
+    /// task completes; can be enqueued manually by the user via the Outline
+    /// tab's Regenerate button.
+    var detailedOutlineHandler: ((String) async throws -> Void)?
 
     init(database: AppDatabase = .shared) {
         self.database = database
@@ -474,6 +478,12 @@ final class TaskQueueManager {
         case .retryAttribution:
             guard let handler = retryAttributionHandler else {
                 throw TaskQueueError.noHandler("retryAttribution")
+            }
+            try await handler(task.meetingId)
+
+        case .detailedOutline:
+            guard let handler = detailedOutlineHandler else {
+                throw TaskQueueError.noHandler("detailedOutline")
             }
             try await handler(task.meetingId)
         }

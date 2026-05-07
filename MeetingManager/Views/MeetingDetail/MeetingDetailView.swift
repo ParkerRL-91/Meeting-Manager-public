@@ -22,11 +22,12 @@ struct MeetingDetailView: View {
     private let exportService = ExportService()
 
     enum DetailTab: String, CaseIterable {
-        case summary, notes, transcript, speakers
+        case summary, outline, notes, transcript, speakers
 
         var label: String {
             switch self {
             case .speakers: return "Speakers"
+            case .outline:  return "Outline"
             default: return rawValue.capitalized
             }
         }
@@ -34,6 +35,7 @@ struct MeetingDetailView: View {
         var icon: String {
             switch self {
             case .summary: return "doc.text"
+            case .outline: return "list.bullet.rectangle"
             case .transcript: return "text.quote"
             case .notes: return "note.text"
             case .speakers: return "person.wave.2"
@@ -299,6 +301,8 @@ struct MeetingDetailView: View {
         switch selectedTab {
         case .summary:
             SummaryView(meetingId: meetingId)
+        case .outline:
+            DetailedOutlineView(meetingId: meetingId)
         case .transcript:
             FullTranscriptView(meetingId: meetingId)
         case .notes:

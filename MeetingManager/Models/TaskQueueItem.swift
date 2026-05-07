@@ -31,6 +31,10 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// Triggered automatically when speakerMap still has unresolved
         /// "Speaker N" clusters after diarization. One retry max.
         case retryAttribution
+        /// v3.10.3+: detailed time-stamped topic outline. Auto-enqueued
+        /// after summary completes; can be re-run on demand from the
+        /// Outline tab. See `Services/AI/DetailedOutlineService.swift`.
+        case detailedOutline
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -52,6 +56,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .knowledgeBaseIndex: return "Index Knowledge Base"
         case .transcriptCleanup:  return "Cleaning Transcript"
         case .retryAttribution:   return "Re-checking Speakers"
+        case .detailedOutline:    return "Generating Outline"
         }
     }
 

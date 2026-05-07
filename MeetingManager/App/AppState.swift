@@ -529,6 +529,16 @@ final class AppState {
                     metadata: metadata
                 )
             }
+
+            // v3.10.3+: auto-enqueue the detailed outline after summary
+            // completes. Lower priority than the follow-up email so the
+            // summary-adjacent UX surfaces (notification + email draft)
+            // land first; outline takes longest of the three.
+            await self.taskQueueManager.enqueue(
+                type: .detailedOutline,
+                meetingId: meetingId,
+                priority: 8
+            )
         }
 
         taskQueueManager.knowledgeBaseIndexHandler = {
@@ -561,10 +571,36 @@ final class AppState {
             await self.runRetryAttribution(meetingId: meetingId)
         }
 
+        // v3.10.3+: detailed outline — single LLM pass that produces a
+        // time-stamped, topic-segmented Markdown blob. Auto-enqueued after
+        // summary completes; can be re-run on demand from the Outline tab.
+        taskQueueManager.detailedOutlineHandler = { [weak self] meetingId in
+            guard let self else { return }
+            await self.runDetailedOutlineGeneration(meetingId: meetingId)
+        }
+
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
         Task {
             await taskQueueManager.startUp()
         }
+    }
+
+    /// Drive `DetailedOutlineService.generate` with the user's current AI
+    /// provider preference. Used by the `detailedOutlineHandler` task wire-up
+    /// and by the Outline tab's "Regenerate" button via direct call.
+    func runDetailedOutlineGeneration(meetingId: String) async {
+        let textGen = await makeTextGenerator()
+        let modelLabel: String = {
+            if settings.useLocalLLM { return "ollama/\(settings.ollamaModel)" }
+            return settings.claudeModel
+        }()
+        _ = await DetailedOutlineService.shared.generate(
+            meetingId: meetingId,
+            settings: settings,
+            textGenerator: textGen,
+            modelLabel: modelLabel
+        )
+        loadMeetings()
     }
 
     /// Generate a summary for a meeting via the task queue.

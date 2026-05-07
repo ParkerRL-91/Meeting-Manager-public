@@ -71,6 +71,12 @@ struct AppSettings: Codable, Equatable {
     /// but do NOT store contact details beyond name and email address.
     var contactsImportEnabled: Bool = false
 
+    /// Prompt template for the detailed-outline pass. nil → fall back to
+    /// `DefaultPrompts.detailedOutline`. Stored as nullable so the column
+    /// can be added by migration without backfill — readers resolve nil to
+    /// the default at use time. Edited via Settings → Prompts → Detailed Outline.
+    var detailedOutlinePromptTemplate: String? = nil
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -98,6 +104,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case kbWriteBack
         case selectedGoogleCalendarIds, selectedAppleCalendarIds
         case contactsImportEnabled
+        case detailedOutlinePromptTemplate
     }
 }
 
@@ -310,5 +317,56 @@ enum DefaultPrompts {
     - **Cite when concrete.** When a fact comes from a specific prior meeting or note, name the source briefly: "(per Mar 12 sync)", "(from your notes)". Don't over-cite — only when it changes how the user weighs the fact.
     - **Don't address the user.** Write in third person about the participants and the situation. The user reads this — they don't need to be told what they wrote.
     - **Length budget:** Aim for 200–400 words total. Hard ceiling: 500.
+    """
+
+    // MARK: - Detailed Outline (v3.10.3+)
+
+    /// The detailed-outline prompt produces a time-stamped, topic-segmented
+    /// readable record of the meeting. Goal density: between the one-page
+    /// summary and the full transcript. Used by `DetailedOutlineService`.
+    ///
+    /// Editable via Settings → Prompts → "Detailed Outline" — the value
+    /// lives on `appSettings.detailedOutlinePromptTemplate`. nil/empty
+    /// falls back to this default at call time.
+    static let detailedOutline = """
+    You are producing a detailed time-stamped outline of a meeting. Output ONLY structured Markdown — no preamble, no closing notes, no overall recap.
+
+    For each major topic discussed (typically 5–15 sections in a 30–60 minute meeting; 3–6 in a short standup), output one section in this exact shape:
+
+    ## [mm:ss – mm:ss] Topic Name
+    **Speakers**: <comma-separated names of people who actually spoke during this section>
+
+    <A 3–6 sentence paragraph in past tense describing what was said and how the conversation evolved during this segment. Name people by name. Capture the arc: who raised the topic, how others responded, where positions diverged or aligned, what was decided or left open. Quote specific terms, product names, dates, numbers, and named artifacts (decks, docs, tickets) when they appear. Capture disagreements explicitly — this is where the value is.>
+
+    - Optional bullet list of hard facts surfaced in this section. Use it for: numbers cited, dates committed to, decisions made, open questions left for follow-up, named artifacts referenced. Skip the list entirely if the prose already covers everything — empty bullet lists are noise.
+
+    ### Format requirements
+
+    - Topic name: a 2–6 word noun phrase. Concrete, not generic. ("Pricing model for SMB tier" — yes. "Discussion" — no.)
+    - Timestamps: `mm:ss` for meetings under 1 hour, `h:mm:ss` for longer. Use the timestamps from the transcript verbatim — don't invent or smooth them.
+    - Section ranges should be contiguous: each section's end timestamp matches the next section's start. No gaps, no overlaps.
+    - Speaker names: use exactly what appears in the transcript. Don't add titles, emails, or normalise.
+
+    ### What counts as a "section"
+
+    Split when the conversation clearly shifts focus — a new topic, a new decision frame, a hand-off to a different speaker on a different subject. Do NOT split mid-thought, mid-debate, or for a brief tangent. A two-sentence aside that gets dropped is part of the surrounding section, not its own. Err toward fewer, denser sections rather than many tiny ones.
+
+    ### Constraints (CRITICAL)
+
+    - Begin DIRECTLY with the first `## [...]` header. No preamble like "Here is the outline" or "## Meeting Overview".
+    - End with the last section's content. No "## Conclusion" or recap section.
+    - Every factual claim must be grounded in the transcript. If something isn't in the transcript, do not write it. No inferred motivations, no plausible-sounding fabrications.
+    - Past tense throughout the prose paragraphs. The meeting is over.
+    - Don't address the reader. Write in third person about the participants.
+    - Don't include the meeting title in the output — the UI already shows it.
+
+    Meeting: {{meetingTitle}}
+    Date: {{date}}
+    Participants: {{participants}}
+
+    Transcript:
+    {{transcript}}
+
+    Now produce the detailed outline.
     """
 }
