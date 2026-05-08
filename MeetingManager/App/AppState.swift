@@ -631,12 +631,17 @@ final class AppState {
         guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
 
         // Resolve which prompt template to use: recipe override → default template
+        // Always read the prompt fresh from the database so edits in
+        // Settings → Prompts take effect immediately, without depending on the
+        // in-memory settings snapshot being current (eliminates a race where
+        // the user changes the prompt and clicks Regenerate before loadSettings
+        // completes its async refresh).
         let rawTemplate: String
         if let recipeId,
            let recipe = try? await RecipeRepository(database: database).find(id: recipeId) {
             rawTemplate = recipe.promptTemplate
         } else {
-            rawTemplate = settings.summaryPromptTemplate
+            rawTemplate = PromptManager().loadTemplate(settings: settings)
         }
 
         let participantsString = meeting.participantList.isEmpty

@@ -13,12 +13,17 @@ private struct OllamaChatRequest: Encodable {
     let messages: [OllamaMessage]
     let stream: Bool
     let options: OllamaOptions?
+    /// Qwen3 defaults to thinking mode which puts output into a separate
+    /// `thinking` field, leaving `content` empty and burning token budget
+    /// on chain-of-thought the app doesn't use. Set `false` to disable.
+    let think: Bool
 
-    init(model: String, messages: [OllamaMessage], stream: Bool = false, options: OllamaOptions?) {
+    init(model: String, messages: [OllamaMessage], stream: Bool = false, options: OllamaOptions?, think: Bool = false) {
         self.model = model
         self.messages = messages
         self.stream = stream
         self.options = options
+        self.think = think
     }
 }
 
@@ -34,8 +39,14 @@ private struct OllamaOptions: Encodable {
     }
 }
 
+private struct OllamaChatResponseMessage: Decodable {
+    let role: String
+    let content: String
+    let thinking: String?
+}
+
 private struct OllamaChatResponse: Decodable {
-    let message: OllamaMessage
+    let message: OllamaChatResponseMessage
     let done: Bool
 }
 
@@ -274,7 +285,11 @@ final class OllamaService {
             throw OllamaServiceError.decodingError(error)
         }
 
-        let text = decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty, let thinking = decoded.message.thinking?.trimmingCharacters(in: .whitespacesAndNewlines), !thinking.isEmpty {
+            Logger.ai.warning("Ollama: content was empty but thinking had \(thinking.count) chars — using thinking as fallback")
+            text = thinking
+        }
         guard !text.isEmpty else {
             throw OllamaServiceError.emptyResponse
         }
@@ -328,7 +343,7 @@ final class OllamaService {
             stream: true,
             options: OllamaOptions(
                 temperature: 0.3,
-                num_predict: 2048,
+                num_predict: 4096,
                 num_ctx: numCtx > 0 ? numCtx : nil
             )
         )
@@ -344,24 +359,41 @@ final class OllamaService {
             throw OllamaServiceError.httpError(statusCode: code)
         }
 
-        // Read NDJSON chunks — each line is a JSON object with {"message":{"content":"..."}, "done":bool}
+        // Read NDJSON chunks — each line is a JSON object with
+        // {"message":{"content":"...", "thinking":"..."}, "done":bool}.
+        // With think:false the thinking field should be absent, but we
+        // collect it as a defensive fallback in case the model still
+        // produces thinking tokens (e.g. user switches to a model that
+        // ignores the think flag).
         var fullText = ""
+        var fullThinking = ""
         for try await line in bytes.lines {
             guard !line.isEmpty else { continue }
             guard let data = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let message = json["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
+                  let message = json["message"] as? [String: Any] else {
                 continue
             }
-            fullText += content
+            if let content = message["content"] as? String {
+                fullText += content
+            }
+            if let thinking = message["thinking"] as? String {
+                fullThinking += thinking
+            }
 
             if let done = json["done"] as? Bool, done {
                 break
             }
         }
 
-        let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Prefer content; fall back to thinking if the model burned all
+        // tokens on chain-of-thought (shouldn't happen with think:false
+        // but guards against edge cases).
+        var trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty && !fullThinking.isEmpty {
+            Logger.ai.warning("Ollama: content was empty but thinking had \(fullThinking.count) chars — using thinking as fallback")
+            trimmed = fullThinking.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         guard !trimmed.isEmpty else {
             throw OllamaServiceError.emptyResponse
         }
