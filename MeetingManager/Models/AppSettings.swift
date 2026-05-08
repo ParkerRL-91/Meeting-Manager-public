@@ -286,33 +286,46 @@ enum DefaultPrompts {
     static let detailedOutline = """
     You are producing a detailed time-stamped outline of a meeting. Output ONLY structured Markdown — no preamble, no closing notes, no overall recap.
 
-    For each major topic discussed (typically 5–15 sections in a 30–60 minute meeting; 3–6 in a short standup), output one section in this exact shape:
+    For each major topic discussed, output one section in this exact shape:
 
     ## [mm:ss – mm:ss] Topic Name
     **Speakers**: <comma-separated names of people who actually spoke during this section>
 
     <A 3–6 sentence paragraph in past tense describing what was said and how the conversation evolved during this segment. Name people by name. Capture the arc: who raised the topic, how others responded, where positions diverged or aligned, what was decided or left open. Quote specific terms, product names, dates, numbers, and named artifacts (decks, docs, tickets) when they appear. Capture disagreements explicitly — this is where the value is.>
 
-    - Optional bullet list of hard facts surfaced in this section. Use it for: numbers cited, dates committed to, decisions made, open questions left for follow-up, named artifacts referenced. Skip the list entirely if the prose already covers everything — empty bullet lists are noise.
+    - Optional bullet list of hard facts surfaced in this section: numbers cited, dates committed to, decisions made, open questions, named artifacts. Skip the list if the prose covers everything.
+
+    ### How to identify topic sections
+
+    A topic section covers one sustained subject of conversation. Multiple speakers debating the same subject is ONE section, not one section per speaker. A brief tangent or aside that gets dropped belongs in the surrounding section, not its own.
+
+    Typical section durations by meeting length:
+    - Meetings under 10 minutes: 1–3 sections. A single-section outline is acceptable for a brief standup.
+    - Meetings 10–60 minutes: 4–10 sections, each spanning roughly 3–15 minutes of conversation.
+    - Meetings over 60 minutes: up to 1 section per 5–8 minutes of content, to a maximum of 20 sections.
+
+    Sections should generally span at least 2 minutes. Preserve shorter sections only when they contain a key decision, announcement, or action item that would lose clarity if merged into an adjacent topic.
+
+    If a topic is revisited after a gap of more than 5 minutes of unrelated discussion, create a separate section for each occurrence. Add "(continued)" to the topic name for the later occurrence.
+
+    Always err toward fewer, denser sections rather than many short ones.
 
     ### Format requirements
 
-    - Topic name: a 2–6 word noun phrase. Concrete, not generic. ("Pricing model for SMB tier" — yes. "Discussion" — no.)
-    - Timestamps: `mm:ss` for meetings under 1 hour, `h:mm:ss` for longer. Use the timestamps from the transcript verbatim — don't invent or smooth them.
+    - Topic name: a 2–6 word concrete noun phrase. "Q3 hiring plan" — not "Discussion".
+    - Timestamps: `mm:ss` for meetings under 1 hour, `h:mm:ss` for longer. Use timestamps from the transcript verbatim.
     - Section ranges should be contiguous: each section's end timestamp matches the next section's start. No gaps, no overlaps.
-    - Speaker names: use exactly what appears in the transcript. Don't add titles, emails, or normalise.
+    - Speaker names: exactly as they appear in the transcript. No titles, no normalization.
+    - When many speakers discuss the same topic, group them into one section rather than splitting by speaker.
+    - If speaker names are unavailable for a segment, describe contributions by content rather than attribution.
 
-    ### What counts as a "section"
-
-    Split when the conversation clearly shifts focus — a new topic, a new decision frame, a hand-off to a different speaker on a different subject. Do NOT split mid-thought, mid-debate, or for a brief tangent. A two-sentence aside that gets dropped is part of the surrounding section, not its own. Err toward fewer, denser sections rather than many tiny ones.
-
-    ### Constraints (CRITICAL)
+    ### Constraints
 
     - Begin DIRECTLY with the first `## [...]` header. No preamble like "Here is the outline" or "## Meeting Overview".
     - End with the last section's content. No "## Conclusion" or recap section.
-    - Every factual claim must be grounded in the transcript. If something isn't in the transcript, do not write it. No inferred motivations, no plausible-sounding fabrications.
+    - Every factual claim must be grounded in the transcript. No inferred motivations, no plausible-sounding fabrications.
     - Past tense throughout the prose paragraphs. The meeting is over.
-    - Don't address the reader. Write in third person about the participants.
+    - Third person about the participants. Don't address the reader.
     - Don't include the meeting title in the output — the UI already shows it.
 
     Meeting: {{meetingTitle}}

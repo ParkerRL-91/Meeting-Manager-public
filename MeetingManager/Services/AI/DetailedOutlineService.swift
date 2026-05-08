@@ -115,6 +115,11 @@ final class DetailedOutlineService {
         // prompts.
         let systemPrompt = """
         You produce detailed time-stamped meeting outlines as structured Markdown. \
+        You think in terms of TOPICS, not time slices or speaker turns. A single topic \
+        is a sustained thread of conversation — typically 3–15 minutes. Multiple speakers \
+        on the same subject belong in one section, not separate sections. \
+        During your reasoning, identify the major topics and their time ranges before \
+        writing any output. \
         Every section is `## [mm:ss – mm:ss] Topic Name` with a `**Speakers**:` line, \
         a 3–6 sentence prose paragraph in past tense, and an optional bullet list of facts. \
         You ground every claim in the provided transcript and never invent facts or names. \
@@ -193,6 +198,14 @@ final class DetailedOutlineService {
     /// directly with a section header. We just delete those.
     nonisolated private func stripLeadingNonHeading(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Match `## [` followed by a digit — prevents false matches on
+        // `## [Topics]` or `## [Planning]` that a small model might emit
+        // as a preamble header.
+        if let firstHeader = trimmed.range(of: #"## \[\d"#, options: .regularExpression) {
+            // Back up to include the `## [` prefix (the regex matched starting at `## [`).
+            return String(trimmed[firstHeader.lowerBound...])
+        }
+        // Fall back to the less strict match for edge cases.
         if let firstHeader = trimmed.range(of: "## [") {
             return String(trimmed[firstHeader.lowerBound...])
         }

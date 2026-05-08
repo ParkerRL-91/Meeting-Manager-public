@@ -860,5 +860,17 @@ enum Migrations {
                    OR summaryPromptTemplate LIKE '%## Topic Timeline%'
                 """, arguments: [AppSettings.default.summaryPromptTemplate])
         }
+
+        // v39: Outline prompt redesign — topic-based chunking instead of
+        // minute-by-minute segments. Matches old default by fingerprint
+        // ("typically 5–15 sections") and resets to new default.
+        migrator.registerMigration("v39-outline-prompt-topic-chunking") { db in
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET detailedOutlinePromptTemplate = ?
+                WHERE detailedOutlinePromptTemplate LIKE '%typically 5–15 sections%'
+                   OR detailedOutlinePromptTemplate LIKE '%typically 5-15 sections%'
+                """, arguments: [DefaultPrompts.detailedOutline])
+        }
     }
 }
