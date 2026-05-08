@@ -222,9 +222,9 @@ struct SpeakerAssignmentView: View {
         for t in transcripts {
             guard let label = t.speakerLabel?.trimmingCharacters(in: .whitespaces),
                   !label.isEmpty else { continue }
-            // Skip the raw "system" label — those are unprocessed system-audio
-            // rows that haven't been through diarization yet.
-            guard label.lowercased() != "system" else { continue }
+            // Skip raw "system" (unprocessed) and "mic" (the user's own voice).
+            let lower = label.lowercased()
+            guard lower != "system" && lower != "mic" else { continue }
             bucket[label, default: []].append(t)
         }
         // Sort: unassigned "Speaker N" clusters first (need attention),

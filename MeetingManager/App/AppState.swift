@@ -2118,10 +2118,13 @@ final class AppState {
                 fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
             }
 
-            // Fetch all system-audio transcript rows for alignment.
+            // Fetch all transcript rows for alignment and echo suppression.
             let transcripts = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
             let systemTranscripts = transcripts.filter {
                 ($0.speakerLabel ?? "").lowercased() == "system"
+            }
+            let micTranscripts = transcripts.filter {
+                ($0.speakerLabel ?? "").lowercased() == "mic"
             }
             guard !systemTranscripts.isEmpty else {
                 fileLog("Diarization: no system-audio transcript rows for \(meetingId)")
@@ -2133,6 +2136,36 @@ final class AppState {
             guard !labelMapping.isEmpty else {
                 fileLog("Diarization: alignment produced no matches for \(meetingId)")
                 return
+            }
+
+            // Echo suppression: call apps (Zoom, Meet, Teams) often mix the
+            // user's mic audio into their output stream. ScreenCaptureKit
+            // captures this mixed output, so system-audio segments can contain
+            // the user's own voice. Cross-reference: any system transcript
+            // that overlaps >50% with a mic transcript is likely the user's
+            // echo — relabel it as the user instead of "Speaker N".
+            let userName = NSFullUserName()
+            if !micTranscripts.isEmpty {
+                var echoCount = 0
+                for (txId, _) in labelMapping {
+                    guard let sysTx = systemTranscripts.first(where: { $0.id == txId }) else { continue }
+                    let sysLen = sysTx.endTime - sysTx.startTime
+                    guard sysLen > 0 else { continue }
+
+                    for micTx in micTranscripts {
+                        let overlapStart = max(sysTx.startTime, micTx.startTime)
+                        let overlapEnd = min(sysTx.endTime, micTx.endTime)
+                        let overlap = max(0, overlapEnd - overlapStart)
+                        if overlap / sysLen >= 0.5 {
+                            labelMapping[txId] = userName.isEmpty ? "Me" : userName
+                            echoCount += 1
+                            break
+                        }
+                    }
+                }
+                if echoCount > 0 {
+                    fileLog("Diarization: suppressed \(echoCount) echo segment(s) (user voice in system audio) for \(meetingId)")
+                }
             }
 
             // Apply voice-profile pre-assignments: replace "Speaker N" with real name
