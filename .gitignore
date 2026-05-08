@@ -33,3 +33,4 @@ xcuserdata/
 *.hmap
 *.ipa
 .claude/worktrees/
+.claude/scheduled_tasks.lock
