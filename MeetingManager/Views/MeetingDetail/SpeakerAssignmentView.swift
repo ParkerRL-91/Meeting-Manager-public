@@ -114,7 +114,9 @@ struct SpeakerAssignmentView: View {
     /// Generate a 1-2 sentence summary per cluster using the configured LLM.
     /// Idempotent: skips clusters that already have a summary cached.
     private func summarizeClusters() async {
-        let textGen = await appState.makeTextGenerator()
+        // 4096 output budget: longer summaries for major speakers (up to
+        // 200 words) plus Qwen3's thinking tokens need more than the 2K default.
+        let textGen = await appState.makeTextGenerator(maxOutputTokens: 4096)
         guard let textGen else {
             Self.logger.info("[SpeakerAssignment] no AI configured — skipping summaries")
             return
@@ -137,24 +139,42 @@ struct SpeakerAssignmentView: View {
     /// cluster's text — no names, no other speakers, no meeting metadata.
     /// This isolation is what prevents the model from inventing speaker
     /// names from nearby context (the bug behind the cleanup hallucination).
+    ///
+    /// Summary length scales with the cluster's content — a speaker who
+    /// talked for 15 minutes gets a 2-paragraph summary, not a sentence.
     static func summarize(
         cluster: SpeakerCluster,
         textGen: (String, String) async throws -> String
     ) async -> String {
         let body = cluster.segments.map { $0.text }.joined(separator: " ")
-        // Cap input to ~2k chars — far enough to capture the gist of an
-        // hour-long monologue, short enough to keep latency tolerable.
-        let truncated = String(body.prefix(2000))
+        // Scale input cap with cluster size — short clusters get 2K,
+        // major speakers get up to 8K so the summary captures their
+        // full range of topics.
+        let inputCap = min(8000, max(2000, body.count))
+        let truncated = String(body.prefix(inputCap))
+
+        // Scale target length: short clusters (< 1 min) get a sentence,
+        // substantial speakers (5+ min) get two paragraphs.
+        let totalDuration = cluster.totalSeconds
+        let lengthGuidance: String
+        if totalDuration < 60 {
+            lengthGuidance = "Write 1-2 sentences (under 40 words)."
+        } else if totalDuration < 300 {
+            lengthGuidance = "Write a short paragraph of 3-5 sentences (60-100 words) covering the main points this speaker raised."
+        } else {
+            lengthGuidance = "Write two paragraphs (100-200 words). The first paragraph should cover the speaker's main topics and positions. The second should cover specific details, decisions, or action items they raised."
+        }
+
         let system = """
-            You are summarizing what one speaker said in a meeting. Read the utterances below and produce a 1-2 sentence summary of what they were discussing or doing.
+            You are summarizing what one speaker said in a meeting. Read the utterances below and produce a summary of what they discussed, argued for, and contributed.
 
             Rules:
             - Do NOT mention any names. Refer to the speaker as "this speaker" or just describe the activity.
             - Do NOT invent details that aren't in the input.
             - Do NOT add a preamble like "Here is a summary…". Output only the summary itself.
-            - Keep it to 1-2 sentences, max 35 words.
+            - \(lengthGuidance)
             """
-        let user = "Utterances:\n\n\(truncated)\n\nSummarize in 1-2 sentences."
+        let user = "Utterances:\n\n\(truncated)\n\nSummarize what this speaker discussed."
         do {
             let result = try await textGen(system, user)
             return result.trimmingCharacters(in: .whitespacesAndNewlines)
