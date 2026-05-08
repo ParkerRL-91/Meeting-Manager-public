@@ -441,22 +441,20 @@ struct FullTranscriptView: View {
                 .font(.caption)
                 .foregroundStyle(Color.appTextTertiary)
 
-            if method == "ai-failed" {
+            if method == "ai-failed" || method == "stitch" {
                 Button {
                     Task {
-                        await appState.taskQueueManager.enqueue(
-                            type: .transcriptCleanup,
-                            meetingId: meetingId,
-                            priority: 1
-                        )
+                        // Run cleanup directly and refresh the view on completion.
+                        await appState.runTranscriptCleanup(meetingId: meetingId)
+                        cleanedTranscript = try? await CleanedTranscriptRepository().cleanedTranscript(meetingId: meetingId)
                     }
                 } label: {
-                    Text("Retry AI cleanup")
+                    Text(method == "ai-failed" ? "Retry AI cleanup" : "Run AI cleanup")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Color.appAccent)
                 }
                 .buttonStyle(.plain)
-                .help("Re-run AI transcript cleanup with the current model")
+                .help("Run AI transcript cleanup with the current model")
             }
 
             Spacer()

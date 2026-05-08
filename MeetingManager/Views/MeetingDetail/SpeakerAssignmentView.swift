@@ -42,6 +42,25 @@ struct SpeakerAssignmentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Reload bar — always visible (not gated on clusters)
+            HStack {
+                Text("Speakers are grouped by voice. Rename to correct mis-assignments.")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                Spacer()
+                Button {
+                    Task { await reload() }
+                } label: {
+                    Label("Reload", systemImage: "arrow.clockwise")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.appAccent)
+                .disabled(isLoading)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
             if isLoading {
                 Spacer()
                 ProgressView()
@@ -50,8 +69,8 @@ struct SpeakerAssignmentView: View {
                 Spacer()
                 EmptyStateView(
                     icon: "person.wave.2",
-                    title: "No speakers to assign",
-                    subtitle: "All transcript segments are already labelled, or the transcript hasn't finished processing yet."
+                    title: "No speakers detected",
+                    subtitle: "The transcript hasn't finished processing yet, or no audio was captured."
                 )
                 Spacer()
             } else {
@@ -64,12 +83,6 @@ struct SpeakerAssignmentView: View {
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        Text("Label each speaker once — every fragment they said gets renamed. Suggestions come from this meeting's participants.")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 12)
-
                         ForEach(clusters) { cluster in
                             SpeakerClusterCard(
                                 cluster: cluster,
@@ -94,6 +107,15 @@ struct SpeakerAssignmentView: View {
 
     // MARK: - Loading
 
+    /// Full reload: clears cached summaries and re-fetches everything
+    /// from the database, then re-generates speaker summaries.
+    private func reload() async {
+        summaries.removeAll()
+        summarizingClusters.removeAll()
+        SpeakerSummaryCache.clear(meetingId: meetingId)
+        await load()
+    }
+
     private func load() async {
         isLoading = true
         defer { isLoading = false }
@@ -103,17 +125,25 @@ struct SpeakerAssignmentView: View {
         clusters = Self.buildClusters(from: transcripts)
         Self.logger.info("[SpeakerAssignment] loaded \(clusters.count) cluster(s) for meeting \(meetingId, privacy: .public)")
 
-        // Kick per-cluster summarization in parallel. Each call summarizes
-        // only what THAT cluster said — never sees other speakers, never
-        // sees the meeting title or participant list, so it can't borrow
-        // names from elsewhere. Capped to clusters with ≥3 utterances —
-        // shorter clusters are fine to identify from the raw fragments.
-        await summarizeClusters()
+        // Load persisted summaries first — avoids re-generating on every tab open.
+        let cached = SpeakerSummaryCache.load(meetingId: meetingId)
+        for (key, value) in cached {
+            summaries[key] = value
+        }
+
+        // Only generate summaries for clusters that aren't already cached.
+        let uncached = clusters.filter { summaries[$0.id] == nil && $0.segments.count >= 3 }
+        if !uncached.isEmpty {
+            await summarizeClusters(only: uncached)
+        }
     }
 
-    /// Generate a 1-2 sentence summary per cluster using the configured LLM.
-    /// Idempotent: skips clusters that already have a summary cached.
-    private func summarizeClusters() async {
+    /// Generate summaries for the given clusters (or all if nil).
+    /// Persists results to disk so they survive tab switches and app restarts.
+    private func summarizeClusters(only targets: [SpeakerCluster]? = nil) async {
+        let toSummarize = targets ?? clusters.filter { summaries[$0.id] == nil && $0.segments.count >= 3 }
+        guard !toSummarize.isEmpty else { return }
+
         // 4096 output budget: longer summaries for major speakers (up to
         // 200 words) plus Qwen3's thinking tokens need more than the 2K default.
         let textGen = await appState.makeTextGenerator(maxOutputTokens: 4096)
@@ -121,15 +151,15 @@ struct SpeakerAssignmentView: View {
             Self.logger.info("[SpeakerAssignment] no AI configured — skipping summaries")
             return
         }
-        for cluster in clusters {
-            guard summaries[cluster.id] == nil else { continue }
-            guard cluster.segments.count >= 3 else { continue }
+        for cluster in toSummarize {
             summarizingClusters.insert(cluster.id)
             Task {
                 let summary = await Self.summarize(cluster: cluster, textGen: textGen)
                 await MainActor.run {
                     summaries[cluster.id] = summary
                     summarizingClusters.remove(cluster.id)
+                    // Persist after each summary completes
+                    SpeakerSummaryCache.save(summaries, meetingId: meetingId)
                 }
             }
         }
@@ -192,14 +222,21 @@ struct SpeakerAssignmentView: View {
         for t in transcripts {
             guard let label = t.speakerLabel?.trimmingCharacters(in: .whitespaces),
                   !label.isEmpty else { continue }
-            // Only show un-assigned cluster ids — "Speaker 1" / "Speaker N".
-            // Anything else is either resolved (real name) or system audio.
-            guard label.lowercased().hasPrefix("speaker ") else { continue }
+            // Skip the raw "system" label — those are unprocessed system-audio
+            // rows that haven't been through diarization yet.
+            guard label.lowercased() != "system" else { continue }
             bucket[label, default: []].append(t)
         }
+        // Sort: unassigned "Speaker N" clusters first (need attention),
+        // then already-named speakers alphabetically.
         return bucket
             .map { id, segments in SpeakerCluster(id: id, segments: segments) }
-            .sorted(by: { $0.id < $1.id })
+            .sorted { a, b in
+                let aIsGeneric = a.id.lowercased().hasPrefix("speaker ")
+                let bIsGeneric = b.id.lowercased().hasPrefix("speaker ")
+                if aIsGeneric != bIsGeneric { return aIsGeneric }
+                return a.id.localizedCaseInsensitiveCompare(b.id) == .orderedAscending
+            }
     }
 
     // MARK: - Suggestions
@@ -290,9 +327,15 @@ struct SpeakerAssignmentView: View {
 // MARK: - Cluster model
 
 struct SpeakerCluster: Identifiable {
-    /// Cluster id ("Speaker 1", "Speaker 2", …)
+    /// Cluster id — either a generic "Speaker 1" label or an assigned name.
     let id: String
     let segments: [Transcript]
+
+    /// True when this cluster still has a generic diarization label
+    /// and needs the user to assign a real name.
+    var needsAssignment: Bool {
+        id.lowercased().hasPrefix("speaker ")
+    }
 
     var totalSeconds: Int {
         Int(segments.reduce(0) { $0 + ($1.endTime - $1.startTime) })
@@ -340,16 +383,23 @@ private struct SpeakerClusterCard: View {
             HStack(spacing: 10) {
                 ZStack {
                     Circle()
-                        .fill(Color.appAccent.opacity(0.18))
+                        .fill(cluster.needsAssignment ? Color.appWarning.opacity(0.18) : Color.appAccent.opacity(0.18))
                         .frame(width: 32, height: 32)
                     Text(initial)
                         .font(.headline)
-                        .foregroundStyle(Color.appAccentLight)
+                        .foregroundStyle(cluster.needsAssignment ? Color.appWarning : Color.appAccentLight)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(cluster.id)
-                        .font(.headline)
-                        .foregroundStyle(Color.appTextPrimary)
+                    HStack(spacing: 6) {
+                        Text(cluster.id)
+                            .font(.headline)
+                            .foregroundStyle(Color.appTextPrimary)
+                        if !cluster.needsAssignment {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(Color.appSuccess)
+                        }
+                    }
                     Text("\(cluster.segments.count) utterance\(cluster.segments.count == 1 ? "" : "s") · \(durationLabel)")
                         .font(.caption)
                         .foregroundStyle(Color.appTextSecondary)
@@ -548,5 +598,42 @@ private struct SpeakerSuggestionFlow: Layout {
         }
         if !current.entries.isEmpty { rows.append(current) }
         return rows
+    }
+}
+
+// MARK: - Speaker Summary Cache
+
+/// Simple file-backed cache for speaker summaries so they don't regenerate
+/// on every tab open. Stored as JSON in the app support directory, one file
+/// per meeting. Cleared on explicit Reload.
+enum SpeakerSummaryCache {
+    private static let fm = FileManager.default
+
+    private static func cacheURL(meetingId: String) -> URL {
+        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MeetingManager", isDirectory: true)
+            .appendingPathComponent("speaker-summaries", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(meetingId).json")
+    }
+
+    static func load(meetingId: String) -> [String: String] {
+        let url = cacheURL(meetingId: meetingId)
+        guard let data = try? Data(contentsOf: url),
+              let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return dict
+    }
+
+    static func save(_ summaries: [String: String], meetingId: String) {
+        let url = cacheURL(meetingId: meetingId)
+        guard let data = try? JSONEncoder().encode(summaries) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func clear(meetingId: String) {
+        let url = cacheURL(meetingId: meetingId)
+        try? fm.removeItem(at: url)
     }
 }
