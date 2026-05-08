@@ -12,8 +12,7 @@ import os
 ///
 /// Suggestions are pulled from:
 ///   1. The current meeting's `participantList` (calendar invitees)
-///   2. Voice profiles previously confirmed in OTHER meetings
-///   3. Any free-form name the user types
+///   2. Any free-form name the user types
 ///
 /// On Apply: bulk renames every transcript row whose `speakerLabel` matches
 /// the cluster, persists the meeting's speakerMap, and writes a SpeakerAlias
@@ -65,7 +64,7 @@ struct SpeakerAssignmentView: View {
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        Text("Label each speaker once — every fragment they said gets renamed. Suggestions come from this meeting's participants and any voice profiles you've confirmed in other meetings.")
+                        Text("Label each speaker once — every fragment they said gets renamed. Suggestions come from this meeting's participants.")
                             .font(.caption)
                             .foregroundStyle(Color.appTextSecondary)
                             .padding(.horizontal, 16)
@@ -187,13 +186,19 @@ struct SpeakerAssignmentView: View {
 
     private func suggestions(for cluster: SpeakerCluster) -> [String] {
         var out: [String] = []
-        // Calendar participants first (most likely match for live meetings)
+        // Calendar participants (most likely match for live meetings)
         if let m = meeting {
             out.append(contentsOf: m.participantList)
         }
-        // Voice profiles confirmed in other meetings
+        // Voice profiles — only include those whose person is already a
+        // participant. Showing every profile from unrelated meetings
+        // clutters the list with irrelevant names (e.g. "Dana" from
+        // last week's call appearing in today's 1:1).
+        let participantSet = Set(out.map { $0.lowercased() })
         for p in voiceProfiles where !out.contains(p.personName) {
-            out.append(p.personName)
+            if participantSet.contains(p.personName.lowercased()) {
+                out.append(p.personName)
+            }
         }
         // Drop the user's own name from suggestions — they're on the mic.
         let userFirst = NSFullUserName()
