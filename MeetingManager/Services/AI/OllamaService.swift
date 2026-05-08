@@ -219,7 +219,7 @@ final class OllamaService {
             // Compute a tight context window even for explicit models —
             // Ollama's default (131K) is too large and causes multi-minute stalls.
             let estimatedTokens = (systemPrompt.count + userPrompt.count) / 4
-            let needed = estimatedTokens + 2048 // input + output reserve
+            let needed = estimatedTokens + maxOutputTokens // input + output reserve
             // Round up to nearest power-of-2 bucket: 8K, 16K, 32K, 64K
             if needed <= 8192       { numCtx = 8192 }
             else if needed <= 16384 { numCtx = 16384 }
@@ -229,9 +229,16 @@ final class OllamaService {
             finalUser = userPrompt
         }
 
-        // Dynamic timeout: ~1 min per 2K input tokens, minimum 120s, max 900s
+        // Dynamic timeout: account for both input processing and output
+        // generation. Qwen3's thinking mode can spend minutes reasoning
+        // before emitting any output tokens, so the timeout must cover
+        // thinking time (proportional to input) + generation time
+        // (proportional to num_predict). Formula: ~1 min per 2K input
+        // tokens + ~1 min per 4K output tokens, minimum 120s, max 1800s.
         let inputChars = finalSystem.count + finalUser.count
-        let estimatedSeconds = max(120, min(900, Double(inputChars / 4) / 2000.0 * 60.0))
+        let inputTime = Double(inputChars / 4) / 2000.0 * 60.0
+        let outputTime = Double(maxOutputTokens) / 4000.0 * 60.0
+        let estimatedSeconds = max(120, min(1800, inputTime + outputTime))
 
         let url = Self.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url)
