@@ -29,6 +29,7 @@ struct SpeakerAssignmentView: View {
     @State private var isLoading = true
     @State private var savingClusterId: String?
     @State private var lastError: String?
+    @State private var isReanalyzing = false
 
     /// LLM-generated 1-2 sentence summary per cluster. Lazy: generated when
     /// the tab is opened, cached in memory, and re-used until the user
@@ -42,21 +43,56 @@ struct SpeakerAssignmentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Reload bar — always visible (not gated on clusters)
-            HStack {
+            // Action bar — always visible (not gated on clusters)
+            VStack(alignment: .leading, spacing: 6) {
                 Text("Speakers are grouped by voice. Rename to correct mis-assignments.")
                     .font(.caption)
                     .foregroundStyle(Color.appTextSecondary)
-                Spacer()
-                Button {
-                    Task { await reload() }
-                } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
-                        .font(.caption.weight(.medium))
+                HStack(spacing: 12) {
+                    Button {
+                        Task {
+                            isReanalyzing = true
+                            await appState.rerunDiarization(meetingId: meetingId)
+                            // Reload clusters after re-diarization
+                            summaries.removeAll()
+                            SpeakerSummaryCache.clear(meetingId: meetingId)
+                            await load()
+                            isReanalyzing = false
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isReanalyzing {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "waveform.badge.magnifyingglass")
+                                    .font(.caption)
+                            }
+                            Text("Re-analyze speakers")
+                                .font(.caption.weight(.medium))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.appAccent)
+                    .disabled(isLoading || isReanalyzing)
+                    .help("Re-run voice diarization on the system audio and reassign speaker labels")
+
+                    Button {
+                        Task { await reload() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                                .font(.caption)
+                            Text("Regenerate summaries")
+                                .font(.caption.weight(.medium))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.appAccent)
+                    .disabled(isLoading || isReanalyzing)
+                    .help("Clear cached summaries and regenerate with AI")
+
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.appAccent)
-                .disabled(isLoading)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

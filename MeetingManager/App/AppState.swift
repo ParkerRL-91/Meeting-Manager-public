@@ -2061,6 +2061,21 @@ final class AppState {
 
     /// Run SpeakerKit diarization on the system audio file, update transcript speaker
     /// labels in the DB, then run LLM attribution to map cluster IDs → real names.
+    /// Re-run diarization for a meeting, resolving the system audio URL
+    /// from the meeting's stored audio paths. Called from the Speakers tab's
+    /// "Re-analyze speakers" button.
+    func rerunDiarization(meetingId: String) async {
+        guard let meeting = try? await meetingRepository.find(id: meetingId),
+              let firstPath = meeting.audioFilePaths.first,
+              !firstPath.isEmpty else {
+            fileLog("Diarization re-run: no audio path for \(meetingId)")
+            return
+        }
+        let mixedURL = URL(fileURLWithPath: firstPath)
+        let systemURL = AudioBufferManager.systemAudioURL(for: mixedURL)
+        await runDiarization(meetingId: meetingId, systemAudioURL: systemURL)
+    }
+
     private func runDiarization(meetingId: String, systemAudioURL: URL?) async {
         let service = SpeakerDiarizationService.shared
         let transcriptRepo = TranscriptRepository(database: database)
