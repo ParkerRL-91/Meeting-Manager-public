@@ -639,10 +639,16 @@ final class AppState {
             rawTemplate = settings.summaryPromptTemplate
         }
 
+        let participantsString = meeting.participantList.isEmpty
+            ? "Not recorded"
+            : meeting.participantList.joined(separator: ", ")
         let baseSystemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
             .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
+            .replacingOccurrences(of: "{{participants}}", with: participantsString)
+            .replacingOccurrences(of: "{{priorContext}}", with: "")
+            .replacingOccurrences(of: "{{knowledgeBase}}", with: "")
             .replacingOccurrences(of: "{{transcript}}", with: "")
             .replacingOccurrences(of: "{{notes}}", with: "")
 
