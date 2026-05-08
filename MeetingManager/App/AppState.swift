@@ -1911,8 +1911,10 @@ final class AppState {
 
         // Best-effort AI: hand the LLM in if one is configured. Service
         // gracefully falls back to stitch-only when nil or when the call
-        // throws.
-        let textGen = await makeTextGenerator()
+        // throws. Cleanup output ≈ input length (it's editing text, not
+        // generating new content), so budget 4096 output tokens to handle
+        // 30-60 min meetings without truncation.
+        let textGen = await makeTextGenerator(maxOutputTokens: 4096)
         let (text, method) = await TranscriptCleanupService.clean(
             transcripts: segments,
             textGenerator: textGen

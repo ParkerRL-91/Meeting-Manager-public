@@ -16,10 +16,24 @@ struct ParticipantBar: View {
 
     @State private var showAddPopover = false
     @State private var newName: String = ""
+    @State private var showAll = false
+
+    /// Max chips shown in collapsed state. Keeps the bar to ~1 row on
+    /// most window widths.
+    private let collapsedLimit = 8
+
+    private var visibleParticipants: [String] {
+        if showAll || participants.count <= collapsedLimit {
+            return participants
+        }
+        return Array(participants.prefix(collapsedLimit))
+    }
+
+    private var hiddenCount: Int {
+        max(0, participants.count - collapsedLimit)
+    }
 
     var body: some View {
-        // Always render the bar when an add-callback is provided so users
-        // can populate an empty participants list (e.g. ad-hoc meetings).
         if !participants.isEmpty || onAddParticipant != nil {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
@@ -29,14 +43,50 @@ struct ParticipantBar: View {
                     Text("Participants")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Color.appTextTertiary)
+                    if participants.count > 1 {
+                        Text("(\(participants.count))")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
                 }
 
                 FlowLayout(spacing: 6) {
-                    ForEach(participants, id: \.self) { name in
+                    ForEach(visibleParticipants, id: \.self) { name in
                         ParticipantChip(name: name) {
                             onTap?(name)
                         }
                     }
+
+                    // "+N more" toggle when collapsed
+                    if !showAll && hiddenCount > 0 {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { showAll = true }
+                        } label: {
+                            Text("+\(hiddenCount) more")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.appAccent)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.appAccentSubtle)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    // "Show less" when expanded with many participants
+                    if showAll && hiddenCount > 0 {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { showAll = false }
+                        } label: {
+                            Text("Show less")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.appTextTertiary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     if onAddParticipant != nil {
                         AddParticipantChip(isOpen: $showAddPopover, name: $newName) { trimmed in
                             onAddParticipant?(trimmed)
@@ -47,7 +97,7 @@ struct ParticipantBar: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
         }
     }
 }

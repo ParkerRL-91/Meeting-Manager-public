@@ -436,10 +436,29 @@ struct FullTranscriptView: View {
         return HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.caption)
-                .foregroundStyle(Color.appAccent)
+                .foregroundStyle(method == "ai-failed" ? Color.appWarning : Color.appAccent)
             Text(label)
                 .font(.caption)
                 .foregroundStyle(Color.appTextTertiary)
+
+            if method == "ai-failed" {
+                Button {
+                    Task {
+                        await appState.taskQueueManager.enqueue(
+                            type: .transcriptCleanup,
+                            meetingId: meetingId,
+                            priority: 1
+                        )
+                    }
+                } label: {
+                    Text("Retry AI cleanup")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.appAccent)
+                }
+                .buttonStyle(.plain)
+                .help("Re-run AI transcript cleanup with the current model")
+            }
+
             Spacer()
         }
     }
