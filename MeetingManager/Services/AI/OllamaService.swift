@@ -13,17 +13,11 @@ private struct OllamaChatRequest: Encodable {
     let messages: [OllamaMessage]
     let stream: Bool
     let options: OllamaOptions?
-    /// Qwen3 defaults to thinking mode which puts output into a separate
-    /// `thinking` field, leaving `content` empty and burning token budget
-    /// on chain-of-thought the app doesn't use. Set `false` to disable.
-    let think: Bool
-
-    init(model: String, messages: [OllamaMessage], stream: Bool = false, options: OllamaOptions?, think: Bool = false) {
+    init(model: String, messages: [OllamaMessage], stream: Bool = false, options: OllamaOptions?) {
         self.model = model
         self.messages = messages
         self.stream = stream
         self.options = options
-        self.think = think
     }
 }
 
@@ -343,7 +337,7 @@ final class OllamaService {
             stream: true,
             options: OllamaOptions(
                 temperature: 0.3,
-                num_predict: 4096,
+                num_predict: 8192,
                 num_ctx: numCtx > 0 ? numCtx : nil
             )
         )
