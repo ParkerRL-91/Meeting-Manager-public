@@ -47,7 +47,7 @@ struct MeetingMetadataHeader: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: 10) {
 
             // Title (inline-editable)
             if isEditingTitle {
@@ -66,6 +66,7 @@ struct MeetingMetadataHeader: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.appTextPrimary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
                     .onTapGesture(count: 2) { beginEditingTitle() }
                     .help("Double-click to rename")
             }
@@ -82,16 +83,14 @@ struct MeetingMetadataHeader: View {
             }
             .font(.system(size: 11.5))
             .foregroundStyle(Color.appTextMuted)
+            .layoutPriority(-1)
 
             // Status pill
             CompactStatusPill(status: meeting.status)
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            // Start / Start Early / Continue Recording — label depends on
-            // whether we're before the scheduled start (early), after it
-            // (regular start), or whether this meeting already has an audio
-            // file (continue an interrupted recording).
+            // Start / Start Early / Continue Recording
             if meeting.status == .scheduled || meeting.status == .notified {
                 Button {
                     appState.startRecording(for: meeting)
@@ -120,17 +119,6 @@ struct MeetingMetadataHeader: View {
                     .foregroundStyle(Color.appSuccess)
                     .transition(.opacity)
             }
-
-            // Edit / more actions
-            if let onEdit {
-                headerIconButton(icon: "calendar.badge.clock", help: "Edit meeting time") {
-                    onEdit()
-                }
-            }
-
-            headerIconButton(icon: "pencil", help: "Rename meeting") {
-                beginEditingTitle()
-            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -144,21 +132,6 @@ struct MeetingMetadataHeader: View {
             titleSaveTask?.cancel()
             if isEditingTitle { commitTitle() }
         }
-    }
-
-    @ViewBuilder
-    private func headerIconButton(icon: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 13))
-                .foregroundStyle(Color.appTextMuted)
-                .frame(width: 26, height: 26)
-                .background(Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .contentShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .buttonStyle(.plain)
-        .help(help)
     }
 
     // MARK: - Title editing

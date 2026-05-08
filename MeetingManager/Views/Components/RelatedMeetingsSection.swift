@@ -126,7 +126,7 @@ struct RelatedMeetingsSection: View {
                         }
                     }
                 }
-                .frame(maxHeight: 240)
+                .frame(maxHeight: 160)
             }
         }
         .padding(.horizontal, 20)

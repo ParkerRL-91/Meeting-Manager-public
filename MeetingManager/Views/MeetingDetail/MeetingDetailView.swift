@@ -68,32 +68,19 @@ struct MeetingDetailView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
+                // Pinned header — always visible
                 MeetingMetadataHeader(meeting: meeting, onEdit: {
                     showingEditor = true
                 })
 
-                ParticipantBar(
-                    participants: meeting.participantList,
-                    onTap: { _ in
-                        appState.sidebarDestination = .people
-                    },
-                    onAddParticipant: { newName in
-                        addParticipantToMeeting(newName)
-                    }
-                )
+                // Scrollable metadata that compresses when the window
+                // is short — participants, context, previous sessions.
+                // Capped so the tab content always gets at least half
+                // the available height.
+                metadataSection(for: meeting)
 
-                RelatedMeetingsSection(
-                    contextJSON: meeting.contextJSON,
-                    onSelectMeeting: { relatedId in
-                        appState.selectedMeetingId = relatedId
-                    }
-                )
-
-                // P5-T02: Previous sessions in the same meeting series.
-                if !previousSessions.isEmpty {
-                    previousSessionsSection
-                }
-
+                // Tab strip + content — gets layout priority so the
+                // main content is always visible and scrollable.
                 UnderlinedTabStrip(
                     tabs: DetailTab.allCases,
                     selected: $selectedTab,
@@ -101,6 +88,7 @@ struct MeetingDetailView: View {
                 )
 
                 tabContent
+                    .layoutPriority(1)
             } else {
                 Spacer()
                 ProgressView("Loading meeting...")
@@ -128,46 +116,13 @@ struct MeetingDetailView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let meeting {
+                    // Primary actions: Edit + Recipes (most used)
                     Button {
                         showingEditor = true
                     } label: {
                         Label("Edit", systemImage: "pencil.circle")
                     }
                     .help("Edit meeting")
-
-                    if meeting.status == .archived {
-                        Button {
-                            unarchiveMeeting()
-                        } label: {
-                            Label("Unarchive", systemImage: "archivebox")
-                        }
-                        .help("Unarchive meeting")
-                    } else if !meeting.status.isActive {
-                        Button {
-                            archiveMeeting()
-                        } label: {
-                            Label("Archive", systemImage: "archivebox")
-                        }
-                        .help("Archive meeting")
-                    }
-
-                    if meeting.isReopenable {
-                        Button {
-                            appState.startRecording(for: meeting)
-                        } label: {
-                            Label("Resume Recording", systemImage: "record.circle")
-                        }
-                        .help("Resume recording this meeting")
-                    }
-
-                    if meeting.status == .scheduled {
-                        Button {
-                            cancelMeeting()
-                        } label: {
-                            Label("Cancel", systemImage: "xmark.circle")
-                        }
-                        .help("Cancel meeting")
-                    }
 
                     Button {
                         showingRecipes = true
@@ -176,35 +131,68 @@ struct MeetingDetailView: View {
                     }
                     .help("Run AI recipes on this meeting")
 
+                    // Consolidated actions menu — share, export, archive, delete
                     Menu {
+                        // Conditional meeting-state actions
+                        if meeting.isReopenable {
+                            Button {
+                                appState.startRecording(for: meeting)
+                            } label: {
+                                Label("Resume Recording", systemImage: "record.circle")
+                            }
+                        }
+
+                        if meeting.status == .scheduled {
+                            Button {
+                                cancelMeeting()
+                            } label: {
+                                Label("Cancel Meeting", systemImage: "xmark.circle")
+                            }
+                        }
+
+                        if meeting.status == .archived {
+                            Button {
+                                unarchiveMeeting()
+                            } label: {
+                                Label("Unarchive", systemImage: "archivebox")
+                            }
+                        } else if !meeting.status.isActive {
+                            Button {
+                                archiveMeeting()
+                            } label: {
+                                Label("Archive", systemImage: "archivebox")
+                            }
+                        }
+
+                        Divider()
+
+                        // Share
                         Button("Share Summary") {
                             Task { await shareSummary() }
                         }
                         Button("Share Full Report") {
                             Task { await shareFullReport() }
                         }
-                    } label: {
-                        Label("Share", systemImage: "square.and.arrow.up.on.square")
-                    }
-                    .help("Share meeting content")
 
-                    Menu {
-                        Button("Summary (Markdown)") { Task { await exportSummary() } }
-                        Button("Transcript (Text)") { Task { await exportTranscript() } }
-                        Button("Full Report (Markdown)") { Task { await exportFullReport() } }
                         Divider()
-                        Button("Copy Summary as Markdown") { copySummaryMarkdown() }
-                    } label: {
-                        Label("Export", systemImage: "square.and.arrow.up")
-                    }
-                    .help("Export meeting")
 
-                    Button(role: .destructive) {
-                        showingDeleteConfirmation = true
+                        // Export
+                        Button("Export Summary (Markdown)") { Task { await exportSummary() } }
+                        Button("Export Transcript (Text)") { Task { await exportTranscript() } }
+                        Button("Export Full Report (Markdown)") { Task { await exportFullReport() } }
+                        Button("Copy Summary as Markdown") { copySummaryMarkdown() }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            showingDeleteConfirmation = true
+                        } label: {
+                            Label("Delete Meeting", systemImage: "trash")
+                        }
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("More", systemImage: "ellipsis.circle")
                     }
-                    .help("Delete meeting")
+                    .help("Share, export, archive, and more")
                 }
             }
         }
@@ -291,6 +279,39 @@ struct MeetingDetailView: View {
         Task {
             try? await appState.meetingRepository.update(m)
         }
+    }
+
+    /// Scrollable metadata band — participants, context brief, previous
+    /// sessions. Capped at 200pt so the tab content always gets the
+    /// majority of the window height.
+    @ViewBuilder
+    private func metadataSection(for meeting: Meeting) -> some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ParticipantBar(
+                    participants: meeting.participantList,
+                    onTap: { _ in
+                        appState.sidebarDestination = .people
+                    },
+                    onAddParticipant: { newName in
+                        addParticipantToMeeting(newName)
+                    }
+                )
+
+                RelatedMeetingsSection(
+                    contextJSON: meeting.contextJSON,
+                    onSelectMeeting: { relatedId in
+                        appState.selectedMeetingId = relatedId
+                    }
+                )
+
+                if !previousSessions.isEmpty {
+                    previousSessionsSection
+                }
+            }
+        }
+        .frame(maxHeight: 200)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Tab body extracted out of the main `body` to keep the SwiftUI type
