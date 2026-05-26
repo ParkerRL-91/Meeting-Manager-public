@@ -77,15 +77,31 @@ codesign --force --deep --sign "${SIGN_IDENTITY}" \
 # never released.
 echo "Stopping any running instance..."
 if pgrep -x "${EXECUTABLE}" >/dev/null 2>&1; then
-    osascript -e "tell application \"${APP_NAME}\" to quit" 2>/dev/null || true
+    # Graceful quit via Apple Event, but BOUNDED: `osascript ... to quit` can
+    # hang indefinitely waiting on an Automation (TCC) permission prompt that
+    # never appears in a non-interactive run, wedging the whole install. Run
+    # it in the background and hard-kill the osascript after 3s so we always
+    # fall through to the SIGTERM/SIGKILL path below.
+    osascript -e "tell application \"${APP_NAME}\" to quit" >/dev/null 2>&1 &
+    osa_pid=$!
+    ( sleep 3; kill -9 "${osa_pid}" 2>/dev/null ) &
+    watchdog_pid=$!
+    wait "${osa_pid}" 2>/dev/null || true
+    kill -9 "${watchdog_pid}" 2>/dev/null || true
+
     # Poll up to 5s for graceful shutdown
     for _ in 1 2 3 4 5; do
         sleep 1
         pgrep -x "${EXECUTABLE}" >/dev/null 2>&1 || break
     done
-    # Force-kill anything still alive
+    # Escalate: SIGTERM, then SIGKILL.
     if pgrep -x "${EXECUTABLE}" >/dev/null 2>&1; then
-        echo "  graceful quit didn't take — sending SIGKILL"
+        echo "  graceful quit didn't take — sending SIGTERM"
+        pkill -TERM -x "${EXECUTABLE}" 2>/dev/null || true
+        sleep 2
+    fi
+    if pgrep -x "${EXECUTABLE}" >/dev/null 2>&1; then
+        echo "  still alive — sending SIGKILL"
         pkill -9 -x "${EXECUTABLE}" 2>/dev/null || true
         sleep 1
     fi
@@ -93,12 +109,31 @@ fi
 
 # ── Install ────────────────────────────────────────────────────────────────
 echo "Installing to ${APP_DEST}..."
-# `ditto` overwrites files with the same name in-place. We don't `rm -rf`
-# the destination because the signed bundle in /Applications carries
-# extended attributes that block plain `rm` without elevation. The bundle
-# layout is consistent build-to-build, so a merge-overwrite is safe in
-# practice — no stale files have ever been observed from this path.
+# Clean the destination's CONTENTS before copying — do NOT plain ditto-merge.
+# A merge left stale files across installs (an old codesign `*.cstemp`, and
+# even a whole nested `Meeting Manager.app/` copied inside the bundle) that
+# aren't part of the freshly-signed seal, so `codesign --verify --strict`
+# failed ("a sealed resource is missing or invalid"). A broken seal risks
+# macOS re-evaluating the app's identity and re-prompting for permissions /
+# spawning a duplicate TCC entry — exactly what we're trying to avoid.
+#
+# We clear the contents rather than `rm -rf` the whole bundle because macOS
+# App Management protection blocks removing a top-level `.app` from
+# /Applications (that fails with "Permission denied"), but we own and can
+# clear what's INSIDE the bundle. `ditto` then lays down a byte-for-byte copy
+# of the signed staging bundle.
+if [[ -d "${APP_DEST}" ]]; then
+    chflags -R nouchg "${APP_DEST}" 2>/dev/null || true
+    rm -rf "${APP_DEST:?}/"* "${APP_DEST:?}/".[!.]* 2>/dev/null || true
+fi
 ditto "${APP_BUNDLE}" "${APP_DEST}"
+
+# Fail loudly if the installed bundle doesn't validate — a bad seal here is
+# exactly what causes permission re-prompts / duplicate TCC entries.
+if ! codesign --verify --strict "${APP_DEST}" 2>/dev/null; then
+    echo "ERROR: installed bundle failed codesign --verify --strict" >&2
+    exit 1
+fi
 
 VERSION=$(defaults read "${APP_DEST}/Contents/Info.plist" CFBundleShortVersionString)
 echo "Installed Meeting Manager ${VERSION}"
