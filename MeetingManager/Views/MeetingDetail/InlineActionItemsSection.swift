@@ -7,6 +7,7 @@ import os
 struct InlineActionItemsSection: View {
     let meetingId: String
 
+    @Environment(AppState.self) private var appState
     @State private var items: [ActionItem] = []
     @State private var isAddingNew = false
     @State private var newItemTitle = ""
@@ -49,6 +50,13 @@ struct InlineActionItemsSection: View {
         }
         .padding(.vertical, 12)
         .task { await reload() }
+        .refreshOnTaskCompletion(
+            meetingId: meetingId,
+            types: [.summary, .regeneration, .enrichment],
+            tasks: appState.taskQueueManager.allTasks
+        ) {
+            Task { await reload() }
+        }
         .errorAlert($errorMessage)
     }
 

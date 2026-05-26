@@ -418,7 +418,17 @@ final class MicrophoneCapture {
             )
             onDeviceDisconnected?(error)
         } else {
-            // Device changed but still valid — try to restart the engine
+            // Device changed but still valid — try to restart the engine.
+            // Re-check isRunning under lock first: stop() may have run between
+            // the notification firing and now, in which case restarting would
+            // resurrect a capture the caller just tore down.
+            lock.lock()
+            let stillRunning = isRunning
+            lock.unlock()
+            guard stillRunning else {
+                onDiagnostic?("DIAG:mic_device config changed after stop — not restarting")
+                return
+            }
             onDiagnostic?("DIAG:mic_device config changed but format still valid (\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch), attempting restart")
             do {
                 try engine.start()

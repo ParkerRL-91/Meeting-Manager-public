@@ -285,6 +285,15 @@ final class AppState {
             }
         }
 
+        // Warn (non-fatally) when the mic is dead while the call audio is live — the
+        // recording keeps the remote participants but the user's voice is missing.
+        audioCaptureService.onMicProblemDetected = { [weak self] message in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.lastUserError = message
+            }
+        }
+
         loadMeetings()
         loadSettings()
         observeNotifications()
@@ -439,6 +448,13 @@ final class AppState {
 
                 let wasTranscribing = meeting.status == .transcribing
                 if wasTranscribing { meeting.status = .complete }
+
+                // Durable record that transcription ran — set whether or not it
+                // produced segments. Stops the startup orphan scan from
+                // re-enqueuing this meeting forever when it yields zero
+                // transcripts (and survives the Tasks "Clear completed" button,
+                // which deletes the task rows the scan used to rely on).
+                meeting.transcriptionAttemptedAt = Date()
 
                 let commitSucceeded: Bool
                 do {
@@ -2090,16 +2106,49 @@ final class AppState {
         let meeting = try? await database.writer.read { db in
             try Meeting.fetchOne(db, key: meetingId)
         }
-        // v3.10 #3: cluster-count hint excludes anyone who declined, so
-        // diarization doesn't over-segment looking for a 5th voice when only
-        // 3 actually attended. Add 1 for the user themselves on the mic stream.
+        // Cluster-count hint for diarization. Diarization runs on the
+        // SYSTEM-ONLY audio, which contains the remote participants — NOT the
+        // local user (they're on the mic stream). Pyannote treats
+        // `numberOfSpeakers` as an EXACT count: when its own clustering
+        // disagrees it re-runs K-Means forced to exactly that many clusters
+        // (see SpeakerKit VBxClustering). So an over-count splits one real
+        // speaker into several. The previous `max(2, acceptedCount + 1)` both
+        // counted the user (who isn't in this audio) AND added another +1,
+        // overshooting by ~2 — every 1:1 had its single remote speaker split
+        // into the forced minimum of 2 clusters.
+        //
+        // Correct hint = number of expected REMOTE speakers = accepted
+        // attendees minus the local user. Declined attendees are already
+        // excluded by `acceptedParticipantList`. Only hint when we expect ≥2
+        // remote speakers (where a count genuinely prevents under-merge); for
+        // 0–1, pass nil and let Pyannote's clustering decide rather than force
+        // a possibly-wrong exact count.
         let participantCount: Int? = {
             guard let m = meeting else { return nil }
-            let acceptedCount = m.acceptedParticipantList.count
-            // Conservative: prefer at least 2 (user + 1 other). Pyannote treats
-            // nil as "unknown — use clustering heuristics."
-            guard acceptedCount > 0 else { return nil }
-            return max(2, acceptedCount + 1)
+            let accepted = m.acceptedParticipantList
+            guard !accepted.isEmpty else { return nil }
+
+            let userEmail = googleAuthManager.userEmail?
+                .lowercased().trimmingCharacters(in: .whitespaces)
+            let userName = NSFullUserName()
+                .lowercased().trimmingCharacters(in: .whitespaces)
+            func isLocalUser(_ raw: String) -> Bool {
+                let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+                if let e = userEmail, !e.isEmpty, s == e { return true }
+                if !userName.isEmpty, s == userName { return true }
+                return false
+            }
+
+            let remote: Int
+            if accepted.contains(where: isLocalUser) {
+                remote = accepted.filter { !isLocalUser($0) }.count
+            } else {
+                // Couldn't positively identify the user in the list, but the
+                // user is virtually always one of their own meeting's
+                // attendees — subtract one rather than counting them as remote.
+                remote = max(0, accepted.count - 1)
+            }
+            return remote >= 2 ? remote : nil
         }()
 
         do {

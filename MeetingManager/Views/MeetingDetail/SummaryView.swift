@@ -93,15 +93,20 @@ struct SummaryView: View {
             saveTask?.cancel()
             flushPendingSaveIfNeeded()
         }
-        .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
-            // Reload summary when a regeneration task for this meeting completes.
-            let justCompleted = tasks.contains {
-                $0.type == .regeneration &&
-                $0.meetingId == meetingId &&
-                $0.status == .completed
-            }
-            if justCompleted {
-                Task { await loadSummary() }
+        // Auto-refresh in place when the post-meeting pipeline finishes — the
+        // initial `.summary` task (auto-run after a meeting ends), a manual
+        // `.regeneration`, or the `.transcription` that gates the empty state.
+        // Previously only `.regeneration` was handled, so the first summary
+        // didn't appear until the user navigated away and back.
+        .refreshOnTaskCompletion(
+            meetingId: meetingId,
+            types: [.summary, .regeneration, .transcription],
+            tasks: appState.taskQueueManager.allTasks
+        ) {
+            Task {
+                meeting = try? await appState.meetingRepository.find(id: meetingId)
+                await loadSummary()
+                await loadEmptyStateMeta()
             }
         }
         .task {

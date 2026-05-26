@@ -16,7 +16,15 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 APP_NAME="Meeting Manager"
 EXECUTABLE="MeetingManager"
-SIGN_IDENTITY="MeetingManager-Dev"
+# Pin to the EXACT cert SHA-1, not the name. Two self-signed certs exist in the
+# keychain ("MeetingManager-Dev" and "MeetingManager-Dev2"), so --sign
+# "MeetingManager-Dev" is an ambiguous prefix match. If codesign ever resolved
+# it to Dev2, the app's designated requirement (certificate root) would change,
+# macOS TCC would treat it as a *different* app, and a DUPLICATE entry would
+# appear in System Settings → Privacy (existing grants lost). This hash is the
+# cert the installed app and all existing TCC grants are bound to:
+#   codesign -d --requirements -  →  certificate root = H"57a1035b…"
+SIGN_IDENTITY="57A1035B19FC882CF723DB2EFF114D8104E50537"
 ENTITLEMENTS="${REPO_DIR}/MeetingManager/Resources/MeetingManager.entitlements"
 BUILD_DIR="${REPO_DIR}/build/app"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"

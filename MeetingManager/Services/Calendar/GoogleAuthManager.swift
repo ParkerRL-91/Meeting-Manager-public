@@ -157,6 +157,13 @@ final class GoogleAuthManager {
         userEmail = nil
     }
 
+    /// In-flight token refresh, if any. Coalesces concurrent callers so two
+    /// near-simultaneous syncs (e.g. multiple calendars, or the poll timer
+    /// racing a calendar-change trigger) don't both POST `refresh_token` —
+    /// Google rotates/invalidates refresh tokens on some flows, so a stampede
+    /// can intermittently break auth.
+    private var refreshTask: Task<String, Error>?
+
     /// Returns a valid access token, refreshing it first if expired.
     func refreshTokenIfNeeded() async throws -> String {
         guard let tokens = cachedTokens else {
@@ -167,8 +174,16 @@ final class GoogleAuthManager {
             return tokens.accessToken
         }
 
+        // Join an already-running refresh instead of starting another.
+        if let existing = refreshTask {
+            return try await existing.value
+        }
+
         Logger.calendar.info("Access token expired, refreshing...")
-        return try await refreshAccessToken()
+        let task = Task { try await refreshAccessToken() }
+        refreshTask = task
+        defer { refreshTask = nil }
+        return try await task.value
     }
 
     // MARK: - Session Restoration

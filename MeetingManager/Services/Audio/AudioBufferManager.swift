@@ -71,6 +71,14 @@ struct CircularBuffer<Element> {
 /// where both voices are simultaneously audible -- the correct input for Whisper.
 final class AudioBufferManager {
     private let lock = NSLock()
+    /// Serializes the actual `AVAudioFile.write` calls. The mic callback thread
+    /// and the system-audio callback thread both write the mixed `audioFile`,
+    /// and `AVAudioFile.write` is not safe for concurrent writers — without this
+    /// the WAV gets corrupted (and can crash inside CoreAudio). Kept separate
+    /// from `lock` (which guards the sample ring buffers) so disk I/O never
+    /// blocks the transcription chunker, and acquired only after `lock` is
+    /// released to avoid lock-ordering inversion.
+    private let fileWriteLock = NSLock()
 
     /// Circular buffers: 30 seconds at 16kHz = 480,000 samples capacity.
     private var micSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
@@ -126,6 +134,12 @@ final class AudioBufferManager {
 
     /// Begin monitoring system memory pressure.
     func startMemoryPressureMonitoring() {
+        // Cancel any existing source first — `prepareForRecording` can be called
+        // again (e.g. a start-failure retry) without an intervening
+        // `finishRecording`, which would otherwise leak the prior source and
+        // leave two handlers mutating the buffers under pressure.
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical],
             queue: .global(qos: .utility)
@@ -305,6 +319,8 @@ final class AudioBufferManager {
         let file = systemAudioFile
         lock.unlock()
         guard let file else { return }
+        fileWriteLock.lock()
+        defer { fileWriteLock.unlock() }
         try? file.write(from: buffer)
     }
 
@@ -314,25 +330,36 @@ final class AudioBufferManager {
         lock.unlock()
 
         guard let file else { return }
+
+        // Serialize the write itself (mic + system threads share `audioFile`).
+        var writeError: Error?
+        fileWriteLock.lock()
         do {
             try file.write(from: buffer)
+        } catch {
+            writeError = error
+        }
+        fileWriteLock.unlock()
+
+        guard let writeError else {
             lock.lock()
             consecutiveWriteFailures = 0
             lock.unlock()
-        } catch {
+            return
+        }
+
+        lock.lock()
+        consecutiveWriteFailures += 1
+        let failures = consecutiveWriteFailures
+        lock.unlock()
+
+        onWriteError?(writeError)
+
+        if failures >= maxConsecutiveWriteFailures {
+            // Auto-stop writing to prevent repeated failures
             lock.lock()
-            consecutiveWriteFailures += 1
-            let failures = consecutiveWriteFailures
+            audioFile = nil
             lock.unlock()
-
-            onWriteError?(error)
-
-            if failures >= maxConsecutiveWriteFailures {
-                // Auto-stop writing to prevent repeated failures
-                lock.lock()
-                audioFile = nil
-                lock.unlock()
-            }
         }
     }
 }

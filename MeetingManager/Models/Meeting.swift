@@ -35,6 +35,12 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// attribution decision. Lets the UI badge low-confidence labels for
     /// review without retraining the user to interpret them.
     var speakerConfidenceMap: String?
+    /// Timestamp of the most recent transcription *attempt* (set whether or not
+    /// it produced segments). The startup orphan scan uses this to avoid
+    /// re-enqueuing transcription for meetings that were already tried but
+    /// yielded nothing — a durable signal that survives clearing completed
+    /// tasks, unlike the old "does a transcription task row exist?" check.
+    var transcriptionAttemptedAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -56,6 +62,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         speakerMap: String? = nil,
         declinedAttendees: String? = nil,
         speakerConfidenceMap: String? = nil,
+        transcriptionAttemptedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -76,6 +83,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.speakerMap = speakerMap
         self.declinedAttendees = declinedAttendees
         self.speakerConfidenceMap = speakerConfidenceMap
+        self.transcriptionAttemptedAt = transcriptionAttemptedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -249,7 +257,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, transcriptionAttemptedAt, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

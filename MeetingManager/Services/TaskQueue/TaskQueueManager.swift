@@ -222,6 +222,7 @@ final class TaskQueueManager {
                           )
                       AND m.status IN ('transcribing', 'complete')
                       AND NOT EXISTS (SELECT 1 FROM transcript t WHERE t.meetingId = m.id)
+                      AND m.transcriptionAttemptedAt IS NULL
                     LIMIT 50
                 """)
             }

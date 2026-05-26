@@ -140,6 +140,12 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         let sampleRate = asbd?.mSampleRate ?? 48000
         let channels = asbd?.mChannelsPerFrame ?? 2
 
+        // CoreMedia can hand back a zeroed ASBD during stream reconfiguration.
+        // Guard before any division: `totalFloats / channels` would trap on an
+        // integer divide-by-zero, and `Int(frameCount * (16000/sampleRate))`
+        // would trap converting Inf/NaN to Int.
+        guard sampleRate > 0, channels > 0 else { return }
+
         // Get the audio buffer list
         do {
             try sampleBuffer.withAudioBufferList { audioBufferList, blockBuffer in

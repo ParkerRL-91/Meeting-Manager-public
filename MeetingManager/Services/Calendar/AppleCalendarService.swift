@@ -282,7 +282,11 @@ final class AppleCalendarService {
         let start = cal.date(byAdding: .day, value: -max(0, daysBehind), to: now) ?? now
         let end = cal.date(byAdding: .day, value: max(1, daysAhead), to: now) ?? now
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: cals)
-        let events = store.events(matching: predicate).sorted { $0.startDate < $1.startDate }
+        // EKEvent.startDate is bridged as an implicitly-unwrapped Date! and is
+        // genuinely nil for some subscribed/birthday/corrupt entries — comparing
+        // it directly would trap. Coalesce to a stable sentinel for sorting.
+        let events = store.events(matching: predicate)
+            .sorted { ($0.startDate ?? .distantPast) < ($1.startDate ?? .distantPast) }
         logger.info("Apple Calendar fetch: \(events.count, privacy: .public) events from \(cals.count, privacy: .public)/\(allCals.count, privacy: .public) calendar(s) over -\(daysBehind, privacy: .public)d/+\(daysAhead, privacy: .public)d")
         return events
     }

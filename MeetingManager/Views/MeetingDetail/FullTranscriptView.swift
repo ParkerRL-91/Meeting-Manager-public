@@ -114,6 +114,17 @@ struct FullTranscriptView: View {
         }
         .onChange(of: searchQuery) { _, _ in updateFilteredTranscripts() }
         .onChange(of: transcripts) { _, _ in updateFilteredTranscripts() }
+        .refreshOnTaskCompletion(
+            meetingId: meetingId,
+            types: [.transcription, .transcriptCleanup, .diarization, .retryAttribution],
+            tasks: appState.taskQueueManager.allTasks
+        ) {
+            Task {
+                meeting = try? await appState.meetingRepository.find(id: meetingId)
+                await loadTranscripts()
+                updateFilteredTranscripts()
+            }
+        }
         .sheet(item: $speakerToCustomRename) { transcript in
             CustomSpeakerNameSheet(
                 currentName: transcript.displayedSpeakerName(

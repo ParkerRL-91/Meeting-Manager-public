@@ -51,6 +51,10 @@ private struct EventResource: Decodable, Sendable {
     let attendees: [Attendee]?
     let hangoutLink: String?
     let conferenceData: ConferenceData?
+    /// Google event classification: "default", "outOfOffice", "focusTime",
+    /// "workingLocation", "birthday", "fromGmail". Anything other than a real
+    /// meeting ("default") is not something to record. Absent ⇒ treat as default.
+    let eventType: String?
 
     struct EventDateTime: Decodable, Sendable {
         let dateTime: String?
@@ -137,9 +141,15 @@ final class GoogleCalendarService {
             var events: [CalendarEvent] = []
             var nextPageToken: String?
             var currentURL = url
+            var pagesFetched = 0
+            // Hard cap so a server returning a stable/repeating nextPageToken
+            // can't spin this loop forever (and hammer the API). 50 pages ×
+            // up to 2500 events/page far exceeds any real calendar window.
+            let maxPages = 50
 
             // Page through all results
             repeat {
+                pagesFetched += 1
                 if let token = nextPageToken {
                     var paged = URLComponents(url: currentURL, resolvingAgainstBaseURL: false)!
                     var items = paged.queryItems ?? []
@@ -165,7 +175,7 @@ final class GoogleCalendarService {
                 }
                 events.append(contentsOf: pageEvents)
                 nextPageToken = decoded.nextPageToken
-            } while nextPageToken != nil
+            } while nextPageToken != nil && pagesFetched < maxPages
 
             return events
         }
@@ -238,8 +248,25 @@ final class GoogleCalendarService {
         }
     }
 
+    /// Google `eventType` values that are not meetings and must never be turned
+    /// into recordable Meeting rows. "workingLocation" is the big one — recurring
+    /// "Home"/"Office" location markers were being imported and auto-recorded,
+    /// producing dozens of empty "Home" meetings. Out-of-office, focus-time, and
+    /// birthday blocks are likewise solo/non-collaborative.
+    private static let nonMeetingEventTypes: Set<String> = [
+        "workingLocation", "outOfOffice", "focusTime", "birthday",
+    ]
+
     /// Maps a Google Calendar API event resource to the app's `CalendarEvent` model.
     private func mapToCalendarEvent(_ resource: EventResource, calendarId: String) -> CalendarEvent? {
+        // Drop calendar entries that aren't meetings (working-location markers,
+        // OOO, focus time, birthdays). These have no call to join and only
+        // create recording noise.
+        if let type = resource.eventType, Self.nonMeetingEventTypes.contains(type) {
+            Logger.calendar.debug("Skipping '\(resource.summary ?? "untitled")' — eventType=\(type, privacy: .public)")
+            return nil
+        }
+
         let startDate = parseEventDate(resource.start)
         let endDate = parseEventDate(resource.end)
 

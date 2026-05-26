@@ -139,6 +139,13 @@ struct SpeakerAssignmentView: View {
             }
         }
         .task { await load() }
+        .refreshOnTaskCompletion(
+            meetingId: meetingId,
+            types: [.diarization, .retryAttribution, .transcriptCleanup],
+            tasks: appState.taskQueueManager.allTasks
+        ) {
+            Task { await reload() }
+        }
     }
 
     // MARK: - Loading

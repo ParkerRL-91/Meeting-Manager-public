@@ -32,6 +32,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// The meeting should be auto-stopped to prevent unbounded memory growth.
     var onCapacityReached: (() -> Void)?
 
+    /// Called once per recording when the mic appears dead — silent for a sustained
+    /// period while system audio proves the call is live. Non-fatal: recording
+    /// continues (remote audio is still captured), but the user is warned so they
+    /// can fix their input device. The String is a user-facing message.
+    var onMicProblemDetected: ((String) -> Void)?
+
     /// Called when the AudioBufferManager encounters a write error (e.g., disk full).
     /// The error is surfaced to the user via AppState.lastUserError.
     var onWriteError: ((Error) -> Void)?
@@ -74,6 +80,19 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// Tracks consecutive seconds of silence for auto-stop.
     private var consecutiveSilentSeconds: Int = 0
     private var silenceCheckTimer: Timer?
+
+    /// Tracks consecutive seconds where the mic is silent but system audio is active —
+    /// the signature of a dead/wrong input device on a live call.
+    private var consecutiveMicDeadSeconds: Int = 0
+    /// Latches true once the mic-problem warning has fired, so it only warns once per recording.
+    private var micProblemWarned = false
+    /// Mic RMS below this is treated as no signal. Working mics (even low-output USB
+    /// webcams ~0.002) sit above it; a dead/output-only device reads ~0.
+    private let micDeadThreshold: Float = 0.0005
+    /// System RMS above this means the call is clearly live (remote participants audible).
+    private let systemActiveThreshold: Float = 0.01
+    /// Seconds of mic-dead-while-system-active before warning the user.
+    private let micDeadWarnSeconds = 45
 
     /// Thread-safe atomic levels updated directly in audio buffer callbacks.
     /// Use these for polling from the main thread instead of the @Published properties
@@ -255,6 +274,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
         // Start silence monitoring AFTER both captures are running
         consecutiveSilentSeconds = 0
+        consecutiveMicDeadSeconds = 0
+        micProblemWarned = false
         silenceCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
 
@@ -263,6 +284,27 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 Logger.audio.warning("Buffer capacity reached (\(Int(self.bufferManager.maxRecordingDurationSeconds / 3600))h limit) — triggering auto-stop")
                 self.onCapacityReached?()
                 return
+            }
+
+            // Dead-mic detection: mic produces no signal while system audio is clearly
+            // live. This is the "wrong input device" failure (e.g. an output-only
+            // headphone dongle selected as the mic) — the call records remote audio
+            // fine but the local mic is silent, so we warn the user without stopping.
+            if !self.micProblemWarned
+                && self.micLevel < self.micDeadThreshold
+                && self.systemLevel >= self.systemActiveThreshold {
+                self.consecutiveMicDeadSeconds += 1
+                if self.consecutiveMicDeadSeconds >= self.micDeadWarnSeconds {
+                    self.micProblemWarned = true
+                    self.logToFile("Audio: mic appears DEAD — no signal for \(self.consecutiveMicDeadSeconds)s while system audio active. Likely wrong input device.")
+                    Logger.audio.warning("Mic dead-signal detected while system audio active — warning user")
+                    self.onMicProblemDetected?(
+                        "Your microphone isn't picking up any sound, but the call audio is being recorded. "
+                        + "Check System Settings > Sound > Input and pick your microphone — your voice won't be in this transcript otherwise."
+                    )
+                }
+            } else if self.micLevel >= self.micDeadThreshold {
+                self.consecutiveMicDeadSeconds = 0
             }
 
             // Silence = both mic AND system audio below threshold.
@@ -289,6 +331,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         silenceCheckTimer?.invalidate()
         silenceCheckTimer = nil
         consecutiveSilentSeconds = 0
+        consecutiveMicDeadSeconds = 0
+        micProblemWarned = false
         micCapture.stop()
         if #available(macOS 14.2, *) {
             systemAudioTap?.stop()

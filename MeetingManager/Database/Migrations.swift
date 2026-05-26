@@ -872,5 +872,29 @@ enum Migrations {
                    OR detailedOutlinePromptTemplate LIKE '%typically 5-15 sections%'
                 """, arguments: [DefaultPrompts.detailedOutline])
         }
+
+        // v40: durable transcription-attempt marker. The startup orphan scan
+        // re-enqueues a transcription task for every complete/transcribing
+        // meeting that has audio but no transcript rows, guarding only against
+        // meetings that still had a transcription task ROW. The Tasks view's
+        // "Clear completed" button deletes those rows, so clearing completed
+        // tasks made the scan re-enqueue every such meeting on the next launch
+        // (the "~50 tasks on reopen" report). Persist the attempt on the
+        // meeting itself so it survives task-row deletion.
+        migrator.registerMigration("v40-transcription-attempt-marker") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "transcriptionAttemptedAt", .datetime)
+            }
+            // Backfill meetings that already have transcripts — they've
+            // demonstrably been transcribed, so mark them attempted. (They
+            // don't match the orphan candidate query anyway since it requires
+            // zero transcript rows; this just keeps the column honest.)
+            // Meetings with audio but no transcripts are intentionally left
+            // NULL so the scan still transcribes them once.
+            try db.execute(sql: """
+                UPDATE meeting SET transcriptionAttemptedAt = updatedAt
+                WHERE EXISTS (SELECT 1 FROM transcript t WHERE t.meetingId = meeting.id)
+                """)
+        }
     }
 }
