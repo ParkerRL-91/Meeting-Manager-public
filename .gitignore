@@ -19,6 +19,8 @@ Package.resolved
 
 # Build artifacts / release DMGs (managed by push-update.sh + GitHub Releases)
 *.dmg
+# ...except the canonical root download, kept in-repo for one-click install.
+!/Meeting-Manager.dmg
 
 # QA evidence / local screenshots
 qa-evidence/
