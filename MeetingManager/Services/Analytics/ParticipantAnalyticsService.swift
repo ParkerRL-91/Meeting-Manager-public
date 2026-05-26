@@ -4,9 +4,12 @@ import os
 
 /// Aggregates meeting and transcript data into analytics-ready summaries.
 ///
-/// All queries run on the shared `AppDatabase` writer's read-pool. Aggregates that
-/// don't translate cleanly into SQL (e.g. parsing the comma-separated `participants`
-/// column on the `meeting` table) are computed in Swift after fetching the rows.
+/// Every aggregate accepts an `AnalyticsFilter` (date range + optional
+/// participant) so the dashboard can be sliced. Meeting durations are computed
+/// in Swift from GRDB-decoded `Date`s: the `meeting.startDate`/`endDate`
+/// columns are stored as ISO-8601 TEXT, so SQL arithmetic like
+/// `(endDate - startDate)` silently yields 0 (SQLite coerces "2026-..." → 2026)
+/// — which is why the old weekly-hours card always read 0.
 @MainActor
 final class ParticipantAnalyticsService {
     private let database: AppDatabase
@@ -16,20 +19,49 @@ final class ParticipantAnalyticsService {
         self.database = database
     }
 
+    // MARK: - Filter
+
+    /// Slices every aggregate. `start`/`end` are inclusive bounds on the
+    /// meeting's start; nil means unbounded. `participant` restricts to
+    /// meetings that include that exact attendee (from the filter dropdown).
+    struct AnalyticsFilter: Equatable {
+        var start: Date?
+        var end: Date?
+        var participant: String?
+
+        static let allTime = AnalyticsFilter(start: nil, end: nil, participant: nil)
+    }
+
     // MARK: - Result types
 
-    struct WeeklyStats: Equatable {
+    struct Overview: Equatable {
+        let totalMeetings: Int
         let totalHours: Double
-        let count: Int
         let avgMinutes: Double
+        let medianMinutes: Double
+        let longestMinutes: Double
+        let longestTitle: String?
 
-        static let empty = WeeklyStats(totalHours: 0, count: 0, avgMinutes: 0)
+        static let empty = Overview(totalMeetings: 0, totalHours: 0, avgMinutes: 0,
+                                     medianMinutes: 0, longestMinutes: 0, longestTitle: nil)
+    }
+
+    /// Aggregate "you vs everyone else" talk balance across the filtered set.
+    struct TalkShare: Equatable {
+        let youSeconds: Double
+        let othersSeconds: Double
+        let meetingsCounted: Int
+
+        var totalSeconds: Double { youSeconds + othersSeconds }
+        var youFraction: Double { totalSeconds > 0 ? youSeconds / totalSeconds : 0 }
+
+        static let empty = TalkShare(youSeconds: 0, othersSeconds: 0, meetingsCounted: 0)
     }
 
     struct TalkTimePerSpeaker: Identifiable, Equatable {
         var id: String { speakerLabel }
-        let speakerLabel: String   // raw label from transcript ("mic", "system", future "Speaker N")
-        let displayName: String    // resolved label for UI ("You", participant name, "Other")
+        let speakerLabel: String
+        let displayName: String
         let totalSeconds: Double
     }
 
@@ -40,47 +72,270 @@ final class ParticipantAnalyticsService {
         let lastMet: Date
     }
 
-    struct MeetingTrendBucket: Identifiable, Equatable {
-        var id: Date { weekStart }
-        let weekStart: Date
+    struct WeekdayBucket: Identifiable, Equatable {
+        var id: Int { weekdayIndex }
+        let weekdayIndex: Int   // 1 = Mon … 7 = Sun
+        let label: String       // "Mon", "Tue", …
+        let count: Int
+        let hours: Double
+    }
+
+    struct TrendBucket: Identifiable, Equatable {
+        var id: Date { start }
+        let start: Date
+        let label: String
         let count: Int
     }
 
-    // MARK: - Weekly stats (this week, Mon-Sun)
+    // MARK: - Internal meeting projection
 
-    func weeklyStats() async throws -> WeeklyStats {
-        let weekStart = Self.startOfCurrentWeek()
+    private struct MeetingRow {
+        let id: String
+        let title: String
+        let start: Date
+        let durationSeconds: Double
+        let participants: [String]
+    }
+
+    /// Fetch completed meetings matching the filter, with durations resolved.
+    /// Decodes dates via GRDB (TEXT → Date) and computes duration in Swift.
+    private func fetchMeetings(_ filter: AnalyticsFilter) async throws -> [MeetingRow] {
         let writer = database.writer
-        return try await Task.detached(priority: .userInitiated) { () -> WeeklyStats in
-            try writer.read { db -> WeeklyStats in
-                // Sum (endDate - startDate) in seconds for completed meetings since weekStart.
-                let row = try Row.fetchOne(
-                    db,
-                    sql: """
-                        SELECT
-                            COUNT(*) AS cnt,
-                            COALESCE(SUM(CASE
-                                WHEN startDate IS NOT NULL AND endDate IS NOT NULL
-                                THEN (endDate - startDate)
-                                ELSE 0
-                            END), 0) AS totalSec
-                        FROM meeting
-                        WHERE status = ?
-                          AND startDate IS NOT NULL
-                          AND startDate >= ?
-                        """,
-                    arguments: [MeetingStatus.complete.rawValue, weekStart]
+        let completed = MeetingStatus.complete.rawValue
+        let start = filter.start
+        let end = filter.end
+        let rows: [MeetingRow] = try await Task.detached(priority: .userInitiated) {
+            try writer.read { db -> [MeetingRow] in
+                var sql = """
+                    SELECT id, title, participants,
+                           COALESCE(startDate, scheduledStartDate) AS s,
+                           endDate AS e
+                    FROM meeting
+                    WHERE status = ?
+                      AND COALESCE(startDate, scheduledStartDate) IS NOT NULL
+                    """
+                var args: [DatabaseValueConvertible] = [completed]
+                // ISO-8601 TEXT sorts lexicographically == chronologically, so
+                // string comparison against a bound Date works for range bounds.
+                if let start { sql += " AND COALESCE(startDate, scheduledStartDate) >= ?"; args.append(start) }
+                if let end { sql += " AND COALESCE(startDate, scheduledStartDate) <= ?"; args.append(end) }
+
+                let cursor = try Row.fetchCursor(db, sql: sql, arguments: StatementArguments(args))
+                var out: [MeetingRow] = []
+                while let row = try cursor.next() {
+                    guard let s: Date = row["s"] else { continue }
+                    let e: Date? = row["e"]
+                    let duration = e.map { max(0, $0.timeIntervalSince(s)) } ?? 0
+                    let raw: String = row["participants"] ?? ""
+                    let names = raw.components(separatedBy: ",")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    out.append(MeetingRow(id: row["id"], title: row["title"] ?? "Untitled",
+                                          start: s, durationSeconds: duration, participants: names))
+                }
+                return out
+            }
+        }.value
+
+        guard let participant = filter.participant, !participant.isEmpty else { return rows }
+        let key = participant.lowercased()
+        return rows.filter { $0.participants.contains { $0.lowercased() == key } }
+    }
+
+    // MARK: - Overview
+
+    func overview(_ filter: AnalyticsFilter) async throws -> Overview {
+        let meetings = try await fetchMeetings(filter)
+        guard !meetings.isEmpty else { return .empty }
+
+        let durations = meetings.map { $0.durationSeconds }
+        let totalSec = durations.reduce(0, +)
+        let count = meetings.count
+        let sorted = durations.sorted()
+        let median: Double = sorted.isEmpty ? 0 :
+            (sorted.count % 2 == 1
+             ? sorted[sorted.count / 2]
+             : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2)
+        let longest = meetings.max { $0.durationSeconds < $1.durationSeconds }
+
+        return Overview(
+            totalMeetings: count,
+            totalHours: totalSec / 3600.0,
+            avgMinutes: count > 0 ? (totalSec / Double(count)) / 60.0 : 0,
+            medianMinutes: median / 60.0,
+            longestMinutes: (longest?.durationSeconds ?? 0) / 60.0,
+            longestTitle: (longest?.durationSeconds ?? 0) > 0 ? longest?.title : nil
+        )
+    }
+
+    // MARK: - Top participants
+
+    func topParticipants(_ filter: AnalyticsFilter, limit: Int = 8) async throws -> [TopParticipant] {
+        let meetings = try await fetchMeetings(filter)
+        var bucket: [String: (count: Int, last: Date)] = [:]
+        for m in meetings {
+            for name in m.participants {
+                // Don't surface the local user in "who you meet with".
+                if Self.isLikelyLocalUser(name) { continue }
+                if let existing = bucket[name] {
+                    bucket[name] = (existing.count + 1, max(existing.last, m.start))
+                } else {
+                    bucket[name] = (1, m.start)
+                }
+            }
+        }
+        return bucket
+            .map { TopParticipant(name: $0.key, meetingCount: $0.value.count, lastMet: $0.value.last) }
+            .sorted { lhs, rhs in
+                if lhs.meetingCount != rhs.meetingCount { return lhs.meetingCount > rhs.meetingCount }
+                return lhs.lastMet > rhs.lastMet
+            }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    /// Distinct attendee names across all completed meetings — powers the
+    /// participant filter dropdown. Excludes the local user.
+    func knownParticipants(limit: Int = 50) async throws -> [String] {
+        let meetings = try await fetchMeetings(.allTime)
+        var counts: [String: Int] = [:]
+        for m in meetings {
+            for name in m.participants where !Self.isLikelyLocalUser(name) {
+                counts[name, default: 0] += 1
+            }
+        }
+        return counts.sorted { $0.value > $1.value }.prefix(limit).map { $0.key }
+    }
+
+    // MARK: - Weekday distribution
+
+    func weekdayDistribution(_ filter: AnalyticsFilter) async throws -> [WeekdayBucket] {
+        let meetings = try await fetchMeetings(filter)
+        let labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        var counts = [Int](repeating: 0, count: 7)
+        var seconds = [Double](repeating: 0, count: 7)
+        for m in meetings {
+            // Calendar weekday: 1=Sun…7=Sat. Map to 0=Mon…6=Sun.
+            let wd = Self.weekCalendar.component(.weekday, from: m.start)
+            let idx = (wd + 5) % 7
+            counts[idx] += 1
+            seconds[idx] += m.durationSeconds
+        }
+        return (0..<7).map {
+            WeekdayBucket(weekdayIndex: $0 + 1, label: labels[$0],
+                          count: counts[$0], hours: seconds[$0] / 3600.0)
+        }
+    }
+
+    // MARK: - Trend over the filtered window
+
+    /// Meetings-per-bucket across the effective window. Bucket granularity
+    /// adapts to the span: day (≤ 31d), week (≤ ~26w), else month.
+    func trend(_ filter: AnalyticsFilter) async throws -> [TrendBucket] {
+        let meetings = try await fetchMeetings(filter)
+        let cal = Self.weekCalendar
+        let now = Date()
+        let lo = filter.start ?? meetings.map { $0.start }.min() ?? now
+        let hi = filter.end ?? now
+        guard lo <= hi else { return [] }
+
+        let span = hi.timeIntervalSince(lo)
+        let day: TimeInterval = 86_400
+        let component: Calendar.Component
+        let labelFormat: String
+        if span <= 31 * day { component = .day; labelFormat = "d MMM" }
+        else if span <= 200 * day { component = .weekOfYear; labelFormat = "d MMM" }
+        else { component = .month; labelFormat = "MMM yy" }
+
+        func anchor(_ d: Date) -> Date {
+            switch component {
+            case .day: return cal.startOfDay(for: d)
+            case .weekOfYear: return cal.dateInterval(of: .weekOfYear, for: d)?.start ?? d
+            default: return cal.dateInterval(of: .month, for: d)?.start ?? d
+            }
+        }
+
+        // Ordered bucket anchors lo → hi.
+        var anchors: [Date] = []
+        var cursor = anchor(lo)
+        let endAnchor = anchor(hi)
+        var guardCount = 0
+        while cursor <= endAnchor && guardCount < 400 {
+            anchors.append(cursor)
+            guard let next = cal.date(byAdding: component, value: 1, to: cursor) else { break }
+            cursor = next
+            guardCount += 1
+        }
+        guard !anchors.isEmpty else { return [] }
+
+        var counts = Dictionary(uniqueKeysWithValues: anchors.map { ($0, 0) })
+        for m in meetings {
+            let a = anchor(m.start)
+            if counts[a] != nil { counts[a]! += 1 }
+        }
+
+        let fmt = DateFormatter()
+        fmt.calendar = cal
+        fmt.locale = .current
+        fmt.dateFormat = labelFormat
+        return anchors.map { TrendBucket(start: $0, label: fmt.string(from: $0), count: counts[$0] ?? 0) }
+    }
+
+    // MARK: - Aggregate talk share (you vs others) across the filtered set
+
+    /// Aggregate "you vs others" talk balance. `youIdentifiers` are the labels
+    /// that count as the local user — there is no single "mic" label in stored
+    /// transcripts (attribution rewrites the user's cluster to their resolved
+    /// name/email), so the caller passes the user's known identities (e.g.
+    /// signed-in email, full name) which are matched case-insensitively. Returns
+    /// `.empty` when none are supplied.
+    func talkShare(_ filter: AnalyticsFilter, youIdentifiers: [String]) async throws -> TalkShare {
+        let you = Set(youIdentifiers
+            .map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty })
+        guard !you.isEmpty else { return .empty }
+
+        // transcript.startTime/endTime are numeric (seconds), so SQL arithmetic
+        // is correct here — unlike the TEXT meeting dates.
+        let writer = database.writer
+        let completed = MeetingStatus.complete.rawValue
+        let start = filter.start
+        let end = filter.end
+        let participant = filter.participant
+        let youList = Array(you)
+        return try await Task.detached(priority: .userInitiated) { () -> TalkShare in
+            try writer.read { db -> TalkShare in
+                let placeholders = youList.map { _ in "?" }.joined(separator: ",")
+                var sql = """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN LOWER(t.speakerLabel) IN (\(placeholders))
+                                          THEN (t.endTime - t.startTime) ELSE 0 END), 0) AS youSec,
+                        COALESCE(SUM(CASE WHEN LOWER(t.speakerLabel) IN (\(placeholders))
+                                          THEN 0 ELSE (t.endTime - t.startTime) END), 0) AS otherSec,
+                        COUNT(DISTINCT CASE WHEN LOWER(t.speakerLabel) IN (\(placeholders))
+                                            THEN t.meetingId END) AS cnt
+                    FROM transcript t
+                    JOIN meeting m ON m.id = t.meetingId
+                    WHERE m.status = ?
+                    """
+                // youList is interpolated three times (one per CASE), so bind it thrice.
+                var args: [DatabaseValueConvertible] = youList + youList + youList + [completed]
+                if let start { sql += " AND COALESCE(m.startDate, m.scheduledStartDate) >= ?"; args.append(start) }
+                if let end { sql += " AND COALESCE(m.startDate, m.scheduledStartDate) <= ?"; args.append(end) }
+                if let participant, !participant.isEmpty {
+                    sql += " AND m.participants LIKE ?"; args.append("%\(participant)%")
+                }
+                let row = try Row.fetchOne(db, sql: sql, arguments: StatementArguments(args))
+                return TalkShare(
+                    youSeconds: max(0, row?["youSec"] ?? 0),
+                    othersSeconds: max(0, row?["otherSec"] ?? 0),
+                    meetingsCounted: row?["cnt"] ?? 0
                 )
-                let count: Int = row?["cnt"] ?? 0
-                let totalSec: Double = row?["totalSec"] ?? 0
-                let totalHours = totalSec / 3600.0
-                let avgMinutes: Double = count > 0 ? (totalSec / Double(count)) / 60.0 : 0
-                return WeeklyStats(totalHours: totalHours, count: count, avgMinutes: avgMinutes)
             }
         }.value
     }
 
-    // MARK: - Talk time for a single meeting
+    // MARK: - Talk time for a single meeting (per-speaker, unchanged)
 
     func talkTime(forMeeting meetingId: String, participants: [String]) async throws -> [TalkTimePerSpeaker] {
         let writer = database.writer
@@ -89,9 +344,8 @@ final class ParticipantAnalyticsService {
                 let cursor = try Row.fetchCursor(
                     db,
                     sql: """
-                        SELECT
-                            COALESCE(speakerLabel, 'unknown') AS speakerLabel,
-                            SUM(endTime - startTime) AS seconds
+                        SELECT COALESCE(speakerLabel, 'unknown') AS speakerLabel,
+                               SUM(endTime - startTime) AS seconds
                         FROM transcript
                         WHERE meetingId = ?
                         GROUP BY speakerLabel
@@ -118,124 +372,23 @@ final class ParticipantAnalyticsService {
         }
     }
 
-    // MARK: - Top participants (parses participants column client-side)
-
-    func topParticipants(limit: Int = 8) async throws -> [TopParticipant] {
-        let writer = database.writer
-        let pairs: [(String, Date)] = try await Task.detached(priority: .userInitiated) {
-            try writer.read { db -> [(String, Date)] in
-                let cursor = try Row.fetchCursor(
-                    db,
-                    sql: """
-                        SELECT participants, COALESCE(endDate, startDate, scheduledStartDate) AS metAt
-                        FROM meeting
-                        WHERE status = ?
-                          AND participants IS NOT NULL
-                          AND participants <> ''
-                          AND COALESCE(endDate, startDate, scheduledStartDate) IS NOT NULL
-                        """,
-                    arguments: [MeetingStatus.complete.rawValue]
-                )
-                var out: [(String, Date)] = []
-                while let row = try cursor.next() {
-                    let raw: String = row["participants"] ?? ""
-                    guard let metAt: Date = row["metAt"] else { continue }
-                    out.append((raw, metAt))
-                }
-                return out
-            }
-        }.value
-
-        // Aggregate in Swift: split comma-separated names, count occurrences, track last-met.
-        var bucket: [String: (count: Int, last: Date)] = [:]
-        for (raw, metAt) in pairs {
-            let names = raw
-                .components(separatedBy: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            for name in names {
-                if let existing = bucket[name] {
-                    bucket[name] = (existing.count + 1, max(existing.last, metAt))
-                } else {
-                    bucket[name] = (1, metAt)
-                }
-            }
-        }
-        return bucket
-            .map { TopParticipant(name: $0.key, meetingCount: $0.value.count, lastMet: $0.value.last) }
-            .sorted { lhs, rhs in
-                if lhs.meetingCount != rhs.meetingCount { return lhs.meetingCount > rhs.meetingCount }
-                return lhs.lastMet > rhs.lastMet
-            }
-            .prefix(limit)
-            .map { $0 }
-    }
-
-    // MARK: - Meeting trend (count per week, last N weeks)
-
-    func meetingTrend(weeksBack: Int = 8) async throws -> [MeetingTrendBucket] {
-        let calendar = Self.weekCalendar
-        let now = Date()
-        // Build ordered list of week-start anchors, oldest -> newest.
-        var weekStarts: [Date] = []
-        guard let currentWeekStart = calendar.dateInterval(of: .weekOfYear, for: now)?.start else {
-            return []
-        }
-        for offset in stride(from: weeksBack - 1, through: 0, by: -1) {
-            if let d = calendar.date(byAdding: .weekOfYear, value: -offset, to: currentWeekStart) {
-                weekStarts.append(d)
-            }
-        }
-        guard let earliest = weekStarts.first else { return [] }
-
-        let writer = database.writer
-        let dates: [Date] = try await Task.detached(priority: .userInitiated) {
-            try writer.read { db -> [Date] in
-                let cursor = try Row.fetchCursor(
-                    db,
-                    sql: """
-                        SELECT COALESCE(startDate, scheduledStartDate) AS d
-                        FROM meeting
-                        WHERE status = ?
-                          AND COALESCE(startDate, scheduledStartDate) IS NOT NULL
-                          AND COALESCE(startDate, scheduledStartDate) >= ?
-                        """,
-                    arguments: [MeetingStatus.complete.rawValue, earliest]
-                )
-                var out: [Date] = []
-                while let row = try cursor.next() {
-                    if let d: Date = row["d"] { out.append(d) }
-                }
-                return out
-            }
-        }.value
-
-        var counts: [Date: Int] = Dictionary(uniqueKeysWithValues: weekStarts.map { ($0, 0) })
-        for date in dates {
-            if let bucketStart = calendar.dateInterval(of: .weekOfYear, for: date)?.start,
-               counts[bucketStart] != nil {
-                counts[bucketStart, default: 0] += 1
-            }
-        }
-        return weekStarts.map { MeetingTrendBucket(weekStart: $0, count: counts[$0] ?? 0) }
-    }
-
     // MARK: - Helpers
 
-    private static let weekCalendar: Calendar = {
+    static let weekCalendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
         cal.firstWeekday = 2 // Monday
         return cal
     }()
 
-    private static func startOfCurrentWeek() -> Date {
-        weekCalendar.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date()
+    /// Heuristic: is this attendee string the local user? Matches the macOS
+    /// full name or the signed-in Google email's local part. Best-effort —
+    /// only used to keep "you" out of participant rollups.
+    private static func isLikelyLocalUser(_ name: String) -> Bool {
+        let s = name.lowercased().trimmingCharacters(in: .whitespaces)
+        if s == NSFullUserName().lowercased() { return true }
+        return false
     }
 
-    /// Maps a raw transcript speakerLabel to a friendly display name.
-    /// - "mic" → "You"
-    /// - "system" → the single participant name when known, else "Other"
-    /// - anything else → returned as-is (future "Speaker 1" etc.)
     static func displayName(for label: String, participants: [String]) -> String {
         switch label {
         case "mic":
