@@ -12,11 +12,22 @@ private struct OllamaChatRequest: Encodable {
     let model: String
     let messages: [OllamaMessage]
     let stream: Bool
+    /// Thinking-model toggle (qwen3, deepseek-r1). nil = model default.
+    /// Setting false skips the chain-of-thought phase — much faster for
+    /// simple tasks (classification, bounded summarization) that don't need it.
+    let think: Bool?
+    /// Constrained output. "json" forces syntactically valid JSON, so the
+    /// model emits just the object instead of rambling reasoning into the
+    /// content (the failure mode when thinking is off but format is free).
+    let format: String?
     let options: OllamaOptions?
-    init(model: String, messages: [OllamaMessage], stream: Bool = false, options: OllamaOptions?) {
+    init(model: String, messages: [OllamaMessage], stream: Bool = false,
+         think: Bool? = nil, format: String? = nil, options: OllamaOptions?) {
         self.model = model
         self.messages = messages
         self.stream = stream
+        self.think = think
+        self.format = format
         self.options = options
     }
 }
@@ -201,7 +212,9 @@ final class OllamaService {
         systemPrompt: String,
         userPrompt: String,
         model: String,
-        maxOutputTokens: Int = 2048
+        maxOutputTokens: Int = 2048,
+        think: Bool = true,
+        jsonMode: Bool = false
     ) async throws -> String {
         let selectedModel: String
         let numCtx: Int
@@ -252,6 +265,8 @@ final class OllamaService {
                 OllamaMessage(role: "system", content: finalSystem),
                 OllamaMessage(role: "user", content: finalUser),
             ],
+            think: think,
+            format: jsonMode ? "json" : nil,
             options: OllamaOptions(
                 temperature: 0.3,
                 num_predict: maxOutputTokens,
@@ -291,12 +306,23 @@ final class OllamaService {
             Logger.ai.warning("Ollama: content was empty but thinking had \(thinking.count) chars — using thinking as fallback")
             text = thinking
         }
+        text = Self.stripThinkBlock(text)
         guard !text.isEmpty else {
             throw OllamaServiceError.emptyResponse
         }
 
         Logger.ai.info("Ollama response received (\(text.count) chars, model: \(selectedModel))")
         return text
+    }
+
+    /// Strip a chain-of-thought block from content. Normally Ollama separates
+    /// thinking into its own field, but some Qwen3 builds emit reasoning inline
+    /// (especially with think:false), leaving a "<think>…</think>" block — or a
+    /// dangling preamble that ends in a stray "</think>" with no opening tag —
+    /// ahead of the real answer. Keep only what follows the last "</think>".
+    static func stripThinkBlock(_ s: String) -> String {
+        guard let closeRange = s.range(of: "</think>", options: .backwards) else { return s }
+        return String(s[closeRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Streaming Generation (for task queue / long meetings)

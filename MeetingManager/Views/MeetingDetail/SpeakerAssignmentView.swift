@@ -39,6 +39,12 @@ struct SpeakerAssignmentView: View {
     @State private var summaries: [String: String] = [:]
     @State private var summarizingClusters: Set<String> = []
 
+    /// AI best-guess name per unresolved cluster (closed-set, hallucination-safe).
+    /// Surfaced as a highlighted "Likely …" chip so the user can confirm with
+    /// one click instead of scanning the full attendee list. Cached to disk.
+    @State private var bestGuesses: [String: SpeakerAttributionService.NameSuggestion] = [:]
+    @State private var guessingClusters: Set<String> = []
+
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager.app", category: "ui")
 
     var body: some View {
@@ -123,7 +129,9 @@ struct SpeakerAssignmentView: View {
                             SpeakerClusterCard(
                                 cluster: cluster,
                                 meeting: meeting,
-                                suggestions: suggestions(for: cluster),
+                                suggestions: orderedSuggestions(for: cluster),
+                                bestGuess: bestGuesses[cluster.id],
+                                isGuessing: guessingClusters.contains(cluster.id),
                                 summary: summaries[cluster.id],
                                 isSummarizing: summarizingClusters.contains(cluster.id),
                                 isSaving: savingClusterId == cluster.id,
@@ -155,7 +163,10 @@ struct SpeakerAssignmentView: View {
     private func reload() async {
         summaries.removeAll()
         summarizingClusters.removeAll()
+        bestGuesses.removeAll()
+        guessingClusters.removeAll()
         SpeakerSummaryCache.clear(meetingId: meetingId)
+        SpeakerGuessCache.clear(meetingId: meetingId)
         await load()
     }
 
@@ -174,10 +185,54 @@ struct SpeakerAssignmentView: View {
             summaries[key] = value
         }
 
+        // Load persisted best-guess names.
+        for (key, value) in SpeakerGuessCache.load(meetingId: meetingId) {
+            bestGuesses[key] = value
+        }
+
         // Only generate summaries for clusters that aren't already cached.
         let uncached = clusters.filter { summaries[$0.id] == nil && $0.segments.count >= 3 }
         if !uncached.isEmpty {
             await summarizeClusters(only: uncached)
+        }
+
+        // Generate AI name guesses for unresolved clusters we don't have one for.
+        let needGuess = clusters.filter {
+            $0.needsAssignment && bestGuesses[$0.id] == nil && $0.segments.count >= 3
+        }
+        if !needGuess.isEmpty {
+            await guessClusters(only: needGuess)
+        }
+    }
+
+    /// Generate best-match name guesses for the given unresolved clusters using
+    /// the closed candidate list (calendar attendees). Persists to disk.
+    private func guessClusters(only targets: [SpeakerCluster]) async {
+        guard !targets.isEmpty else { return }
+        // think:false + jsonMode: this is a closed-set classification. With
+        // thinking ON, Qwen3 burns the token budget reasoning and returns empty
+        // content; with thinking OFF but free-form output it rambles its
+        // reasoning into the content and never reaches the JSON. Forcing JSON
+        // output (Ollama format:"json") makes it emit just the object, which is
+        // both reliable to parse and far fewer tokens to generate. Validated
+        // against real clusters + qwen3:4b before shipping.
+        let textGen = await appState.makeTextGenerator(maxOutputTokens: 1024, think: false, jsonMode: true)
+        guard let textGen else { return }
+        for cluster in targets {
+            let candidates = suggestions(for: cluster)
+            guard !candidates.isEmpty else { continue }
+            guessingClusters.insert(cluster.id)
+            let body = cluster.segments.map { $0.text }.joined(separator: " ")
+            Task {
+                let guess = await SpeakerAttributionService.suggestBestMatch(
+                    clusterText: body, candidates: candidates, textGen: textGen
+                )
+                await MainActor.run {
+                    if let guess { bestGuesses[cluster.id] = guess }
+                    guessingClusters.remove(cluster.id)
+                    SpeakerGuessCache.save(bestGuesses, meetingId: meetingId)
+                }
+            }
         }
     }
 
@@ -187,8 +242,13 @@ struct SpeakerAssignmentView: View {
         let toSummarize = targets ?? clusters.filter { summaries[$0.id] == nil && $0.segments.count >= 3 }
         guard !toSummarize.isEmpty else { return }
 
-        // 4096 output budget: longer summaries for major speakers (up to
-        // 200 words) plus Qwen3's thinking tokens need more than the 2K default.
+        // think defaults ON here: Qwen3 reasons regardless, and with thinking
+        // ON Ollama cleanly separates the reasoning into a `thinking` field so
+        // the returned content is just the profile. With think:false the model
+        // dumps its reasoning INTO the content (a "Hmm, the user wants…" preamble
+        // ending in a stray </think>) — no faster, just messier. 4096 leaves
+        // room for the think pass plus the <=160-word profile. (OllamaService
+        // also strips any stray <think> block defensively.)
         let textGen = await appState.makeTextGenerator(maxOutputTokens: 4096)
         guard let textGen else {
             Self.logger.info("[SpeakerAssignment] no AI configured — skipping summaries")
@@ -227,27 +287,41 @@ struct SpeakerAssignmentView: View {
         let truncated = String(body.prefix(inputCap))
 
         // Scale target length: short clusters (< 1 min) get a sentence,
-        // substantial speakers (5+ min) get two paragraphs.
+        // substantial speakers (5+ min) get a fuller profile.
         let totalDuration = cluster.totalSeconds
         let lengthGuidance: String
         if totalDuration < 60 {
-            lengthGuidance = "Write 1-2 sentences (under 40 words)."
+            lengthGuidance = "Write 1 sentence (under 30 words) capturing their apparent role and topic."
         } else if totalDuration < 300 {
-            lengthGuidance = "Write a short paragraph of 3-5 sentences (60-100 words) covering the main points this speaker raised."
+            lengthGuidance = "Write 2-4 sentences (50-90 words): role first, then the topics they own and how they engage."
         } else {
-            lengthGuidance = "Write two paragraphs (100-200 words). The first paragraph should cover the speaker's main topics and positions. The second should cover specific details, decisions, or action items they raised."
+            lengthGuidance = "Write a short paragraph (90-160 words): lead with their apparent role and what they're responsible for, then the specific topics they drive and any decisions or commitments they make."
         }
 
+        // The goal of this summary is recognition — helping the reader figure
+        // out WHO this anonymous speaker is so they can label the cluster. So
+        // we ask for identity cues (role, ownership, participation style),
+        // not just a topic recap. Names are still forbidden: the model only
+        // ever sees this one cluster's text (no attendee list, no other
+        // speakers), so it cannot attribute a name without inventing one
+        // (ADR-005). Name guessing happens separately against a closed
+        // candidate set.
         let system = """
-            You are summarizing what one speaker said in a meeting. Read the utterances below and produce a summary of what they discussed, argued for, and contributed.
+            You are profiling ONE anonymous speaker in a meeting to help a reader recognize who they are. You see only this speaker's own utterances — no names, no other speakers.
+
+            Describe, drawing only on the text:
+            - Their apparent ROLE or function (e.g. leads/facilitates the meeting, presents an update, makes decisions, asks questions, takes notes, mostly listens and reacts).
+            - The specific TOPICS or areas they own or speak to (products, teams, customers, metrics, dates).
+            - HOW they participate (drives the agenda, gives status, pushes back, defers to others, assigns or accepts action items).
 
             Rules:
-            - Do NOT mention any names. Refer to the speaker as "this speaker" or just describe the activity.
-            - Do NOT invent details that aren't in the input.
-            - Do NOT add a preamble like "Here is a summary…". Output only the summary itself.
+            - Do NOT state or guess any person's name. Refer to them as "this speaker."
+            - Do NOT invent anything not supported by the text. If they say little of substance, say so plainly.
+            - No preamble like "Here is a summary." Output only the profile.
+            - Do NOT include a word count, notes to yourself, or any meta-commentary.
             - \(lengthGuidance)
             """
-        let user = "Utterances:\n\n\(truncated)\n\nSummarize what this speaker discussed."
+        let user = "This speaker's utterances:\n\n\(truncated)\n\nProfile this speaker for recognition."
         do {
             let result = try await textGen(system, user)
             return result.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -283,6 +357,14 @@ struct SpeakerAssignmentView: View {
     }
 
     // MARK: - Suggestions
+
+    /// Suggestions for the plain chip list, excluding the AI best guess (which
+    /// is rendered separately as a highlighted chip) so it isn't shown twice.
+    private func orderedSuggestions(for cluster: SpeakerCluster) -> [String] {
+        let base = suggestions(for: cluster)
+        guard let guess = bestGuesses[cluster.id]?.name else { return base }
+        return base.filter { $0.caseInsensitiveCompare(guess) != .orderedSame }
+    }
 
     private func suggestions(for cluster: SpeakerCluster) -> [String] {
         var out: [String] = []
@@ -410,6 +492,10 @@ private struct SpeakerClusterCard: View {
     let cluster: SpeakerCluster
     let meeting: Meeting?
     let suggestions: [String]
+    /// AI best-match guess (closed-set, hallucination-safe) + a short reason.
+    /// Shown as a highlighted "Likely …" chip when present.
+    let bestGuess: SpeakerAttributionService.NameSuggestion?
+    let isGuessing: Bool
     /// 1-2 sentence summary of what this speaker said. Nil while the
     /// LLM call is in flight or when AI isn't configured — falls back to
     /// a short utterance excerpt in either case.
@@ -456,11 +542,51 @@ private struct SpeakerClusterCard: View {
             // a single sentence is enough to identify the person.
             speakerContextBlock
 
+            // AI best match — a one-click highlighted chip when the model is
+            // confident enough to name a candidate, with its reasoning.
+            if cluster.needsAssignment {
+                if let guess = bestGuess {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Best match")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.appTextTertiary)
+                            .textCase(.uppercase).tracking(0.5)
+                        Button {
+                            onApply(guess.name)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "sparkles").font(.caption2)
+                                Text(guess.name).font(.system(size: 13, weight: .semibold))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.appAccent)
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSaving)
+                        if !guess.reason.isEmpty {
+                            Text(guess.reason)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                } else if isGuessing {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Finding the best match…")
+                            .font(.caption).foregroundStyle(Color.appTextSecondary)
+                    }
+                }
+            }
+
             // Name picker — calendar suggestions as buttons + a free-form field
             // for anyone who isn't on the invite.
             if !suggestions.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Suggested")
+                    Text(bestGuess == nil ? "Suggested" : "Other attendees")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.appTextTertiary)
                         .textCase(.uppercase)
@@ -672,6 +798,43 @@ enum SpeakerSummaryCache {
     static func save(_ summaries: [String: String], meetingId: String) {
         let url = cacheURL(meetingId: meetingId)
         guard let data = try? JSONEncoder().encode(summaries) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func clear(meetingId: String) {
+        let url = cacheURL(meetingId: meetingId)
+        try? fm.removeItem(at: url)
+    }
+}
+
+// MARK: - Speaker Guess Cache
+
+/// File-backed cache for AI best-match name guesses, one file per meeting, so
+/// they don't regenerate on every tab open. Cleared on explicit Reload /
+/// Re-analyze (the same points that clear summaries).
+enum SpeakerGuessCache {
+    private static let fm = FileManager.default
+
+    private static func cacheURL(meetingId: String) -> URL {
+        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MeetingManager", isDirectory: true)
+            .appendingPathComponent("speaker-guesses", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(meetingId).json")
+    }
+
+    static func load(meetingId: String) -> [String: SpeakerAttributionService.NameSuggestion] {
+        let url = cacheURL(meetingId: meetingId)
+        guard let data = try? Data(contentsOf: url),
+              let dict = try? JSONDecoder().decode([String: SpeakerAttributionService.NameSuggestion].self, from: data) else {
+            return [:]
+        }
+        return dict
+    }
+
+    static func save(_ guesses: [String: SpeakerAttributionService.NameSuggestion], meetingId: String) {
+        let url = cacheURL(meetingId: meetingId)
+        guard let data = try? JSONEncoder().encode(guesses) else { return }
         try? data.write(to: url, options: .atomic)
     }
 

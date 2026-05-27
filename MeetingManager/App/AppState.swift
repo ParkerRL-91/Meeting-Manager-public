@@ -3140,7 +3140,9 @@ final class AppState {
     /// Creates a text generator closure that routes to Claude or Ollama based on current settings.
     /// Used by GlobalChatView and other global AI features.
     func makeTextGenerator(
-        maxOutputTokens: Int = 2048
+        maxOutputTokens: Int = 2048,
+        think: Bool = true,
+        jsonMode: Bool = false
     ) async -> ((String, String) async throws -> String)? {
         let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
         await ollamaService.refreshStatus()
@@ -3165,7 +3167,9 @@ final class AppState {
                     systemPrompt: sys,
                     userPrompt: usr,
                     model: ollamaModel,
-                    maxOutputTokens: maxOutputTokens
+                    maxOutputTokens: maxOutputTokens,
+                    think: think,
+                    jsonMode: jsonMode
                 )
             }
         } else if hasClaudeKey {

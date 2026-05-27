@@ -313,6 +313,79 @@ final class SpeakerAttributionService {
         return result
     }
 
+    /// A single best-guess attribution for one cluster, for the manual Speaker
+    /// tab. `name` is always one of the supplied candidates (closed set).
+    struct NameSuggestion: Equatable, Codable {
+        let name: String
+        let reason: String
+    }
+
+    /// Ask the LLM for the single most likely attendee for one anonymous
+    /// cluster, given a sample of its utterances and the closed candidate list.
+    /// Hallucination-safe: the returned name is validated against `candidates`
+    /// via `resolveAttendee`, so the model can only pick a real attendee or be
+    /// rejected — it can never invent a name. Returns nil on "Unknown",
+    /// invalid output, or any error (the UI just shows the plain chip list).
+    ///
+    /// Uses the app's configured text generator (Qwen via Ollama, or Claude)
+    /// so callers don't need to know which backend is active.
+    static func suggestBestMatch(
+        clusterText: String,
+        candidates: [String],
+        textGen: (String, String) async throws -> String
+    ) async -> NameSuggestion? {
+        let cands = candidates
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !cands.isEmpty else { return nil }
+        let sample = String(clusterText.prefix(3000))
+        guard sample.count >= 20 else { return nil }
+
+        let candidateLine = cands.map { "\"\($0)\"" }.joined(separator: ", ")
+        let system = "You match an anonymous meeting speaker to the single most likely attendee from a fixed list. Reply with JSON only. Never use a name that is not in the list."
+        let user = """
+            Attendees: [\(candidateLine)]
+
+            A sample of what one anonymous speaker said:
+            \"\"\"
+            \(sample)
+            \"\"\"
+
+            Pick the SINGLE most likely attendee from the list above — reason from their role, the topics they own, and how others might address them. If you genuinely cannot tell, use "Unknown".
+
+            Respond with ONLY this JSON on one line:
+            {"name": "<an attendee name exactly as listed, or Unknown>", "reason": "<why, max 12 words>"}
+            """
+        guard let raw = try? await textGen(system, user),
+              let json = extractJSONObject(from: raw),
+              let data = json.data(using: .utf8),
+              let dict = try? JSONDecoder().decode([String: String].self, from: data),
+              let rawName = dict["name"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawName.isEmpty, rawName.lowercased() != "unknown",
+              let resolved = resolveAttendee(name: rawName, candidates: Set(cands))
+        else { return nil }
+        let reason = (dict["reason"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return NameSuggestion(name: resolved, reason: reason)
+    }
+
+    /// Extract the first balanced `{…}` JSON object from a string. LLMs (esp.
+    /// Qwen3 in thinking mode) sometimes wrap JSON in prose or `<think>` blocks.
+    static func extractJSONObject(from text: String) -> String? {
+        guard let start = text.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var idx = start
+        while idx < text.endIndex {
+            let ch = text[idx]
+            if ch == "{" { depth += 1 }
+            else if ch == "}" {
+                depth -= 1
+                if depth == 0 { return String(text[start...idx]) }
+            }
+            idx = text.index(after: idx)
+        }
+        return nil
+    }
+
     /// Map an LLM-returned name onto one of the meeting's actual attendees.
     /// Returns nil when no candidate matches with high enough confidence.
     /// Public so the UI's manual-assign affordance can reuse the same logic.
