@@ -663,15 +663,41 @@ final class AppState {
         let participantsString = meeting.participantList.isEmpty
             ? "Not recorded"
             : meeting.participantList.joined(separator: ", ")
-        let baseSystemPrompt = rawTemplate
+
+        // Pull relevant Knowledge Base excerpts so the summary can reference the
+        // user's own documents (OKRs, project briefs, specs) — not just the
+        // transcript. Query is meeting metadata + a transcript snippet so
+        // retrieval matches what was actually discussed. Empty string when no
+        // KB folder is configured (then the template's KB section is just blank,
+        // same as before).
+        let kbContext = await KnowledgeBaseService.shared.retrieveContext(
+            for: meeting,
+            additionalQuery: String(transcript.prefix(800))
+        )
+
+        var baseSystemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
             .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
             .replacingOccurrences(of: "{{participants}}", with: participantsString)
             .replacingOccurrences(of: "{{priorContext}}", with: "")
-            .replacingOccurrences(of: "{{knowledgeBase}}", with: "")
+            .replacingOccurrences(of: "{{knowledgeBase}}", with: kbContext)
             .replacingOccurrences(of: "{{transcript}}", with: "")
             .replacingOccurrences(of: "{{notes}}", with: "")
+
+        // The default/stored summary templates don't carry a {{knowledgeBase}}
+        // placeholder, so the substitution above is a no-op for them. Append the
+        // KB excerpts explicitly (skipping if a custom template already injected
+        // them via the placeholder) so the summary always benefits from the KB.
+        if !kbContext.isEmpty, !baseSystemPrompt.contains(kbContext) {
+            baseSystemPrompt += """
+
+
+            ## Relevant excerpts from the user's Knowledge Base
+            These are excerpts from the user's own documents (OKRs, project briefs, specs) — not prior meetings. Treat them as authoritative reference and cite the source path when you use them.
+            \(kbContext)
+            """
+        }
 
         // P2-T03: Notes-first summary. If the user captured notes during the meeting via
         // NotepadPaneView, treat those notes as the primary anchor and use the transcript to
@@ -2860,6 +2886,24 @@ final class AppState {
 
     // MARK: - Meeting Proximity Detection
 
+    /// True when a meeting has at least one attendee besides the local user.
+    /// Gates time-based auto-start: solo calendar blocks, focus time, and
+    /// reminders (no other attendees) shouldn't auto-record. The local user is
+    /// matched by signed-in Google email or macOS full name, then excluded.
+    /// (Call detection is NOT gated by this — a detected live call is ground
+    /// truth that a real meeting is happening, regardless of the invite list.)
+    private func meetingHasOtherAttendees(_ meeting: Meeting) -> Bool {
+        let userEmail = googleAuthManager.userEmail?
+            .lowercased().trimmingCharacters(in: .whitespaces)
+        let userName = NSFullUserName().lowercased().trimmingCharacters(in: .whitespaces)
+        return meeting.participantList.contains { raw in
+            let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+            if let userEmail, !userEmail.isEmpty, s == userEmail { return false }
+            if !userName.isEmpty, s == userName { return false }
+            return true
+        }
+    }
+
     func startProximityCheck() {
         checkUpcomingMeetings() // Run immediately
         proximityPollingCancellable = Timer.publish(every: 30, on: .main, in: .common)
@@ -2961,6 +3005,7 @@ final class AppState {
             if settings.autoRecord,
                timeUntilStart > 0 && timeUntilStart <= 75,
                let meetLink = meeting.meetLink, !meetLink.isEmpty,
+               meetingHasOtherAttendees(meeting),
                (meeting.status == .scheduled || meeting.status == .notified),
                !isRecording, !isStartingMeeting,
                autoJoinedMeetingIds.insert(meeting.id).inserted {

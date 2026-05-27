@@ -98,10 +98,27 @@ final class MeetingChatService {
             \(kbExcerpts)
             """
 
+        // Meeting metadata header — title, date, participants — so the assistant
+        // can answer from the meeting's *context*, not just the raw transcript.
+        let meetingBlock: String = {
+            guard let meeting else { return "" }
+            let parts = meeting.participantList.isEmpty
+                ? "Not recorded"
+                : meeting.participantList.joined(separator: ", ")
+            let when = meeting.startDate ?? meeting.scheduledStartDate
+            let whenStr = when?.formatted() ?? "Unknown"
+            return """
+                Meeting: \(meeting.title)
+                When: \(whenStr)
+                Participants: \(parts)
+
+                """
+        }()
+
         // 3. Build prompts
         let systemPrompt = """
             You are a helpful meeting assistant. Answer questions about this meeting \
-            based strictly on the transcript and context below.
+            using the meeting details, transcript, and Knowledge Base context below.
 
             Formatting rules — always follow these:
             - Respond in Markdown.
@@ -111,7 +128,7 @@ final class MeetingChatService {
             - Keep answers concise — 100–250 words unless depth is clearly needed.
             - Never write walls of unbroken prose.
 
-            Transcript:
+            \(meetingBlock)Transcript:
             \(transcript)\(kbBlock)
             """
 

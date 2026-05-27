@@ -44,13 +44,18 @@ final class RelevantMeetingService {
         // Synthesize a prose brief when a backend is provided AND we have at
         // least one related meeting to feed it. Brief failures are non-fatal —
         // we still cache the related list.
+        // Pull KB excerpts up front. Empty string when no KB folder is
+        // configured — buildBriefUserPrompt handles the fallback wording.
+        let kbExcerpts = await KnowledgeBaseService.shared.retrieveContext(for: meeting)
+
         var brief: String? = nil
-        if let synthesizer = briefSynthesizer, !related.isEmpty {
+        // Synthesize a brief when there's ANY useful input — a related past
+        // meeting OR relevant Knowledge Base material. Previously this required
+        // a related meeting, so a brand-new topic got no brief even when the KB
+        // had highly relevant docs (the gap behind "the brief ignores my KB").
+        if let synthesizer = briefSynthesizer, (!related.isEmpty || !kbExcerpts.isEmpty) {
             let priorNotes = await self.gatherPriorNotes(from: related)
             let openItems = await self.gatherOpenActionItems(for: meeting)
-            // Pull KB excerpts. Empty string when no KB folder is configured —
-            // buildBriefUserPrompt handles the fallback wording.
-            let kbExcerpts = await KnowledgeBaseService.shared.retrieveContext(for: meeting)
             let userPrompt = Self.buildBriefUserPrompt(
                 meeting: meeting,
                 related: related,
