@@ -430,9 +430,19 @@ final class MicrophoneCapture {
                 return
             }
             onDiagnostic?("DIAG:mic_device config changed but format still valid (\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch), attempting restart")
+            // Re-pin the device we selected before restarting. A configuration
+            // change (a device (dis)connect, a Continuity mic appearing) can
+            // silently revert AVAudioEngine's input to the *system default* —
+            // which may be a phantom aggregate/Continuity mic that captures pure
+            // silence. Re-applying our chosen device + tap keeps capture on the
+            // intended mic instead of drifting onto a silent default mid-meeting.
+            if activeDeviceID != kAudioObjectUnknown && activeDeviceID != 0 {
+                _ = setInputDeviceByID(activeDeviceID)
+            }
+            installTapOnInputNode()
             do {
                 try engine.start()
-                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change")
+                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(activeDeviceID)))")
             } catch {
                 Logger.audio.error("Failed to restart engine after config change: \(error.localizedDescription)")
                 onDiagnostic?("DIAG:mic_device engine restart FAILED: \(error.localizedDescription)")

@@ -55,43 +55,73 @@ final class AudioSessionManager {
         }
 
         // The system default reflects what the user chose in System Settings > Sound > Input.
-        // Respect it unless it's the built-in mic and a better external device is available —
-        // but only if it can actually capture input.
+        // Respect it unless it's the built-in mic OR an "unreliable" auto-created
+        // device — but only if it can actually capture input.
         let systemDefault = defaultInputDevice()
 
-        if let systemDefault, hasInputChannels(systemDefault), !isBuiltInDevice(systemDefault) {
-            // User explicitly chose a non-built-in device that can record — respect it.
+        if let systemDefault, hasInputChannels(systemDefault),
+           !isBuiltInDevice(systemDefault), !isUnreliableInput(systemDefault) {
+            // User explicitly chose a real non-built-in device that can record — respect it.
             return systemDefault
         }
 
-        // System default is built-in, nil, or input-less. Check for a connected external mic.
+        // System default is built-in, nil, input-less, or an unreliable phantom
+        // (a transient CoreAudio default-device aggregate, or a Continuity
+        // iPhone/iPad mic). Those frequently capture pure SILENCE when
+        // auto-selected — the cause of the silent Connor/Parker recording — so
+        // we rank them below every real mic AND the built-in mic. A meeting
+        // captured on the built-in is infinitely better than one captured as
+        // silence on a phantom aggregate.
+        //
+        // Check for a connected external mic by name.
         // Note: "headphone" is intentionally NOT here — headphones are an output device.
         let externalKeywords = [
             // Connection types
-            "headset", "external", "usb", "thunderbolt", "interface",
+            "headset", "external", "usb", "thunderbolt", "interface", "webcam", "anker",
             // Popular mic brands
             "yeti", "blue", "focusrite", "scarlett", "rode", "elgato", "hyperx",
             "shure", "audio-technica", "at2020", "logitech", "jabra", "poly",
             "sennheiser", "samson", "presonus", "behringer", "motu",
         ]
 
-        for device in devices {
+        for device in devices where !isUnreliableInput(device) {
             let name = device.localizedName.lowercased()
             if externalKeywords.contains(where: { name.contains($0) }) {
                 return device
             }
         }
 
-        // No recognized external device — check for any non-built-in device with input
-        if let nonBuiltIn = devices.first(where: { !isBuiltInDevice($0) }) {
-            return nonBuiltIn
+        // Any other real (non-built-in, non-phantom) input device.
+        if let realExternal = devices.first(where: { !isBuiltInDevice($0) && !isUnreliableInput($0) }) {
+            return realExternal
         }
 
-        // Everything is built-in — prefer the (input-capable) system default, else any input device
+        // The built-in mic — always present and actually captures audio. Strongly
+        // preferred over a phantom aggregate / Continuity mic.
+        if let builtIn = devices.first(where: { isBuiltInDevice($0) }) {
+            return builtIn
+        }
+
+        // Absolute last resort: an input-capable system default (even if phantom),
+        // then anything with input channels.
         if let systemDefault, hasInputChannels(systemDefault) {
             return systemDefault
         }
         return devices.first
+    }
+
+    /// Auto-created / Continuity input devices that frequently capture silence
+    /// when picked automatically: the transient CoreAudio "default device"
+    /// aggregate (named like `CADefaultDeviceAggregate-…`) and Continuity
+    /// iPhone/iPad mics that hijack the system default input. These are ranked
+    /// below real hardware and the built-in mic. User-created/named aggregates
+    /// do NOT match `cadefaultdevice`, so a deliberate pro-audio aggregate is
+    /// unaffected.
+    private func isUnreliableInput(_ device: AVCaptureDevice) -> Bool {
+        let name = device.localizedName.lowercased()
+        if name.contains("cadefaultdevice") { return true }
+        if name.contains("iphone") || name.contains("ipad") { return true }
+        return false
     }
 
     /// Returns true if the device exposes at least one input channel.
