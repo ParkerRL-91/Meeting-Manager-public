@@ -3041,8 +3041,13 @@ final class AppState {
             // The 5-minute window accommodates meetings that start slightly late.
             // Accepts .notified too — call-app-launch can advance status before the start window.
             // Skip if we already auto-joined at lead time.
+            // Only auto-start meetings with at least one OTHER attendee — solo
+            // calendar blocks, focus time, and reminders shouldn't auto-record.
+            // (This is the at-start fallback path; the lead-time auto-join above
+            // applies the same gate. Live call detection stays ungated.)
             if timeUntilStart >= -300 && timeUntilStart <= 0
                 && (meeting.status == .scheduled || meeting.status == .notified)
+                && meetingHasOtherAttendees(meeting)
                 && !isRecording && !isStartingMeeting
                 && !autoJoinedMeetingIds.contains(meeting.id) {
                 Logger.general.debug("Auto-starting recording for meeting: \(meeting.title)")
