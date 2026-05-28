@@ -16,7 +16,7 @@ Open the meeting from the sidebar or Home. Click **Record** in the meeting detai
 
 ### 3. Ad-hoc
 
-Click **+ New Meeting** at the bottom of the sidebar. A blank meeting is created and recording starts immediately. You can rename the title and add participants from the meeting detail view.
+Click **+ New Meeting** at the bottom of the sidebar. A blank meeting is created and recording starts immediately. You can rename the title and add participants from the meeting detail view — and if you don't, the app auto-names it after transcription (see [After Stop](#after-stop)).
 
 ---
 
@@ -56,6 +56,8 @@ A pipeline of background tasks fires automatically:
 4. **Transcript cleanup** — produces a clean readable version of the segment-by-segment transcript.
 5. **Second-pass attribution** — if any clusters are still unresolved, retries against the full transcript.
 6. **Summary, action items, follow-up email** — using your default prompt and provider.
+
+If the meeting was never given a real name — an ad-hoc **New Meeting** rather than a calendar event — Meeting Manager also **auto-titles** it: an 8-words-or-fewer name generated from the start of the transcript by your local model (Ollama), falling back to Claude if Ollama isn't running. Calendar meetings keep their event title untouched, and you can always rename any meeting yourself.
 
 Watch progress in the **Activity** sidebar entry. Most meetings finish within 2–5 minutes of stop.
 

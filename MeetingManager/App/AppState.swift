@@ -2753,8 +2753,9 @@ final class AppState {
     // MARK: - Auto-title (P1-T06)
 
     /// If the meeting still has the default/empty title and is not tied to a
-    /// calendar event, ask Ollama for a 5-7 word title from the transcript.
-    /// Falls through silently when Ollama is unavailable — the meeting just
+    /// calendar event, generate an ≤8-word title from the transcript (local
+    /// Ollama first, Claude haiku as fallback, then the summary's first sentence).
+    /// Falls through silently when no provider is available — the meeting just
     /// keeps its default title until the user (or summary) renames it.
     private func autoTitleIfNeeded(meeting: Meeting, transcripts: [Transcript]) async {
         // Calendar meetings already have a meaningful title from the event.
@@ -2767,10 +2768,12 @@ final class AppState {
         let transcriptText = transcripts.map { $0.text }.joined(separator: " ")
         guard !transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
+        let claudeKey = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? nil
         let resolvedTitle: String?
         if let generated = await TitleGenerationService.shared.generate(
             fromTranscript: transcriptText,
-            using: ollamaService
+            claudeAPIKey: claudeKey,
+            ollama: ollamaService
         ) {
             resolvedTitle = generated
         } else if let summary = try? await summaryRepository.latestSummary(meetingId: meeting.id),

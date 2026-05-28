@@ -1,11 +1,13 @@
 import Foundation
 import os
 
-/// Generates short meeting titles from transcript or summary content.
+/// Generates short (≤8 word) meeting titles from transcript or summary content.
 ///
-/// Uses local Ollama if available (pass in the app's `OllamaService` instance);
-/// callers should fall back to `extractFromSummary(_:)` if `generate(...)` returns
-/// nil. No data leaves the device — all generation is local.
+/// `generate(...)` prefers local Ollama — it keeps the transcript on-device — and
+/// falls back to Claude haiku only when Ollama isn't running or returns an
+/// unusable result. Callers should fall back to `extractFromSummary(_:)` if
+/// `generate(...)` returns nil. The Ollama path keeps all content on-device; the
+/// Claude fallback sends the transcript excerpt to Anthropic.
 @MainActor
 final class TitleGenerationService {
     static let shared = TitleGenerationService()
@@ -14,28 +16,33 @@ final class TitleGenerationService {
     /// Cap so we never persist a runaway model output as a title.
     private let maxTitleLength = 80
 
+    /// The title contract: a generated meeting name is at most this many words.
+    private static let maxTitleWords = 8
+
     private init() {}
 
-    /// Generate a 5-7 word title from transcript text using local Ollama.
+    /// Generate an ≤8-word title from transcript text, preferring local Ollama
+    /// and falling back to Claude haiku.
     ///
     /// - Parameters:
     ///   - text: Full transcript text (any length — only the first ~1500 chars are used).
+    ///   - claudeAPIKey: The Anthropic key, or nil/empty to disable the cloud
+    ///     fallback. Only consulted when Ollama is unreachable or returns an
+    ///     unusable result.
     ///   - ollama: The app's `OllamaService` instance. Caller must have refreshed status
     ///     at least once so `isReachable` / `availableModels` are populated; if Ollama
-    ///     is unreachable this method short-circuits to nil.
+    ///     is unreachable this method tries the Claude fallback.
     /// - Returns: A trimmed title (no quotes, no trailing punctuation) or nil on any
     ///   failure. Callers should fall back to `extractFromSummary(_:)`.
-    func generate(fromTranscript text: String, using ollama: OllamaService) async -> String? {
+    func generate(
+        fromTranscript text: String,
+        claudeAPIKey: String?,
+        ollama: OllamaService
+    ) async -> String? {
         // Use first ~1500 chars of transcript as input (about 300 tokens)
         let excerpt = String(text.prefix(1500))
         guard !excerpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             logger.debug("generate: empty transcript excerpt — skipping")
-            return nil
-        }
-
-        // Skip the network round-trip if we already know Ollama isn't up.
-        guard ollama.isReachable, !ollama.availableModels.isEmpty else {
-            logger.info("generate: Ollama not reachable — caller should fall back")
             return nil
         }
 
@@ -45,24 +52,51 @@ final class TitleGenerationService {
         """
 
         let userPrompt = """
-        Generate a concise meeting title (5 to 7 words, no punctuation, no quotes) \
-        based on this transcript excerpt. Return ONLY the title, nothing else.
+        Generate a concise meeting title (8 words or fewer, no punctuation, \
+        no quotes) based on this transcript excerpt. Return ONLY the title, \
+        nothing else.
 
         Transcript:
         \(excerpt)
         """
 
-        do {
-            let raw = try await ollama.generate(
-                systemPrompt: systemPrompt,
-                userPrompt: userPrompt,
-                model: "auto"
-            )
-            return Self.sanitize(raw, maxLength: maxTitleLength)
-        } catch {
-            logger.error("generate: Ollama call failed — \(error.localizedDescription, privacy: .public)")
-            return nil
+        // Prefer local Ollama: it keeps the transcript on-device. Any failure
+        // (or an unusable result) falls through to the Claude fallback.
+        if ollama.isReachable, !ollama.availableModels.isEmpty {
+            do {
+                let raw = try await ollama.generate(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: "auto"
+                )
+                if let title = Self.sanitize(raw, maxLength: maxTitleLength) {
+                    return title
+                }
+                logger.info("generate: Ollama returned an unusable title — trying Claude")
+            } catch {
+                logger.error("generate: Ollama call failed — \(error.localizedDescription, privacy: .public) — trying Claude")
+            }
         }
+
+        // Cloud fallback, used only when local generation is unavailable. Sends
+        // the transcript excerpt to Anthropic.
+        if let key = claudeAPIKey, !key.isEmpty {
+            do {
+                let raw = try await ClaudeService().sendMessage(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: "claude-haiku-4-5",
+                    maxTokens: 64
+                )
+                return Self.sanitize(raw, maxLength: maxTitleLength)
+            } catch {
+                logger.error("generate: Claude fallback failed — \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+
+        logger.info("generate: no local or cloud provider available — caller should fall back")
+        return nil
     }
 
     /// Fallback: extract first sentence from summary text as title.
@@ -70,20 +104,22 @@ final class TitleGenerationService {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        // Take first sentence, truncate to ~7 words
+        // Take first sentence, clamp to the 8-word title contract.
         let firstLine = trimmed.components(separatedBy: .newlines).first ?? trimmed
         let sentence = firstLine.components(separatedBy: ". ").first ?? firstLine
-        let words = sentence.split(separator: " ", maxSplits: 7, omittingEmptySubsequences: true)
-        let title = words.prefix(7).joined(separator: " ")
+        let words = sentence.split(separator: " ", maxSplits: Self.maxTitleWords, omittingEmptySubsequences: true)
+        let title = words.prefix(Self.maxTitleWords).joined(separator: " ")
         let cleaned = Self.sanitize(title, maxLength: maxTitleLength)
         return cleaned
     }
 
     // MARK: - Helpers
 
-    /// Trim whitespace, surrounding quotes, and trailing punctuation.
-    /// Returns nil if the result is empty or longer than `maxLength`.
-    private static func sanitize(_ raw: String, maxLength: Int) -> String? {
+    /// Trim whitespace, surrounding quotes, and trailing punctuation; clamp to
+    /// the ≤`maxTitleWords`-word contract. Returns nil if the result is empty or
+    /// longer than `maxLength`. Internal (not private) so the title contract can
+    /// be verified directly in tests.
+    static func sanitize(_ raw: String, maxLength: Int) -> String? {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Models sometimes wrap output in matching quotes — strip one matched pair.
@@ -116,6 +152,14 @@ final class TitleGenerationService {
             s.removeLast()
         }
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Enforce the title contract deterministically: at most `maxTitleWords`
+        // words. The prompt already asks for this, but per ADR-005 we don't trust
+        // the prompt — clamping is the guarantee for the occasional long output.
+        let words = s.split(separator: " ", omittingEmptySubsequences: true)
+        if words.count > maxTitleWords {
+            s = words.prefix(maxTitleWords).joined(separator: " ")
+        }
 
         guard !s.isEmpty, s.count <= maxLength else { return nil }
         return s
