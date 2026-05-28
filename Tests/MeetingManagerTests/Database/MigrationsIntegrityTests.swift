@@ -92,7 +92,7 @@ final class MigrationsIntegrityTests: XCTestCase {
 
     func testAllMigrationIdentifiersAreApplied() throws {
         let applied = try db.writer.read { conn -> [String] in
-            try String.fetchAll(conn, sql: "SELECT id FROM grdb_migrations ORDER BY rowid")
+            try String.fetchAll(conn, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid")
         }
         XCTAssertEqual(
             applied,
@@ -566,7 +566,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         XCTAssertNotNil(settings)
         guard let s = settings else { return }
 
-        XCTAssertFalse(s.aiEnabled, "appSettings.aiEnabled should default to false (v5)")
+        XCTAssertTrue(s.aiEnabled, "appSettings.aiEnabled defaults to true (v5 adds the column with DEFAULT true)")
         XCTAssertFalse(s.autoRecord, "appSettings.autoRecord should default to false (v6)")
         XCTAssertTrue(s.autoInvite, "appSettings.autoInvite should default to true (v6)")
         XCTAssertFalse(s.useLocalLLM, "appSettings.useLocalLLM should default to false (v9)")

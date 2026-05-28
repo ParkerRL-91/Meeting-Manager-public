@@ -27,7 +27,7 @@ final class AppSettingsTests: XCTestCase {
     }
 
     func testDefaultNotificationLeadTime() {
-        XCTAssertEqual(AppSettings.default.notificationLeadTimeMinutes, 2)
+        XCTAssertEqual(AppSettings.default.notificationLeadTimeMinutes, 5)
     }
 
     func testDefaultLaunchAtLogin() {

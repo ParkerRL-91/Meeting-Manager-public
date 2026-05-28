@@ -60,16 +60,20 @@ final class ExportServiceTests: XCTestCase {
 
     func testExportTranscriptTextIncludesTimestampsAndSpeakers() {
         let meeting = SampleData.makeMeeting(title: "Team Sync")
+        // Use explicit speaker names: "mic"/"system" resolve through
+        // displayedSpeakerName to the local user's name / "Them"/"Other", which
+        // are machine- and participant-count-dependent. Named labels pass through
+        // verbatim (the default case), so the assertions are deterministic.
         let transcripts = [
-            SampleData.makeTranscript(speakerLabel: "mic", text: "Hello team", startTime: 0, endTime: 5),
-            SampleData.makeTranscript(speakerLabel: "system", text: "Hi there", startTime: 5, endTime: 10),
+            SampleData.makeTranscript(speakerLabel: "Alice", text: "Hello team", startTime: 0, endTime: 5),
+            SampleData.makeTranscript(speakerLabel: "Bob", text: "Hi there", startTime: 5, endTime: 10),
         ]
 
         let result = service.exportTranscriptText(meeting: meeting, transcripts: transcripts)
 
         XCTAssertTrue(result.contains("Team Sync - Transcript"))
-        XCTAssertTrue(result.contains("[00:00] You: Hello team"))
-        XCTAssertTrue(result.contains("[00:05] Them: Hi there"))
+        XCTAssertTrue(result.contains("[00:00] Alice: Hello team"))
+        XCTAssertTrue(result.contains("[00:05] Bob: Hi there"))
     }
 
     func testExportTranscriptTextIncludesDateHeader() {
@@ -89,7 +93,7 @@ final class ExportServiceTests: XCTestCase {
         let meeting = SampleData.makeMeeting(title: "Full Report Meeting", startDate: start, endDate: end)
         let summary = SampleData.makeMeetingSummary(summaryText: "Summary content here")
         let transcripts = [
-            SampleData.makeTranscript(speakerLabel: "mic", text: "Discussion point", startTime: 0, endTime: 5),
+            SampleData.makeTranscript(speakerLabel: "Dana", text: "Discussion point", startTime: 0, endTime: 5),
         ]
         let notes = [
             SampleData.makeMeetingNote(content: "Important note"),
@@ -106,7 +110,7 @@ final class ExportServiceTests: XCTestCase {
         XCTAssertTrue(result.contains("## Summary"))
         XCTAssertTrue(result.contains("Summary content here"))
         XCTAssertTrue(result.contains("## Transcript"))
-        XCTAssertTrue(result.contains("[00:00] You: Discussion point"))
+        XCTAssertTrue(result.contains("[00:00] Dana: Discussion point"))
         XCTAssertTrue(result.contains("## Notes"))
         XCTAssertTrue(result.contains("Important note"))
     }

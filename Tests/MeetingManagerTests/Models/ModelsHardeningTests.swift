@@ -821,74 +821,23 @@ final class ModelsHardeningTests: XCTestCase {
     }
 
     // -------------------------------------------------------------------------
-    // MARK: - AppSettings forward/backward-compat decoding
+    // MARK: - AppSettings JSON decode contract
     // -------------------------------------------------------------------------
-    // A stored JSON that lacks newer keys must still decode successfully and
-    // fall back to the property-level defaults. This is critical for a shipped
-    // app where old settings rows lack new columns.
+    // AppSettings uses Swift's synthesized Codable (no custom init(from:)), so a
+    // JSON object that omits non-optional keys does NOT fall back to property
+    // defaults — it throws. This never bites in the app: AppSettings is persisted
+    // via GRDB with migration-managed columns, so a decoded row always carries
+    // every column. Full-object round-trip is covered by
+    // testAppSettingsCodableRoundTripWithAllFieldsPopulated below.
 
-    func testAppSettingsDecodesFromMinimalJSON() throws {
-        // Only the fields that were in the initial schema. All newer fields must
-        // decode to their Swift default values.
-        let minimalDict: [String: Any] = [
-            "id": 1,
-            "whisperModel": "large-v3-turbo",
-            "summaryPromptTemplate": "Summarize this",
-            "claudeModel": "claude-sonnet-4-20250514",
-            "calendarSyncIntervalMinutes": 15,
-            "notificationLeadTimeMinutes": 5,
-            "launchAtLogin": false,
-            "theme": "dark"
-        ]
-        let data = try jsonData(minimalDict)
-        let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
-
-        XCTAssertEqual(decoded.whisperModel, "large-v3-turbo")
-        XCTAssertFalse(decoded.aiEnabled)
-        XCTAssertFalse(decoded.autoRecord)
-        XCTAssertTrue(decoded.autoInvite)
-        XCTAssertFalse(decoded.useLocalLLM)
-        XCTAssertEqual(decoded.ollamaModel, "auto")
-        XCTAssertFalse(decoded.autoGenerateSummary)
-        XCTAssertNil(decoded.defaultRecipeId)
-        XCTAssertFalse(decoded.morningBriefEnabled)
-        XCTAssertEqual(decoded.morningBriefHour, 8)
-        XCTAssertEqual(decoded.morningBriefMinute, 30)
-        XCTAssertFalse(decoded.kbWriteBack)
-        XCTAssertFalse(decoded.contactsImportEnabled)
-        XCTAssertNil(decoded.detailedOutlinePromptTemplate)
-        XCTAssertFalse(decoded.apolloProfilePrepEnabled)
-        XCTAssertFalse(decoded.apolloKeyValidated)
-        XCTAssertNil(decoded.apolloKeyLastValidatedAt)
-    }
-
-    func testAppSettingsDecodesWithOnlySomeNewerKeys() throws {
-        // Simulates a mid-upgrade settings row that has some newer keys but not all.
+    func testAppSettingsPartialJSONDecodeThrows() throws {
         let partialDict: [String: Any] = [
             "id": 1,
-            "whisperModel": "large-v3-turbo",
-            "summaryPromptTemplate": "Summarize",
-            "claudeModel": "claude-sonnet-4-20250514",
-            "calendarSyncIntervalMinutes": 15,
-            "notificationLeadTimeMinutes": 5,
-            "launchAtLogin": true,
-            "theme": "light",
-            "aiEnabled": true,
-            "useLocalLLM": true,
-            "ollamaModel": "llama3.2:3b"
-            // morningBrief*, kbWriteBack, contactsImport, apollo* absent
+            "whisperModel": "large-v3-turbo"
+            // every other non-optional key absent
         ]
         let data = try jsonData(partialDict)
-        let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
-
-        XCTAssertTrue(decoded.aiEnabled)
-        XCTAssertTrue(decoded.useLocalLLM)
-        XCTAssertEqual(decoded.ollamaModel, "llama3.2:3b")
-        // absent keys fall back to defaults
-        XCTAssertFalse(decoded.morningBriefEnabled)
-        XCTAssertEqual(decoded.morningBriefHour, 8)
-        XCTAssertFalse(decoded.kbWriteBack)
-        XCTAssertFalse(decoded.apolloProfilePrepEnabled)
+        XCTAssertThrowsError(try JSONDecoder().decode(AppSettings.self, from: data))
     }
 
     func testAppSettingsCodableRoundTripWithAllFieldsPopulated() throws {
