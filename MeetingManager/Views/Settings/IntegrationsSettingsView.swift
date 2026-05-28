@@ -1,166 +1,157 @@
 import SwiftUI
+import os
 
 /// Settings panel for third-party integrations. Currently surfaces Apollo
 /// (attendee profile prep). Each integration is gated on three things —
 /// a feature toggle, a Keychain-stored API key, and a successful "Test"
 /// validation — so the UI never claims it's enabled when the key is bad.
+///
+/// Uses the same `Form { Section { ... } }` / `.formStyle(.grouped)` shape
+/// as the rest of the Settings tabs so the chrome lines up.
 struct IntegrationsSettingsView: View {
 
     @Environment(AppState.self) private var appState
 
     // Apollo
     @State private var apolloKey: String = ""
-    @State private var apolloKeyMasked: Bool = true
+    @State private var showApolloKey: Bool = false
     @State private var isTestingApollo: Bool = false
     @State private var apolloTestMessage: String?
     @State private var apolloTestError: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                apolloSection
-            }
-            .padding(20)
-            .frame(maxWidth: 720, alignment: .leading)
+        @Bindable var appState = appState
+        Form {
+            apolloToggleSection
+            apolloKeySection
+                .disabled(!appState.settings.apolloProfilePrepEnabled)
+                .opacity(appState.settings.apolloProfilePrepEnabled ? 1 : 0.5)
+            apolloStatusSection
+                .disabled(!appState.settings.apolloProfilePrepEnabled)
+                .opacity(appState.settings.apolloProfilePrepEnabled ? 1 : 0.5)
         }
-        .background(Color.appBackground)
-        .task { loadApolloKey() }
+        .formStyle(.grouped)
+        .onAppear { loadApolloKey() }
     }
 
-    // MARK: - Apollo
+    // MARK: - Sections
 
-    private var apolloSection: some View {
-        @Bindable var state = appState
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: "person.text.rectangle")
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(Color.appAccent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Integrated Attendee Profile Prep")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.appTextPrimary)
-                    Text("Powered by Apollo.io. Surfaces title, employer, recent moves, and LinkedIn for everyone on the invite list.")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Color.appTextSecondary)
+    private var apolloToggleSection: some View {
+        @Bindable var appState = appState
+        return Section {
+            Toggle("Integrated Attendee Profile Prep", isOn: $appState.settings.apolloProfilePrepEnabled)
+            if appState.settings.apolloProfilePrepEnabled {
+                Text("Replaces the Context card in the meeting view and pre-meeting prep with attendee profiles: title, employer, recent moves, and a LinkedIn link.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Off — meeting views show the existing AI Context card from past meetings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Apollo.io")
+        }
+    }
+
+    private var apolloKeySection: some View {
+        Section {
+            HStack {
+                Group {
+                    if showApolloKey {
+                        TextField("Apollo API key", text: $apolloKey)
+                    } else {
+                        SecureField("Apollo API key", text: $apolloKey)
+                    }
                 }
-                Spacer()
+                .textFieldStyle(.roundedBorder)
+
+                Button {
+                    showApolloKey.toggle()
+                } label: {
+                    Image(systemName: showApolloKey ? "eye.slash" : "eye")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(showApolloKey ? "Hide API key" : "Show API key")
             }
 
-            Toggle(isOn: $state.settings.apolloProfilePrepEnabled) {
-                Text("Show attendee profile section in meeting view and pre-meeting prep")
-                    .font(.system(size: 13))
-            }
-            .toggleStyle(.switch)
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Apollo API Key")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(Color.appTextSecondary)
-                    Spacer()
-                    Button(apolloKeyMasked ? "Show" : "Hide") {
-                        apolloKeyMasked.toggle()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.appAccent)
+            HStack {
+                Button("Save API Key") {
+                    saveApolloKey()
                 }
+                .disabled(apolloKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                if apolloKeyMasked {
-                    SecureField("Paste your Apollo API key", text: $apolloKey)
-                        .textFieldStyle(.roundedBorder)
-                } else {
-                    TextField("Paste your Apollo API key", text: $apolloKey)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                HStack(spacing: 10) {
-                    Button {
-                        saveApolloKey()
-                    } label: {
-                        Text("Save key")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(minWidth: 70)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.appAccent)
-                    .disabled(apolloKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                    Button {
-                        Task { await testApolloKey() }
-                    } label: {
+                Button {
+                    Task { await testApolloKey() }
+                } label: {
+                    if isTestingApollo {
                         HStack(spacing: 6) {
-                            if isTestingApollo {
-                                ProgressView().controlSize(.mini)
-                            }
-                            Text(isTestingApollo ? "Testing…" : "Test")
-                                .font(.system(size: 12, weight: .semibold))
+                            ProgressView().controlSize(.small)
+                            Text("Testing…")
                         }
-                        .frame(minWidth: 70)
+                    } else {
+                        Text("Test Connection")
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(isTestingApollo || apolloKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                    if let msg = apolloTestMessage {
-                        Label(msg, systemImage: "checkmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(Color.appSuccess)
-                    }
-                    if let err = apolloTestError {
-                        Label(err, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(Color.appRecording)
-                    }
-                    Spacer()
                 }
+                .disabled(isTestingApollo || apolloKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                if appState.settings.apolloKeyValidated,
-                   let lastValidated = appState.settings.apolloKeyLastValidatedAt {
-                    Text("Key verified \(lastValidated, format: .relative(presentation: .named)).")
-                        .font(.caption2)
-                        .foregroundStyle(Color.appSuccess)
-                } else if !apolloKey.isEmpty {
-                    Text("Key not yet verified. Click Test to confirm Apollo accepts it.")
-                        .font(.caption2)
-                        .foregroundStyle(Color.appTextMuted)
-                }
+                Spacer()
+
+                apolloTestBadge
             }
-
-            statusCard
+        } header: {
+            Text("API Key")
+        } footer: {
+            Text("Your key is stored securely in the macOS Keychain. Get a key at [apollo.io](https://app.apollo.io/#/settings/integrations/api/keys).")
         }
-        .padding(16)
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.appBorderStrong, lineWidth: 1)
-        )
     }
 
-    private var statusCard: some View {
+    @ViewBuilder
+    private var apolloTestBadge: some View {
+        if let msg = apolloTestMessage {
+            Label(msg, systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Color.appSuccess)
+                .font(.caption)
+        } else if let err = apolloTestError {
+            Label(err, systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+                .lineLimit(2)
+        } else if appState.settings.apolloKeyValidated,
+                  let when = appState.settings.apolloKeyLastValidatedAt {
+            Label("Verified \(when, format: .relative(presentation: .named))", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Color.appSuccess)
+                .font(.caption)
+        } else {
+            EmptyView()
+        }
+    }
+
+    private var apolloStatusSection: some View {
         let conditions: [(String, Bool)] = [
             ("Toggle enabled", appState.settings.apolloProfilePrepEnabled),
-            ("API key stored", !apolloKey.isEmpty),
+            ("API key stored", !apolloKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
             ("Key validated by Test", appState.settings.apolloKeyValidated)
         ]
         let allMet = conditions.allSatisfy { $0.1 }
-        return VStack(alignment: .leading, spacing: 6) {
-            Text(allMet ? "Attendee Profile section is live in meetings." : "Attendee Profile section is hidden until all three are true:")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(allMet ? Color.appSuccess : Color.appTextSecondary)
+        return Section {
             ForEach(conditions, id: \.0) { name, met in
-                HStack(spacing: 6) {
+                HStack {
                     Image(systemName: met ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(met ? Color.appSuccess : Color.appTextMuted)
+                        .foregroundStyle(met ? Color.appSuccess : .secondary)
                     Text(name)
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextSecondary)
+                    Spacer()
                 }
             }
+        } header: {
+            Text("Surface in meeting views")
+        } footer: {
+            Text(allMet
+                 ? "Attendee Profile section is live. The Context card has been replaced in the meeting view and pre-meeting prep."
+                 : "All three conditions must be true for the Attendee Profile section to surface in meeting views.")
+                .foregroundStyle(allMet ? Color.appSuccess : .secondary)
         }
-        .padding(.top, 4)
     }
 
     // MARK: - Key plumbing
@@ -171,10 +162,15 @@ struct IntegrationsSettingsView: View {
 
     private func saveApolloKey() {
         let trimmed = apolloKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            try? KeychainHelper.delete(forKey: KeychainHelper.Key.apolloAPIKey)
-        } else {
-            try? KeychainHelper.save(trimmed, forKey: KeychainHelper.Key.apolloAPIKey)
+        do {
+            if trimmed.isEmpty {
+                try KeychainHelper.delete(forKey: KeychainHelper.Key.apolloAPIKey)
+            } else {
+                try KeychainHelper.save(trimmed, forKey: KeychainHelper.Key.apolloAPIKey)
+            }
+        } catch {
+            apolloTestError = "Couldn't save key: \(error.localizedDescription)"
+            return
         }
         // A new key invalidates the last test result — the user has to
         // re-run Test before the section will surface again.
