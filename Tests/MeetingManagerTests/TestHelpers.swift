@@ -173,3 +173,27 @@ enum SampleData {
         )
     }
 }
+
+// MARK: - Codable date strategy
+
+// The models persist dates as a Double of seconds since the reference date
+// (GRDB's storage convention). These strategies let Codable round-trip tests
+// encode/decode with the same semantics. Foundation has no built-in case for
+// this, so the suite defines one shared helper here.
+extension JSONEncoder.DateEncodingStrategy {
+    static var secondsSinceReferenceDate: JSONEncoder.DateEncodingStrategy {
+        .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(date.timeIntervalSinceReferenceDate)
+        }
+    }
+}
+
+extension JSONDecoder.DateDecodingStrategy {
+    static var secondsSinceReferenceDate: JSONDecoder.DateDecodingStrategy {
+        .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            return Date(timeIntervalSinceReferenceDate: try container.decode(Double.self))
+        }
+    }
+}

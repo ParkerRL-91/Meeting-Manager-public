@@ -51,22 +51,19 @@ final class KeyboardShortcutsTests: XCTestCase {
     }
 
     func testTabTranscriptShortcut() {
-        let expected = KeyboardShortcut("2", modifiers: .command)
+        let expected = KeyboardShortcut("3", modifiers: .command)
         let actual = KeyboardShortcuts.tabTranscript
         XCTAssertEqual(String(describing: actual), String(describing: expected))
     }
 
     func testTabNotesShortcut() {
-        let expected = KeyboardShortcut("3", modifiers: .command)
+        let expected = KeyboardShortcut("2", modifiers: .command)
         let actual = KeyboardShortcuts.tabNotes
         XCTAssertEqual(String(describing: actual), String(describing: expected))
     }
 
-    func testTabActionItemsShortcut() {
-        let expected = KeyboardShortcut("4", modifiers: .command)
-        let actual = KeyboardShortcuts.tabActionItems
-        XCTAssertEqual(String(describing: actual), String(describing: expected))
-    }
+    // ⌘4 / .actionItems tab was removed in P1-T02 (action items render inline
+    // under the summary); ⌘4 is intentionally unbound, so there's no shortcut to test.
 
     // MARK: - All Shortcuts Are Distinct
 
@@ -80,7 +77,6 @@ final class KeyboardShortcutsTests: XCTestCase {
             KeyboardShortcuts.tabSummary,
             KeyboardShortcuts.tabTranscript,
             KeyboardShortcuts.tabNotes,
-            KeyboardShortcuts.tabActionItems,
         ]
         let descriptions = allShortcuts.map { String(describing: $0) }
         let unique = Set(descriptions)

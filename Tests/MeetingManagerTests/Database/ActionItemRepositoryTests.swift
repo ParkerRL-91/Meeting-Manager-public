@@ -80,7 +80,7 @@ final class ActionItemRepositoryTests: XCTestCase {
 
     func testAllOpenItemsAcrossMultipleMeetings() async throws {
         var meeting2 = SampleData.makeMeeting(id: "meeting-ai-2")
-        try db.writer.write { dbConn in try meeting2.save(dbConn) }
+        try await db.writer.write { dbConn in try meeting2.save(dbConn) }
 
         var item1 = SampleData.makeActionItem(meetingId: meetingId, title: "Item 1")
         var item2 = SampleData.makeActionItem(meetingId: "meeting-ai-2", title: "Item 2")
@@ -100,7 +100,7 @@ final class ActionItemRepositoryTests: XCTestCase {
 
         try await repo.toggleComplete(id: item.id!)
 
-        let fetched = try db.writer.read { dbConn in
+        let fetched = try await db.writer.read { dbConn in
             try ActionItem.fetchOne(dbConn, key: item.id!)
         }
         XCTAssertTrue(fetched!.isCompleted)
@@ -113,7 +113,7 @@ final class ActionItemRepositoryTests: XCTestCase {
         try await repo.toggleComplete(id: item.id!)
         try await repo.toggleComplete(id: item.id!)
 
-        let fetched = try db.writer.read { dbConn in
+        let fetched = try await db.writer.read { dbConn in
             try ActionItem.fetchOne(dbConn, key: item.id!)
         }
         XCTAssertFalse(fetched!.isCompleted)

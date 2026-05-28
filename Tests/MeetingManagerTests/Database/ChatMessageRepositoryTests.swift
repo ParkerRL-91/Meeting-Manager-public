@@ -48,7 +48,7 @@ final class ChatMessageRepositoryTests: XCTestCase {
 
     func testMessagesAreIsolatedByMeeting() async throws {
         var meeting2 = SampleData.makeMeeting(id: "meeting-chat-2")
-        try db.writer.write { dbConn in try meeting2.save(dbConn) }
+        try await db.writer.write { dbConn in try meeting2.save(dbConn) }
 
         var msg1 = SampleData.makeChatMessage(meetingId: meetingId, content: "For meeting 1")
         var msg2 = SampleData.makeChatMessage(meetingId: "meeting-chat-2", content: "For meeting 2")
@@ -80,7 +80,7 @@ final class ChatMessageRepositoryTests: XCTestCase {
 
     func testClearForMeetingDoesNotAffectOtherMeetings() async throws {
         var meeting2 = SampleData.makeMeeting(id: "meeting-chat-other")
-        try db.writer.write { dbConn in try meeting2.save(dbConn) }
+        try await db.writer.write { dbConn in try meeting2.save(dbConn) }
 
         var msg1 = SampleData.makeChatMessage(meetingId: meetingId, content: "To clear")
         var msg2 = SampleData.makeChatMessage(meetingId: "meeting-chat-other", content: "Keep this")

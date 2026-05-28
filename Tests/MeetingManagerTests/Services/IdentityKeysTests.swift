@@ -33,8 +33,8 @@ final class IdentityKeysTests: XCTestCase {
         Meeting(
             id: id,
             title: title,
-            participants: participants,
             calendarEventId: calendarEventId,
+            participants: participants,
             declinedAttendees: declinedAttendees
         )
     }

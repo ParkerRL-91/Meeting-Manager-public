@@ -118,7 +118,7 @@ final class TranscriptRepositoryTests: XCTestCase {
 
         // Also insert a transcript for a different meeting
         var otherMeeting = SampleData.makeMeeting(id: "other-meeting")
-        try db.writer.write { dbConn in try otherMeeting.save(dbConn) }
+        try await db.writer.write { dbConn in try otherMeeting.save(dbConn) }
         var otherTranscript = SampleData.makeTranscript(meetingId: "other-meeting", text: "Other")
         try await repo.save(&otherTranscript)
 

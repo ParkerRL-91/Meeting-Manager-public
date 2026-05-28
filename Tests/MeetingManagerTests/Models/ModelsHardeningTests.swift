@@ -25,26 +25,26 @@ final class ModelsHardeningTests: XCTestCase {
         XCTAssertEqual(meeting.duration, 0)
     }
 
-    func testDurationNegativeWhenEndBeforeStart() {
+    func testDurationNegativeWhenEndBeforeStart() throws {
         let start = Date(timeIntervalSinceReferenceDate: 2000)
         let end   = Date(timeIntervalSinceReferenceDate: 1000)
         let meeting = SampleData.makeMeeting(startDate: start, endDate: end)
         // duration is end - start, which is negative; callers must guard
-        XCTAssertEqual(meeting.duration, -1000, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(meeting.duration), -1000, accuracy: 0.001)
     }
 
-    func testDurationSubMinute() {
+    func testDurationSubMinute() throws {
         let start = Date(timeIntervalSinceReferenceDate: 0)
         let end   = start.addingTimeInterval(30)
         let meeting = SampleData.makeMeeting(startDate: start, endDate: end)
-        XCTAssertEqual(meeting.duration, 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(meeting.duration), 30, accuracy: 0.001)
     }
 
-    func testDurationExactHour() {
+    func testDurationExactHour() throws {
         let start = Date(timeIntervalSinceReferenceDate: 0)
         let end   = start.addingTimeInterval(3600)
         let meeting = SampleData.makeMeeting(startDate: start, endDate: end)
-        XCTAssertEqual(meeting.duration, 3600, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(meeting.duration), 3600, accuracy: 0.001)
     }
 
     // -------------------------------------------------------------------------

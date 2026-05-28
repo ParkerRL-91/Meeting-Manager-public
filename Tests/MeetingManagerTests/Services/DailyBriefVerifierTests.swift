@@ -403,7 +403,7 @@ final class DailyBriefVerifierTests: XCTestCase {
         // Count occurrences of the path in the sources footer
         let footerStart = result.range(of: "_Sources:")
         XCTAssertNotNil(footerStart, "Sources footer must be present when citations survive")
-        let footer = footerStart.map { String(result[$0...]) } ?? ""
+        let footer = footerStart.map { String(result[$0.lowerBound...]) } ?? ""
         let occurrences = footer.components(separatedBy: "vendors/acme.md").count - 1
         XCTAssertEqual(occurrences, 1, "Same relative path must appear only once in Sources footer")
     }

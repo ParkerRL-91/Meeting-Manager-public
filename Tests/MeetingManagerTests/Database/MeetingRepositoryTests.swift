@@ -61,9 +61,9 @@ final class MeetingRepositoryTests: XCTestCase {
     func testUpcomingMeetingsReturnsScheduledNotifiedRecording() async throws {
         let future = Date().addingTimeInterval(3600)
 
-        var m1 = SampleData.makeMeeting(id: "m1", status: .scheduled, scheduledStartDate: future)
-        var m2 = SampleData.makeMeeting(id: "m2", status: .notified, scheduledStartDate: future)
-        var m3 = SampleData.makeMeeting(id: "m3", status: .recording, scheduledStartDate: future)
+        var m1 = SampleData.makeMeeting(id: "m1", scheduledStartDate: future, status: .scheduled)
+        var m2 = SampleData.makeMeeting(id: "m2", scheduledStartDate: future, status: .notified)
+        var m3 = SampleData.makeMeeting(id: "m3", scheduledStartDate: future, status: .recording)
         var m4 = SampleData.makeMeeting(id: "m4", status: .complete)
         var m5 = SampleData.makeMeeting(id: "m5", status: .cancelled)
         var m6 = SampleData.makeMeeting(id: "m6", status: .archived)
@@ -88,8 +88,8 @@ final class MeetingRepositoryTests: XCTestCase {
         let earlier = Date().addingTimeInterval(1800)
         let later = Date().addingTimeInterval(7200)
 
-        var m1 = SampleData.makeMeeting(id: "later", status: .scheduled, scheduledStartDate: later)
-        var m2 = SampleData.makeMeeting(id: "earlier", status: .scheduled, scheduledStartDate: earlier)
+        var m1 = SampleData.makeMeeting(id: "later", scheduledStartDate: later, status: .scheduled)
+        var m2 = SampleData.makeMeeting(id: "earlier", scheduledStartDate: earlier, status: .scheduled)
 
         try await repo.save(&m1)
         try await repo.save(&m2)
@@ -104,8 +104,8 @@ final class MeetingRepositoryTests: XCTestCase {
     func testPastMeetingsReturnsCompleteAndCancelled() async throws {
         let past = Date().addingTimeInterval(-3600)
 
-        var m1 = SampleData.makeMeeting(id: "m1", status: .complete, endDate: past)
-        var m2 = SampleData.makeMeeting(id: "m2", status: .cancelled, endDate: past)
+        var m1 = SampleData.makeMeeting(id: "m1", endDate: past, status: .complete)
+        var m2 = SampleData.makeMeeting(id: "m2", endDate: past, status: .cancelled)
         var m3 = SampleData.makeMeeting(id: "m3", status: .scheduled)
 
         try await repo.save(&m1)
@@ -125,7 +125,7 @@ final class MeetingRepositoryTests: XCTestCase {
         let past = Date().addingTimeInterval(-3600)
 
         for i in 0..<5 {
-            var m = SampleData.makeMeeting(id: "m\(i)", status: .complete, endDate: past)
+            var m = SampleData.makeMeeting(id: "m\(i)", endDate: past, status: .complete)
             try await repo.save(&m)
         }
 
@@ -162,8 +162,8 @@ final class MeetingRepositoryTests: XCTestCase {
         let within = anchor.addingTimeInterval(5 * 60)   // 5 min ahead — inside default 10-min window
         let outside = anchor.addingTimeInterval(20 * 60) // 20 min ahead — outside window
 
-        var m1 = SampleData.makeMeeting(id: "near-in", status: .scheduled, scheduledStartDate: within)
-        var m2 = SampleData.makeMeeting(id: "near-out", status: .scheduled, scheduledStartDate: outside)
+        var m1 = SampleData.makeMeeting(id: "near-in", scheduledStartDate: within, status: .scheduled)
+        var m2 = SampleData.makeMeeting(id: "near-out", scheduledStartDate: outside, status: .scheduled)
         try await repo.save(&m1)
         try await repo.save(&m2)
 
@@ -178,7 +178,7 @@ final class MeetingRepositoryTests: XCTestCase {
         let anchor = Date()
         let within = anchor.addingTimeInterval(3 * 60)
 
-        var m = SampleData.makeMeeting(id: "near-complete", status: .complete, scheduledStartDate: within)
+        var m = SampleData.makeMeeting(id: "near-complete", scheduledStartDate: within, status: .complete)
         try await repo.save(&m)
 
         let results = try await repo.meetingsNearDate(anchor)

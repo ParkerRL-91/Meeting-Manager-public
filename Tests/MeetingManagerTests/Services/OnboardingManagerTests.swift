@@ -8,14 +8,20 @@ final class OnboardingManagerTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        // Reset UserDefaults state for test isolation
+        // Reset ALL persisted onboarding state for test isolation. currentStep and
+        // aiChoice persist on every mutation, so without clearing the step key a
+        // prior test could leak its step into the next manager's init.
         UserDefaults.standard.removeObject(forKey: "onboardingCompleted")
+        UserDefaults.standard.removeObject(forKey: "onboardingCurrentStep")
+        UserDefaults.standard.removeObject(forKey: "onboardingAIChoice")
         manager = OnboardingManager()
     }
 
     override func tearDown() {
         super.tearDown()
         UserDefaults.standard.removeObject(forKey: "onboardingCompleted")
+        UserDefaults.standard.removeObject(forKey: "onboardingCurrentStep")
+        UserDefaults.standard.removeObject(forKey: "onboardingAIChoice")
     }
 
     // MARK: - Initial State
@@ -25,21 +31,22 @@ final class OnboardingManagerTests: XCTestCase {
     }
 
     // MARK: - Step Navigation
+    // Flow: welcome -> calendar -> knowledgeBase -> ready
 
     func testNextStepFromWelcome() {
         manager.currentStep = .welcome
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .permissions)
+        XCTAssertEqual(manager.currentStep, .calendar)
     }
 
-    func testNextStepFromPermissions() {
-        manager.currentStep = .permissions
+    func testNextStepFromCalendar() {
+        manager.currentStep = .calendar
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .setup)
+        XCTAssertEqual(manager.currentStep, .knowledgeBase)
     }
 
-    func testNextStepFromSetup() {
-        manager.currentStep = .setup
+    func testNextStepFromKnowledgeBase() {
+        manager.currentStep = .knowledgeBase
         manager.nextStep()
         XCTAssertEqual(manager.currentStep, .ready)
     }
@@ -50,22 +57,22 @@ final class OnboardingManagerTests: XCTestCase {
         XCTAssertEqual(manager.currentStep, .ready, "Should not advance past the last step")
     }
 
-    func testPreviousStepFromPermissions() {
-        manager.currentStep = .permissions
+    func testPreviousStepFromCalendar() {
+        manager.currentStep = .calendar
         manager.previousStep()
         XCTAssertEqual(manager.currentStep, .welcome)
     }
 
-    func testPreviousStepFromSetup() {
-        manager.currentStep = .setup
+    func testPreviousStepFromKnowledgeBase() {
+        manager.currentStep = .knowledgeBase
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .permissions)
+        XCTAssertEqual(manager.currentStep, .calendar)
     }
 
     func testPreviousStepFromReady() {
         manager.currentStep = .ready
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .setup)
+        XCTAssertEqual(manager.currentStep, .knowledgeBase)
     }
 
     func testPreviousStepFromWelcomeStaysAtWelcome() {
@@ -96,15 +103,15 @@ final class OnboardingManagerTests: XCTestCase {
 
     func testStepRawValues() {
         XCTAssertEqual(OnboardingManager.OnboardingStep.welcome.rawValue, 0)
-        XCTAssertEqual(OnboardingManager.OnboardingStep.permissions.rawValue, 1)
-        XCTAssertEqual(OnboardingManager.OnboardingStep.setup.rawValue, 2)
+        XCTAssertEqual(OnboardingManager.OnboardingStep.calendar.rawValue, 1)
+        XCTAssertEqual(OnboardingManager.OnboardingStep.knowledgeBase.rawValue, 2)
         XCTAssertEqual(OnboardingManager.OnboardingStep.ready.rawValue, 3)
     }
 
     func testStepTitles() {
         XCTAssertEqual(OnboardingManager.OnboardingStep.welcome.title, "Welcome")
-        XCTAssertEqual(OnboardingManager.OnboardingStep.permissions.title, "Permissions")
-        XCTAssertEqual(OnboardingManager.OnboardingStep.setup.title, "Setup")
+        XCTAssertEqual(OnboardingManager.OnboardingStep.calendar.title, "Calendar")
+        XCTAssertEqual(OnboardingManager.OnboardingStep.knowledgeBase.title, "Knowledge Base")
         XCTAssertEqual(OnboardingManager.OnboardingStep.ready.title, "Ready")
     }
 
@@ -113,9 +120,9 @@ final class OnboardingManagerTests: XCTestCase {
     func testFullForwardNavigationCycle() {
         XCTAssertEqual(manager.currentStep, .welcome)
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .permissions)
+        XCTAssertEqual(manager.currentStep, .calendar)
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .setup)
+        XCTAssertEqual(manager.currentStep, .knowledgeBase)
         manager.nextStep()
         XCTAssertEqual(manager.currentStep, .ready)
         manager.nextStep()
@@ -125,9 +132,9 @@ final class OnboardingManagerTests: XCTestCase {
     func testFullBackwardNavigationCycle() {
         manager.currentStep = .ready
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .setup)
+        XCTAssertEqual(manager.currentStep, .knowledgeBase)
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .permissions)
+        XCTAssertEqual(manager.currentStep, .calendar)
         manager.previousStep()
         XCTAssertEqual(manager.currentStep, .welcome)
         manager.previousStep()
