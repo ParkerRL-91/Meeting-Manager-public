@@ -2565,6 +2565,13 @@ final class AppState {
                     try await transcriptionService.loadModel(model)
                     modelProgressCancellable = nil
                     modelDownloadProgress = 1.0
+                    // Flip the "loading" flag immediately so the sidebar
+                    // banner dismisses the moment the model is ready. The
+                    // pending-transcription pass below can run for many
+                    // minutes (a full WhisperKit pass per queued meeting),
+                    // and gating the banner on it leaves a "100%" bar stuck
+                    // on screen long after transcription is actually working.
+                    isLoadingModel = false
 
                     Logger.transcription.info("WhisperKit model loaded — transcription is ready")
                     fileLog("Model: LOADED successfully — ready for transcription")
@@ -2575,8 +2582,13 @@ final class AppState {
                         sendModelReadyNotification()
                     }
 
-                    // Process any pending transcription jobs
-                    await processPendingTranscriptions()
+                    // Kick pending transcriptions off without awaiting — the
+                    // outer function returns immediately so the UI updates,
+                    // and the queue drains in the background like any other
+                    // post-meeting work.
+                    Task { [weak self] in
+                        await self?.processPendingTranscriptions()
+                    }
 
                     lastError = nil
                     break

@@ -24,12 +24,19 @@ struct ModelDownloadBanner: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if appState.isLoadingModel {
-            // WhisperKit takes priority when both are active — see doc comment.
-            whisperKitBanner
-        } else if let pull = ollamaPullStatus {
-            ollamaBanner(name: pull.name, progress: pull.progress)
+        Group {
+            if appState.isLoadingModel {
+                // WhisperKit takes priority when both are active — see doc comment.
+                whisperKitBanner
+            } else if let pull = ollamaPullStatus {
+                ollamaBanner(name: pull.name, progress: pull.progress)
+            }
         }
+        // Animate the show/hide so the banner fades out the moment the model
+        // load completes, instead of snapping away (or worse, sticking at
+        // 100% if the visibility flag is briefly stale).
+        .animation(.easeInOut(duration: 0.25), value: appState.isLoadingModel)
+        .animation(.easeInOut(duration: 0.25), value: ollamaPullStatus?.progress)
     }
 
     // MARK: - WhisperKit
