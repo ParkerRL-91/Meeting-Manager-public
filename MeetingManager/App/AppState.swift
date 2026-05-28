@@ -188,6 +188,11 @@ final class AppState {
     /// User-visible error from the most recent operation (shown via alert).
     var lastUserError: String?
 
+    /// Note drafts found at launch whose sidecar content diverged from the
+    /// stored note (a previous session ended before SQLite committed). Drives
+    /// the startup `DraftRecoverySheet`. Empty when there's nothing to recover.
+    var recoverableDrafts: [RecoverableDraft] = []
+
     /// Meetings queued for transcription when model wasn't available.
     /// Persisted via UserDefaults so they survive app restarts.
     private static let pendingTranscriptionKey = "pendingTranscriptions"
@@ -368,11 +373,72 @@ final class AppState {
             }
         }
 
+        // Surface note drafts a previous session left unsaved. The per-meeting
+        // recovery in NotepadPaneView.loadNote only fires when the user reopens
+        // that specific meeting; this proactively lists ALL recoverable drafts
+        // at launch so nothing is silently stranded. Background — never blocks
+        // launch, and a no-op (empty sheet never shown) on a clean shutdown.
+        Task { await self.scanForRecoverableDrafts() }
+
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
         AppState.isInitialized = true
 
         fileLog("AppState initialized — starting model download")
+    }
+
+    // MARK: - Note Draft Recovery
+
+    /// Scans sidecar note drafts at launch and populates `recoverableDrafts`
+    /// with those whose content diverged from the stored note. Orphaned
+    /// sidecars (the meeting no longer exists) are cleared and skipped so they
+    /// don't re-surface on every launch. See `NoteDraftStore` and
+    /// `NotepadPaneView.loadNote` for the per-meeting recovery path.
+    private func scanForRecoverableDrafts() async {
+        let drafts = await NoteDraftStore.recoverableDrafts(noteRepo: noteRepository)
+        guard !drafts.isEmpty else { return }
+
+        var resolved: [RecoverableDraft] = []
+        for draft in drafts {
+            guard let meeting = try? await meetingRepository.find(id: draft.meetingId) else {
+                NoteDraftStore.clearDraft(meetingId: draft.meetingId)
+                continue
+            }
+            resolved.append(RecoverableDraft(
+                meetingId: draft.meetingId,
+                meetingTitle: meeting.title,
+                content: draft.content,
+                modifiedAt: draft.modifiedAt
+            ))
+        }
+        recoverableDrafts = resolved
+    }
+
+    /// Writes a recovered draft into the meeting's note and clears the sidecar.
+    /// Mirrors `NotepadPaneView.saveNote`: update the latest note in place when
+    /// one exists, otherwise insert a new note row.
+    func restoreDraft(_ draft: RecoverableDraft) async {
+        do {
+            if var note = try await noteRepository.latestNote(meetingId: draft.meetingId) {
+                note.content = draft.content
+                try await noteRepository.save(&note)
+            } else {
+                var note = MeetingNote(meetingId: draft.meetingId, content: draft.content)
+                try await noteRepository.save(&note)
+            }
+            NoteDraftStore.clearDraft(meetingId: draft.meetingId)
+            recoverableDrafts.removeAll { $0.meetingId == draft.meetingId }
+        } catch {
+            Logger.database.error("restoreDraft: failed for \(draft.meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            lastUserError = "Couldn't restore the note draft: \(error.localizedDescription)"
+        }
+    }
+
+    /// Discards a recovered draft: deletes the sidecar and drops it from the
+    /// list. The stored note is left untouched.
+    func discardDraft(_ draft: RecoverableDraft) {
+        NoteDraftStore.clearDraft(meetingId: draft.meetingId)
+        recoverableDrafts.removeAll { $0.meetingId == draft.meetingId }
     }
 
     // MARK: - Settings

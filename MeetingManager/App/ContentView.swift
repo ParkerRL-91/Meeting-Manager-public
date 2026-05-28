@@ -20,6 +20,12 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .errorAlert($appState.lastUserError)
+        .sheet(isPresented: Binding(
+            get: { !appState.recoverableDrafts.isEmpty },
+            set: { presented in if !presented { appState.recoverableDrafts = [] } }
+        )) {
+            DraftRecoverySheet()
+        }
     }
 
     @ViewBuilder
