@@ -77,6 +77,23 @@ struct AppSettings: Codable, Equatable {
     /// the default at use time. Edited via Settings → Prompts → Detailed Outline.
     var detailedOutlinePromptTemplate: String? = nil
 
+    // MARK: - Integrated Profile Prep (Apollo)
+
+    /// User-facing toggle for surfacing attendee profile cards (title,
+    /// employment, LinkedIn) in the meeting view and pre-meeting prep.
+    /// The cards only render when this is on, an Apollo API key is in
+    /// the Keychain, and `apolloKeyValidated` is true — see ApolloService.
+    var apolloProfilePrepEnabled: Bool = false
+
+    /// Set to true after the Test button confirms the keychain's Apollo
+    /// API key works. Cleared when the key changes. Drives whether the
+    /// Attendee Profile section is allowed to surface.
+    var apolloKeyValidated: Bool = false
+
+    /// When the user last successfully ran the Test button. Surfaced in
+    /// Settings as a "Last verified" timestamp.
+    var apolloKeyLastValidatedAt: Date? = nil
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -105,6 +122,9 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case selectedGoogleCalendarIds, selectedAppleCalendarIds
         case contactsImportEnabled
         case detailedOutlinePromptTemplate
+        case apolloProfilePrepEnabled
+        case apolloKeyValidated
+        case apolloKeyLastValidatedAt
     }
 }
 

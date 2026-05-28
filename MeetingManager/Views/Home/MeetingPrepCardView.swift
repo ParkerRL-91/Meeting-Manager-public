@@ -233,8 +233,35 @@ struct MeetingPrepCardView: View {
 
     // MARK: - Expanded Content
 
+    /// Lowercased identifiers (email or name) for the local user so the
+    /// Attendee Profile card skips themselves.
+    private var localUserIdentifiers: Set<String> {
+        var ids: Set<String> = []
+        if let email = appState.googleAuthManager.userEmail?
+            .lowercased().trimmingCharacters(in: .whitespaces), !email.isEmpty {
+            ids.insert(email)
+        }
+        let fullName = NSFullUserName().lowercased().trimmingCharacters(in: .whitespaces)
+        if !fullName.isEmpty { ids.insert(fullName) }
+        return ids
+    }
+
     private func expandedContent(brief: MeetingPrepBrief) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Apollo: when the integration is configured and the key has
+            // been validated, surface attendee profiles inside the expanded
+            // prep card. Doesn't replace existing prep context (related
+            // meetings + open items still appear below) — adds richer
+            // attendee identity above them.
+            if appState.settings.apolloProfilePrepEnabled,
+               appState.settings.apolloKeyValidated,
+               !brief.participants.isEmpty {
+                AttendeeProfileSection(
+                    participants: brief.participants,
+                    excludeIdentifiers: localUserIdentifiers
+                )
+            }
+
             // P5-T02: Series awareness — "Last time:" line.
             if let prev = brief.previousSession {
                 HStack(spacing: 6) {

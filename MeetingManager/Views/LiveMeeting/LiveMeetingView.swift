@@ -118,6 +118,19 @@ struct LiveMeetingView: View {
 
     // MARK: - Main Content
 
+    /// Lowercased emails / names that identify the local user — used by
+    /// AttendeeProfileSection to skip lookups for the user themselves.
+    private var localUserIdentifiers: Set<String> {
+        var ids: Set<String> = []
+        if let email = appState.googleAuthManager.userEmail?
+            .lowercased().trimmingCharacters(in: .whitespaces), !email.isEmpty {
+            ids.insert(email)
+        }
+        let fullName = NSFullUserName().lowercased().trimmingCharacters(in: .whitespaces)
+        if !fullName.isEmpty { ids.insert(fullName) }
+        return ids
+    }
+
     private var mainContent: some View {
         // Two-tier layout: top sections (title, badges, context brief, open
         // items) live inside an inner ScrollView with a capped height so
@@ -201,7 +214,22 @@ struct LiveMeetingView: View {
                     // post-meeting detail view, now rendered with the same
                     // .display heading style and 14pt base font as SummaryView
                     // so it reads as a proper "summary" (not a sidebar widget).
-                    if let json = meeting?.contextJSON, !json.isEmpty, showContextBrief {
+                    //
+                    // Apollo integration: when the user has the toggle on,
+                    // a key in the Keychain, and a successful Test, the
+                    // Context card is replaced with Attendee Profiles for
+                    // the meeting's participants. Toggling Apollo off
+                    // restores the existing Context card immediately.
+                    if appState.settings.apolloProfilePrepEnabled,
+                       appState.settings.apolloKeyValidated,
+                       let meeting, !meeting.participantList.isEmpty {
+                        AttendeeProfileSection(
+                            participants: meeting.participantList,
+                            excludeIdentifiers: localUserIdentifiers
+                        )
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 12)
+                    } else if let json = meeting?.contextJSON, !json.isEmpty, showContextBrief {
                         RelatedMeetingsSection(
                             contextJSON: json,
                             onSelectMeeting: { id in

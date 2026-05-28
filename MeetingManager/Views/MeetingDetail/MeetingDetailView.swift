@@ -21,6 +21,19 @@ struct MeetingDetailView: View {
 
     private let exportService = ExportService()
 
+    /// Lowercased emails / names that identify the local user — used by
+    /// AttendeeProfileSection to skip lookups for the user themselves.
+    private var localUserIdentifiers: Set<String> {
+        var ids: Set<String> = []
+        if let email = appState.googleAuthManager.userEmail?
+            .lowercased().trimmingCharacters(in: .whitespaces), !email.isEmpty {
+            ids.insert(email)
+        }
+        let fullName = NSFullUserName().lowercased().trimmingCharacters(in: .whitespaces)
+        if !fullName.isEmpty { ids.insert(fullName) }
+        return ids
+    }
+
     enum DetailTab: String, CaseIterable {
         case summary, outline, notes, transcript, speakers
 
@@ -298,12 +311,25 @@ struct MeetingDetailView: View {
                     }
                 )
 
-                RelatedMeetingsSection(
-                    contextJSON: meeting.contextJSON,
-                    onSelectMeeting: { relatedId in
-                        appState.selectedMeetingId = relatedId
-                    }
-                )
+                // Apollo replaces the Context card with attendee profiles
+                // when the user has the toggle on, a key in the Keychain,
+                // and the key was successfully validated. The conditions
+                // are independent — toggling off should restore Context
+                // immediately, even if the key remains stored.
+                if appState.settings.apolloProfilePrepEnabled,
+                   appState.settings.apolloKeyValidated {
+                    AttendeeProfileSection(
+                        participants: meeting.participantList,
+                        excludeIdentifiers: localUserIdentifiers
+                    )
+                } else {
+                    RelatedMeetingsSection(
+                        contextJSON: meeting.contextJSON,
+                        onSelectMeeting: { relatedId in
+                            appState.selectedMeetingId = relatedId
+                        }
+                    )
+                }
 
                 if !previousSessions.isEmpty {
                     previousSessionsSection

@@ -896,5 +896,16 @@ enum Migrations {
                 WHERE EXISTS (SELECT 1 FROM transcript t WHERE t.meetingId = meeting.id)
                 """)
         }
+
+        // v41: Apollo-backed attendee profile prep (v3.13.0). Three settings
+        // columns gate the feature — toggle, key-validated flag, last-validated
+        // timestamp. The actual API key lives in the Keychain, not the DB.
+        migrator.registerMigration("v41-apollo-profile-prep") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "apolloProfilePrepEnabled", .boolean).notNull().defaults(to: false)
+                t.add(column: "apolloKeyValidated", .boolean).notNull().defaults(to: false)
+                t.add(column: "apolloKeyLastValidatedAt", .datetime)
+            }
+        }
     }
 }

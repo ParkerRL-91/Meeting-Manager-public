@@ -11,6 +11,10 @@ enum KeychainHelper {
         static let googleOAuthToken = "google-oauth-token"
         /// User-supplied Google OAuth client ID (not secret — PKCE native apps have no secret).
         static let googleOAuthClientId = "google-oauth-client-id"
+        /// Apollo.io API key. Used by ApolloService to enrich attendees with
+        /// title / employment history / LinkedIn link in the meeting view
+        /// when the Settings toggle is on.
+        static let apolloAPIKey = "apollo-api-key"
     }
 
     /// The service identifier written into every keychain item.
