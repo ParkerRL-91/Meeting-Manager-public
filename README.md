@@ -21,21 +21,15 @@ You only do this once.
 
 ---
 
-## What's New in v3.10
+## What's New in v3.15
 
-**Speaker identification overhaul.** Five independent signals now combine into per-cluster confidence scores so you can see at a glance which speaker labels were AI guesses vs voice-matched vs manually confirmed.
+**Meetings name themselves.** When you record an ad-hoc meeting and never give it a title, Meeting Manager generates a short name — eight words or fewer — from what was actually discussed. Generation runs on your local Ollama model first and falls back to Claude, so the transcript stays on your Mac whenever a local model is available. Calendar meetings keep the title from their event, and you can always rename any meeting yourself.
 
-- **RSVP gate** — declined invitees no longer count as candidates
-- **Confidence scores per attribution** — amber dot in the transcript when a label is genuinely uncertain
-- **Adaptive voice profile learning** — manual renames weighted heavily, LLM attributions cautiously (no profile drift onto similar voices)
-- **Second-pass attribution** — automatically retries unresolved clusters after transcript cleanup with the full transcript context
-- **Cluster-count hint from RSVP** — diarization knows how many voices to expect, no over-segmentation when an invitee declined
+**The daily brief draws on your Knowledge Base.** Each meeting's brief can now pull relevant background from your own notes, quoted verbatim and cited to the source file. A deterministic verifier drops any quoted line it can't trace back to your notes, so the brief never attaches one meeting's context to another and never fabricates background.
 
-**Person directory + Contacts import.** Identities are now stable UUIDs that survive name/email format changes. "dave@acme.com" and "Dave Smith" are the same Person; "Dave from Acme" is a different one.
+**Reliability and test coverage.** This release adds an enterprise test suite of roughly 340 cases covering the anti-hallucination verifiers, speaker-identity keys, transcript cleanup, and the data layer, run in continuous integration on every change. The same work fixed a Swift 6 persistence bug in which a saved record's database id was not returned to the caller, which could leave newly created action items, notes, and transcripts referencing a missing row.
 
-**Cleaned + raw transcript stay in sync** — renaming a speaker updates both the segment-by-segment transcript AND the post-processed readable view immediately.
-
-**+ everything from 3.9** (Person model, voice fingerprint anchoring, People page with inline identity management, opt-in macOS Contacts import, domain-based disambiguation, utterance sample bank for future provenance/rollback).
+**+ everything from 3.11–3.14** (KB-grounded summaries and chat, the auto-generated daily brief, inline task progress, Apollo-powered attendee profiles, bulletproof note autosave, and audio-capture reliability fixes).
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
@@ -69,7 +63,7 @@ Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manag
 - **SpeakerKit** — pyannote-based speaker diarization
 - **Claude API** — optional, for summarization + attribution
 - **Ollama** — optional, for fully local AI
-- **Sparkle** — auto-update channel
+- **GitHub Releases** — update distribution via manual download (self-signed DMG; no auto-update)
 - **EventKit** — Apple Calendar / Outlook for Mac
 - **Google Calendar REST** — Google Calendar
 - **Contacts framework** — opt-in identity import
