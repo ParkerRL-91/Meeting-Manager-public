@@ -34,12 +34,30 @@ final class ApolloService {
         let organizationName: String?
         let linkedinURL: URL?
         let photoURL: URL?
-        /// Latest two employment records in reverse chronological order.
+        /// Reverse-chronological employment history. Top of stack is the
+        /// current role. UI shows the first row inline and the rest when
+        /// the user expands the card.
         let recentEmployment: [Employment]
         /// "Just started at X" — true when the most recent employment row
         /// has a `startDate` within the last 90 days. Surfaced as a small
         /// "Recently joined" badge in the UI.
         let recentlyJoined: Bool
+
+        // Expanded-card fields. All optional — Apollo doesn't always have
+        // them, and the UI degrades gracefully when any are nil.
+
+        /// Short one-line bio Apollo composes for the person.
+        let headline: String?
+        /// "City, State" or "City, Country" composed from Apollo fields.
+        let location: String?
+        /// Industry of the current employer, e.g. "Hospital & Health Care".
+        let industry: String?
+        /// Estimated company headcount.
+        let companyEmployees: Int?
+        /// One-paragraph company description Apollo composes.
+        let companyDescription: String?
+        /// Company website URL when present.
+        let companyWebsite: URL?
     }
 
     struct Employment: Codable, Sendable, Equatable {
@@ -181,9 +199,10 @@ final class ApolloService {
         let linkedin = (person["linkedin_url"] as? String).flatMap(URL.init(string:))
         let photo = (person["photo_url"] as? String).flatMap(URL.init(string:))
 
+        // Up to 4 employment rows — first is shown inline, rest reveal on expand.
         var employmentRows: [Employment] = []
         if let history = person["employment_history"] as? [[String: Any]] {
-            for row in history.prefix(2) {
+            for row in history.prefix(4) {
                 let rowTitle = (row["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 let rowOrg = (row["organization_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 let start = parseDate(row["start_date"] as? String)
@@ -202,6 +221,24 @@ final class ApolloService {
             return Date().timeIntervalSince(mostRecentStart) < (90 * 24 * 3600)
         }()
 
+        let headline = (person["headline"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+
+        // Location: "City, State" preferred, then "City, Country", then either alone.
+        let city = (person["city"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let state = (person["state"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let country = (person["country"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let locationParts: [String?] = [city, state ?? country]
+        let location: String? = {
+            let composed = locationParts.compactMap { $0 }.joined(separator: ", ")
+            return composed.isEmpty ? nil : composed
+        }()
+
+        let industry = (org?["industry"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let companyEmployees = (org?["estimated_num_employees"] as? Int)
+            ?? (org?["organization_headcount"] as? Int)
+        let companyDescription = (org?["short_description"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let companyWebsite = (org?["website_url"] as? String).flatMap(URL.init(string:))
+
         return Profile(
             name: fullName,
             title: title,
@@ -209,7 +246,13 @@ final class ApolloService {
             linkedinURL: linkedin,
             photoURL: photo,
             recentEmployment: employmentRows,
-            recentlyJoined: recentlyJoined
+            recentlyJoined: recentlyJoined,
+            headline: headline,
+            location: location,
+            industry: industry,
+            companyEmployees: companyEmployees,
+            companyDescription: companyDescription,
+            companyWebsite: companyWebsite
         )
     }
 

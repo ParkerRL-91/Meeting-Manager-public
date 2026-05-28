@@ -311,16 +311,20 @@ struct MeetingDetailView: View {
                     }
                 )
 
-                // Apollo replaces the Context card with attendee profiles
-                // when the user has the toggle on, a key in the Keychain,
-                // and the key was successfully validated. The conditions
-                // are independent — toggling off should restore Context
-                // immediately, even if the key remains stored.
+                // Apollo: when the toggle is on, key stored, and key validated,
+                // show the Attendee Profile section. It carries the cached
+                // contextJSON so its built-in Profiles ↔ Brief switch can flip
+                // to the brief without losing it. When Apollo is off, fall
+                // through to the legacy Context-only card.
                 if appState.settings.apolloProfilePrepEnabled,
                    appState.settings.apolloKeyValidated {
                     AttendeeProfileSection(
                         participants: meeting.participantList,
-                        excludeIdentifiers: localUserIdentifiers
+                        excludeIdentifiers: localUserIdentifiers,
+                        contextJSON: meeting.contextJSON,
+                        onSelectMeeting: { relatedId in
+                            appState.selectedMeetingId = relatedId
+                        }
                     )
                 } else {
                     RelatedMeetingsSection(

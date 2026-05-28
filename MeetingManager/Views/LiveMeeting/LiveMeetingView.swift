@@ -225,7 +225,12 @@ struct LiveMeetingView: View {
                        let meeting, !meeting.participantList.isEmpty {
                         AttendeeProfileSection(
                             participants: meeting.participantList,
-                            excludeIdentifiers: localUserIdentifiers
+                            excludeIdentifiers: localUserIdentifiers,
+                            contextJSON: meeting.contextJSON,
+                            onSelectMeeting: { id in
+                                appState.selectedMeetingId = id
+                                appState.sidebarDestination = .meetings
+                            }
                         )
                         .padding(.horizontal, 24)
                         .padding(.bottom, 12)
