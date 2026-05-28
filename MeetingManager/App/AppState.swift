@@ -665,39 +665,25 @@ final class AppState {
             : meeting.participantList.joined(separator: ", ")
 
         // Pull relevant Knowledge Base excerpts so the summary can reference the
-        // user's own documents (OKRs, project briefs, specs) — not just the
-        // transcript. Query is meeting metadata + a transcript snippet so
-        // retrieval matches what was actually discussed. Empty string when no
-        // KB folder is configured (then the template's KB section is just blank,
-        // same as before).
-        let kbContext = await KnowledgeBaseService.shared.retrieveContext(
-            for: meeting,
-            additionalQuery: String(transcript.prefix(800))
-        )
-
-        var baseSystemPrompt = rawTemplate
+        // KB is intentionally OUT of the main-summary prompt. Earlier we injected
+        // KB excerpts here, but they leaked unrelated content into Discussion
+        // Points / Decisions / Open Questions — e.g. an Globex meeting summary
+        // citing Initech-specific people and Umbrella Health pricing pulled from
+        // KB docs about a different customer. The main summary must be grounded
+        // ONLY in this meeting's transcript + the user's own notes.
+        //
+        // Cross-meeting context lives in a separate, strictly-scoped "How this
+        // connects to other work" section appended after the summary saves —
+        // see appendConnectionsSection below.
+        let baseSystemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
             .replacingOccurrences(of: "{{duration}}", with: meeting.formattedDuration)
             .replacingOccurrences(of: "{{participants}}", with: participantsString)
             .replacingOccurrences(of: "{{priorContext}}", with: "")
-            .replacingOccurrences(of: "{{knowledgeBase}}", with: kbContext)
+            .replacingOccurrences(of: "{{knowledgeBase}}", with: "")
             .replacingOccurrences(of: "{{transcript}}", with: "")
             .replacingOccurrences(of: "{{notes}}", with: "")
-
-        // The default/stored summary templates don't carry a {{knowledgeBase}}
-        // placeholder, so the substitution above is a no-op for them. Append the
-        // KB excerpts explicitly (skipping if a custom template already injected
-        // them via the placeholder) so the summary always benefits from the KB.
-        if !kbContext.isEmpty, !baseSystemPrompt.contains(kbContext) {
-            baseSystemPrompt += """
-
-
-            ## Relevant excerpts from the user's Knowledge Base
-            These are excerpts from the user's own documents (OKRs, project briefs, specs) — not prior meetings. Treat them as authoritative reference and cite the source path when you use them.
-            \(kbContext)
-            """
-        }
 
         // P2-T03: Notes-first summary. If the user captured notes during the meeting via
         // NotepadPaneView, treat those notes as the primary anchor and use the transcript to
@@ -730,7 +716,16 @@ final class AppState {
         let systemPrompt: String
         let userPrompt: String
         if noteText.isEmpty {
-            systemPrompt = baseSystemPrompt
+            systemPrompt = baseSystemPrompt + """
+
+
+            Strict anti-hallucination rule: every claim, decision, action item, \
+            and quoted line must come directly from the transcript provided. Do \
+            NOT invent participants, accounts, organisations, dates, decisions, \
+            commitments, pricing, or any specifics that aren't in the transcript. \
+            If the transcript is short or thin, write a shorter summary — never \
+            pad with assumed context.
+            """
             if seriesContext.isEmpty {
                 userPrompt = transcript
             } else {
@@ -743,12 +738,30 @@ final class AppState {
                 """
             }
         } else {
+            // Notes are GROUND TRUTH — both prep notes (written before the meeting)
+            // and in-meeting notes captured by the user are stored in the same
+            // MeetingNote rows, so this branch covers both. The summary's
+            // structure, themes, and emphasis must mirror what the user wrote;
+            // the transcript is supporting evidence, not the lead source.
             systemPrompt = baseSystemPrompt + """
 
 
-            The user captured notes during this meeting — treat these notes as ground truth and \
-            anchor the summary around them. Use the transcript to fill in details, context, and \
-            action items the user may have missed. Do not contradict the notes.
+            PRIORITY: the user captured notes before and/or during this meeting. \
+            Treat those notes as GROUND TRUTH. The summary's structure, themes, \
+            emphasis, and ordering must mirror what the user wrote — they \
+            recorded what mattered to *them*. Use the transcript only to fill in \
+            supporting detail, exact wording, names, and items the user clearly \
+            missed.
+
+            Strict anti-hallucination rules:
+            - Every claim, decision, action item, and quoted line must be \
+              traceable to either the notes or the transcript provided.
+            - Do NOT contradict the notes.
+            - Do NOT invent participants, accounts, organisations, dates, \
+              decisions, commitments, pricing, or specifics absent from both \
+              sources.
+            - If neither source supports a section, write that section briefly \
+              or skip it — never pad with assumed context.
             """
             userPrompt = """
             <user_notes>
@@ -795,6 +808,151 @@ final class AppState {
         )
         try await summaryRepository.save(&summary)
         fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
+
+        // After saving, append a strictly-scoped "How this connects to other
+        // work" section sourced ONLY from the Knowledge Base — see comment on
+        // the removed KB injection above for why we keep KB out of the main
+        // summary. No-op when no KB folder is set or no entities match.
+        await appendConnectionsSection(meeting: meeting, summary: &summary)
+    }
+
+    /// Append a "How this connects to other work" section to a freshly-saved
+    /// summary, sourced strictly from the user's Knowledge Base and gated on
+    /// exact name matches against the meeting's context entities (account
+    /// acronyms, product names, participant names). The strict gating exists
+    /// because earlier KB injection bled unrelated context into the summary —
+    /// e.g. an Globex-titled meeting picking up Initech-specific people and pricing
+    /// from other customer docs in the KB.
+    private func appendConnectionsSection(meeting: Meeting, summary: inout MeetingSummary) async {
+        let entities = Self.extractContextEntities(meeting: meeting,
+                                                    userEmail: googleAuthManager.userEmail,
+                                                    userName: NSFullUserName())
+        guard !entities.isEmpty else { return }
+
+        // Per-entity KB retrieval so each query is anchored to a specific
+        // name. Joining names into one FTS query would AND-combine the tokens;
+        // we want excerpts that mention any one entity.
+        var blocks: [String] = []
+        var totalLen = 0
+        let cap = 8000
+        for entity in entities.prefix(8) {
+            let chunk = await KnowledgeBaseService.shared.retrieveContext(query: entity)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !chunk.isEmpty else { continue }
+            let labelled = "### Entity: \(entity)\n\(chunk)"
+            if totalLen + labelled.count > cap { break }
+            blocks.append(labelled)
+            totalLen += labelled.count
+        }
+        guard !blocks.isEmpty else { return }
+        let kbBlock = blocks.joined(separator: "\n\n---\n\n")
+
+        guard let textGen = await makeTextGenerator(maxOutputTokens: 2048) else { return }
+
+        let entitiesList = entities.map { "- \($0)" }.joined(separator: "\n")
+        let system = """
+            You are surfacing how a specific meeting connects to the user's wider work, drawing ONLY from the provided Knowledge Base excerpts. STRICT rules:
+
+            1. Each connection MUST be anchored to one of the listed context entities — an account acronym, product name, or participant name from THIS meeting — appearing by EXACT name in the excerpt. If an excerpt doesn't mention a listed entity by exact name, ignore it; it's a different thread.
+            2. Do NOT generalise from similar-sounding topics, generic industry terms, or shared roles. "Healthcare" or "genomics" alone is not a connection — the entity name must be present.
+            3. First pass — direct: surface KB items that name a listed entity directly (e.g., "Globex", "Acme", a participant by name).
+            4. Second pass — bridged: from the direct hits, you may briefly note where the SAME named entity appears in conversations with OTHER people elsewhere in the KB (e.g., "X also came up with Y" — still anchored on the named entity).
+            5. Cite the source path in square brackets after each bullet (e.g., "[kb/path/to/doc.md]").
+            6. If no excerpt qualifies after filtering, output exactly:
+               (No clear connections to other work in your Knowledge Base.)
+               Do NOT invent connections to fill the section.
+            7. Output Markdown only — no preamble, no chain-of-thought. 2 to 5 bullets max. Each bullet under 30 words.
+            """
+        let user = """
+            Meeting: \(meeting.title)
+            Participants: \(meeting.participantList.joined(separator: ", "))
+
+            Context entities (excerpts MUST mention one of these by exact name to count):
+            \(entitiesList)
+
+            Knowledge Base excerpts (some may be unrelated — apply the rules above):
+            \(kbBlock)
+            """
+        let raw: String
+        do {
+            raw = try await textGen(system, user)
+        } catch {
+            Logger.ai.warning("Connections section synthesis failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        let body = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Skip refusal-style or empty outputs so we don't pad the summary.
+        guard !body.isEmpty,
+              !body.lowercased().contains("no clear connections") else {
+            return
+        }
+
+        let section = "\n\n## How this connects to other work\n\n\(body)"
+        var updated = summary
+        updated.summaryText += section
+        do {
+            try await summaryRepository.update(updated)
+            summary = updated
+            fileLog("Connections section appended for \(meeting.id) (\(body.count) chars, \(entities.count) entities)")
+        } catch {
+            Logger.ai.warning("Connections section save failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Extract context entities for the connections section: participant
+    /// names (excluding the local user), all-caps acronyms (Globex, NHS, Initech,
+    /// 2–6 chars), and CamelCase product names (Acme). Used as exact-name
+    /// gates against KB excerpts so the section can't drift to a different
+    /// customer with a similar topic. Static so it stays trivially testable.
+    static func extractContextEntities(meeting: Meeting, userEmail: String?, userName: String) -> [String] {
+        var entities = [String]()
+        var seen = Set<String>()
+        func add(_ s: String) {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { return }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted { entities.append(trimmed) }
+        }
+
+        // Participants (excluding the local user).
+        let userEmailLower = userEmail?.lowercased().trimmingCharacters(in: .whitespaces) ?? ""
+        let userNameLower = userName.lowercased().trimmingCharacters(in: .whitespaces)
+        for raw in meeting.participantList {
+            let p = raw.trimmingCharacters(in: .whitespaces)
+            let pLower = p.lowercased()
+            if !userEmailLower.isEmpty, pLower == userEmailLower { continue }
+            if !userNameLower.isEmpty, pLower == userNameLower { continue }
+            if let at = p.firstIndex(of: "@") {
+                add(String(p[..<at]))   // email local-part — usually their name
+            } else {
+                add(p)
+            }
+        }
+
+        // Acronyms (3–6 ALL CAPS letters/digits — 2-letter ones like "IT",
+        // "OK", "AI" are too generic to anchor a connection on) and CamelCase
+        // (initial cap + at least one internal cap, e.g. "Acme") from
+        // the title.
+        let titleStop: Set<String> = [
+            "TBD"
+        ]
+        let title = meeting.title as NSString
+        let range = NSRange(location: 0, length: title.length)
+        if let acro = try? NSRegularExpression(pattern: "\\b[A-Z][A-Z0-9]{2,5}\\b") {
+            acro.enumerateMatches(in: meeting.title, range: range) { m, _, _ in
+                guard let r = m?.range else { return }
+                let tok = title.substring(with: r)
+                guard !titleStop.contains(tok) else { return }
+                add(tok)
+            }
+        }
+        if let camel = try? NSRegularExpression(pattern: "\\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\\b") {
+            camel.enumerateMatches(in: meeting.title, range: range) { m, _, _ in
+                guard let r = m?.range else { return }
+                add(title.substring(with: r))
+            }
+        }
+        return entities
     }
 
     /// Re-run LLM speaker attribution against an existing meeting's transcripts
