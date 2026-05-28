@@ -134,6 +134,71 @@ struct MeetingDetailView: View {
     }
 
     var body: some View {
+        chrome
+            .onReceive(NotificationCenter.default.publisher(for: .switchTab)) { notification in
+                if let tabName = notification.object as? String,
+                   let tab = DetailTab(rawValue: tabName) {
+                    selectedTab = tab
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .exportMeeting)) { _ in
+                Task { await exportFullReport() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .copySummary)) { _ in
+                copySummaryMarkdown()
+            }
+            .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
+                // Reload meeting when context enrichment completes for this meeting
+                let contextDone = tasks.contains {
+                    $0.type == .contextEnrichment && $0.meetingId == meetingId && $0.status == .completed
+                }
+                if contextDone {
+                    Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
+                }
+            }
+            // Refresh meeting status when recording starts or stops so "Start Early"
+            // disappears immediately instead of waiting for the next manual reload.
+            .onChange(of: appState.activeMeeting?.id) { _, _ in
+                Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
+            }
+            .onChange(of: appState.isRecording) { _, _ in
+                Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
+            }
+            .task {
+                await loadInitialContext()
+            }
+    }
+
+    // The view + its window chrome (toolbar, sheets, dialog) is split out of
+    // `body` — and the toolbar/menu split out again into `detailToolbar` — so no
+    // single modifier-chain expression is large. The combined chain tripped
+    // Swift's "unable to type-check in reasonable time" hard limit on the CI
+    // toolchain (Xcode 16 / Swift 6.0), though newer toolchains accepted it.
+    // Modifier order and every closure are unchanged — identical behavior.
+    private var chrome: some View {
+        mainContent
+            .toolbar { detailToolbar }
+            .sheet(isPresented: $showingRecipes) {
+                RecipeListView(meetingId: meetingId)
+            }
+            .sheet(isPresented: $showingEditor) {
+                editorSheet
+            }
+            .confirmationDialog(
+                "Delete this meeting?",
+                isPresented: $showingDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Meeting", role: .destructive) {
+                    deleteMeeting()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This permanently removes the transcript, notes, summaries, action items, and any stored audio recording for this meeting. This cannot be undone.")
+            }
+    }
+
+    private var mainContent: some View {
         VStack(spacing: 0) {
             if let meeting {
                 loadedContent(for: meeting)
@@ -149,151 +214,110 @@ struct MeetingDetailView: View {
         // MeetingManagerApp.swift via NotificationCenter — registering the same
         // shortcuts here would create a duplicate registration whose target is
         // responder-chain-dependent (caught in v3.0.0 QA).
-        .background(
-            Group {
-                Button("") { appState.selectAdjacentMeeting(direction: -1) }
-                    .keyboardShortcut(KeyboardShortcuts.prevMeeting)
-                Button("") { appState.selectAdjacentMeeting(direction: 1) }
-                    .keyboardShortcut(KeyboardShortcuts.nextMeeting)
-            }
-            .hidden()
-        )
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if let meeting {
-                    // Primary actions: Edit + Recipes (most used)
-                    Button {
-                        showingEditor = true
-                    } label: {
-                        Label("Edit", systemImage: "pencil.circle")
-                    }
-                    .help("Edit meeting")
+        .background(keyboardShortcutButtons)
+    }
 
-                    Button {
-                        showingRecipes = true
-                    } label: {
-                        Label("Recipes", systemImage: "text.book.closed")
-                    }
-                    .help("Run AI recipes on this meeting")
+    private var keyboardShortcutButtons: some View {
+        Group {
+            Button("") { appState.selectAdjacentMeeting(direction: -1) }
+                .keyboardShortcut(KeyboardShortcuts.prevMeeting)
+            Button("") { appState.selectAdjacentMeeting(direction: 1) }
+                .keyboardShortcut(KeyboardShortcuts.nextMeeting)
+        }
+        .hidden()
+    }
 
-                    // Consolidated actions menu — share, export, archive, delete
-                    Menu {
-                        // Conditional meeting-state actions
-                        if meeting.isReopenable {
-                            Button {
-                                appState.startRecording(for: meeting)
-                            } label: {
-                                Label("Resume Recording", systemImage: "record.circle")
-                            }
-                        }
-
-                        if meeting.status == .scheduled {
-                            Button {
-                                cancelMeeting()
-                            } label: {
-                                Label("Cancel Meeting", systemImage: "xmark.circle")
-                            }
-                        }
-
-                        if meeting.status == .archived {
-                            Button {
-                                unarchiveMeeting()
-                            } label: {
-                                Label("Unarchive", systemImage: "archivebox")
-                            }
-                        } else if !meeting.status.isActive {
-                            Button {
-                                archiveMeeting()
-                            } label: {
-                                Label("Archive", systemImage: "archivebox")
-                            }
-                        }
-
-                        Divider()
-
-                        // Share
-                        Button("Share Summary") {
-                            Task { await shareSummary() }
-                        }
-                        Button("Share Full Report") {
-                            Task { await shareFullReport() }
-                        }
-
-                        Divider()
-
-                        // Export
-                        Button("Export Summary (Markdown)") { Task { await exportSummary() } }
-                        Button("Export Transcript (Text)") { Task { await exportTranscript() } }
-                        Button("Export Full Report (Markdown)") { Task { await exportFullReport() } }
-                        Button("Copy Summary as Markdown") { copySummaryMarkdown() }
-
-                        Divider()
-
-                        Button(role: .destructive) {
-                            showingDeleteConfirmation = true
-                        } label: {
-                            Label("Delete Meeting", systemImage: "trash")
-                        }
-                    } label: {
-                        Label("More", systemImage: "ellipsis.circle")
-                    }
-                    .help("Share, export, archive, and more")
-                }
+    @ViewBuilder
+    private var editorSheet: some View {
+        if let meeting {
+            MeetingEditorSheet(meeting: meeting) { title, startDate, endDate in
+                saveMeetingEdits(title: title, startDate: startDate, endDate: endDate)
             }
         }
-        .sheet(isPresented: $showingRecipes) {
-            RecipeListView(meetingId: meetingId)
-        }
-        .sheet(isPresented: $showingEditor) {
+    }
+
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
             if let meeting {
-                MeetingEditorSheet(meeting: meeting) { title, startDate, endDate in
-                    saveMeetingEdits(title: title, startDate: startDate, endDate: endDate)
+                // Primary actions: Edit + Recipes (most used)
+                Button {
+                    showingEditor = true
+                } label: {
+                    Label("Edit", systemImage: "pencil.circle")
                 }
+                .help("Edit meeting")
+
+                Button {
+                    showingRecipes = true
+                } label: {
+                    Label("Recipes", systemImage: "text.book.closed")
+                }
+                .help("Run AI recipes on this meeting")
+
+                // Consolidated actions menu — share, export, archive, delete
+                Menu {
+                    // Conditional meeting-state actions
+                    if meeting.isReopenable {
+                        Button {
+                            appState.startRecording(for: meeting)
+                        } label: {
+                            Label("Resume Recording", systemImage: "record.circle")
+                        }
+                    }
+
+                    if meeting.status == .scheduled {
+                        Button {
+                            cancelMeeting()
+                        } label: {
+                            Label("Cancel Meeting", systemImage: "xmark.circle")
+                        }
+                    }
+
+                    if meeting.status == .archived {
+                        Button {
+                            unarchiveMeeting()
+                        } label: {
+                            Label("Unarchive", systemImage: "archivebox")
+                        }
+                    } else if !meeting.status.isActive {
+                        Button {
+                            archiveMeeting()
+                        } label: {
+                            Label("Archive", systemImage: "archivebox")
+                        }
+                    }
+
+                    Divider()
+
+                    // Share
+                    Button("Share Summary") {
+                        Task { await shareSummary() }
+                    }
+                    Button("Share Full Report") {
+                        Task { await shareFullReport() }
+                    }
+
+                    Divider()
+
+                    // Export
+                    Button("Export Summary (Markdown)") { Task { await exportSummary() } }
+                    Button("Export Transcript (Text)") { Task { await exportTranscript() } }
+                    Button("Export Full Report (Markdown)") { Task { await exportFullReport() } }
+                    Button("Copy Summary as Markdown") { copySummaryMarkdown() }
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Label("Delete Meeting", systemImage: "trash")
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .help("Share, export, archive, and more")
             }
-        }
-        .confirmationDialog(
-            "Delete this meeting?",
-            isPresented: $showingDeleteConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Meeting", role: .destructive) {
-                deleteMeeting()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This permanently removes the transcript, notes, summaries, action items, and any stored audio recording for this meeting. This cannot be undone.")
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .switchTab)) { notification in
-            if let tabName = notification.object as? String,
-               let tab = DetailTab(rawValue: tabName) {
-                selectedTab = tab
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .exportMeeting)) { _ in
-            Task { await exportFullReport() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .copySummary)) { _ in
-            copySummaryMarkdown()
-        }
-        .onChange(of: appState.taskQueueManager.allTasks) { _, tasks in
-            // Reload meeting when context enrichment completes for this meeting
-            let contextDone = tasks.contains {
-                $0.type == .contextEnrichment && $0.meetingId == meetingId && $0.status == .completed
-            }
-            if contextDone {
-                Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
-            }
-        }
-        // Refresh meeting status when recording starts or stops so "Start Early"
-        // disappears immediately instead of waiting for the next manual reload.
-        .onChange(of: appState.activeMeeting?.id) { _, _ in
-            Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
-        }
-        .onChange(of: appState.isRecording) { _, _ in
-            Task { meeting = try? await appState.meetingRepository.find(id: meetingId) }
-        }
-        .task {
-            await loadInitialContext()
         }
     }
 
