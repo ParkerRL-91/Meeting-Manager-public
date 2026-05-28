@@ -19,6 +19,19 @@ struct MeetingDetailView: View {
     @State private var previousSessions: [Meeting] = []
     @State private var summaryModelInfo: String? = nil
 
+    /// User-resizable height of the top metadata pane (Participants + Brief /
+    /// Profiles + previous sessions). Persisted across sessions and meetings
+    /// so the user's preferred split sticks. See the drag handle below the
+    /// pane.
+    @AppStorage("meetingDetail.metadataHeight") private var metadataHeight: Double = 220
+    private static let metadataMinHeight: Double = 80
+    private static let metadataMaxHeight: Double = 800
+    private static let metadataDefaultHeight: Double = 220
+    /// Snapshot of `metadataHeight` taken on drag begin so movement is
+    /// computed from the original height rather than the live (already
+    /// updated) value.
+    @State private var dragStartHeight: Double? = nil
+
     private let exportService = ExportService()
 
     /// Lowercased emails / names that identify the local user — used by
@@ -86,11 +99,14 @@ struct MeetingDetailView: View {
                     showingEditor = true
                 })
 
-                // Scrollable metadata that compresses when the window
-                // is short — participants, context, previous sessions.
-                // Capped so the tab content always gets at least half
-                // the available height.
+                // Scrollable metadata — participants, context, previous
+                // sessions. Height is user-resizable via the drag handle
+                // below; drag down to expand the brief / profiles area
+                // when you want the full detail, drag up to give more
+                // room to the tab content.
                 metadataSection(for: meeting)
+
+                metadataDragHandle
 
                 // Tab strip + content — gets layout priority so the
                 // main content is always visible and scrollable.
@@ -340,8 +356,56 @@ struct MeetingDetailView: View {
                 }
             }
         }
-        .frame(maxHeight: 200)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(height: metadataHeight)
+    }
+
+    /// Draggable horizontal divider between the metadata pane (top) and the
+    /// tab strip + content (bottom). Drag to resize; double-click to reset
+    /// to the default height.
+    private var metadataDragHandle: some View {
+        ZStack {
+            // The visible separator + grip indicator
+            VStack(spacing: 0) {
+                Spacer()
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.appTextTertiary.opacity(0.4))
+                    .frame(width: 36, height: 3)
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 10)
+        .background(Color.appBackground)
+        .contentShape(Rectangle())
+        // Resize cursor on hover so the affordance is obvious
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeUpDown.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if dragStartHeight == nil { dragStartHeight = metadataHeight }
+                    let proposed = (dragStartHeight ?? metadataHeight) + Double(value.translation.height)
+                    metadataHeight = min(
+                        max(proposed, Self.metadataMinHeight),
+                        Self.metadataMaxHeight
+                    )
+                }
+                .onEnded { _ in
+                    dragStartHeight = nil
+                }
+        )
+        .onTapGesture(count: 2) {
+            // Double-click anywhere on the handle to reset the split.
+            withAnimation(.easeInOut(duration: 0.2)) {
+                metadataHeight = Self.metadataDefaultHeight
+            }
+        }
+        .help("Drag to resize • double-click to reset")
     }
 
     /// Tab body extracted out of the main `body` to keep the SwiftUI type
