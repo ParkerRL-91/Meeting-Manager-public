@@ -91,6 +91,34 @@ final class AppState {
     /// Updated when the Daily Brief view loads. Used for the sidebar badge.
     var dailyBriefMeetingsNeedingPrep: Int = 0
 
+    // MARK: - Daily AI Brief (observable, surfaces in DailyBriefView)
+
+    /// AI-narrated daily brief text. Populated from the on-disk cache on
+    /// launch and refreshed in the background by `maybeRegenerateDailyBrief`.
+    /// The View reads this directly so the brief appears instantly without
+    /// the user clicking "Generate".
+    var dailyBriefAIText: String?
+
+    /// When the current `dailyBriefAIText` was generated. `nil` while
+    /// regenerating with no prior text on disk.
+    var dailyBriefGeneratedAt: Date?
+
+    /// Model that produced the current text — surfaced as a small footer hint.
+    var dailyBriefModel: String?
+
+    /// True while a background generation is in flight. Drives the spinner /
+    /// "Generating…" label in DailyBriefView.
+    var isGeneratingDailyBrief: Bool = false
+
+    /// Last generation error (if any), shown inline in the View.
+    var dailyBriefError: String?
+
+    /// Cancellation token + signature for the most-recent generation, so
+    /// repeated triggers don't fire concurrent regenerations.
+    private var dailyBriefGenerationTask: Task<Void, Never>?
+    private var currentDailyBriefSignature: String?
+    private let dailyBriefAIService = DailyBriefAIService()
+
     /// Persisted Ask Anything conversation. Stored here so the history survives
     /// the user navigating away from GlobalChatView and returning.
     var globalChatMessages: [GlobalChatMessage] = []
@@ -296,6 +324,7 @@ final class AppState {
 
         loadMeetings()
         loadSettings()
+        loadCachedDailyBriefForToday()
         observeNotifications()
         startProximityCheck()
         autoLoadTranscriptionModel()
@@ -551,6 +580,13 @@ final class AppState {
                     priority: 7,
                     metadata: metadata
                 )
+            }
+
+            // If the meeting whose summary just landed is on today's calendar
+            // (typical for an in-the-moment recording), the daily brief now
+            // has fresher carry-over context. Re-evaluate.
+            if let m = meeting, Calendar.current.isDateInToday(m.scheduledStartDate ?? m.startDate ?? .distantPast) {
+                await self.maybeRegenerateDailyBrief()
             }
 
             // v3.10.3+: auto-enqueue the detailed outline after summary
@@ -3019,8 +3055,132 @@ final class AppState {
                 await MainActor.run {
                     self.dailyBriefMeetingsNeedingPrep = brief.meetingsNeedingPrep
                 }
+
+                // Regenerate the AI brief when the underlying inputs have
+                // changed. Cheap when the signature is unchanged — the cache
+                // already has a fresh entry, so this is just a no-op.
+                await self.maybeRegenerateDailyBrief(brief: brief, force: false)
             } catch {
                 fileLog("Prep: context pre-computation failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Daily AI Brief Scheduler
+
+    /// Loads any cached AI brief for today into `dailyBriefAIText` so the
+    /// view paints with content on first render. Called once at startup.
+    @MainActor
+    func loadCachedDailyBriefForToday() {
+        let date = Date()
+        guard let entry = DailyBriefCache.load(date: date) else {
+            self.dailyBriefAIText = nil
+            self.dailyBriefGeneratedAt = nil
+            self.dailyBriefModel = nil
+            self.currentDailyBriefSignature = nil
+            return
+        }
+        self.dailyBriefAIText = entry.text
+        self.dailyBriefGeneratedAt = entry.generatedAt
+        self.dailyBriefModel = entry.model
+        self.currentDailyBriefSignature = entry.signature
+    }
+
+    /// Build today's brief data and (re)generate the AI text in the background
+    /// when its input signature has changed or `force` is set. Safe to call
+    /// from any trigger — it coalesces concurrent calls, skips when nothing
+    /// changed, and persists the result to `DailyBriefCache` on success.
+    ///
+    /// Triggers wired in this file:
+    ///   - `preComputePrepContext` (calendar sync + hourly safety net + launch)
+    ///   - `summaryCompletedHandler` (a meeting today just got a fresh summary)
+    ///   - "Regenerate" button in DailyBriefView (passes `force: true`)
+    @MainActor
+    func maybeRegenerateDailyBrief(brief precomputed: DailyBrief? = nil, force: Bool = false) async {
+        // Build the brief data if the caller didn't pre-compute it.
+        let brief: DailyBrief
+        if let p = precomputed { brief = p }
+        else {
+            do {
+                brief = try await DailyBriefService().buildBrief(for: Date())
+            } catch {
+                Logger.ai.warning("DailyBrief: failed to assemble brief data: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+        }
+        // Don't even ask the LLM if there's nothing on today's calendar.
+        if brief.meetings.isEmpty {
+            self.dailyBriefAIText = nil
+            self.dailyBriefGeneratedAt = nil
+            self.dailyBriefModel = nil
+            self.currentDailyBriefSignature = nil
+            DailyBriefCache.clear(date: Date())
+            return
+        }
+
+        let signature = DailyBriefCache.signature(for: brief)
+        if !force, signature == currentDailyBriefSignature, dailyBriefAIText != nil {
+            return // Cache hit — nothing changed.
+        }
+
+        // Make sure AI is even configured before spinning up a task.
+        let claudeKey = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? ""
+        let hasClaude = !claudeKey.isEmpty
+        let hasOllama = ollamaService.isReachable
+        guard hasClaude || hasOllama || settings.useLocalLLM else {
+            // No path to a model — leave whatever is on disk and bail.
+            return
+        }
+
+        // Cancel any in-flight gen with a stale signature.
+        dailyBriefGenerationTask?.cancel()
+        isGeneratingDailyBrief = true
+        dailyBriefError = nil
+
+        let service = self.dailyBriefAIService
+        let ollama = self.ollamaService
+        let ollamaModel = settings.ollamaModel
+        let claudeModel = settings.claudeModel
+        let date = Date()
+
+        dailyBriefGenerationTask = Task { [weak self] in
+            do {
+                let result = try await service.generate(
+                    for: brief,
+                    claudeAPIKey: hasClaude ? claudeKey : nil,
+                    claudeModel: claudeModel,
+                    ollama: ollama,
+                    ollamaModel: ollamaModel,
+                    date: date
+                )
+                guard !Task.isCancelled else { return }
+                let entry = DailyBriefCache.Entry(
+                    date: DailyBriefCache.dayString(for: date),
+                    signature: signature,
+                    text: result.text,
+                    model: result.model,
+                    generatedAt: Date()
+                )
+                DailyBriefCache.save(entry)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.dailyBriefAIText = entry.text
+                    self.dailyBriefGeneratedAt = entry.generatedAt
+                    self.dailyBriefModel = entry.model
+                    self.currentDailyBriefSignature = entry.signature
+                    self.isGeneratingDailyBrief = false
+                    self.dailyBriefError = nil
+                }
+                Logger.ai.info("DailyBrief: generated \(entry.text.count) chars via \(entry.model, privacy: .public)")
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isGeneratingDailyBrief = false
+                    if !(error is CancellationError) {
+                        self.dailyBriefError = error.localizedDescription
+                        Logger.ai.error("DailyBrief: generation failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
             }
         }
     }

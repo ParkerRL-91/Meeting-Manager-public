@@ -15,16 +15,9 @@ struct DailyBriefView: View {
     @State private var loadError: String?
     @State private var expandedMeetingIds: Set<String> = []
 
-    // AI brief
-    @State private var aiBriefText: String?
-    @State private var isGeneratingBrief = false
-    @State private var aiError: String?
-
     // Tick every 60 seconds so countdown labels ("In 5 min", "In progress") stay current
     @State private var now = Date()
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-
-    private static let noAIServiceError = "no_ai_service"
 
     private let service = DailyBriefService()
     private let date: Date
@@ -52,21 +45,22 @@ struct DailyBriefView: View {
                     } else {
                         meetingsList(brief: brief)
 
-                        if let aiText = aiBriefText {
+                        if let aiText = appState.dailyBriefAIText {
                             aiBriefSection(text: aiText)
+                                .padding(.horizontal, 20)
+                        } else if appState.isGeneratingDailyBrief {
+                            generatingPlaceholder
+                                .padding(.horizontal, 20)
+                        } else if !isAIConfigured {
+                            aiSetupCard
                                 .padding(.horizontal, 20)
                         }
 
-                        if let error = aiError {
-                            if error == Self.noAIServiceError {
-                                aiSetupCard
-                                    .padding(.horizontal, 20)
-                            } else {
-                                Text(error)
-                                    .font(.caption)
-                                    .foregroundStyle(Color.appRecording)
-                                    .padding(.horizontal, 20)
-                            }
+                        if let error = appState.dailyBriefError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(Color.appRecording)
+                                .padding(.horizontal, 20)
                         }
                     }
                 }
@@ -81,6 +75,13 @@ struct DailyBriefView: View {
             // doesn't need this to load.
             async let _ = appState.ollamaService.refreshStatus()
             await loadBrief()
+            // If the AI brief hasn't been generated yet for today, kick it
+            // off now. The scheduler also fires from calendar sync and the
+            // hourly safety net, but a user opening the view shouldn't have
+            // to wait for either of those.
+            if appState.dailyBriefAIText == nil && !appState.isGeneratingDailyBrief {
+                await appState.maybeRegenerateDailyBrief(brief: dailyBrief, force: false)
+            }
         }
         .onReceive(timer) { date in
             now = date
@@ -163,16 +164,18 @@ struct DailyBriefView: View {
 
     private var generateButton: some View {
         Button {
-            Task { await generateAIBrief() }
+            Task {
+                await appState.maybeRegenerateDailyBrief(brief: dailyBrief, force: true)
+            }
         } label: {
             HStack(spacing: 6) {
-                if isGeneratingBrief {
+                if appState.isGeneratingDailyBrief {
                     ProgressView().controlSize(.mini).tint(.white)
                 } else {
                     Image(systemName: "sparkles")
                         .font(.system(size: 12))
                 }
-                Text(isGeneratingBrief ? "Generating…" : (isAIConfigured ? (aiBriefText == nil ? "Generate AI brief" : "Regenerate") : "Set up AI →"))
+                Text(buttonLabel)
                     .font(.system(size: 12.5, weight: .semibold))
             }
             .foregroundStyle(.white)
@@ -182,7 +185,35 @@ struct DailyBriefView: View {
             .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
-        .disabled(isGeneratingBrief)
+        .disabled(appState.isGeneratingDailyBrief)
+    }
+
+    private var buttonLabel: String {
+        if appState.isGeneratingDailyBrief { return "Generating…" }
+        if !isAIConfigured { return "Set up AI →" }
+        return appState.dailyBriefAIText == nil ? "Generate AI brief" : "Regenerate"
+    }
+
+    private var generatingPlaceholder: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Writing today's brief…")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.appTextPrimary)
+                Text("This runs in the background — feel free to keep working.")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(Color.appSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.appBorderStrong, lineWidth: 1)
+        )
     }
 
     private var aiSetupCard: some View {
@@ -402,6 +433,31 @@ struct DailyBriefView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
                 .background(Color.appSurface)
+
+            if appState.dailyBriefGeneratedAt != nil || appState.dailyBriefModel != nil {
+                Divider().background(Color.appSeparator)
+                HStack(spacing: 6) {
+                    if let generatedAt = appState.dailyBriefGeneratedAt {
+                        Text("Updated \(generatedAt, format: .relative(presentation: .named))")
+                    }
+                    if appState.dailyBriefGeneratedAt != nil, appState.dailyBriefModel != nil {
+                        Text("·")
+                    }
+                    if let model = appState.dailyBriefModel {
+                        Text("via \(model)")
+                    }
+                    Spacer()
+                    if appState.isGeneratingDailyBrief {
+                        ProgressView().controlSize(.mini)
+                        Text("regenerating…")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(Color.appTextMuted)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.appSurfaceSecondary.opacity(0.5))
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
@@ -428,141 +484,4 @@ struct DailyBriefView: View {
         isLoading = false
     }
 
-    // MARK: - AI Generation
-
-    @MainActor
-    private func generateAIBrief() async {
-        guard let brief = dailyBrief, !brief.meetings.isEmpty else { return }
-        isGeneratingBrief = true
-        aiError = nil
-
-        let prompt = buildPrompt(for: brief)
-        let system = """
-            You are a chief-of-staff preparing a morning briefing. \
-            Respond in clean Markdown. Use ## for section headings, \
-            bullet lists for items, and **bold** for names and key phrases. \
-            Never use raw asterisks or hashes in prose. Be direct and specific — \
-            no pleasantries, no filler.
-            """
-
-        do {
-            let hasClaudeKey: Bool
-            if let apiKey = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
-               !apiKey.isEmpty {
-                hasClaudeKey = true
-            } else {
-                hasClaudeKey = false
-            }
-
-            if hasClaudeKey {
-                let claude = ClaudeService()
-                aiBriefText = try await claude.sendMessage(
-                    systemPrompt: system,
-                    userPrompt: prompt,
-                    model: appState.settings.claudeModel
-                )
-            } else if appState.ollamaService.isReachable {
-                aiBriefText = try await appState.ollamaService.generate(
-                    systemPrompt: system,
-                    userPrompt: prompt,
-                    model: appState.settings.ollamaModel
-                )
-            } else {
-                aiError = Self.noAIServiceError
-            }
-        } catch {
-            aiError = error.localizedDescription
-            Logger.ai.error("DailyBriefView: AI brief generation failed: \(error.localizedDescription)")
-        }
-
-        isGeneratingBrief = false
-    }
-
-    private func buildPrompt(for brief: DailyBrief) -> String {
-        let dateStr = date.formatted(date: .long, time: .omitted)
-        let timeFormatter = DateFormatter()
-        timeFormatter.dateFormat = "h:mm a"
-
-        var lines: [String] = [
-            "## Today: \(dateStr)",
-            "",
-            "### Schedule",
-        ]
-
-        for entry in brief.meetings {
-            let meeting = entry.meeting
-            let timeStr: String
-            if let start = meeting.scheduledStartDate ?? meeting.startDate,
-               let end = meeting.scheduledEndDate {
-                timeStr = "\(timeFormatter.string(from: start))–\(timeFormatter.string(from: end))"
-            } else if let start = meeting.scheduledStartDate ?? meeting.startDate {
-                timeStr = timeFormatter.string(from: start)
-            } else {
-                timeStr = "Time TBD"
-            }
-
-            let participants = entry.prepBrief.participants.prefix(4).joined(separator: ", ")
-            var row = "- **\(timeStr)** — \(meeting.title)"
-            if !participants.isEmpty { row += " · \(participants)" }
-            switch entry.category {
-            case .carryOver:
-                let n = entry.prepBrief.openActionItems.count
-                row += " ⚠️ \(n) open item\(n == 1 ? "" : "s")"
-            case .followUp:
-                row += " (follow-up)"
-            case .new:
-                break
-            }
-            lines.append(row)
-
-            // Prior context excerpt
-            if let prev = entry.prepBrief.previousSession {
-                let excerpt = prev.summaryExcerpt?.prefix(120) ?? ""
-                if !excerpt.isEmpty {
-                    lines.append("  - *Last time (\(prev.date.formatted(date: .abbreviated, time: .omitted))): \(excerpt)…*")
-                }
-            }
-        }
-
-        if brief.totalOpenItems > 0 {
-            lines.append("")
-            lines.append("### Open Action Items")
-            for entry in brief.meetings {
-                for item in entry.prepBrief.openActionItems.prefix(4) {
-                    var itemLine = "- "
-                    if let assignee = item.assignee { itemLine += "**\(assignee)** — " }
-                    itemLine += item.title
-                    itemLine += " *(from \(entry.meeting.title))*"
-                    lines.append(itemLine)
-                }
-            }
-        }
-
-        lines.append(contentsOf: [
-            "",
-            "---",
-            "",
-            "Write a daily brief in **exactly this structure**, in Markdown:",
-            "",
-            "## One-line read",
-            "A single sentence: the most important thing about today.",
-            "",
-            "## What needs attention",
-            "2–4 bullets — only items that require action or prep before a meeting.",
-            "Each bullet names the meeting, the issue, and what to do about it.",
-            "Skip entirely if there are no carry-over items.",
-            "",
-            "## Meeting-by-meeting",
-            "One tight bullet per meeting: time, title, and the single most useful thing to know walking in.",
-            "If there's no prior context, say \"First conversation — no prior context.\"",
-            "",
-            "## Day-end goals",
-            "2–3 bullets on what a successful day looks like by 5pm, given today's schedule.",
-            "",
-            "Rules: be specific, use exact names from the schedule, no filler phrases.",
-            "Length: 150–300 words total."
-        ])
-
-        return lines.joined(separator: "\n")
-    }
 }
