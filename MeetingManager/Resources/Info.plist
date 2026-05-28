@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>3.11.1</string>
+	<string>3.11.2</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -40,7 +40,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>202605271849</string>
+	<string>202605280904</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.4</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>

@@ -86,13 +86,22 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private var consecutiveMicDeadSeconds: Int = 0
     /// Latches true once the mic-problem warning has fired, so it only warns once per recording.
     private var micProblemWarned = false
-    /// Mic RMS below this is treated as no signal. Working mics (even low-output USB
-    /// webcams ~0.002) sit above it; a dead/output-only device reads ~0.
-    private let micDeadThreshold: Float = 0.0005
-    /// System RMS above this means the call is clearly live (remote participants audible).
-    private let systemActiveThreshold: Float = 0.01
-    /// Seconds of mic-dead-while-system-active before warning the user.
-    private let micDeadWarnSeconds = 45
+    /// Mic RMS below this is treated as "effectively dead". A real working mic
+    /// always has a noise floor above this even when the user is silent — only a
+    /// truly broken/output-only/disconnected input reads near literal zero. The
+    /// old 0.0005 threshold tripped on a quietly-listening user (e.g. the first
+    /// minute of a meeting before they speak), which caused the warning to fire
+    /// false-positive on most calls.
+    private let micDeadThreshold: Float = 0.00005
+    /// System RMS above this means remote participants are clearly *talking*
+    /// (not just ambient/blip noise). Raised from 0.01 so a brief network blip
+    /// doesn't accumulate dead-mic seconds while the user is listening quietly.
+    private let systemActiveThreshold: Float = 0.05
+    /// Seconds of effectively-dead mic while system audio is active+loud before
+    /// warning. Raised from 45s — a user listening to others for 45s is normal
+    /// at the start of a call. 5 minutes of continuous "mic at zero while others
+    /// are loudly talking" is the actual dead-device signal worth surfacing.
+    private let micDeadWarnSeconds = 300
 
     /// Thread-safe atomic levels updated directly in audio buffer callbacks.
     /// Use these for polling from the main thread instead of the @Published properties
