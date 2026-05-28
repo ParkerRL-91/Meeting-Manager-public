@@ -17,13 +17,19 @@ concurrency:
 jobs:
   unit-tests:
     name: Swift unit suite (XCTest)
-    runs-on: macos-14
+    # Swift 6 is required: WhisperKit's transitive dep swift-jinja ships a
+    # swift-tools-version 6.0 manifest, which an older toolchain can't even read
+    # (dependency resolution fails before any test runs). macos-15 defaults to
+    # Xcode 16 (Swift 6); the step below also selects the newest Xcode present.
+    runs-on: macos-15
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain info
+      - name: Select latest Xcode (Swift 6+ needed for the dependency graph)
         run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest/Contents/Developer"; fi
           xcode-select -p
           swift --version
 
