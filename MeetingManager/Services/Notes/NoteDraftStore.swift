@@ -24,8 +24,11 @@ import os
 ///   on every keystroke.
 /// - `clearDraft(meetingId:)` deletes the file. Call after a successful DB
 ///   save so the draft and the canonical record stay in sync.
-/// - `staleDrafts()` lists drafts whose mtime is newer than their meeting's
-///   stored note — used by the recovery banner on app startup.
+/// - `recoverableDrafts(noteRepo:)` lists drafts whose content diverges from
+///   (or exceeds) the meeting's stored note. It backs a future app-wide
+///   "unsaved draft" startup banner. NOTE: that banner is not wired yet — the
+///   live recovery today is per-meeting in `NotepadPaneView.loadNote`, which
+///   restores the sidecar the moment you reopen the affected meeting.
 @MainActor
 enum NoteDraftStore {
 
@@ -80,9 +83,12 @@ enum NoteDraftStore {
 
     // MARK: - Recovery
 
-    /// Returns every draft whose mtime is newer than the corresponding meeting's
-    /// stored note (or where no note exists). Used on app launch to surface a
-    /// "We have an unsaved draft for X" recovery banner.
+    /// Returns every draft whose content differs from (or is longer than) the
+    /// corresponding meeting's stored note, or where no stored note exists.
+    /// Intended to back an app-launch "unsaved draft for X" recovery banner.
+    /// Not yet wired to any UI — see the type doc comment. The mtime is
+    /// returned only for sorting/display; the recover/skip decision is by
+    /// content, matching `NotepadPaneView.loadNote`.
     static func recoverableDrafts(noteRepo: NoteRepository) async -> [(meetingId: String, content: String, modifiedAt: Date)] {
         var out: [(String, String, Date)] = []
         let dir = directory()

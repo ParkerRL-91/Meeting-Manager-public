@@ -43,7 +43,21 @@ struct AttendeeProfileSection: View {
     }
 
     private var mode: Mode {
-        get { Mode(rawValue: modeRaw) ?? .profiles }
+        Mode(rawValue: modeRaw) ?? .profiles
+    }
+
+    /// The mode actually rendered. Honors the user's persisted choice when both
+    /// sources have content; otherwise falls back to whichever source is
+    /// non-empty so the section never renders an empty body. (The persisted
+    /// `mode` is global, so a meeting with a brief but no email-bearing
+    /// attendees would otherwise show a "PRE-MEETING BRIEF" header over an
+    /// empty body when the user last picked "Profiles" on another meeting.)
+    private var effectiveMode: Mode {
+        let canShowProfiles = !lookupableAttendees.isEmpty
+        switch mode {
+        case .brief:    return hasBrief ? .brief : (canShowProfiles ? .profiles : .brief)
+        case .profiles: return canShowProfiles ? .profiles : (hasBrief ? .brief : .profiles)
+        }
     }
 
     private var hasBrief: Bool {
@@ -68,7 +82,8 @@ struct AttendeeProfileSection: View {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 if isExpanded {
-                    if mode == .brief && hasBrief {
+                    switch effectiveMode {
+                    case .brief:
                         // Reuse the existing brief layout. It manages its own
                         // expand/collapse for source meetings.
                         RelatedMeetingsSection(
@@ -76,7 +91,7 @@ struct AttendeeProfileSection: View {
                             onSelectMeeting: onSelectMeeting
                         )
                         .padding(.top, 4)
-                    } else if !lookupableAttendees.isEmpty {
+                    case .profiles:
                         cards
                     }
                 }
@@ -107,7 +122,7 @@ struct AttendeeProfileSection: View {
                         ProgressView().controlSize(.mini)
                     }
                     Spacer()
-                    if mode == .profiles, !profiles.isEmpty {
+                    if effectiveMode == .profiles, !profiles.isEmpty {
                         Text("\(profiles.count)/\(lookupableAttendees.count) found")
                             .font(.caption2)
                             .foregroundStyle(Color.appTextTertiary)
@@ -133,12 +148,7 @@ struct AttendeeProfileSection: View {
     }
 
     private var headerTitle: String {
-        if !isExpanded { return mode == .brief ? "PRE-MEETING BRIEF" : "ATTENDEE PROFILES" }
-        if hasBrief && !lookupableAttendees.isEmpty {
-            return mode == .brief ? "PRE-MEETING BRIEF" : "ATTENDEE PROFILES"
-        }
-        if !lookupableAttendees.isEmpty { return "ATTENDEE PROFILES" }
-        return "PRE-MEETING BRIEF"
+        effectiveMode == .brief ? "PRE-MEETING BRIEF" : "ATTENDEE PROFILES"
     }
 
     private var modeSwitch: some View {
