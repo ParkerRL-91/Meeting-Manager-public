@@ -72,10 +72,127 @@ final class TaskQueueManager {
     func startUp() async {
         Logger.general.info("TaskQueue: starting up")
         await recoverStuckTasks()
+        await reconcileOrphanAudioFiles()
         await enqueueOrphanedMeetings()
         await refreshTaskList()
         startProcessor()
         startCalendarPoll()
+    }
+
+    // MARK: - Filesystem Orphan Reconciliation
+
+    /// Walks `~/Library/Application Support/MeetingManager/Audio/*.wav` and
+    /// re-attaches WAV files to their meeting rows when the row exists but
+    /// `audioFilePath` is empty (which happens when the app was force-killed
+    /// before the row could persist the path, e.g. during an in-flight reinstall).
+    ///
+    /// Also repairs in place WAV headers whose `data` chunk size is zero —
+    /// the canonical signature of an `AVAudioFile` that never reached its
+    /// `close`. Without this repair, AVAudioFile refuses to read the file
+    /// and transcription would silently produce zero segments.
+    private func reconcileOrphanAudioFiles() async {
+        let fm = FileManager.default
+        let audioDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MeetingManager", isDirectory: true)
+            .appendingPathComponent("Audio", isDirectory: true)
+        guard fm.fileExists(atPath: audioDir.path) else { return }
+        guard let entries = try? fm.contentsOfDirectory(at: audioDir, includingPropertiesForKeys: nil) else { return }
+
+        // Map: meetingId UUID → main wav URL (skip _system.wav siblings)
+        var byMeeting: [String: URL] = [:]
+        for url in entries {
+            let name = url.lastPathComponent
+            guard name.hasSuffix(".wav"), !name.hasSuffix("_system.wav") else { continue }
+            let meetingId = url.deletingPathExtension().lastPathComponent
+            // Skip ones that don't look like a UUID
+            if meetingId.count != 36 { continue }
+            byMeeting[meetingId] = url
+        }
+        guard !byMeeting.isEmpty else { return }
+
+        var repaired = 0
+        var reattached = 0
+        for (meetingId, url) in byMeeting {
+            // Repair zero-data WAV header in place if needed.
+            if Self.repairWavHeaderIfNeeded(at: url) {
+                repaired += 1
+                let systemURL = url.deletingLastPathComponent().appendingPathComponent("\(meetingId)_system.wav")
+                _ = Self.repairWavHeaderIfNeeded(at: systemURL)
+            }
+
+            // Re-attach when the meeting row exists but has no audio path.
+            do {
+                let needsAttach = try await database.writer.read { db -> Bool in
+                    guard let m = try Meeting.fetchOne(db, key: meetingId) else { return false }
+                    let hasPath = (m.audioFilePath ?? "").isEmpty == false
+                    return !hasPath
+                }
+                guard needsAttach else { continue }
+
+                try await database.writer.write { db in
+                    try db.execute(
+                        sql: "UPDATE meeting SET audioFilePath = ?, status = CASE WHEN status = 'scheduled' THEN 'transcribing' ELSE status END WHERE id = ?",
+                        arguments: [url.path, meetingId]
+                    )
+                }
+                reattached += 1
+                Logger.general.info("TaskQueue: re-attached orphan audio \(url.lastPathComponent, privacy: .public) to meeting \(meetingId, privacy: .public)")
+            } catch {
+                Logger.general.warning("TaskQueue: reattach failed for \(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        if repaired > 0 || reattached > 0 {
+            Logger.general.info("TaskQueue: orphan-audio reconciliation — repaired \(repaired), re-attached \(reattached) file(s)")
+        }
+    }
+
+    /// Patch the RIFF size + data chunk size of a WAV file that was killed
+    /// before `AVAudioFile.close` ran. Returns true if the file was modified.
+    /// Safe to call on healthy files (early-exits when the data chunk size
+    /// already matches reality).
+    ///
+    /// WAV layout written by AVAudioFile (Float32 mono 16k):
+    ///   0..3   "RIFF"
+    ///   4..7   RIFF size (file_size - 8)
+    ///   8..11  "WAVE"
+    ///   12..43 JUNK (28) + fmt (16) + ...
+    ///   4088   "data"
+    ///   4092   data size  ← zero on a force-killed file
+    ///   4096   audio samples
+    private static func repairWavHeaderIfNeeded(at url: URL) -> Bool {
+        guard let handle = try? FileHandle(forUpdating: url) else { return false }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: 0)
+            guard let riffTag = try handle.read(upToCount: 4), riffTag == Data("RIFF".utf8) else { return false }
+            try handle.seek(toOffset: 4088)
+            guard let dataTag = try handle.read(upToCount: 4), dataTag == Data("data".utf8) else { return false }
+            try handle.seek(toOffset: 4092)
+            guard let sizeBytes = try handle.read(upToCount: 4), sizeBytes.count == 4 else { return false }
+
+            // File size — seek to end and read offset.
+            let endOffset = try handle.seekToEnd()
+            let fileSize = UInt32(endOffset)
+            let newDataSize = fileSize &- 4096
+            let existing = sizeBytes.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+
+            if existing == newDataSize { return false }
+
+            // Patch RIFF size (offset 4) and data size (offset 4092).
+            let newRiffSize = fileSize &- 8
+            var riffLE = newRiffSize.littleEndian
+            var dataLE = newDataSize.littleEndian
+            try handle.seek(toOffset: 4)
+            try handle.write(contentsOf: Data(bytes: &riffLE, count: 4))
+            try handle.seek(toOffset: 4092)
+            try handle.write(contentsOf: Data(bytes: &dataLE, count: 4))
+            Logger.general.info("WAV header repaired for \(url.lastPathComponent, privacy: .public) (data=\(newDataSize, privacy: .public) bytes)")
+            return true
+        } catch {
+            Logger.general.warning("WAV header repair failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     func shutdown() {

@@ -15,6 +15,10 @@ struct NotepadPaneView: View {
     @State private var existingNote: MeetingNote?
     @State private var saveTask: Task<Void, Never>?
     @State private var isSaving = false
+    /// True when the most recent content came from the sidecar draft (i.e. a
+    /// previous session was killed before SQLite could commit). Surfaced as a
+    /// small "Recovered unsaved draft" notice in the header.
+    @State private var didRestoreFromDraft = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -25,9 +29,14 @@ struct NotepadPaneView: View {
                 Text("Notes")
                     .font(.headline)
                     .foregroundStyle(Color.appTextPrimary)
+                if didRestoreFromDraft {
+                    Label("Recovered unsaved draft", systemImage: "arrow.counterclockwise.circle.fill")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(Color.appWarning)
+                }
                 Spacer()
                 if isSaving {
-                    Text("Saving...")
+                    Text("Saving…")
                         .font(.caption)
                         .foregroundStyle(Color.appTextTertiary)
                 }
@@ -65,10 +74,16 @@ struct NotepadPaneView: View {
         .background(Color.appBackground)
         .onAppear(perform: loadNote)
         .onChange(of: noteContent) { oldValue, newValue in
-            // Check for /action parsing on newline
+            // 1. Per-keystroke sidecar-file write — synchronous, atomic. This
+            //    is the durable copy. SQLite is best-effort on top.
+            NoteDraftStore.saveDraft(meetingId: meetingId, content: newValue)
+
+            // 2. /action parsing on newline
             if newValue.count > oldValue.count && newValue.hasSuffix("\n") {
                 parseActionCommandIfNeeded(in: newValue, oldContent: oldValue)
             }
+
+            // 3. Debounced SQLite save (still 1s, still best-effort).
             scheduleSave()
         }
         .onChange(of: initialText) { _, newValue in
@@ -83,7 +98,9 @@ struct NotepadPaneView: View {
         }
         .onDisappear {
             saveTask?.cancel()
-            // Perform a final synchronous-style save
+            // Final draft flush is already on disk from the last keystroke;
+            // this just kicks off one more SQLite save attempt.
+            NoteDraftStore.saveDraft(meetingId: meetingId, content: noteContent)
             saveNoteImmediately()
         }
     }
@@ -93,21 +110,49 @@ struct NotepadPaneView: View {
     private func loadNote() {
         Task {
             do {
-                if let note = try await appState.noteRepository.latestNote(meetingId: meetingId) {
-                    await MainActor.run {
-                        self.existingNote = note
-                        if !initialText.isEmpty {
-                            // Existing note — append carry-forward below rather than silently skipping
-                            self.noteContent = note.content + "\n\n---\n**Open items from previous meetings:**\n" + initialText
+                let storedNote = try await appState.noteRepository.latestNote(meetingId: meetingId)
+                // Sidecar draft is the authoritative copy when it has more
+                // content than the DB (which means a previous session was
+                // killed before SQLite could commit). When the draft is
+                // shorter or equal to the DB note, the DB note already
+                // includes the draft's content — use the DB note and clear
+                // the now-redundant draft.
+                let draft = NoteDraftStore.loadDraft(meetingId: meetingId)
+                let dbContent = storedNote?.content ?? ""
+
+                let chosen: String
+                let recovered: Bool
+                if let draft, !draft.isEmpty, draft != dbContent, draft.count > dbContent.count {
+                    chosen = draft
+                    recovered = true
+                } else {
+                    chosen = dbContent
+                    recovered = false
+                    if draft != nil, draft == dbContent {
+                        NoteDraftStore.clearDraft(meetingId: meetingId)
+                    }
+                }
+
+                await MainActor.run {
+                    self.existingNote = storedNote
+                    self.didRestoreFromDraft = recovered
+
+                    if !initialText.isEmpty {
+                        if chosen.isEmpty {
+                            self.noteContent = initialText
                         } else {
-                            self.noteContent = note.content
+                            self.noteContent = chosen + "\n\n---\n**Open items from previous meetings:**\n" + initialText
                         }
+                    } else {
+                        self.noteContent = chosen
                     }
-                } else if !initialText.isEmpty {
-                    // No existing note — pre-populate with carry-forward content
-                    await MainActor.run {
-                        self.noteContent = initialText
-                    }
+                }
+
+                // If we restored from draft, kick off an immediate SQLite save
+                // so the canonical record catches up. The draft stays until
+                // that save succeeds — see saveNote().
+                if recovered {
+                    await saveNote()
                 }
             } catch {
                 Logger.database.error("Failed to load note: \(error.localizedDescription, privacy: .public)")
@@ -133,21 +178,36 @@ struct NotepadPaneView: View {
         guard !noteContent.isEmpty else { return }
         await MainActor.run { isSaving = true }
 
+        var sqliteCommitted = false
+        let snapshot = noteContent
         do {
             if var note = existingNote {
-                note.content = noteContent
+                note.content = snapshot
                 try await appState.noteRepository.save(&note)
                 await MainActor.run { self.existingNote = note }
             } else {
-                var note = MeetingNote(meetingId: meetingId, content: noteContent)
+                var note = MeetingNote(meetingId: meetingId, content: snapshot)
                 try await appState.noteRepository.save(&note)
                 await MainActor.run { self.existingNote = note }
             }
+            sqliteCommitted = true
         } catch {
             Logger.database.error("Failed to save note: \(error.localizedDescription, privacy: .public)")
         }
 
-        await MainActor.run { isSaving = false }
+        // Only clear the sidecar draft once SQLite confirmed the same content
+        // is durable. If the user kept typing during the save, the sidecar
+        // already has the newer keystroke — don't clobber that.
+        if sqliteCommitted, snapshot == noteContent {
+            NoteDraftStore.clearDraft(meetingId: meetingId)
+        }
+
+        await MainActor.run {
+            isSaving = false
+            // Successful canonical save means the "recovered" badge is no
+            // longer accurate — the DB now matches what's on screen.
+            if sqliteCommitted { didRestoreFromDraft = false }
+        }
     }
 
     private func saveNoteImmediately() {

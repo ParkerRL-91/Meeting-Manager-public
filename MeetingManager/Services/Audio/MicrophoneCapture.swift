@@ -36,8 +36,16 @@ final class MicrophoneCapture {
     /// Called when the microphone device is disconnected mid-recording.
     var onDeviceDisconnected: ((Error) -> Void)?
 
-    let engine = AVAudioEngine()
+    /// AVAudioEngine instance. `var` because we deliberately recreate it on
+    /// `stop()` — reusing a stopped engine across recording sessions has
+    /// repeatedly caused -10868 (`kAudioUnitErr_FormatNotSupported`) on the
+    /// next `start()` when the input HAL hasn't fully released the prior
+    /// format. A fresh engine sidesteps the issue entirely.
+    var engine = AVAudioEngine()
     private var isRunning = false
+    /// Wall-clock time the last `stop()` returned. Used to throttle the next
+    /// `start()` so the CoreAudio HAL has time to release the input device.
+    private var lastStopAt: Date?
     private(set) var preferredInputDeviceID: String?
     /// Diagnostic: callback for logging raw buffer info (set by AudioCaptureService)
     var onDiagnostic: ((String) -> Void)?
@@ -69,6 +77,17 @@ final class MicrophoneCapture {
         lock.lock()
         guard !isRunning else { lock.unlock(); return }
         lock.unlock()
+
+        // If we just stopped, give the HAL a moment to release the device.
+        // Without this, immediate reopen hits -10868 (FormatNotSupported)
+        // because the previous tap's IO unit is still tearing down.
+        if let stopped = lastStopAt {
+            let elapsed = Date().timeIntervalSince(stopped)
+            let minGap: TimeInterval = 0.25
+            if elapsed < minGap {
+                Thread.sleep(forTimeInterval: minGap - elapsed)
+            }
+        }
 
         // Task 7: Check microphone permission before attempting capture
         let authStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -126,12 +145,31 @@ final class MicrophoneCapture {
                 onDiagnostic?("DIAG:mic_engine fallback START succeeded with default device")
                 Logger.audio.info("AVAudioEngine fallback start succeeded with default device")
             } catch {
-                onDiagnostic?("DIAG:mic_engine FALLBACK START ALSO FAILED: \(error.localizedDescription)")
-                Logger.audio.error("AVAudioEngine fallback also failed: \(error.localizedDescription)")
-                throw AudioCaptureError.captureSetupFailed(
-                    "Could not start audio capture: \(error.localizedDescription). "
-                    + "Please check that your microphone is connected and enabled in System Settings > Sound > Input."
-                )
+                // Last-resort recovery for -10868 and friends: discard this
+                // engine instance entirely and try once more with a fresh one.
+                // Same logic as stop() — works around the HAL not releasing
+                // the input format when the engine is reused. Sleeps briefly
+                // to give CoreAudio time to settle.
+                onDiagnostic?("DIAG:mic_engine FALLBACK START FAILED: \(error.localizedDescription) — recreating engine")
+                Logger.audio.error("AVAudioEngine fallback failed: \(error.localizedDescription) — rebuilding engine")
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+                engine = AVAudioEngine()
+                Thread.sleep(forTimeInterval: 0.3)
+                configureInputDevice()
+                installTapOnInputNode()
+                do {
+                    try engine.start()
+                    onDiagnostic?("DIAG:mic_engine rebuilt engine START succeeded")
+                    Logger.audio.info("AVAudioEngine succeeded after engine rebuild")
+                } catch {
+                    onDiagnostic?("DIAG:mic_engine REBUILT ENGINE ALSO FAILED: \(error.localizedDescription)")
+                    Logger.audio.error("AVAudioEngine even after rebuild failed: \(error.localizedDescription)")
+                    throw AudioCaptureError.captureSetupFailed(
+                        "Could not start audio capture: \(error.localizedDescription). "
+                        + "Please check that your microphone is connected and enabled in System Settings > Sound > Input."
+                    )
+                }
             }
         }
 
@@ -164,7 +202,16 @@ final class MicrophoneCapture {
 
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        Logger.audio.info("MicrophoneCapture stopped")
+
+        // Recreate the engine for the next session. Reusing a stopped engine
+        // is supposed to be safe but in practice it leaves the input IO unit
+        // in a half-released state — the next start() then fails with
+        // -10868 (FormatNotSupported). A fresh engine is cheap (~ms) and
+        // makes "stop → start" idempotent.
+        engine = AVAudioEngine()
+        lastStopAt = Date()
+
+        Logger.audio.info("MicrophoneCapture stopped (engine recreated for next session)")
     }
 
     // MARK: - Device Configuration
