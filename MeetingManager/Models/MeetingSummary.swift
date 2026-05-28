@@ -31,7 +31,7 @@ struct MeetingSummary: Identifiable, Codable, Equatable, Hashable {
 
 // MARK: - GRDB
 
-extension MeetingSummary: FetchableRecord, PersistableRecord {
+extension MeetingSummary: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "meetingSummary"
 
     enum Columns: String, ColumnExpression {

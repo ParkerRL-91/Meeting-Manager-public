@@ -28,7 +28,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
 
 // MARK: - GRDB
 
-extension ChatMessage: FetchableRecord, PersistableRecord {
+extension ChatMessage: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "chatMessage"
 
     enum Columns: String, ColumnExpression {

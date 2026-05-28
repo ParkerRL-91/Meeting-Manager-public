@@ -52,7 +52,7 @@ struct Transcript: Identifiable, Codable, Equatable {
 
 // MARK: - GRDB
 
-extension Transcript: FetchableRecord, PersistableRecord {
+extension Transcript: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "transcript"
 
     enum Columns: String, ColumnExpression {

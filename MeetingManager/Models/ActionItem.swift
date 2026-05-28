@@ -31,7 +31,7 @@ struct ActionItem: Identifiable, Codable, Equatable {
 
 // MARK: - GRDB
 
-extension ActionItem: FetchableRecord, PersistableRecord {
+extension ActionItem: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "actionItem"
 
     enum Columns: String, ColumnExpression {

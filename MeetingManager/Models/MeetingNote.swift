@@ -22,7 +22,7 @@ struct MeetingNote: Identifiable, Codable, Equatable {
 
 // MARK: - GRDB
 
-extension MeetingNote: FetchableRecord, PersistableRecord {
+extension MeetingNote: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "meetingNote"
 
     enum Columns: String, ColumnExpression {

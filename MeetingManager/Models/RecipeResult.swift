@@ -25,7 +25,7 @@ struct RecipeResult: Identifiable, Codable, Equatable {
 
 // MARK: - GRDB
 
-extension RecipeResult: FetchableRecord, PersistableRecord {
+extension RecipeResult: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "recipeResult"
 
     enum Columns: String, ColumnExpression {
