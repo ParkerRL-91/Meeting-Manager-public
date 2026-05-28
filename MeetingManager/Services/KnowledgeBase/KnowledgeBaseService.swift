@@ -471,6 +471,86 @@ final class KnowledgeBaseService {
         return Self.formatChunks(hits)
     }
 
+    /// Retrieve KB chunks scoped to a single meeting for the daily brief, with
+    /// a strict relevance gate. Unlike `retrieveContext`, this returns the raw
+    /// chunks (not a formatted blob) so the daily-brief pipeline can assign
+    /// stable citation ids and verify quotes against the chunk bodies.
+    ///
+    /// The gate is deliberately stricter than chat/summary retrieval. The brief
+    /// is generated unattended and narrates several meetings in one pass, so a
+    /// loosely-matched chunk risks being attributed to the wrong meeting (the
+    /// failure ADR-005 was written to kill). FTS5 OR-matches any single token,
+    /// which would let a chunk that merely shares a common first name qualify.
+    /// We require a chunk to share at least two *distinctive* query terms (or
+    /// the one available when the query is that short). Better to show no
+    /// background than misleading background — the same stance as
+    /// `DailyBriefAIService.cleanPriorExcerpt`.
+    func retrieveScopedChunks(for meeting: Meeting, limit: Int = 4) async -> [KBDocument] {
+        guard rootURL != nil else { return [] }
+
+        var queryParts: [String] = [meeting.title]
+        queryParts.append(contentsOf: meeting.participantList.prefix(3))
+        let query = queryParts
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+
+        let terms = Self.distinctiveTerms(in: query)
+        guard !terms.isEmpty else { return [] }
+        let required = terms.count >= 2 ? 2 : 1
+
+        // Over-fetch, then filter by term overlap so the gate has candidates to
+        // work with even after dropping weak matches.
+        let hits = (try? await repo.search(query: query, limit: max(limit * 3, 8))) ?? []
+
+        var kept: [KBDocument] = []
+        var perFile: [String: Int] = [:]
+        for hit in hits {
+            let haystack = (hit.heading.map { $0 + " " } ?? "") + hit.body
+            let overlap = terms.intersection(Self.distinctiveTerms(in: haystack)).count
+            guard overlap >= required else { continue }
+            // Cap two chunks per file so one document can't dominate a meeting's
+            // background.
+            let count = perFile[hit.filePath, default: 0]
+            guard count < 2 else { continue }
+            perFile[hit.filePath] = count + 1
+            kept.append(hit)
+            if kept.count >= limit { break }
+        }
+        return kept
+    }
+
+    /// Lowercased, de-duplicated set of "distinctive" tokens: alphanumeric runs
+    /// of length ≥ 4 that aren't common/meeting-domain stopwords. Backs the
+    /// daily-brief relevance gate and the misattribution guard in
+    /// `DailyBriefAIService.verify` — a chunk matching only a short or generic
+    /// token ("the", "call", a first name) contributes no distinctive term and
+    /// therefore can't qualify as real background.
+    nonisolated static func distinctiveTerms(in text: String) -> Set<String> {
+        let tokens = text.lowercased().split { !$0.isLetter && !$0.isNumber }
+        var out: Set<String> = []
+        for token in tokens where token.count >= 4 {
+            let s = String(token)
+            if !stopwords.contains(s) { out.insert(s) }
+        }
+        return out
+    }
+
+    /// Generic + meeting-domain words that carry no disambiguating signal. A
+    /// meeting titled "Weekly Standup" yields no distinctive term and so gets
+    /// no KB background — exactly the conservative behavior we want for generic
+    /// recurring slots.
+    private nonisolated static let stopwords: Set<String> = [
+        "this", "that", "with", "from", "have", "will", "your", "about", "there",
+        "meeting", "meetings", "call", "calls", "sync", "standup", "weekly",
+        "daily", "monthly", "biweekly", "update", "updates", "review", "reviews",
+        "discussion", "catch", "chat", "intro", "introduction", "team", "teams",
+        "notes", "note", "into", "over", "they", "them", "what", "when", "where",
+        "which", "while", "would", "could", "should", "been", "being", "than",
+        "then", "time", "week", "month", "today", "tomorrow", "google", "meet",
+        "zoom", "session", "check", "checkin",
+    ]
+
     /// Format retrieved chunks into a single Markdown block ready for the
     /// LLM. Each chunk is preceded by its source path so the model can cite.
     static func formatChunks(_ chunks: [KBDocument]) -> String {

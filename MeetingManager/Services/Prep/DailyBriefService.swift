@@ -20,6 +20,11 @@ struct DailyBriefEntry: Sendable {
     let meeting: Meeting
     let prepBrief: MeetingPrepBrief
     let category: MeetingPrepCategory
+    /// Relevance-gated Knowledge Base chunks scoped to *this* meeting only.
+    /// Empty when no KB is configured or nothing cleared the gate. Used by
+    /// `DailyBriefAIService` to build cited, quote-verified background bullets,
+    /// and folded into the cache signature so a KB edit regenerates the brief.
+    let kbChunks: [KBDocument]
 }
 
 // MARK: - DailyBrief
@@ -60,6 +65,10 @@ final class DailyBriefService {
         // 2. Build prep briefs in batch
         let briefs = try await prepService.prepBriefs(for: meetings)
 
+        // KB is a @MainActor singleton; grab the (Sendable) reference once so
+        // per-meeting retrieval below is a plain cross-actor await.
+        let kb = await MainActor.run { KnowledgeBaseService.shared }
+
         // 3. Categorize each meeting and assemble entries
         var entries: [DailyBriefEntry] = []
         var totalOpenItems = 0
@@ -79,7 +88,8 @@ final class DailyBriefService {
             }
 
             totalOpenItems += brief.openActionItems.count
-            entries.append(DailyBriefEntry(meeting: meeting, prepBrief: brief, category: category))
+            let kbChunks = await Self.scopedKBChunks(for: meeting, using: kb)
+            entries.append(DailyBriefEntry(meeting: meeting, prepBrief: brief, category: category, kbChunks: kbChunks))
         }
 
         // Sort by scheduled start date
@@ -95,5 +105,16 @@ final class DailyBriefService {
             totalOpenItems: totalOpenItems,
             meetingsNeedingPrep: carryOverCount
         )
+    }
+
+    /// Fetch relevance-gated KB background for one meeting, skipping the same
+    /// placeholder titles `DailyBriefAIService` filters out of the schedule —
+    /// there's no point searching the KB for "Untitled Event".
+    private static func scopedKBChunks(for meeting: Meeting, using kb: KnowledgeBaseService) async -> [KBDocument] {
+        let title = meeting.title.trimmingCharacters(in: .whitespaces).lowercased()
+        if title.isEmpty || title == "untitled event" || title == "untitled" || title == "home" {
+            return []
+        }
+        return await kb.retrieveScopedChunks(for: meeting)
     }
 }

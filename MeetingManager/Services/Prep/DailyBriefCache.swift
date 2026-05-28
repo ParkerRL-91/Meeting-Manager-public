@@ -86,11 +86,25 @@ enum DailyBriefCache {
             // meeting invalidates the brief.
             let prev = entry.prepBrief.previousSession?.meetingId ?? "-"
             let prevDate = entry.prepBrief.previousSession?.date.timeIntervalSince1970 ?? 0
-            parts.append("\(m.id)|\(title)|\(Int(startStamp))|\(p)|\(prev)|\(Int(prevDate))|\(entry.prepBrief.openActionItems.count)")
+            // Fold the meeting's KB background so editing/adding/removing a cited
+            // note regenerates the brief. Content-hashed (not just counted) so a
+            // same-length edit still invalidates.
+            let kb = entry.kbChunks
+                .sorted { ($0.relativePath, $0.chunkIndex) < ($1.relativePath, $1.chunkIndex) }
+                .map { "\($0.relativePath)#\($0.chunkIndex):\($0.body)" }
+                .joined(separator: "\u{00A7}")
+            parts.append("\(m.id)|\(title)|\(Int(startStamp))|\(p)|\(prev)|\(Int(prevDate))|\(entry.prepBrief.openActionItems.count)|kb:\(shortHash(kb))")
         }
         let joined = parts.joined(separator: "\n")
         let hash = SHA256.hash(data: Data(joined.utf8))
         return hash.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Deterministic 8-byte hex digest, used to fold variable-length KB bodies
+    /// into the signature without bloating it. Stable across launches (unlike
+    /// `String.hashValue`, which is per-process salted).
+    private static func shortHash(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 }
 

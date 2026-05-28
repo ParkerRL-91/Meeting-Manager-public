@@ -36,6 +36,24 @@ struct DailyBriefAIService {
         let model: String
     }
 
+    /// One verifiable KB citation surfaced to the model as `[KBn]`. `body` is the
+    /// full chunk text (the model is shown a truncated single-line slice of it);
+    /// `verify` confirms any quote the model attaches is a verbatim substring of
+    /// this body and that the citation belongs to the meeting it's filed under.
+    struct Citation: Sendable {
+        let id: String            // "KB1"
+        let meetingTitle: String
+        let relativePath: String
+        let body: String
+    }
+
+    /// The assembled user prompt plus the citation table needed to verify the
+    /// model's `[KBn]` references after generation.
+    struct PreparedPrompt: Sendable {
+        let userPrompt: String
+        let citations: [String: Citation]
+    }
+
     // MARK: - Public entry point
 
     /// Generates a daily brief. Picks Claude if a key is present, else Ollama
@@ -48,17 +66,19 @@ struct DailyBriefAIService {
         ollamaModel: String,
         date: Date
     ) async throws -> Result {
-        let userPrompt = Self.buildUserPrompt(for: brief, date: date)
-        let system = Self.systemPrompt
+        let prepared = Self.buildUserPrompt(for: brief, date: date)
+        // The KB clause only applies when there are notes to cite, so a brief
+        // with no KB background produces byte-identical output to before.
+        let system = prepared.citations.isEmpty ? Self.systemPrompt : Self.systemPromptWithKB
 
         if let key = claudeAPIKey, !key.isEmpty {
             let claude = ClaudeService()
-            let text = try await claude.sendMessage(
+            let raw = try await claude.sendMessage(
                 systemPrompt: system,
-                userPrompt: userPrompt,
+                userPrompt: prepared.userPrompt,
                 model: claudeModel
             )
-            return Result(text: text, model: claudeModel)
+            return Result(text: Self.verify(text: raw, citations: prepared.citations), model: claudeModel)
         }
 
         // think:true — Qwen3 with think:false still leaks chain-of-thought into
@@ -67,14 +87,14 @@ struct DailyBriefAIService {
         // cleanly in `content`. OllamaService.stripThinkBlock handles any
         // stray dangling </think> if the model ever inlines a tag.
         if ollama.isReachable {
-            let text = try await ollama.generate(
+            let raw = try await ollama.generate(
                 systemPrompt: system,
-                userPrompt: userPrompt,
+                userPrompt: prepared.userPrompt,
                 model: ollamaModel,
                 think: true,
                 jsonMode: false
             )
-            return Result(text: text, model: ollamaModel)
+            return Result(text: Self.verify(text: raw, citations: prepared.citations), model: ollamaModel)
         }
 
         throw BriefError.noAIService
@@ -93,8 +113,27 @@ struct DailyBriefAIService {
         decisions, action items, prior conversations, or commitments that are not in INPUT.
         """
 
-    /// Build the user-side prompt. Public so we can persona-eval it in tests.
-    static func buildUserPrompt(for brief: DailyBrief, date: Date) -> String {
+    /// Used only when the brief has KB notes to cite. Adds the verbatim-only
+    /// citation discipline on top of the base rules. Kept separate so the
+    /// no-KB path is unchanged.
+    static let systemPromptWithKB: String = systemPrompt + """
+
+
+        Knowledge-base notes: each note is tagged with an id like [KB1]. You may surface a note \
+        only inside a Background sub-bullet of the exact form `    - Background: "<exact quote>" [KB1]`. \
+        The quoted text must be copied verbatim from one of the notes listed under that same meeting, \
+        and the [KB1] tag must be that note's id. Never paraphrase a note, never merge two notes, \
+        never attach a note to a meeting it was not listed under, and never state a knowledge-base \
+        fact anywhere except inside a Background sub-bullet.
+        """
+
+    /// Hard cap on cited notes across the whole brief, to bound prompt size and
+    /// keep the brief skimmable when many meetings carry KB background.
+    private static let maxCitations = 12
+
+    /// Build the user-side prompt + citation table. Public so we can persona-eval
+    /// it in tests.
+    static func buildUserPrompt(for brief: DailyBrief, date: Date) -> PreparedPrompt {
         let dateStr = date.formatted(date: .complete, time: .omitted)
         let timeFmt: DateFormatter = {
             let f = DateFormatter()
@@ -105,6 +144,12 @@ struct DailyBriefAIService {
         var scheduleLines: [String] = []
         var openItemsLines: [String] = []
         var hasUsefulCarryOver = false
+
+        // KB background, scoped per meeting and tagged [KBn] for verifiable
+        // citation. `citations` is the source of truth `verify` checks against.
+        var citations: [String: Citation] = [:]
+        var backgroundBlocks: [String] = []
+        var citationCounter = 0
 
         for entry in brief.meetings {
             let meeting = entry.meeting
@@ -167,6 +212,29 @@ struct DailyBriefAIService {
                 li += " *(from \(title))*"
                 openItemsLines.append(li)
             }
+
+            // KB background for this meeting. Each chunk gets a stable [KBn] id
+            // the model must cite; the full body is retained in `citations` so
+            // `verify` can confirm any quote is verbatim. The model is shown a
+            // truncated single-line slice, so it can only quote what fits.
+            if !entry.kbChunks.isEmpty {
+                var noteLines: [String] = []
+                for chunk in entry.kbChunks {
+                    guard citationCounter < maxCitations else { break }
+                    citationCounter += 1
+                    let id = "KB\(citationCounter)"
+                    citations[id] = Citation(
+                        id: id,
+                        meetingTitle: title,
+                        relativePath: chunk.relativePath,
+                        body: chunk.body
+                    )
+                    noteLines.append("[\(id)] (\(chunk.relativePath)) \(singleLineExcerpt(chunk.body, limit: 280))")
+                }
+                if !noteLines.isEmpty {
+                    backgroundBlocks.append("For \"\(title)\":\n" + noteLines.joined(separator: "\n"))
+                }
+            }
         }
 
         let scheduleBlock = scheduleLines.isEmpty
@@ -192,7 +260,27 @@ struct DailyBriefAIService {
                 """
         }
 
-        return """
+        let hasKB = !citations.isEmpty
+        let backgroundBlock = backgroundBlocks.joined(separator: "\n\n")
+
+        // KB-conditional fragments. Built as explicit strings (not slices of a
+        // multiline literal) so the rendered prompt's indentation is exact and
+        // independent of source formatting. All empty when there's no KB, so the
+        // no-KB prompt is byte-for-byte the prior version.
+        let exampleBackgroundInput = hasKB
+            ? "\n\n### Background notes from your knowledge base\nFor \"Acme renewal\":\n[KB1] (vendors/acme.md) Acme requires SOC 2 Type II before signing any enterprise agreement; security review is owned by their CISO."
+            : ""
+        let exampleBackgroundBullet = hasKB
+            ? "\n    - Background: \"Acme requires SOC 2 Type II before signing any enterprise agreement\" [KB1]"
+            : ""
+        let backgroundInputSection = hasKB
+            ? "\n\n### Background notes from your knowledge base\nEach note belongs to the meeting it is listed under. Quote verbatim; never paraphrase a note or reuse it across meetings.\n\(backgroundBlock)"
+            : ""
+        let backgroundRule = hasKB
+            ? "\n- **Background sub-bullet**: when a meeting has notes listed under \"Background notes from your knowledge base\", add exactly one indented sub-bullet beneath that meeting's line, formatted `    - Background: \"<exact quote>\" [KBn]`. Copy the quote verbatim from one of *that meeting's own* listed notes and cite its [KBn] id. If a meeting has no listed notes, add no Background sub-bullet. Never state a knowledge-base fact anywhere except inside a Background sub-bullet."
+            : ""
+
+        let userPrompt = """
         Here is an example showing the exact shape you must produce.
 
         EXAMPLE INPUT
@@ -205,7 +293,7 @@ struct DailyBriefAIService {
         - **2:00 PM–2:30 PM** — Candidate intro — Jane Doe · Jane Doe
 
         ### Open action items carried in
-        - **Sam Lee** — Send Acme volume-discount proposal *(from Acme renewal)*
+        - **Sam Lee** — Send Acme volume-discount proposal *(from Acme renewal)*\(exampleBackgroundInput)
 
         EXAMPLE OUTPUT
         ## Today's read
@@ -216,7 +304,7 @@ struct DailyBriefAIService {
 
         ## Meeting-by-meeting
         - **9:00 AM–9:30 AM** **Engineering standup** — First conversation — no prior context.
-        - **11:00 AM–12:00 PM** **Acme renewal** — Alex committed Dec 20 to send the procurement contact this week and asked for a 12-month proposal with volume discount above 50 seats.
+        - **11:00 AM–12:00 PM** **Acme renewal** — Alex committed Dec 20 to send the procurement contact this week and asked for a 12-month proposal with volume discount above 50 seats.\(exampleBackgroundBullet)
         - **2:00 PM–2:30 PM** **Candidate intro — Jane Doe** — First conversation — no prior context.
 
         ## Day-end goals
@@ -235,15 +323,17 @@ struct DailyBriefAIService {
         \(scheduleBlock)
 
         ### Open action items carried in
-        \(openItemsBlock)
+        \(openItemsBlock)\(backgroundInputSection)
 
         Section rules for the real output:
         - **What needs attention**: \(attentionInstruction)
-        - **Meeting-by-meeting**: one bullet per meeting in order. If a meeting has no "Last time" excerpt above, write exactly "First conversation — no prior context." for that bullet.
+        - **Meeting-by-meeting**: one bullet per meeting in order. If a meeting has no "Last time" excerpt above, write exactly "First conversation — no prior context." for that bullet.\(backgroundRule)
         - **Day-end goals**: two or three bullets, each tied to a meeting from the schedule.
 
         Begin your response with the literal line "## Today's read".
         """
+
+        return PreparedPrompt(userPrompt: userPrompt, citations: citations)
     }
 
     // MARK: - Excerpt hygiene
@@ -298,5 +388,145 @@ struct DailyBriefAIService {
             s = String(s.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
         }
         return s.isEmpty ? nil : s
+    }
+
+    /// Collapse a KB chunk body to a single bounded line for display in the
+    /// prompt. The model can only quote what it's shown, so a truncated slice
+    /// caps how much of a note can land in the brief; `verify` still checks the
+    /// quote against the full body.
+    static func singleLineExcerpt(_ s: String, limit: Int) -> String {
+        let collapsed = s
+            .split(whereSeparator: { $0.isNewline })
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        guard collapsed.count > limit else { return collapsed }
+        return String(collapsed.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    // MARK: - Citation verification
+
+    /// Verify the model's `[KBn]` references against the citation table and
+    /// strip anything it can't prove. This is the structural anti-hallucination
+    /// gate for KB-grounded briefs — the same philosophy as ADR-005: don't trust
+    /// the prompt to prevent fabrication, catch it deterministically afterward.
+    ///
+    /// A line carrying a `[KBn]` marker survives only when it contains a quote
+    /// (≥ 8 normalized chars) that is a verbatim substring of a cited chunk's
+    /// body AND that chunk's meeting shares a distinctive term with the meeting
+    /// bullet the line sits under (misattribution guard). On failure:
+    ///   - an indented Background sub-bullet is dropped entirely;
+    ///   - a top-level line keeps its text but loses the unverifiable marker.
+    /// Surviving citations are listed in a `_Sources: …_` footer for provenance.
+    static func verify(text rawText: String, citations: [String: Citation]) -> String {
+        // Nothing to check and nothing claimed → return untouched.
+        if citations.isEmpty && !rawText.contains("[KB") { return rawText }
+
+        let markerRegex = try? NSRegularExpression(pattern: "\\[(KB\\d+)\\]")
+        let lines = rawText.components(separatedBy: "\n")
+        var out: [String] = []
+        out.reserveCapacity(lines.count)
+        var lastTopBullet = ""
+        var usedPaths: [String] = []   // ordered, de-duplicated
+
+        for line in lines {
+            let leadingWS = line.prefix(while: { $0 == " " || $0 == "\t" }).count
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let isSubBullet = leadingWS > 0 && trimmed.hasPrefix("-")
+            let isTopBullet = leadingWS == 0 && trimmed.hasPrefix("- ")
+
+            let ns = line as NSString
+            let matches = markerRegex?.matches(in: line, range: NSRange(location: 0, length: ns.length)) ?? []
+
+            if matches.isEmpty {
+                if isTopBullet { lastTopBullet = trimmed }
+                out.append(line)
+                continue
+            }
+
+            let ids = matches.map { ns.substring(with: $0.range(at: 1)) }
+            let quote = firstQuotedSpan(in: line).map(normForMatch)
+
+            var validID: String? = nil
+            if let qn = quote, qn.count >= 8 {
+                for id in ids {
+                    guard let c = citations[id] else { continue }
+                    guard normForMatch(c.body).contains(qn) else { continue }
+                    // Misattribution guard: the cited note's meeting must share a
+                    // distinctive term with the meeting bullet this line sits
+                    // under. Skipped when the title has no distinctive term.
+                    let titleTerms = KnowledgeBaseService.distinctiveTerms(in: c.meetingTitle)
+                    if !titleTerms.isEmpty,
+                       titleTerms.isDisjoint(with: KnowledgeBaseService.distinctiveTerms(in: lastTopBullet)) {
+                        continue
+                    }
+                    validID = id
+                    break
+                }
+            }
+
+            if let vid = validID {
+                var cleaned = line
+                for id in Set(ids) where id != vid {
+                    cleaned = cleaned.replacingOccurrences(of: "[\(id)]", with: "")
+                }
+                cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+                out.append(cleaned)
+                if let c = citations[vid], !usedPaths.contains(c.relativePath) {
+                    usedPaths.append(c.relativePath)
+                }
+                if isTopBullet { lastTopBullet = trimmed }
+            } else if isSubBullet {
+                // Unverifiable Background sub-bullet → drop it.
+                continue
+            } else {
+                // Unverifiable marker on a main line → keep text, strip markers.
+                var cleaned = line
+                for id in Set(ids) {
+                    cleaned = cleaned.replacingOccurrences(of: "[\(id)]", with: "")
+                }
+                cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+                if isTopBullet { lastTopBullet = trimmed }
+                out.append(cleaned)
+            }
+        }
+
+        var result = out.joined(separator: "\n")
+        if !usedPaths.isEmpty {
+            result += "\n\n_Sources: " + usedPaths.joined(separator: ", ") + "_"
+        }
+        return result
+    }
+
+    /// First double-quoted span on a line — straight quotes first, then smart
+    /// quotes. Returns the inner text without the quote characters.
+    static func firstQuotedSpan(in line: String) -> String? {
+        if let r = line.range(of: "\"[^\"]{1,400}\"", options: .regularExpression) {
+            return String(line[r].dropFirst().dropLast())
+        }
+        if let open = line.firstIndex(of: "\u{201C}") {
+            let after = line.index(after: open)
+            if let close = line[after...].firstIndex(of: "\u{201D}") {
+                return String(line[after..<close])
+            }
+        }
+        return nil
+    }
+
+    /// Lowercase, map every run of non-alphanumerics to a single space, trim.
+    /// Makes the verbatim-quote check tolerant of punctuation / smart-quote
+    /// differences while still requiring the same words in the same order.
+    static func normForMatch(_ s: String) -> String {
+        var chars: [Character] = []
+        var pendingSpace = false
+        for ch in s.lowercased() {
+            if ch.isLetter || ch.isNumber {
+                if pendingSpace && !chars.isEmpty { chars.append(" ") }
+                chars.append(ch)
+                pendingSpace = false
+            } else {
+                pendingSpace = true
+            }
+        }
+        return String(chars)
     }
 }
