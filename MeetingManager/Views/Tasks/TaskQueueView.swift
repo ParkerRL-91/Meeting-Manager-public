@@ -68,10 +68,18 @@ struct TaskQueueView: View {
 
                     VStack(spacing: 4) {
                         ForEach(running) { task in
-                            CompletedTaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                            CompletedTaskRow(
+                                task: task,
+                                meetingTitle: meetingTitle(for: task.meetingId),
+                                liveProgress: qm.currentTask?.id == task.id ? qm.currentProgress : nil
+                            )
                         }
                         ForEach(pending) { task in
-                            CompletedTaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                            CompletedTaskRow(
+                                task: task,
+                                meetingTitle: meetingTitle(for: task.meetingId),
+                                liveProgress: nil
+                            )
                         }
                     }
                     .padding(.horizontal, 24)
@@ -115,7 +123,11 @@ struct TaskQueueView: View {
 
                     VStack(spacing: 4) {
                         ForEach(done.prefix(20)) { task in
-                            CompletedTaskRow(task: task, meetingTitle: meetingTitle(for: task.meetingId))
+                            CompletedTaskRow(
+                                task: task,
+                                meetingTitle: meetingTitle(for: task.meetingId),
+                                liveProgress: nil
+                            )
                         }
                     }
                     .padding(.horizontal, 24)
@@ -263,35 +275,64 @@ private struct FailedTaskRow: View {
 private struct CompletedTaskRow: View {
     let task: TaskQueueItem
     let meetingTitle: String
+    /// Live stage + (optional) fraction reported by the currently-running
+    /// handler. nil when this row isn't the active task or no progress has
+    /// been reported yet.
+    let liveProgress: TaskQueueManager.TaskProgress?
 
     var body: some View {
-        HStack(spacing: 12) {
-            statusIcon
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                statusIcon
 
-            Text(task.displayName)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(Color.appTextPrimary)
+                Text(task.displayName)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Color.appTextPrimary)
 
-            Text("·")
-                .foregroundStyle(Color.appTextMuted)
-
-            Text(meetingTitle)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.appTextTertiary)
-                .lineLimit(1)
-
-            Spacer()
-
-            if task.status == .running {
-                ProgressView().controlSize(.mini)
-            } else if task.status == .pending {
-                Text("Priority \(task.priority)")
-                    .font(.system(size: 11, design: .monospaced))
+                Text("·")
                     .foregroundStyle(Color.appTextMuted)
-            } else if let completed = task.completedAt {
-                RelativeTimestampLabel(date: completed)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color.appTextMuted)
+
+                Text(meetingTitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.appTextTertiary)
+                    .lineLimit(1)
+
+                Spacer()
+
+                if task.status == .running {
+                    ProgressView().controlSize(.mini)
+                } else if task.status == .pending {
+                    Text("Priority \(task.priority)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color.appTextMuted)
+                } else if let completed = task.completedAt {
+                    RelativeTimestampLabel(date: completed)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color.appTextMuted)
+                }
+            }
+
+            // Live stage + progress strip — only visible while running and
+            // when the handler has actually reported a stage. Stage text is
+            // honest; the fraction bar appears only when the handler chose
+            // to surface a real measurable fraction.
+            if task.status == .running, let progress = liveProgress {
+                HStack(spacing: 8) {
+                    Text(progress.stage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.appTextSecondary)
+                    if let fraction = progress.fraction {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                            .controlSize(.mini)
+                            .frame(maxWidth: 120)
+                        Text("\(Int(fraction * 100))%")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.appTextMuted)
+                    }
+                    Spacer()
+                }
+                .padding(.leading, 28)
             }
         }
         .padding(.horizontal, 12)

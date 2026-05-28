@@ -110,8 +110,17 @@ final class KnowledgeBaseService {
         isIndexing = true
         defer { isIndexing = false }
 
+        // Report progress through the task queue if this reindex was triggered
+        // via the task queue (knowledgeBaseIndex task). Per-file fractions are
+        // actually accurate here because we loop over a known file count.
+        taskQueue?.reportCurrentProgress(stage: "Scanning folder")
+
         let urls = enumerateSupportedFiles(root: root)
         logger.info("KB reindex: \(urls.count) supported file(s) found under \(root.path, privacy: .public)")
+
+        taskQueue?.reportCurrentProgress(
+            stage: "Parsing \(urls.count) file\(urls.count == 1 ? "" : "s")"
+        )
 
         // Parse all files off the main actor so file I/O doesn't block the UI.
         // KBDocument is a value type (Sendable); URL, Int are also Sendable.
@@ -130,7 +139,8 @@ final class KnowledgeBaseService {
         // Persist chunks back on the main actor (GRDB operations).
         var indexedPaths: Set<String> = []
         var totalChunks = 0
-        for (path, chunks) in fileResults {
+        let totalFiles = max(fileResults.count, 1)
+        for (idx, (path, chunks)) in fileResults.enumerated() {
             do {
                 try await repo.replaceChunks(filePath: path, with: chunks)
                 indexedPaths.insert(path)
@@ -138,6 +148,10 @@ final class KnowledgeBaseService {
             } catch {
                 logger.error("KB index: failed to save \(path, privacy: .public): \(error.localizedDescription)")
             }
+            taskQueue?.reportCurrentProgress(
+                stage: "Indexing \(idx + 1)/\(totalFiles)",
+                fraction: Double(idx + 1) / Double(totalFiles)
+            )
         }
 
         // Drop chunks for files that have been deleted or moved out of the KB.

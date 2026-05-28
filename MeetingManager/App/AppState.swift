@@ -453,6 +453,7 @@ final class AppState {
         taskQueueManager.transcriptionHandler = { [weak self] meetingId, audioURL in
             guard let self else { return }
             self.fileLog("TaskQueue: running transcription for \(meetingId)")
+            self.taskQueueManager.reportCurrentProgress(stage: "Transcribing audio")
             let (rawTranscripts, speakerLabels) = await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
 
             // Atomically commit transcripts + meeting-status update + speaker labels in one write.
@@ -469,6 +470,7 @@ final class AppState {
                 // persistence so the rewritten labels land in the DB on the
                 // first save. No-op when Ollama is down, no other participants
                 // exist, or the LLM fails — labels just stay as Speaker N.
+                self.taskQueueManager.reportCurrentProgress(stage: "Attributing speakers")
                 let (transcripts, attributedMeeting) = await self.applySpeakerAttribution(
                     transcripts: rawTranscripts,
                     meeting: meeting
@@ -485,6 +487,7 @@ final class AppState {
                 // which deletes the task rows the scan used to rely on).
                 meeting.transcriptionAttemptedAt = Date()
 
+                self.taskQueueManager.reportCurrentProgress(stage: "Saving transcripts")
                 let commitSucceeded: Bool
                 do {
                     try await self.database.writer.write { db in
@@ -2372,6 +2375,7 @@ final class AppState {
         }()
 
         do {
+            taskQueueManager.reportCurrentProgress(stage: "Running diarization")
             let result = try await service.diarize(
                 systemAudioURL: audioURL,
                 participantCount: participantCount
@@ -2380,6 +2384,8 @@ final class AppState {
                 fileLog("Diarization: 0 speakers detected for \(meetingId)")
                 return
             }
+
+            taskQueueManager.reportCurrentProgress(stage: "Matching voice profiles")
 
             let resultBox = DiarizationResultBox(result)
             let profileRepo = VoiceProfileRepository(database: database)

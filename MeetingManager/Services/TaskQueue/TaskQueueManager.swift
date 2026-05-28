@@ -15,6 +15,22 @@ final class TaskQueueManager {
     var pendingCount: Int { allTasks.filter { $0.status == .pending }.count }
     var isProcessing: Bool { currentTask != nil }
 
+    /// Live, in-memory progress for whichever task is currently running.
+    /// Cleared when the task finishes or fails. Handlers update this
+    /// through `reportCurrentProgress(stage:fraction:)` between stages.
+    ///
+    /// `fraction` is `nil` when the work isn't chunk-able (one big LLM call)
+    /// — in that case only the `stage` label is meaningful. Where the work
+    /// genuinely proceeds in measurable chunks (KB indexing), `fraction` is
+    /// a real 0…1 value derived from items processed / total.
+    private(set) var currentProgress: TaskProgress?
+
+    struct TaskProgress: Sendable, Equatable {
+        let stage: String
+        let fraction: Double?
+        let updatedAt: Date
+    }
+
     // MARK: - Dependencies
 
     private let database: AppDatabase
@@ -349,6 +365,7 @@ final class TaskQueueManager {
 
             await markRunning(next)
             currentTask = next
+            currentProgress = Self.initialProgress(for: next.type)
             await refreshTaskList()
 
             do {
@@ -395,8 +412,41 @@ final class TaskQueueManager {
             }
 
             currentTask = nil
+            currentProgress = nil
             await refreshTaskList()
         }
+    }
+
+    // MARK: - Progress reporting
+
+    /// Handlers call this between stages to surface what they're doing.
+    /// `fraction` is optional; pass it only when work proceeds in genuinely
+    /// measurable chunks (KB indexing, batch enrichment). For single-shot
+    /// LLM calls leave `fraction` nil — the stage label is honest enough,
+    /// a fabricated percentage isn't.
+    func reportCurrentProgress(stage: String, fraction: Double? = nil) {
+        let clamped: Double? = fraction.map { max(0, min(1, $0)) }
+        currentProgress = TaskProgress(stage: stage, fraction: clamped, updatedAt: Date())
+    }
+
+    /// Initial stage label shown the instant a task starts running, before
+    /// the handler reports anything. Keeps the UI from flashing "Running"
+    /// with no detail.
+    private static func initialProgress(for type: TaskQueueItem.TaskType) -> TaskProgress {
+        let stage: String
+        switch type {
+        case .transcription:      stage = "Loading audio"
+        case .diarization:        stage = "Preparing diarization"
+        case .summary:            stage = "Drafting summary"
+        case .enrichment:         stage = "Enriching"
+        case .regeneration:       stage = "Regenerating"
+        case .contextEnrichment:  stage = "Finding related meetings"
+        case .knowledgeBaseIndex: stage = "Indexing"
+        case .transcriptCleanup:  stage = "Cleaning transcript"
+        case .retryAttribution:   stage = "Re-checking speakers"
+        case .detailedOutline:    stage = "Generating outline"
+        }
+        return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
 
     private func fetchNextPending() async -> TaskQueueItem? {
