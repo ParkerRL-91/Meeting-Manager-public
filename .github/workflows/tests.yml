@@ -1,0 +1,45 @@
+name: Tests
+
+# The XCTest suite cannot run on a Command Line Tools-only machine (XCTest ships
+# with full Xcode). GitHub's macOS runners have Xcode preinstalled, so this is the
+# canonical place the suite executes. It runs on every push and PR.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Swift unit suite (XCTest)
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcode-select -p
+          swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      # The enterprise unit suite — pure-logic and GRDB tests, fully hermetic
+      # (in-memory DB, no network, no audio). This is the gate.
+      - name: Run MeetingManagerTests
+        run: swift test --filter MeetingManagerTests
+
+      # Process-simulation detection tests (no real Zoom needed).
+      - name: Run MeetingDetectionTests
+        run: swift test --filter MeetingDetectionTests
+
+      # Release compile gate — matches the bar in CLAUDE.md ("swift build -c
+      # release must be clean before marking done").
+      - name: Release build
+        run: swift build -c release

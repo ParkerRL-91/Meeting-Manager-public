@@ -26,7 +26,7 @@ enum SampleData {
         scheduledEndDate: Date? = nil,
         status: MeetingStatus = .scheduled,
         calendarEventId: String? = nil,
-        audioFilePath: String? = nil,
+        audioFilePaths: [String] = [],
         createdAt: Date = fixedDate,
         updatedAt: Date = fixedDate
     ) -> Meeting {
@@ -39,7 +39,7 @@ enum SampleData {
             scheduledEndDate: scheduledEndDate,
             status: status,
             calendarEventId: calendarEventId,
-            audioFilePath: audioFilePath,
+            audioFilePaths: audioFilePaths,
             createdAt: createdAt,
             updatedAt: updatedAt
         )

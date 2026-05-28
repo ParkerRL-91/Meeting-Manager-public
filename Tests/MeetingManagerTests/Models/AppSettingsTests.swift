@@ -13,7 +13,9 @@ final class AppSettingsTests: XCTestCase {
     // MARK: - Default Values
 
     func testDefaultWhisperModel() {
-        XCTAssertEqual(AppSettings.default.whisperModel, "tiny-en")
+        // Default moved to Large v3 Turbo in the v17 migration; assert against the
+        // enum rawValue (the source of truth) rather than a hard-coded legacy string.
+        XCTAssertEqual(AppSettings.default.whisperModel, WhisperModel.largev3turbo.rawValue)
     }
 
     func testDefaultClaudeModel() {

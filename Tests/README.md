@@ -1,5 +1,24 @@
 # Meeting Manager Tests
 
+## Unit Test Suite (XCTest)
+
+`MeetingManagerTests` is the hermetic unit suite — pure-logic and GRDB tests
+(in-memory DB, no network/audio). It anchors the project's invariants:
+anti-hallucination verifiers (ADR-005, ADR-008), identity/series keys (ADR-003),
+auto-title (ADR-009), model Codable/round-trips, and migration/schema integrity.
+
+```bash
+swift test --filter MeetingManagerTests
+```
+
+**Requires full Xcode.** XCTest ships with Xcode, not the Command Line Tools, so
+on a CLT-only machine `swift test` fails with `no such module 'XCTest'`. Either
+install/select Xcode (`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`)
+or rely on CI — `.github/workflows/tests.yml` runs the suite on a macOS+Xcode
+runner on every push and PR.
+
+See **`docs/developer/testing.md`** for the full coverage map and conventions.
+
 ## Test Infrastructure
 
 ### Synthetic Audio Fixtures
