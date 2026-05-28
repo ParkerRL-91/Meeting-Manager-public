@@ -9,11 +9,15 @@ final class ChatMessageRepository {
     }
 
     func save(_ message: inout ChatMessage) async throws {
-        var copy = message
-        try await database.writer.write { db in
+        // Return the saved record so the auto-assigned rowid propagates back;
+        // mutating a captured var inside GRDB's @Sendable async write does not
+        // (see ActionItemRepository.save).
+        let input = message
+        message = try await database.writer.write { db in
+            var copy = input
             try copy.save(db)
+            return copy
         }
-        message = copy
     }
 
     func messagesForMeeting(_ meetingId: String, limit: Int = 200) async throws -> [ChatMessage] {

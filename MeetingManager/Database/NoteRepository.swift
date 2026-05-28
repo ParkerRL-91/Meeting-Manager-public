@@ -9,11 +9,14 @@ final class NoteRepository {
     }
 
     func save(_ note: inout MeetingNote) async throws {
-        var copy = note
-        try await database.writer.write { db in
+        // Return the saved record so the auto-assigned rowid propagates back
+        // (see ActionItemRepository.save).
+        let input = note
+        note = try await database.writer.write { db in
+            var copy = input
             try copy.save(db)
+            return copy
         }
-        note = copy
     }
 
     func notesForMeeting(_ meetingId: String, limit: Int = 100) async throws -> [MeetingNote] {

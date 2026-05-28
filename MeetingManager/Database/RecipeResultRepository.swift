@@ -9,11 +9,14 @@ final class RecipeResultRepository {
     }
 
     func save(_ result: inout RecipeResult) async throws {
-        var copy = result
-        try await database.writer.write { db in
+        // Return the saved record so the auto-assigned rowid propagates back
+        // (see ActionItemRepository.save).
+        let input = result
+        result = try await database.writer.write { db in
+            var copy = input
             try copy.save(db)
+            return copy
         }
-        result = copy
     }
 
     func resultsForMeeting(_ meetingId: String, limit: Int = 50) async throws -> [RecipeResult] {

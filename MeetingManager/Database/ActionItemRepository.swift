@@ -9,11 +9,16 @@ final class ActionItemRepository {
     }
 
     func save(_ item: inout ActionItem) async throws {
-        var copy = item
-        try await database.writer.write { db in
+        // Flow the saved record (with its auto-assigned rowid) back via the write
+        // closure's RETURN VALUE. Mutating a captured `var` inside GRDB's
+        // @Sendable async write does NOT propagate to the caller — the closure
+        // works on its own copy — so `item.id` would otherwise stay nil after save.
+        let input = item
+        item = try await database.writer.write { db in
+            var copy = input
             try copy.save(db)
+            return copy
         }
-        item = copy
     }
 
     func saveBatch(_ items: [ActionItem]) async throws {
