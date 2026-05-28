@@ -69,60 +69,76 @@ struct MeetingDetailView: View {
         }
     }
 
+    // Split out of `body` so each sub-expression type-checks quickly. The
+    // single combined `VStack { if let meeting { …all of this… } }` tripped
+    // Swift's "unable to type-check in reasonable time" limit on older
+    // toolchains (CI), even though newer ones accepted it.
+    @ViewBuilder
+    private func loadedContent(for meeting: Meeting) -> some View {
+        // Up Next banner (shown after recording stops).
+        upNextBanner(for: meeting)
+
+        // Pinned header — always visible.
+        MeetingMetadataHeader(meeting: meeting, onEdit: {
+            showingEditor = true
+        })
+
+        // Scrollable metadata — participants, context, previous sessions.
+        // Height is user-resizable via the drag handle below.
+        metadataSection(for: meeting)
+
+        metadataDragHandle
+
+        // Tab strip + content — gets layout priority so the main content
+        // is always visible and scrollable.
+        UnderlinedTabStrip(
+            tabs: DetailTab.allCases,
+            selected: $selectedTab,
+            modelInfo: summaryModelInfo
+        )
+
+        tabContent
+            .layoutPriority(1)
+    }
+
+    @ViewBuilder
+    private func upNextBanner(for meeting: Meeting) -> some View {
+        if showUpNext,
+           meeting.status == .transcribing || meeting.status == .complete,
+           let nextMeeting = appState.nextUpcomingMeeting {
+            UpNextBannerView(
+                meeting: nextMeeting,
+                prepBrief: upNextBrief,
+                onPrep: {
+                    appState.selectedMeetingId = nextMeeting.id
+                },
+                onDismiss: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showUpNext = false
+                    }
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    @ViewBuilder
+    private var loadingContent: some View {
+        Spacer()
+        ProgressView("Loading meeting...")
+            .foregroundStyle(Color.appTextSecondary)
+        Spacer()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let meeting {
-                // MARK: - Up Next Banner (shown after recording stops)
-                if showUpNext,
-                   meeting.status == .transcribing || meeting.status == .complete,
-                   let nextMeeting = appState.nextUpcomingMeeting {
-                    UpNextBannerView(
-                        meeting: nextMeeting,
-                        prepBrief: upNextBrief,
-                        onPrep: {
-                            appState.selectedMeetingId = nextMeeting.id
-                        },
-                        onDismiss: {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                showUpNext = false
-                            }
-                        }
-                    )
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 4)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
-                // Pinned header — always visible
-                MeetingMetadataHeader(meeting: meeting, onEdit: {
-                    showingEditor = true
-                })
-
-                // Scrollable metadata — participants, context, previous
-                // sessions. Height is user-resizable via the drag handle
-                // below; drag down to expand the brief / profiles area
-                // when you want the full detail, drag up to give more
-                // room to the tab content.
-                metadataSection(for: meeting)
-
-                metadataDragHandle
-
-                // Tab strip + content — gets layout priority so the
-                // main content is always visible and scrollable.
-                UnderlinedTabStrip(
-                    tabs: DetailTab.allCases,
-                    selected: $selectedTab,
-                    modelInfo: summaryModelInfo
-                )
-
-                tabContent
-                    .layoutPriority(1)
+                loadedContent(for: meeting)
             } else {
-                Spacer()
-                ProgressView("Loading meeting...")
-                    .foregroundStyle(Color.appTextSecondary)
-                Spacer()
+                loadingContent
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
