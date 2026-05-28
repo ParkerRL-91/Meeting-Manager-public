@@ -37,7 +37,7 @@ final class DetectionTests: XCTestCase {
             "us.zoom.xos",
             "com.microsoft.teams",
             "com.apple.FaceTime",
-            "com.cisco.webexmeetings",
+            "com.cisco.webexmeetingsapp",
         ]
         for bundleID in knownBundleIDs {
             XCTAssertTrue(
@@ -69,10 +69,16 @@ final class DetectionTests: XCTestCase {
 
     // MARK: - State Machine Notification Response
 
-    /// Posting .callAppTerminated while recording should stop the recording
-    /// within 3 seconds (handled by MeetingStateMachine.handleCallAppTerminated).
+    /// Stopping an active recording transitions the meeting to `.transcribing`,
+    /// clears the active state, and stops audio capture.
+    ///
+    /// NOTE: auto-stop on `.callAppTerminated` lives in AppState (which owns the
+    /// notification observer and the "is this our call app?" check), NOT in
+    /// MeetingStateMachine — see the comment in the machine's notification setup.
+    /// So this test exercises the machine's real stop contract directly rather
+    /// than via a notification the machine doesn't observe.
     @MainActor
-    func testAutoStopOnCallTerminated() async throws {
+    func testStopRecordingTransitionsToTranscribing() async throws {
         let db = try AppDatabase.empty()
         let repo = MeetingRepository(database: db)
         let audio = MockAudioCapture()
@@ -86,20 +92,16 @@ final class DetectionTests: XCTestCase {
         XCTAssertTrue(machine.isRecording, "Should be recording after createAndStartMeeting")
         XCTAssertNotNil(machine.currentMeeting)
 
-        // Simulate call app termination via notification (as CallDetectionService would fire)
-        NotificationCenter.default.post(name: .callAppTerminated, object: nil)
+        try await machine.stopRecording()
 
-        // Give the async handler time to run (it posts on main queue)
-        try await Task.sleep(for: .seconds(1))
-
-        XCTAssertFalse(machine.isRecording, "Recording should stop within 1s of .callAppTerminated")
-        XCTAssertNil(machine.currentMeeting, "No active meeting after auto-stop")
+        XCTAssertFalse(machine.isRecording, "Recording should be stopped")
+        XCTAssertNil(machine.currentMeeting, "No active meeting after stop")
         XCTAssertTrue(audio.stopCalled, "AudioCapture.stopCapture should have been called")
 
         // Verify meeting was persisted with .transcribing status
         let persisted = try await repo.find(id: meeting.id)
         XCTAssertNotNil(persisted)
-        XCTAssertEqual(persisted?.status, .transcribing, "Meeting should be in transcribing state after auto-stop")
+        XCTAssertEqual(persisted?.status, .transcribing, "Meeting should be in transcribing state after stop")
     }
 
     /// Posting .callAppLaunched when not recording should NOT auto-start recording
