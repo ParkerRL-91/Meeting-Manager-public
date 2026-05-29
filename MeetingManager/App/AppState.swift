@@ -1898,6 +1898,36 @@ final class AppState {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
             }
 
+            // Identify the LOCAL USER's own speech so it's always labeled as
+            // them — never a generic "Speaker". Diarization runs on the
+            // system-only audio (remote voices), so the user (whose voice is
+            // only on the mic) never forms a cluster. But we have the mic
+            // signal implicitly: it's whatever is in the MIXED audio but not in
+            // the SYSTEM audio. A segment where the mixed track is clearly
+            // louder than the system track is the user talking over a quiet/
+            // silent system stream. Comparing levels (rather than "system
+            // silent") also survives call apps that echo the mic faintly into
+            // system output — the direct mic is still much louder than its echo.
+            // Only meaningful when a real system-only stream was diarized.
+            let userDisplayName: String = {
+                let n = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+                return n.isEmpty ? "Me" : n
+            }()
+            let canDetectUser = (diarizationSource == "system-only")
+            let userSpeechFloor: Float = 0.005   // mixed must carry real speech
+            let userDominanceRatio: Float = 0.5  // system < half of mixed ⇒ mic dominates
+            func windowRMS(_ buf: [Float], _ startSec: Double, _ endSec: Double) -> Float {
+                let sr = 16_000.0
+                let s = max(0, Int(startSec * sr))
+                let e = min(buf.count, Int(endSec * sr))
+                guard s < e else { return 0 }
+                var sum: Float = 0
+                var i = s
+                while i < e { sum += buf[i] * buf[i]; i += 1 }
+                return sqrtf(sum / Float(e - s))
+            }
+            var userSegmentCount = 0
+
             // Step 3: Filter hallucinations and save transcripts with speaker labels
             //
             // WhisperKit hallucinates on silent/noisy audio — common patterns:
@@ -1959,8 +1989,21 @@ final class AppState {
                     }
                 }
 
-                // Look up speaker for this segment's time
-                let speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+                // Label the user's own turns first (mic-dominant windows), then
+                // fall back to the diarization cluster for remote speakers.
+                let speaker: String
+                if canDetectUser {
+                    let mixedRMS = windowRMS(samples, seg.startTime, seg.endTime)
+                    let systemRMS = windowRMS(diarizationSamples, seg.startTime, seg.endTime)
+                    if mixedRMS > userSpeechFloor && systemRMS < mixedRMS * userDominanceRatio {
+                        speaker = userDisplayName
+                        userSegmentCount += 1
+                    } else {
+                        speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+                    }
+                } else {
+                    speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+                }
 
                 toSave.append(Transcript(
                     meetingId: meetingId,
@@ -1971,7 +2014,7 @@ final class AppState {
                     confidence: seg.confidence
                 ))
             }
-            fileLog("Batch transcribe: prepared \(toSave.count) segments, skipped \(skippedCount) hallucinations")
+            fileLog("Batch transcribe: prepared \(toSave.count) segments, skipped \(skippedCount) hallucinations, \(userSegmentCount) labeled as user (\(userDisplayName))")
             Logger.transcription.info("Batch transcription ready: \(toSave.count) segments for meeting \(meetingId)")
             return (toSave, capturedSpeakerLabels)
 
