@@ -195,6 +195,12 @@ final class OllamaInstaller {
     /// Minimum free disk space required for Ollama install + a small model (~5 GB).
     private static let minimumFreeDiskBytes: Int64 = 5 * 1024 * 1024 * 1024
 
+    /// Pinned Ollama release. Bump this when adopting a new upstream version
+    /// after smoke-testing the chat + pull endpoints we depend on. Using a
+    /// fixed tag (not `releases/latest/`) means an upstream breaking change
+    /// can't silently break summarization for new installs.
+    static let pinnedOllamaVersion = "v0.24.0"
+
     private func downloadAndInstall() async -> URL? {
         // Check disk space before downloading
         let fm = FileManager.default
@@ -215,8 +221,12 @@ final class OllamaInstaller {
         // Apple Silicon — no Rosetta needed
         #endif
 
-        // Download Ollama-darwin.zip from GitHub
-        let downloadURL = URL(string: "https://github.com/ollama/ollama/releases/latest/download/Ollama-darwin.zip")!
+        // Download Ollama-darwin.zip from GitHub. Pinned to a known-good
+        // version (see pinnedOllamaVersion) instead of `releases/latest/`
+        // so an upstream API break can't silently strand new installs.
+        let downloadURL = URL(
+            string: "https://github.com/ollama/ollama/releases/download/\(Self.pinnedOllamaVersion)/Ollama-darwin.zip"
+        )!
         phase = .downloadingApp(progress: 0)
 
         let tempDir = fm.temporaryDirectory.appendingPathComponent("OllamaInstall-\(UUID().uuidString)")
@@ -304,9 +314,38 @@ final class OllamaInstaller {
         phase = .waitingForServer
         for _ in 0..<45 {  // up to 45 seconds
             try? await Task.sleep(nanoseconds: 1_000_000_000)
-            if await isServerReachable() { return }
+            if await isServerReachable() {
+                await Self.checkServerVersionCompatibility()
+                return
+            }
         }
         phase = .failed("Ollama server didn't start. Try opening Ollama from ~/Applications.")
+    }
+
+    /// Query the running Ollama's /api/version and log a warning when the
+    /// reported major.minor differs from `pinnedOllamaVersion`. Observability
+    /// only — the app still talks to whatever's running. If an upstream
+    /// breaking change ever ships, this warning is the breadcrumb that points
+    /// at the version mismatch instead of presenting as a generic chat failure.
+    private static func checkServerVersionCompatibility() async {
+        let url = OllamaService.baseURL.appendingPathComponent("api/version")
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        struct VersionResponse: Decodable { let version: String }
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+              let decoded = try? JSONDecoder().decode(VersionResponse.self, from: data) else {
+            Logger.ai.info("Ollama /api/version not reachable — skipping compatibility check")
+            return
+        }
+        let running = decoded.version
+        let pinnedBare = String(pinnedOllamaVersion.dropFirst())  // "v0.24.0" → "0.24.0"
+        let runningMajorMinor = running.split(separator: ".").prefix(2).joined(separator: ".")
+        let pinnedMajorMinor = pinnedBare.split(separator: ".").prefix(2).joined(separator: ".")
+        if runningMajorMinor == pinnedMajorMinor {
+            Logger.ai.info("Ollama version OK: running \(running) (pinned \(pinnedBare))")
+        } else {
+            Logger.ai.warning("Ollama version mismatch: running \(running), pinned \(pinnedBare) — chat behavior may differ from tested baseline")
+        }
     }
 
     private func pullModel(_ model: String) async {
