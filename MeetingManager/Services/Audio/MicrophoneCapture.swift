@@ -249,7 +249,16 @@ final class MicrophoneCapture {
         let hwRate = hwFormat.sampleRate
         let hwChannels = Int(hwFormat.channelCount)
 
-        guard hwRate > 0 else { return }
+        // Persist the hardware input format so -10868 root-causing is possible
+        // from the file log: a 0Hz/0ch format means the input device couldn't be
+        // acquired at all (permission/contention), which is a different failure
+        // than a valid format being rejected by the engine.
+        onDiagnostic?("DIAG:mic_format hw=\(hwRate)Hz/\(hwChannels)ch deviceID=\(activeDeviceID) name=\(getDeviceName(activeDeviceID))")
+
+        guard hwRate > 0 else {
+            onDiagnostic?("DIAG:mic_format INVALID (0Hz) — input device not acquirable; engine.start() will fail -10868. No tap installed.")
+            return
+        }
 
         Logger.audio.info("Mic: \(hwRate)Hz \(hwChannels)ch → downsampling to 16kHz mono")
 
