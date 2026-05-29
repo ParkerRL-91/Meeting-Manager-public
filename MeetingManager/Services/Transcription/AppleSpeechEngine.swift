@@ -43,7 +43,10 @@ final class AppleSpeechTranscriber {
     // MARK: - Init
 
     init() {
-        self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        // Use the user's locale (falling back to en-US, then the system
+        // default) so non-US-English Macs get a usable recognizer instead of
+        // being forced onto an English model.
+        self.speechRecognizer = AppleSpeechSupport.makeRecognizer()
     }
 
     // MARK: - Lifecycle

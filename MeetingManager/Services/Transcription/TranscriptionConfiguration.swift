@@ -69,8 +69,10 @@ struct TranscriptionConfiguration: Codable, Equatable {
 
     // MARK: Language
 
-    /// BCP-47 language code. WhisperKit uses this as a hint.
-    var language: String = "en"
+    /// BCP-47 language code. WhisperKit uses this as a hint. Defaults to the
+    /// Mac's system language so non-English users aren't silently transcribed
+    /// as English; falls back to "en" when the system language can't be read.
+    var language: String = Locale.current.language.languageCode?.identifier ?? "en"
 
     // MARK: Decoding -- accuracy controls
 

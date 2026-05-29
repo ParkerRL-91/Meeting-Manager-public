@@ -1534,14 +1534,21 @@ final class AppState {
                     }
                 }
 
-                // Wire Apple Speech fallback if WhisperKit is unavailable
+                // Wire Apple Speech fallback if WhisperKit is unavailable.
+                // SFSpeechRecognizer produces nothing until the user grants
+                // Speech access, so request it before starting the recognizer.
                 if self.transcriptionService.transcriptionMode == .appleSpeech,
                    let meetingId = self.stateMachine.currentMeeting?.id {
-                    self.audioCaptureService.onRawMicBuffer = { [weak self] buffer in
-                        self?.appleSpeechTranscriber.appendBuffer(buffer)
+                    if await AppleSpeechSupport.ensureAuthorized() {
+                        self.audioCaptureService.onRawMicBuffer = { [weak self] buffer in
+                            self?.appleSpeechTranscriber.appendBuffer(buffer)
+                        }
+                        self.appleSpeechTranscriber.start(meetingId: meetingId, repository: self.transcriptRepository)
+                        self.fileLog("Apple Speech fallback wired for meeting \(meetingId)")
+                    } else {
+                        self.lastUserError = "Speech Recognition access is off. Live transcription is unavailable until you enable it in System Settings → Privacy & Security → Speech Recognition."
+                        self.fileLog("Apple Speech fallback: Speech authorization denied")
                     }
-                    self.appleSpeechTranscriber.start(meetingId: meetingId, repository: self.transcriptRepository)
-                    self.fileLog("Apple Speech fallback wired for meeting \(meetingId)")
                 }
 
                 // Start participant detection if calendar didn't provide attendees.

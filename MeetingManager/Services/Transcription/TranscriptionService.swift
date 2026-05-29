@@ -265,6 +265,11 @@ final class TranscriptionService {
 
     private let engine: TranscriptionEngine
 
+    /// Batch fallback used when WhisperKit failed to load and the service is
+    /// running in `.appleSpeech` mode. Without this, completed-meeting
+    /// transcription threw `.modelNotLoaded` and the "fallback" was dead code.
+    private let appleSpeechBatch = AppleSpeechBatchTranscriber()
+
     // MARK: Init
 
     /// Create a service with the default WhisperEngine.
@@ -358,6 +363,21 @@ final class TranscriptionService {
 
         isTranscribing = true
         defer { isTranscribing = false }
+
+        // When WhisperKit couldn't load we run in .appleSpeech mode: route batch
+        // transcription to Apple's on-device recognizer instead of WhisperEngine
+        // (which would throw .modelNotLoaded). Apple's confidence scores use a
+        // different scale than WhisperKit's log-prob conversion, so the
+        // WhisperKit confidence floor is not applied here.
+        if transcriptionMode == .appleSpeech {
+            do {
+                return try await appleSpeechBatch.transcribe(samples: samples)
+            } catch {
+                let txError = TranscriptionError.transcriptionFailed(error.localizedDescription)
+                lastError = txError
+                throw txError
+            }
+        }
 
         do {
             let segments = try await engine.transcribe(
