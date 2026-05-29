@@ -15,6 +15,22 @@ struct FullTranscriptView: View {
     @State private var speakerToCustomRename: Transcript?
     @State private var renameError: String?
 
+    /// Transient confirmation shown after a manual rename so the user sees the
+    /// "correct once, recognized forever" value loop actually happen. Cleared
+    /// automatically after a few seconds.
+    @State private var learnedToast: String?
+
+    /// #8 — after a rename in a recurring meeting, offer to re-check the other
+    /// meetings in the same series (they now benefit from the new alias and
+    /// voiceprint). Holds the confirmed name + the other series meeting ids.
+    @State private var seriesPropagation: SeriesPropagation?
+
+    struct SeriesPropagation: Identifiable {
+        let id = UUID()
+        let name: String
+        let meetingIds: [String]
+    }
+
     /// Cleaned-up version of the transcript (stitched + AI-cleaned). Loaded
     /// from the cleanedTranscript table after segments load. May be nil if
     /// cleanup hasn't run yet (e.g. mid-recording, or AI failed).
@@ -92,6 +108,10 @@ struct FullTranscriptView: View {
                 // Cleaned view — paragraph-rendered Markdown. We bypass the
                 // search-empty branch when in cleaned mode without a search
                 // query because cleaned text isn't indexed as segments.
+                // The diagnostic banner is shown here too (it used to appear
+                // only in the raw segment list), so the default view explains
+                // why speaker names are missing and offers the next step.
+                attributionDiagnosticBanner
                 cleanedView(cleaned)
             } else if filteredTranscripts.isEmpty {
                 Spacer()
@@ -143,6 +163,41 @@ struct FullTranscriptView: View {
         } message: {
             Text(renameError ?? "")
         }
+        .confirmationDialog(
+            "Apply across this series?",
+            isPresented: Binding(
+                get: { seriesPropagation != nil },
+                set: { if !$0 { seriesPropagation = nil } }
+            ),
+            presenting: seriesPropagation
+        ) { prop in
+            Button("Re-check \(prop.meetingIds.count) earlier meeting\(prop.meetingIds.count == 1 ? "" : "s")") {
+                propagateAcrossSeries(prop.meetingIds)
+                seriesPropagation = nil
+            }
+            Button("Not now", role: .cancel) { seriesPropagation = nil }
+        } message: { prop in
+            Text("\(prop.name) was just confirmed. Re-check earlier meetings in this series so the same voice is recognized there too. Names you already confirmed are left unchanged.")
+        }
+        .overlay(alignment: .bottom) {
+            if let toast = learnedToast {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.badge.checkmark")
+                        .foregroundStyle(Color.appAccent)
+                    Text(toast)
+                        .font(.callout)
+                        .foregroundStyle(Color.appTextPrimary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.appSeparator))
+                .padding(.bottom, 20)
+                .shadow(radius: 8, y: 2)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: learnedToast)
     }
 
     // MARK: - Attribution Diagnostic Banner
@@ -363,6 +418,53 @@ struct FullTranscriptView: View {
             // 6. Reload to reflect the rewritten labels.
             await loadTranscripts()
             updateFilteredTranscripts()
+
+            // #2 — make the learning loop visible. The rename just taught the
+            // voice DB; tell the user so the "correct once, recognized forever"
+            // value is felt rather than silent.
+            let firstName = trimmed.components(separatedBy: " ").first ?? trimmed
+            showLearnedToast("\(firstName)'s voice will be recognized in future meetings.")
+
+            // #8 — offer to apply across the series. Other meetings in the same
+            // series can now be re-checked: they pick up the new alias and the
+            // freshly-learned voiceprint. Re-attribution only fills unresolved
+            // "Speaker N" clusters and preserves names already confirmed, so it
+            // can't clobber prior manual work. (seriesKey computed in step 4.)
+            let others = appState.meetings.filter {
+                $0.id != meeting.id
+                && MeetingSeriesService.shared.seriesKey(for: $0) == seriesKey
+            }
+            if !others.isEmpty {
+                seriesPropagation = SeriesPropagation(
+                    name: trimmed,
+                    meetingIds: Array(others.prefix(25)).map { $0.id }
+                )
+            }
+        }
+    }
+
+    /// Re-run speaker attribution on the given past meetings so a name just
+    /// confirmed here propagates across the series. Each re-run is safe: it
+    /// fills only unresolved clusters and leaves resolved names intact.
+    private func propagateAcrossSeries(_ ids: [String]) {
+        Task { @MainActor in
+            for id in ids {
+                await appState.rerunSpeakerAttribution(for: id)
+            }
+            showLearnedToast("Re-checked \(ids.count) earlier meeting\(ids.count == 1 ? "" : "s") in this series.")
+        }
+    }
+
+    /// Show a transient confirmation toast, auto-dismissing after 4s. A nonce
+    /// guards against an earlier toast's timer clearing a newer message.
+    @State private var toastNonce = 0
+    private func showLearnedToast(_ message: String) {
+        toastNonce += 1
+        let nonce = toastNonce
+        learnedToast = message
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            if toastNonce == nonce { learnedToast = nil }
         }
     }
 
