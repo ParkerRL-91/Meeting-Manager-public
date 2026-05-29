@@ -44,12 +44,10 @@ if [[ "${1:-}" != "--skip-build" ]]; then
     pkill -f MeetingManager 2>/dev/null || true
     sleep 1
     rm -rf "$APP_DIR"
-    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
+    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
     cp ".build/release/MeetingManager" "$APP_DIR/Contents/MacOS/MeetingManager"
     cp "MeetingManager/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
     cp -r .build/release/MeetingManager_MeetingManager.bundle "$APP_DIR/Contents/Resources/" 2>/dev/null || true
-    cp -r ".build/release/Sparkle.framework" "$APP_DIR/Contents/Frameworks/"
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents/MacOS/MeetingManager" 2>/dev/null || true
     printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
     pass "Installed"
 else

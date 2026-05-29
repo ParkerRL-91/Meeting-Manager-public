@@ -2,12 +2,11 @@
 # push-update.sh — Build, sign, package, and publish a Meeting Manager release.
 #
 # Prerequisites:
-#   - Developer ID Application certificate in Keychain
-#   - Sparkle EdDSA private key in Keychain (generated once with generate_keys)
+#   - Developer ID Application certificate in Keychain (only if NOTARIZE=1)
+#   - Self-signed "MeetingManager-Dev" cert in Keychain (default path; see ADR-006)
 #   - gh CLI installed and authenticated (brew install gh)
-#   - GitHub Pages enabled on the repo, serving from docs/ on main branch
 #   - TEAM_ID and APPLE_ID environment variables set, or a notarytool keychain profile
-#     named "MeetingManager-Notarize" (xcrun notarytool store-credentials)
+#     named "MeetingManager-Notarize" (xcrun notarytool store-credentials) — only if NOTARIZE=1
 #
 # Usage:
 #   ./Scripts/push-update.sh 1.2.0           # full release (must set NOTARIZE=1)
@@ -208,19 +207,6 @@ else
     RUNTIME_OPTS=""
 fi
 
-# Sign Sparkle first (required for deep signing to work)
-if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework" ]]; then
-    codesign --force --deep ${RUNTIME_OPTS} \
-        --sign "${SIGN_IDENTITY}" \
-        "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" 2>/dev/null || true
-    codesign --force ${RUNTIME_OPTS} \
-        --sign "${SIGN_IDENTITY}" \
-        "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B/Autoupdate" 2>/dev/null || true
-    codesign --force ${RUNTIME_OPTS} \
-        --sign "${SIGN_IDENTITY}" \
-        "${FRAMEWORKS_DIR}/Sparkle.framework" 2>/dev/null || true
-fi
-
 # Sign the binary (with entitlements so microphone/screen permissions aren't stripped)
 if [[ -f "${ENTITLEMENTS}" ]]; then
     codesign --force ${RUNTIME_OPTS} \
@@ -314,12 +300,11 @@ gh release create "v${VERSION}" \
 
 **Install:** Download and open the DMG, then drag Meeting Manager to Applications.
 
-**Auto-update:** If you have a previous version installed, it will update automatically via Sparkle." \
+**Update:** Quit any running copy first, then drag the new version over the previous one." \
     --repo "ParkerRL-91/Meeting-Manager"
 
 echo ""
 echo "=== Release v${VERSION} complete ==="
 echo "  DMG:      ${DMG_PATH}"
 echo "  SHA-256:  ${DMG_SHA}"
-echo "  Appcast:  https://parkerrl-91.github.io/Meeting-Manager/appcast.xml"
 echo "  Release:  https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v${VERSION}"
