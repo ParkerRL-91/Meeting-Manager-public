@@ -1686,6 +1686,20 @@ final class AppState {
             let audioFile = try AVAudioFile(forReading: audioURL)
             let fileFormat = audioFile.processingFormat
             let frameCount = AVAudioFrameCount(audioFile.length)
+
+            // WhisperKit expects 16 kHz mono Float32. AudioCaptureService is
+            // responsible for writing the WAV at that rate; if the upstream
+            // capture ever changes, the model would silently get the wrong
+            // audio (time-stretched transcripts, garbage segments). Bail out
+            // explicitly instead, so the failure is loud and the existing
+            // task-queue retry path handles it.
+            let expectedSampleRate: Double = 16_000
+            guard fileFormat.sampleRate == expectedSampleRate else {
+                fileLog("Batch transcribe: unexpected sample rate \(fileFormat.sampleRate) Hz (expected \(expectedSampleRate)) — refusing to transcribe")
+                Logger.transcription.error("Batch transcribe sample-rate mismatch for \(audioURL.lastPathComponent): \(fileFormat.sampleRate) Hz")
+                return ([], nil)
+            }
+
             guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
                 fileLog("Batch transcribe: failed to create buffer")
                 return ([], nil)
