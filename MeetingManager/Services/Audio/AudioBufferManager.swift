@@ -88,6 +88,57 @@ final class AudioBufferManager {
     private var systemAudioFile: AVAudioFile?
     private let sampleRate: Double = 16000
 
+    /// Canonical capture format that EVERY incoming buffer is converted to before
+    /// it touches the sample buffers or the WAV files: 16 kHz mono Float32. Mic
+    /// and system inputs arrive at arbitrary hardware rates — ScreenCaptureKit
+    /// commonly delivers 44.1/48 kHz, and writing those straight into the 16 kHz
+    /// file is what threw `kAudioFileUnspecifiedError` (CoreAudio 2003334207) on
+    /// some machines. Converting at ingress makes capture robust to any device.
+    private lazy var canonicalFormat: AVAudioFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false
+    )!
+    /// One stateful AVAudioConverter per distinct input format (mic vs system
+    /// differ), so sample-rate conversion keeps phase continuity across buffers.
+    private var converters: [String: AVAudioConverter] = [:]
+    private let converterLock = NSLock()
+
+    /// Convert any buffer to `canonicalFormat` (16 kHz mono Float32). Returns the
+    /// input unchanged when it already matches, and nil — so the caller safely
+    /// skips the buffer rather than crashing — when the format is degenerate
+    /// (0 Hz / 0 ch, e.g. an un-granted mic) or a converter can't be built.
+    private func canonicalize(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let inFmt = buffer.format
+        if inFmt == canonicalFormat { return buffer }
+        guard inFmt.sampleRate > 0, inFmt.channelCount > 0, buffer.frameLength > 0 else { return nil }
+
+        let key = "\(inFmt.sampleRate)|\(inFmt.channelCount)|\(inFmt.commonFormat.rawValue)|\(inFmt.isInterleaved)"
+        converterLock.lock()
+        let converter: AVAudioConverter?
+        if let cached = converters[key] {
+            converter = cached
+        } else if let made = AVAudioConverter(from: inFmt, to: canonicalFormat) {
+            converters[key] = made
+            converter = made
+        } else {
+            converter = nil
+        }
+        converterLock.unlock()
+        guard let converter else { return nil }
+
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * canonicalFormat.sampleRate / inFmt.sampleRate) + 32
+        guard let out = AVAudioPCMBuffer(pcmFormat: canonicalFormat, frameCapacity: capacity) else { return nil }
+        var consumed = false
+        var error: NSError?
+        let status = converter.convert(to: out, error: &error) { _, inStatus in
+            if consumed { inStatus.pointee = .noDataNow; return nil }
+            consumed = true
+            inStatus.pointee = .haveData
+            return buffer
+        }
+        if status == .error || out.frameLength == 0 { return nil }
+        return out
+    }
+
     /// Maximum recording duration in seconds. Prevents unbounded memory growth
     /// from accidental multi-hour recordings. 2 hours = 7200s.
     /// At 16kHz mono Float32, 2 hours ~ 460 MB per source buffer.
@@ -176,24 +227,16 @@ final class AudioBufferManager {
     private var totalSystemSamplesAppended: Int = 0
 
     func prepareForRecording(outputURL: URL) throws {
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
+        // Use the exact canonicalFormat the write path produces, so the file's
+        // processingFormat and every buffer handed to write(from:) are identical
+        // — eliminating any chance of a format-mismatch write failure.
+        let settings = canonicalFormat.settings
 
-        audioFile = try AVAudioFile(
-            forWriting: outputURL,
-            settings: format.settings
-        )
+        audioFile = try AVAudioFile(forWriting: outputURL, settings: settings)
 
         // Write system-only audio alongside the mixed file for speaker diarization.
         let systemURL = Self.systemAudioURL(for: outputURL)
-        systemAudioFile = try? AVAudioFile(
-            forWriting: systemURL,
-            settings: format.settings
-        )
+        systemAudioFile = try? AVAudioFile(forWriting: systemURL, settings: settings)
 
         consecutiveWriteFailures = 0
         startMemoryPressureMonitoring()
@@ -207,7 +250,10 @@ final class AudioBufferManager {
             .appendingPathComponent("\(stem)_system.wav")
     }
 
-    func appendMicBuffer(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
+    func appendMicBuffer(_ rawBuffer: AVAudioPCMBuffer, at time: AVAudioTime) {
+        // Convert to 16 kHz mono Float32 first; skip the buffer if it can't be
+        // converted (degenerate device format) rather than writing a mismatch.
+        guard let buffer = canonicalize(rawBuffer) else { return }
         guard let channelData = buffer.floatChannelData else { return }
         let samples = Array(UnsafeBufferPointer(
             start: channelData[0],
@@ -226,7 +272,11 @@ final class AudioBufferManager {
         writeToFile(buffer)
     }
 
-    func appendSystemBuffer(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
+    func appendSystemBuffer(_ rawBuffer: AVAudioPCMBuffer, at time: AVAudioTime) {
+        // ScreenCaptureKit usually delivers 44.1/48 kHz; convert to the canonical
+        // 16 kHz so it matches the file format AND the 16 kHz mic samples it gets
+        // mixed with for transcription. Skip if it can't be converted.
+        guard let buffer = canonicalize(rawBuffer) else { return }
         guard let channelData = buffer.floatChannelData else { return }
         let samples = Array(UnsafeBufferPointer(
             start: channelData[0],
@@ -294,6 +344,10 @@ final class AudioBufferManager {
     }
 
     func finishRecording() {
+        converterLock.lock()
+        converters.removeAll()
+        converterLock.unlock()
+
         lock.lock()
         audioFile = nil
         systemAudioFile = nil
