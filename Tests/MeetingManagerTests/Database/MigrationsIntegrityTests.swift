@@ -82,6 +82,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v39-outline-prompt-topic-chunking",
         "v40-transcription-attempt-marker",
         "v41-apollo-profile-prep",
+        "v42-mic-override",
     ]
 
     override func setUpWithError() throws {
