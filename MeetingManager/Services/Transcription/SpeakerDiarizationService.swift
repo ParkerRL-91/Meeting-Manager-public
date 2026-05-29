@@ -37,6 +37,8 @@ final class SpeakerDiarizationService {
 
     /// Load (and download if needed) the SpeakerKit CoreML models.
     /// Safe to call multiple times — no-ops if already loaded.
+    /// Wrapped in a 5-minute timeout race because the Pyannote model download
+    /// can hang indefinitely on a bad network or corrupt cache.
     func loadModels() async throws {
         guard modelState != .loaded else { return }
 
@@ -49,7 +51,19 @@ final class SpeakerDiarizationService {
                 load: true,
                 verbose: false
             )
-            speakerKit = try await SpeakerKit(config)
+            let kit = try await withThrowingTaskGroup(of: SpeakerKit.self) { group in
+                group.addTask {
+                    return try await SpeakerKit(config)
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(300))
+                    throw DiarizationError.modelLoadTimeout
+                }
+                let loaded = try await group.next()!
+                group.cancelAll()
+                return loaded
+            }
+            speakerKit = kit
             modelState = .loaded
             logger.info("SpeakerKit models ready.")
         } catch {
@@ -82,19 +96,32 @@ final class SpeakerDiarizationService {
             throw DiarizationError.audioFileNotFound(systemAudioURL.path)
         }
 
+        let samples = try loadAsSamples(url: systemAudioURL)
+        logger.info("Diarizing \(systemAudioURL.lastPathComponent), speakers hint: \(participantCount.map(String.init) ?? "auto")")
+        return try await diarize(audioArray: samples, participantCount: participantCount)
+    }
+
+    /// Diarize an already-loaded sample buffer. Use this when the caller has
+    /// the audio in memory and wants to avoid re-reading the WAV from disk
+    /// (e.g. batchTranscribe, which already loaded the file for WhisperKit).
+    ///
+    /// - Parameters:
+    ///   - audioArray: 16 kHz mono Float32 samples.
+    ///   - participantCount: Speaker-count hint for the clusterer; nil lets the model decide.
+    func diarize(
+        audioArray: [Float],
+        participantCount: Int?
+    ) async throws -> DiarizationResult {
+        guard !audioArray.isEmpty else {
+            throw DiarizationError.emptyAudio
+        }
+
         if modelState != .loaded {
             try await loadModels()
         }
 
         guard let kit = speakerKit else {
             throw DiarizationError.modelNotLoaded
-        }
-
-        logger.info("Diarizing \(systemAudioURL.lastPathComponent), speakers hint: \(participantCount.map(String.init) ?? "auto")")
-
-        let samples = try loadAsSamples(url: systemAudioURL)
-        guard !samples.isEmpty else {
-            throw DiarizationError.emptyAudio
         }
 
         let options = PyannoteDiarizationOptions(
@@ -104,7 +131,7 @@ final class SpeakerDiarizationService {
         )
 
         let result = try await kit.diarize(
-            audioArray: samples,
+            audioArray: audioArray,
             options: options
         )
 
@@ -190,6 +217,7 @@ final class SpeakerDiarizationService {
 
 enum DiarizationError: LocalizedError {
     case modelNotLoaded
+    case modelLoadTimeout
     case audioFileNotFound(String)
     case emptyAudio
 
@@ -197,6 +225,8 @@ enum DiarizationError: LocalizedError {
         switch self {
         case .modelNotLoaded:
             return "Speaker diarization model is not loaded."
+        case .modelLoadTimeout:
+            return "Speaker diarization model load timed out after 5 minutes."
         case .audioFileNotFound(let path):
             return "System audio file not found at \(path)."
         case .emptyAudio:
