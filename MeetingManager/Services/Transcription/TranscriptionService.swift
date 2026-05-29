@@ -169,7 +169,6 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
             temperatureIncrementOnFallback: 0.2,
             temperatureFallbackCount: configuration.temperatureFallbackCount,
             usePrefillPrompt: true,
-            usePrefillCache: true,
             skipSpecialTokens: true,
             wordTimestamps: configuration.wordTimestamps,
             suppressBlank: configuration.suppressBlank,

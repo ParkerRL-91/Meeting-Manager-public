@@ -51,7 +51,6 @@ Task {
             temperatureIncrementOnFallback: 0.2,
             temperatureFallbackCount: 3,
             usePrefillPrompt: true,
-            usePrefillCache: true,
             skipSpecialTokens: true,
             wordTimestamps: true,
             suppressBlank: true,
