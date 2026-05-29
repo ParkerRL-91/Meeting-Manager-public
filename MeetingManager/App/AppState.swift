@@ -578,6 +578,23 @@ final class AppState {
                 // Calendar meetings already have a title from the event, so skip those.
                 await self.autoTitleIfNeeded(meeting: meeting, transcripts: transcripts)
 
+                // Cross-meeting voice learning. This is the ONLY place the normal
+                // recording flow learns voice profiles. learnVoiceProfiles is
+                // transcript-based: it reads the just-committed rows (now carrying
+                // attributed names), groups time ranges per confirmed speaker, and
+                // extracts a fingerprint from the system-only WAV. It already
+                // filters generic labels (Speaker N / system / mic / Unknown) and
+                // applies a confidence floor so low-confidence LLM guesses don't
+                // poison the profile DB. No-op when there's no system audio.
+                //
+                // (Historically this only ran on manual re-run / rebuild, so
+                // profiles were never learned automatically — the diarization
+                // task that was supposed to do it bailed because it required
+                // "system"-labelled rows the batch path never produces.)
+                if commitSucceeded {
+                    await self.learnVoiceProfiles(meetingId: meetingId)
+                }
+
                 self.loadMeetings()
             }
         }
@@ -2297,6 +2314,17 @@ final class AppState {
     ///   - the meeting has no system audio file
     ///   - no transcript row carries a real name
     ///   - audio segments for a name are < 3s total (handled inside the service)
+    /// True when a speaker label is a generic/unresolved bucket that must never
+    /// be learned as a real person's voice: "Speaker N", "system", "mic",
+    /// "Unknown", "Everyone", "Other", "Them", or empty. Centralizes the filter
+    /// used by both learning paths so junk profiles can't slip through.
+    static func isGenericSpeakerLabel(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        if s.isEmpty { return true }
+        if s.hasPrefix("speaker ") || s == "speaker" { return true }
+        return ["system", "mic", "unknown", "other", "them", "everyone", "everybody", "all"].contains(s)
+    }
+
     func learnVoiceProfiles(meetingId: String) async {
         guard let meeting = try? await meetingRepository.find(id: meetingId),
               let firstAudioPath = meeting.audioFilePath,
@@ -2322,10 +2350,8 @@ final class AppState {
         var rangesByName: [String: [(start: Float, end: Float)]] = [:]
         for t in transcripts {
             let raw = (t.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
-            guard !raw.isEmpty else { continue }
+            guard !Self.isGenericSpeakerLabel(raw) else { continue }
             let lower = raw.lowercased()
-            if lower.hasPrefix("speaker ") { continue }
-            if lower == "system" || lower == "mic" || lower == "unknown" || lower == "other" || lower == "them" { continue }
             if !userFirst.isEmpty, lower.contains(userFirst) { continue }
             // Treat the speaker name as the canonical key.
             rangesByName[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
@@ -2348,10 +2374,35 @@ final class AppState {
             .aliases(forSeriesKey: seriesKey)) ?? []
         let manuallyConfirmedNames = Set(aliasRows.map { $0.resolvedName.lowercased() })
 
+        // #4 — confidence floor against profile poisoning. Build name → min
+        // attribution confidence from the meeting's cluster maps (confidence is
+        // keyed by cluster id; speakerMap maps cluster id → resolved name). A
+        // name attributed only by a low-confidence LLM guess must NOT be folded
+        // into the voice DB — otherwise one wrong guess teaches a fingerprint
+        // that then auto-mis-matches that voice forever. Manual confirmations
+        // (alias rows) always learn regardless of this floor.
+        let learnConfidenceFloor: Float = 0.70
+        let confByCluster = meeting.speakerConfidenceMapDictionary
+        let clusterToName = meeting.speakerMapDictionary
+        var confidenceByName: [String: Float] = [:]
+        for (cluster, name) in clusterToName {
+            guard let c = confByCluster[cluster] else { continue }
+            let key = name.lowercased()
+            confidenceByName[key] = min(confidenceByName[key] ?? .greatestFiniteMagnitude, c)
+        }
+
         for (name, ranges) in rangesByName {
+            let isManual = manuallyConfirmedNames.contains(name.lowercased())
+            // Skip low-confidence LLM-attributed names. Learn when manual, when
+            // there's no confidence entry (deterministic paths — mic auto-map,
+            // auto-2-person — don't write a cluster confidence and are trusted),
+            // or when confidence clears the floor.
+            if !isManual, let conf = confidenceByName[name.lowercased()], conf < learnConfidenceFloor {
+                Logger.general.info("Voice learn skipped (low confidence \(conf)): \(name, privacy: .public) for meeting \(meetingId, privacy: .public)")
+                continue
+            }
             guard let embedding = await voiceService.extractEmbedding(audioURL: systemURL, timeRanges: ranges) else { continue }
             let person = try? await personRepo.findOrCreate(for: name)
-            let isManual = manuallyConfirmedNames.contains(name.lowercased())
             let source: VoiceProfileRepository.EmbeddingSource = isManual ? .manual : .llm
             try? await repo.merge(
                 personName: name,
@@ -2371,7 +2422,7 @@ final class AppState {
                     startTime: Double(span.min),
                     endTime: Double(span.max),
                     embeddingData: Data(),
-                    source: "voice_match",
+                    source: source.rawValue,
                     createdAt: Date()
                 )
                 sample.embedding = embedding
@@ -2612,6 +2663,9 @@ final class AppState {
                 let personRepo = PersonRepository(database: database)
                 for (clusterLabel, personName) in finalSpeakerMap {
                     guard !personName.isEmpty else { continue }
+                    // Never learn a generic/unresolved label as a person — this is
+                    // what produced junk "Speaker 3" / "Everyone" voice profiles.
+                    guard !Self.isGenericSpeakerLabel(personName) else { continue }
                     let source: VoiceProfileRepository.EmbeddingSource =
                         voiceMatches[clusterLabel] != nil ? .voiceMatch : .llm
                     if let embedding = await voiceService.extractEmbedding(
