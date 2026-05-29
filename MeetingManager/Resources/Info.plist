@@ -43,6 +43,8 @@
 	<string>202605282359</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.4</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Meeting Manager reads browser tab titles to detect active video calls. It only reads titles — it cannot control your browser.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Meeting Manager reads your Apple Calendar events to surface upcoming meetings and prepare context for them.</string>
 	<key>NSContactsUsageDescription</key>
