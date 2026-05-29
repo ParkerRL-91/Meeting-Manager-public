@@ -227,19 +227,46 @@ final class AudioBufferManager {
     private var totalSystemSamplesAppended: Int = 0
 
     func prepareForRecording(outputURL: URL) throws {
-        // Use the exact canonicalFormat the write path produces, so the file's
-        // processingFormat and every buffer handed to write(from:) are identical
-        // — eliminating any chance of a format-mismatch write failure.
-        let settings = canonicalFormat.settings
+        // Create the recording file robustly. The mixed file is required; its
+        // creation throwing a raw AVFoundation error
+        // (com.apple.coreaudio.avfaudio 2003334207 / kAudioFileUnspecifiedError)
+        // is the most likely reason recording fails on a machine the build
+        // wasn't tested on. We try the canonical Float32 WAV first (what the
+        // write path produces) and fall back to a universally-supported 16-bit
+        // PCM WAV if a given macOS rejects IEEE-float WAV. Either way the file's
+        // processingFormat is 16 kHz mono Float32, so the converted buffers
+        // still match on write.
+        guard let file = Self.makeAudioFile(at: outputURL, primary: canonicalFormat.settings) else {
+            throw AudioCaptureError.captureSetupFailed(
+                "Couldn't create the recording file at \(outputURL.lastPathComponent). The disk may be full or the location unwritable."
+            )
+        }
+        audioFile = file
 
-        audioFile = try AVAudioFile(forWriting: outputURL, settings: settings)
-
-        // Write system-only audio alongside the mixed file for speaker diarization.
+        // System-only file is best-effort (used for diarization). Same fallback.
         let systemURL = Self.systemAudioURL(for: outputURL)
-        systemAudioFile = try? AVAudioFile(forWriting: systemURL, settings: settings)
+        systemAudioFile = Self.makeAudioFile(at: systemURL, primary: canonicalFormat.settings)
 
         consecutiveWriteFailures = 0
         startMemoryPressureMonitoring()
+    }
+
+    /// Create an AVAudioFile for writing, trying the preferred (Float32) settings
+    /// then a maximally-compatible 16-bit PCM WAV fallback. Returns nil only if
+    /// both fail (disk/permission). Both produce a 16 kHz mono file whose
+    /// processingFormat is Float32, matching the canonical write buffers.
+    private static func makeAudioFile(at url: URL, primary: [String: Any]) -> AVAudioFile? {
+        if let f = try? AVAudioFile(forWriting: url, settings: primary) { return f }
+        let pcm16: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        return try? AVAudioFile(forWriting: url, settings: pcm16)
     }
 
     /// Returns the system-audio-only WAV URL derived from the mixed audio URL.
