@@ -45,8 +45,6 @@
 	<string>14.4</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Meeting Manager reads your Apple Calendar events to surface upcoming meetings and prepare context for them.</string>
-	<key>NSCalendarsUsageDescription</key>
-	<string>Meeting Manager reads your Apple Calendar events to surface upcoming meetings.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Meeting Manager can import names and email addresses from your Contacts to improve speaker identification accuracy.</string>
 	<key>NSMicrophoneUsageDescription</key>
@@ -54,8 +52,6 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Meeting Manager can push action items extracted from your meetings to Apple Reminders.</string>
-	<key>NSRemindersUsageDescription</key>
 	<string>Meeting Manager can push action items extracted from your meetings to Apple Reminders.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Meeting Manager reads window titles for meeting and participant detection, and captures system audio (call participant voices) during meetings. Video frames are never recorded.</string>
