@@ -1751,7 +1751,24 @@ final class AppState {
             // SPRINT_LOG.
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
-                let kit = try await SpeakerKit(PyannoteConfig())
+                // Wrap SpeakerKit init in a 5-minute timeout race, matching
+                // the WhisperKit load pattern in TranscriptionService. The
+                // Pyannote model download can hang indefinitely on a bad
+                // network or a corrupt cache; the existing catch block treats
+                // a thrown error as "continue without speaker labels," so a
+                // timeout fail is non-fatal but loud.
+                let kit = try await withThrowingTaskGroup(of: SpeakerKit.self) { group in
+                    group.addTask {
+                        return try await SpeakerKit(PyannoteConfig())
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(300))
+                        throw TranscriptionError.transcriptionFailed("SpeakerKit load timed out after 5 minutes")
+                    }
+                    let loaded = try await group.next()!
+                    group.cancelAll()
+                    return loaded
+                }
                 fileLog("Diarization: SpeakerKit models loaded")
                 let diarResult = try await kit.diarize(audioArray: samples)
                 fileLog("Diarization: \(diarResult.segments.count) speaker segments found")
