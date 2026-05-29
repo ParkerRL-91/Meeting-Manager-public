@@ -9,15 +9,15 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "6.0.0"),
-        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "0.9.0"),
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift", from: "1.0.0"),
     ],
     targets: [
         .executableTarget(
             name: "MeetingManager",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
-                .product(name: "WhisperKit", package: "WhisperKit"),
-                .product(name: "SpeakerKit", package: "WhisperKit"),
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "SpeakerKit", package: "argmax-oss-swift"),
             ],
             path: "MeetingManager",
             exclude: ["Resources/Info.plist", "Resources/MeetingManager.entitlements"],
@@ -47,7 +47,7 @@ let package = Package(
         .executableTarget(
             name: "transcribe-audio",
             dependencies: [
-                .product(name: "WhisperKit", package: "WhisperKit"),
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
             ],
             path: "Tools/TranscribeAudio"
         ),

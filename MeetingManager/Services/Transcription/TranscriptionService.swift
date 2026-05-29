@@ -173,7 +173,7 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
             skipSpecialTokens: true,
             wordTimestamps: configuration.wordTimestamps,
             suppressBlank: configuration.suppressBlank,
-            supressTokens: [Int]?.none,
+            suppressTokens: [Int]?.none,
             compressionRatioThreshold: configuration.compressionRatioThreshold,
             logProbThreshold: configuration.logProbThreshold,
             noSpeechThreshold: configuration.noSpeechThreshold

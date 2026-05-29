@@ -55,7 +55,7 @@ Task {
             skipSpecialTokens: true,
             wordTimestamps: true,
             suppressBlank: true,
-            supressTokens: [Int]?.none,
+            suppressTokens: [Int]?.none,
             compressionRatioThreshold: 2.4,
             logProbThreshold: -1.0,
             noSpeechThreshold: 0.6
