@@ -144,9 +144,19 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
             )
         }
 
-        // Wrap with a 5-minute timeout — WhisperKit(config) can hang indefinitely
-        // on network issues or corrupt model caches. withThrowingTaskGroup cancels
+        // Wrap with a timeout — WhisperKit(config) can hang indefinitely on
+        // network issues or corrupt model caches. withThrowingTaskGroup cancels
         // the hung task when the timeout fires (unlike a naive Task.sleep race).
+        //
+        // The timeout is adaptive. A cached model only needs to compile/prewarm
+        // (slower on Intel, which has no Neural Engine, but bounded), so 5
+        // minutes is plenty; on a real hang the caller falls back to Apple
+        // Speech. A first-time download legitimately needs much longer on a slow
+        // connection, so the download path gets a generous window rather than
+        // false-timing-out and degrading a capable Mac to the lower-quality
+        // fallback. The timeout is only ever extended versus the old fixed 5 min.
+        let timeoutSeconds: Int = cachedFolder != nil ? 300 : 900
+        let timeoutDescription = cachedFolder != nil ? "5 minutes" : "15 minutes"
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 let kit = try await WhisperKit(config)
@@ -157,8 +167,8 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
                 progressHandler(1.0)
             }
             group.addTask {
-                try await Task.sleep(for: .seconds(300))
-                throw TranscriptionError.transcriptionFailed("Model load timed out after 5 minutes")
+                try await Task.sleep(for: .seconds(timeoutSeconds))
+                throw TranscriptionError.transcriptionFailed("Model load timed out after \(timeoutDescription)")
             }
             // First task to finish wins; cancel the other
             try await group.next()!
