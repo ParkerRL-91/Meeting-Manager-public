@@ -70,6 +70,16 @@ final class TaskQueueManager {
     /// tab's Regenerate button.
     var detailedOutlineHandler: ((String) async throws -> Void)?
 
+    /// Returns true when an AI backend (Claude key or Ollama) is configured.
+    /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
+    /// when this is true, so a user with no AI configured doesn't get a failed
+    /// summary task — and a red error banner — after every meeting. Defaults
+    /// to permissive (true) when unset so behaviour is unchanged if not wired.
+    var isAIWorkConfigured: (() -> Bool)?
+
+    /// Whether AI-dependent work should be auto-enqueued right now.
+    private var shouldEnqueueAIWork: Bool { isAIWorkConfigured?() ?? true }
+
     init(database: AppDatabase = .shared) {
         self.database = database
     }
@@ -406,8 +416,10 @@ final class TaskQueueManager {
                 """)
             }
 
-            for meeting in needSummary {
-                await enqueue(type: .summary, meetingId: meeting.id, priority: 6)
+            if shouldEnqueueAIWork {
+                for meeting in needSummary {
+                    await enqueue(type: .summary, meetingId: meeting.id, priority: 6)
+                }
             }
 
             let total = needTranscription.count + needSummary.count
@@ -520,7 +532,11 @@ final class TaskQueueManager {
                         // Diarization runs before summary so speaker names are in the transcript
                         // when the summarizer prompt is built.
                         await enqueue(type: .diarization, meetingId: next.meetingId, priority: 4)
-                        await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
+                        // Only enqueue the AI summary when a backend is configured,
+                        // so no-AI users don't get a failed task after every meeting.
+                        if shouldEnqueueAIWork {
+                            await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
+                        }
                         // Transcript cleanup runs after summary — by then speaker
                         // names are mostly resolved, so the cleaned blob shows
                         // real names instead of "Speaker 1". Lower priority so
@@ -741,10 +757,12 @@ final class TaskQueueManager {
                     LIMIT 10
                 """)
             }
-            for meeting in needSummary {
-                await enqueue(type: .summary, meetingId: meeting.id, priority: 8)
+            if shouldEnqueueAIWork {
+                for meeting in needSummary {
+                    await enqueue(type: .summary, meetingId: meeting.id, priority: 8)
+                }
             }
-            if !needSummary.isEmpty {
+            if shouldEnqueueAIWork, !needSummary.isEmpty {
                 Logger.general.info("TaskQueue: poll found \(needSummary.count) meeting(s) needing summaries")
             }
         } catch {

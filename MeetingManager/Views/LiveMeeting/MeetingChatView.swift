@@ -249,30 +249,11 @@ struct MeetingChatView: View {
         }
     }
 
-    /// Builds a textGenerator closure using the same AI routing as SummaryView.
+    /// Builds a textGenerator closure using the app's central AI routing.
     private func buildTextGenerator() async -> ((String, String) async throws -> String)? {
-        let settings = appState.settings
-        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-        await appState.ollamaService.refreshStatus()
-        let ollamaReachable = appState.ollamaService.isReachable
-        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-        if useOllama {
-            let ollamaService = appState.ollamaService
-            let ollamaModel = settings.ollamaModel
-            return { sys, usr in
-                try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
-            }
-        } else if hasClaudeKey {
-            let claude = ClaudeService()
-            let claudeModel = settings.claudeModel
-            return { sys, usr in
-                try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
-            }
-        } else {
-            chatService?.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
-            return nil
-        }
+        if let generator = await appState.makeTextGenerator() { return generator }
+        chatService?.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+        return nil
     }
 
     private func sendMessage() {

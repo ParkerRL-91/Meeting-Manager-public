@@ -184,27 +184,8 @@ struct ActionItemsView: View {
     private func extractItems() async {
         guard let meeting = try? await appState.meetingRepository.find(id: meetingId) else { return }
 
-        // Build textGenerator with same AI routing as SummaryView
-        let settings = appState.settings
-        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-        await appState.ollamaService.refreshStatus()
-        let ollamaReachable = appState.ollamaService.isReachable
-        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-        let textGenerator: (String, String) async throws -> String
-        if useOllama {
-            let ollamaService = appState.ollamaService
-            let ollamaModel = settings.ollamaModel
-            textGenerator = { sys, usr in
-                try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
-            }
-        } else if hasClaudeKey {
-            let claude = ClaudeService()
-            let claudeModel = settings.claudeModel
-            textGenerator = { sys, usr in
-                try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
-            }
-        } else {
+        // Build textGenerator with the app's central AI routing.
+        guard let textGenerator = await appState.makeTextGenerator() else {
             extractor.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
             return
         }

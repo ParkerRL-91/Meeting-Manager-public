@@ -630,6 +630,10 @@ final class AppState {
             self.loadMeetings()
         }
 
+        // Gate AI-dependent auto-enqueues (summary) on a configured backend so
+        // users with no AI don't accumulate failed tasks after every meeting.
+        taskQueueManager.isAIWorkConfigured = { [weak self] in self?.isAIWorkConfigured ?? false }
+
         taskQueueManager.diarizationHandler = { [weak self] meetingId, systemAudioURL in
             guard let self else { return }
             self.fileLog("TaskQueue: diarization starting for \(meetingId)")
@@ -967,28 +971,26 @@ final class AppState {
             """
         }
 
-        // Determine which AI backend to use
-        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-        await ollamaService.refreshStatus()
-        let ollamaReachable = ollamaService.isReachable
-        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+        // Determine which AI backend to use (single source of truth).
+        let backend = await resolveAIBackend(refreshOllama: true)
 
         let summaryText: String
-        if useOllama {
+        switch backend {
+        case .ollama(let model):
             // Use streaming for task queue — never times out, reads chunks incrementally
             summaryText = try await ollamaService.generateStreaming(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
-                model: settings.ollamaModel
+                model: model
             )
-        } else if hasClaudeKey {
+        case .claude(let model):
             let claude = ClaudeService()
             summaryText = try await claude.sendMessage(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
-                model: settings.claudeModel
+                model: model
             )
-        } else {
+        case .none:
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
         }
 
@@ -997,7 +999,7 @@ final class AppState {
             meetingId: meetingId,
             promptUsed: systemPrompt,
             summaryText: summaryText,
-            modelUsed: useOllama ? "ollama/\(settings.ollamaModel)" : settings.claudeModel
+            modelUsed: backend.modelIdentifier
         )
         try await summaryRepository.save(&summary)
         fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
@@ -3943,10 +3945,7 @@ final class AppState {
         think: Bool = true,
         jsonMode: Bool = false
     ) async -> ((String, String) async throws -> String)? {
-        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-        await ollamaService.refreshStatus()
-        let ollamaReachable = ollamaService.isReachable
-        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
+        let backend = await resolveAIBackend(refreshOllama: true)
 
         // Map the unified output budget to each backend's parameter:
         //   Ollama → num_predict
@@ -3958,9 +3957,9 @@ final class AppState {
         // 4096/2048 caps were silently truncating mid-meeting.
         let claudeMaxTokens = max(maxOutputTokens, 4096)
 
-        if useOllama {
+        switch backend {
+        case .ollama(let ollamaModel):
             let service = ollamaService
-            let ollamaModel = settings.ollamaModel
             return { sys, usr in
                 try await service.generate(
                     systemPrompt: sys,
@@ -3971,9 +3970,8 @@ final class AppState {
                     jsonMode: jsonMode
                 )
             }
-        } else if hasClaudeKey {
+        case .claude(let claudeModel):
             let claude = ClaudeService()
-            let claudeModel = settings.claudeModel
             return { sys, usr in
                 try await claude.sendMessage(
                     systemPrompt: sys,
@@ -3982,8 +3980,9 @@ final class AppState {
                     maxTokens: claudeMaxTokens
                 )
             }
+        case .none:
+            return nil
         }
-        return nil
     }
 
     /// Groups all meetings (past + upcoming) into recurring-series "folders" by normalised base title.
