@@ -113,6 +113,13 @@ final class AppState {
     /// Last generation error (if any), shown inline in the View.
     var dailyBriefError: String?
 
+    /// True when brief generation was deferred because the AI backend was busy
+    /// with other work (e.g. a bulk re-transcription saturating the local
+    /// model), rather than genuinely failing. The View shows a neutral
+    /// "Daily brief queued" notice instead of a red error, and the brief is
+    /// retried automatically once the task queue drains.
+    var dailyBriefQueued: Bool = false
+
     /// Cancellation token + signature for the most-recent generation, so
     /// repeated triggers don't fire concurrent regenerations.
     private var dailyBriefGenerationTask: Task<Void, Never>?
@@ -736,6 +743,16 @@ final class AppState {
         taskQueueManager.detailedOutlineHandler = { [weak self] meetingId in
             guard let self else { return }
             await self.runDetailedOutlineGeneration(meetingId: meetingId)
+        }
+
+        // When the queue drains, retry any daily brief that was deferred due to
+        // backend contention (e.g. while a bulk re-transcription was running).
+        taskQueueManager.onQueueIdle = { [weak self] in
+            guard let self else { return }
+            if self.dailyBriefQueued {
+                self.fileLog("DailyBrief: queue idle — retrying deferred brief")
+                await self.maybeRegenerateDailyBrief(force: true)
+            }
         }
 
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
@@ -3483,6 +3500,7 @@ final class AppState {
         dailyBriefGenerationTask?.cancel()
         isGeneratingDailyBrief = true
         dailyBriefError = nil
+        dailyBriefQueued = false
 
         let service = self.dailyBriefAIService
         let ollama = self.ollamaService
@@ -3517,13 +3535,29 @@ final class AppState {
                     self.currentDailyBriefSignature = entry.signature
                     self.isGeneratingDailyBrief = false
                     self.dailyBriefError = nil
+                    self.dailyBriefQueued = false
                 }
                 Logger.ai.info("DailyBrief: generated \(entry.text.count) chars via \(entry.model, privacy: .public)")
             } catch {
                 await MainActor.run {
                     guard let self else { return }
                     self.isGeneratingDailyBrief = false
-                    if !(error is CancellationError) {
+                    if error is CancellationError {
+                        // Stale-signature cancel — a newer generation superseded
+                        // this one. Not user-facing.
+                        return
+                    }
+                    // If the task queue is busy (e.g. a bulk re-transcription is
+                    // monopolizing the local model), the AI backend was reachable
+                    // but couldn't serve the brief in time. Present this as
+                    // "queued" rather than a hard error — it will retry once the
+                    // queue drains (see the transcription handler).
+                    if self.taskQueueManager.isProcessing || self.taskQueueManager.pendingCount > 0 {
+                        self.dailyBriefQueued = true
+                        self.dailyBriefError = nil
+                        Logger.ai.info("DailyBrief: deferred — AI backend busy with \(self.taskQueueManager.pendingCount) queued task(s); will retry when idle")
+                    } else {
+                        self.dailyBriefQueued = false
                         self.dailyBriefError = error.localizedDescription
                         Logger.ai.error("DailyBrief: generation failed: \(error.localizedDescription, privacy: .public)")
                     }

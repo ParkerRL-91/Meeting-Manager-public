@@ -56,7 +56,15 @@ struct DailyBriefView: View {
                                 .padding(.horizontal, 20)
                         }
 
-                        if let error = appState.dailyBriefError {
+                        if appState.dailyBriefQueued {
+                            HStack(spacing: 6) {
+                                Image(systemName: "clock.badge.checkmark")
+                                Text("Daily brief queued — it will generate automatically once the current transcriptions finish.")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                            .padding(.horizontal, 20)
+                        } else if let error = appState.dailyBriefError {
                             Text(error)
                                 .font(.caption)
                                 .foregroundStyle(Color.appRecording)

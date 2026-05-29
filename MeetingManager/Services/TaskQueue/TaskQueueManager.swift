@@ -39,6 +39,13 @@ final class TaskQueueManager {
 
     /// Closures injected by AppState to execute actual work.
     var transcriptionHandler: ((String, URL?, String?) async throws -> Void)?
+
+    /// Fired once each time the queue transitions from busy to idle (no pending
+    /// or running tasks). Lets callers run deferred work that needs the AI
+    /// backend free — e.g. regenerating a daily brief that was queued while a
+    /// bulk re-transcription saturated the local model.
+    var onQueueIdle: (() async -> Void)?
+    private var idleNotified = false
     /// Speaker diarization handler — meetingId, system audio URL (may be nil if not recorded).
     var diarizationHandler: ((String, URL?) async throws -> Void)?
     var summaryHandler: ((String) async throws -> Void)?
@@ -476,9 +483,15 @@ final class TaskQueueManager {
     private func processLoop() async {
         while !Task.isCancelled {
             guard let next = await fetchNextPending() else {
+                // Queue is drained — fire the idle hook once per busy→idle edge.
+                if !idleNotified {
+                    idleNotified = true
+                    if let onQueueIdle { await onQueueIdle() }
+                }
                 try? await Task.sleep(for: .seconds(5))
                 continue
             }
+            idleNotified = false
 
             await markRunning(next)
             currentTask = next
