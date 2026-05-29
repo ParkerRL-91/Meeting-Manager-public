@@ -9,8 +9,8 @@ import os
 /// for streaming audio and produces results in real-time as speech is detected.
 /// It uses Apple's on-device speech model — no internet required on macOS 13+.
 ///
-/// This replaces the StreamingTranscriber + WhisperKit pipeline for live transcription.
-/// WhisperKit remains available for post-recording batch transcription if needed.
+/// Used as the auto-fallback when WhisperKit fails to load; WhisperKit remains
+/// the primary engine for post-recording batch transcription.
 @MainActor
 final class AppleSpeechTranscriber {
 

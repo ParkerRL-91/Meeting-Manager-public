@@ -155,7 +155,6 @@ final class AppState {
     let summaryRepository: SummaryRepository
     let audioCaptureService: AudioCaptureService
     let transcriptionService: TranscriptionService
-    let streamingTranscriber: StreamingTranscriber
     let appleSpeechTranscriber: AppleSpeechTranscriber
     let taskQueueManager: TaskQueueManager
     let notificationService: NotificationService
@@ -246,7 +245,6 @@ final class AppState {
             self.summaryRepository = existing.summaryRepository
             self.audioCaptureService = existing.audioCaptureService
             self.transcriptionService = existing.transcriptionService
-            self.streamingTranscriber = existing.streamingTranscriber
             self.appleSpeechTranscriber = existing.appleSpeechTranscriber
             self.stateMachine = existing.stateMachine
             self.taskQueueManager = existing.taskQueueManager
@@ -284,7 +282,6 @@ final class AppState {
 
         let txService = TranscriptionService()
         self.transcriptionService = txService
-        self.streamingTranscriber = StreamingTranscriber(transcriptionService: txService)
         self.appleSpeechTranscriber = AppleSpeechTranscriber()
 
         self.stateMachine = MeetingStateMachine(

@@ -346,7 +346,7 @@ final class TranscriptionService {
                 self.downloadProgress = 1.0
             }
             Logger.transcription.info("Transcription mode set to .appleSpeech (WhisperKit unavailable)")
-            // Don't throw — fallback is available. StreamingTranscriber checks transcriptionMode.
+            // Don't throw — fallback is available. Callers read transcriptionMode.
         }
     }
 
