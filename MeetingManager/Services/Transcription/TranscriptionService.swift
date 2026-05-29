@@ -106,57 +106,79 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         return allExist ? modelDir.path : nil
     }
 
+    /// Minimum free disk space (bytes) required before a first-time download:
+    /// the model size plus headroom for the HuggingFace snapshot's temporary
+    /// files and CoreML's on-device compile.
+    private static func ensureDiskSpaceForDownload(_ model: WhisperModel) throws {
+        let requiredBytes = Int64(model.estimatedDownloadMB) * 1024 * 1024 * 2 + 512 * 1024 * 1024
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+              let freeBytes = attrs[.systemFreeSize] as? Int64 else {
+            return // Can't read free space — don't block; the download will surface any real failure.
+        }
+        if freeBytes < requiredBytes {
+            let freeMB = freeBytes / (1024 * 1024)
+            throw TranscriptionError.downloadFailed("Not enough disk space to download \(model.displayName) (\(model.downloadSizeDescription)). Only \(freeMB) MB free — free up space and try again.")
+        }
+    }
+
     func loadModel(
         named model: WhisperModel,
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws {
         Logger.transcription.info("Downloading/loading WhisperKit model: \(model.rawValue)")
-        progressHandler(0.05)
+        progressHandler(0.02)
 
         // Use cached model folder if available — avoids network check on HuggingFace
         // which can intermittently fail and cause "Model not found" errors.
-        let cachedFolder = Self.cachedModelFolder(for: model)
         let computeOptions = Self.computeOptionsForCurrentHardware()
-        let config: WhisperKitConfig
-        if let cachedFolder {
-            Logger.transcription.info("Using cached model at: \(cachedFolder)")
-            config = WhisperKitConfig(
-                model: model.rawValue,
-                modelFolder: cachedFolder,
-                computeOptions: computeOptions,
-                verbose: false,
-                logLevel: .error,
-                prewarm: true,
-                load: true,
-                download: false
-            )
+        var modelFolder = Self.cachedModelFolder(for: model)
+
+        // First-time download: do it explicitly (not via WhisperKitConfig's
+        // download:true) so we can preflight disk space and report real
+        // byte-level progress. The old config path jumped the progress bar from
+        // 5% straight to 100%, so a multi-hundred-MB download looked frozen.
+        if modelFolder == nil {
+            try Self.ensureDiskSpaceForDownload(model)
+            Logger.transcription.info("No cached model found — downloading \(model.rawValue) from HuggingFace")
+
+            let downloadedURL = try await withThrowingTaskGroup(of: URL.self) { group in
+                group.addTask {
+                    try await WhisperKit.download(variant: model.rawValue) { progress in
+                        // Reserve the final 10% for compile/prewarm below.
+                        progressHandler(min(0.9, max(0.02, progress.fractionCompleted * 0.9)))
+                    }
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(900))
+                    throw TranscriptionError.downloadFailed("Model download timed out after 15 minutes")
+                }
+                let url = try await group.next()!
+                group.cancelAll()
+                return url
+            }
+            modelFolder = downloadedURL.path
         } else {
-            Logger.transcription.info("No cached model found — downloading from HuggingFace")
-            config = WhisperKitConfig(
-                model: model.rawValue,
-                computeOptions: computeOptions,
-                verbose: false,
-                logLevel: .error,
-                prewarm: true,
-                load: true,
-                download: true,
-                useBackgroundDownloadSession: false
-            )
+            Logger.transcription.info("Using cached model at: \(modelFolder!)")
         }
 
-        // Wrap with a timeout — WhisperKit(config) can hang indefinitely on
-        // network issues or corrupt model caches. withThrowingTaskGroup cancels
-        // the hung task when the timeout fires (unlike a naive Task.sleep race).
-        //
-        // The timeout is adaptive. A cached model only needs to compile/prewarm
-        // (slower on Intel, which has no Neural Engine, but bounded), so 5
-        // minutes is plenty; on a real hang the caller falls back to Apple
-        // Speech. A first-time download legitimately needs much longer on a slow
-        // connection, so the download path gets a generous window rather than
-        // false-timing-out and degrading a capable Mac to the lower-quality
-        // fallback. The timeout is only ever extended versus the old fixed 5 min.
-        let timeoutSeconds: Int = cachedFolder != nil ? 300 : 900
-        let timeoutDescription = cachedFolder != nil ? "5 minutes" : "15 minutes"
+        guard let resolvedFolder = modelFolder else {
+            throw TranscriptionError.downloadFailed("Model folder unavailable after download")
+        }
+
+        let config = WhisperKitConfig(
+            model: model.rawValue,
+            modelFolder: resolvedFolder,
+            computeOptions: computeOptions,
+            verbose: false,
+            logLevel: .error,
+            prewarm: true,
+            load: true,
+            download: false
+        )
+
+        // Load + compile/prewarm with a timeout. This step no longer includes a
+        // network download (handled above), so 5 minutes is plenty even on Intel
+        // (no Neural Engine); on a real hang the caller falls back to Apple Speech.
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 let kit = try await WhisperKit(config)
@@ -167,8 +189,8 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
                 progressHandler(1.0)
             }
             group.addTask {
-                try await Task.sleep(for: .seconds(timeoutSeconds))
-                throw TranscriptionError.transcriptionFailed("Model load timed out after \(timeoutDescription)")
+                try await Task.sleep(for: .seconds(300))
+                throw TranscriptionError.transcriptionFailed("Model load timed out after 5 minutes")
             }
             // First task to finish wins; cancel the other
             try await group.next()!

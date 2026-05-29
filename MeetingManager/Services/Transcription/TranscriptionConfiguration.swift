@@ -42,6 +42,15 @@ enum WhisperModel: String, CaseIterable, Identifiable, Codable {
         case .largev3: return "~1.5 GB"
         }
     }
+
+    /// Approximate on-disk download size in megabytes. Used for the disk-space
+    /// preflight before a first-time model download.
+    var estimatedDownloadMB: Int {
+        switch self {
+        case .largev3turbo: return 700
+        case .largev3: return 1_600
+        }
+    }
 }
 
 // MARK: - Transcription Mode
