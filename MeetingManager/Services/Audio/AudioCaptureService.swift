@@ -42,6 +42,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// The error is surfaced to the user via AppState.lastUserError.
     var onWriteError: ((Error) -> Void)?
 
+    /// Called when the system-audio tap can't start (almost always missing
+    /// Screen Recording permission), so remote participants won't be recorded —
+    /// only the local mic. Surfaced to the user with an actionable message,
+    /// since this can't be requested programmatically and needs a relaunch.
+    var onSystemAudioUnavailable: ((String) -> Void)?
+
     /// How many consecutive seconds of silence before triggering auto-stop.
     /// 5 minutes — meetings often have long pauses (presentations, screen sharing, muted mic).
     var silenceTimeout: TimeInterval = 300
@@ -263,10 +269,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 } catch {
                     Logger.audio.error("System audio tap FAILED: \(error.localizedDescription)")
                     logToFile("Audio: system audio tap FAILED — \(error.localizedDescription). Only mic will be recorded. Grant Screen Recording permission to capture remote participants.")
+                    onSystemAudioUnavailable?("Remote participants aren't being recorded — only your microphone. Grant Screen Recording permission in System Settings → Privacy & Security → Screen Recording, then quit and reopen Meeting Manager.")
                 }
             } else {
                 Logger.audio.warning("System audio tap not available (requires macOS 14.2+)")
                 logToFile("Audio: system audio tap not available (requires macOS 14.2+)")
+                onSystemAudioUnavailable?("System audio capture needs macOS 14.2 or later, so remote participants won't be recorded — only your microphone.")
             }
         } else {
             logToFile("Audio: system audio tap requires macOS 14.2+ — only mic will be recorded")

@@ -340,6 +340,13 @@ final class AppState {
             }
         }
 
+        // Surface missing Screen Recording permission (no system/remote audio).
+        audioCaptureService.onSystemAudioUnavailable = { [weak self] message in
+            Task { @MainActor in
+                self?.lastUserError = message
+            }
+        }
+
         loadMeetings()
         loadSettings()
         loadCachedDailyBriefForToday()

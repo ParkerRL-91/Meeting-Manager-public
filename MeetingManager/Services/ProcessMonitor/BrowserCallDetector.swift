@@ -141,7 +141,17 @@ final class BrowserCallDetector {
         guard let appleScript = NSAppleScript(source: script) else { return nil }
         var errorInfo: NSDictionary?
         let result = appleScript.executeAndReturnError(&errorInfo)
-        if errorInfo != nil { return nil }
+        if let errorInfo {
+            // -1743 = errAEEventNotPermitted: Automation (Apple Events) permission
+            // was denied. Browser tab-title detection is a fallback to calendar
+            // (the primary participant source), so we degrade quietly to the
+            // CGWindowList / mic-usage strategies rather than nagging — but log
+            // it clearly so the cause is visible in diagnostics.
+            if let code = errorInfo[NSAppleScript.errorNumber] as? Int, code == -1743 {
+                Logger.general.info("BrowserCallDetector: Automation permission denied (errAEEventNotPermitted); falling back to window-title detection. Enable it in System Settings → Privacy & Security → Automation.")
+            }
+            return nil
+        }
 
         let count = result.numberOfItems
         guard count > 0 else { return nil }
