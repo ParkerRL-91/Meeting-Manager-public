@@ -214,6 +214,17 @@ final class ClaudeService {
                 } else {
                     message = String(data: data, encoding: .utf8) ?? "Unknown error"
                 }
+                // 429 carries an actionable Retry-After value. Surface it as
+                // the typed rateLimited case so the retry helper can honor
+                // the server's hint instead of falling back to exp backoff.
+                if httpResponse.statusCode == 429 {
+                    let retryAfter: Int? = {
+                        guard let raw = httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                              let seconds = Int(raw.trimmingCharacters(in: .whitespaces)) else { return nil }
+                        return seconds
+                    }()
+                    throw ClaudeServiceError.rateLimited(retryAfterSeconds: retryAfter)
+                }
                 throw ClaudeServiceError.httpError(
                     statusCode: httpResponse.statusCode,
                     message: message
@@ -263,7 +274,15 @@ final class ClaudeService {
                     throw error
                 }
                 if attempt < maxAttempts - 1 {
-                    let delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                    // Prefer the server's Retry-After hint on 429 over the
+                    // default exp backoff. Cap at 60s so a misbehaving
+                    // server doesn't strand the user staring at a spinner.
+                    let delay: Double
+                    if case ClaudeServiceError.rateLimited(let hint) = error, let seconds = hint {
+                        delay = min(60.0, max(0.1, Double(seconds)))
+                    } else {
+                        delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                    }
                     try? await Task.sleep(for: .seconds(delay))
                 }
             }
