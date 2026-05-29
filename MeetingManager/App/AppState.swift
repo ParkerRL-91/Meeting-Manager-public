@@ -1966,6 +1966,9 @@ final class AppState {
         // per-profile threshold (0.82 normally, 0.87 for LLM-only profiles)
         // gates each match, and we capture the cosine similarity as confidence.
         var voiceMatches: [String: String] = [:]
+        // #3 — keep each signal's own confidence so agreeing signals can be
+        // combined later (not just first-writer-wins).
+        var voiceConfidence: [String: Float] = [:]
         if let audioPath = meeting.audioFilePath {
             let systemURL = AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: audioPath))
             if FileManager.default.fileExists(atPath: systemURL.path) {
@@ -1986,6 +1989,7 @@ final class AppState {
                         stored: stored
                     )
                     voiceMatches = result.mapping
+                    voiceConfidence = result.confidence
                     // Voice match confidence = cosine similarity (already in [0, 1]).
                     for (cluster, sim) in result.confidence {
                         clusterConfidence[cluster] = sim
@@ -2022,6 +2026,7 @@ final class AppState {
         for (cluster, name) in droppedMatches {
             Logger.general.warning("[AttendanceGate] dropping voice match \(cluster, privacy: .public) → \(name, privacy: .public) — not in attendees \(participants.joined(separator: ", "), privacy: .public)")
             voiceMatches.removeValue(forKey: cluster)
+            voiceConfidence.removeValue(forKey: cluster)
             clusterConfidence.removeValue(forKey: cluster)
         }
 
@@ -2068,16 +2073,28 @@ final class AppState {
         for (cluster, name) in voiceMatches where mapping[cluster] == nil {
             mapping[cluster] = name
         }
-        // Capture LLM confidence for clusters the LLM contributed (and which
-        // weren't already covered by a stronger voice/vocative signal).
-        for (cluster, conf) in outcome.confidenceMap where clusterConfidence[cluster] == nil {
-            clusterConfidence[cluster] = conf
-        }
-        // Pull vocative confidence into final map for clusters the LLM kept.
-        for (cluster, _) in mapping where clusterConfidence[cluster] == nil {
-            if let voc = vocativeResult.confidence[cluster] {
-                clusterConfidence[cluster] = voc
-            }
+
+        // #3 — combine AGREEING signals instead of first-writer-wins. For each
+        // finally-mapped cluster, gather the confidence from every independent
+        // signal (voice / vocative / LLM) that proposed the SAME resolved name,
+        // and combine them probabilistically: 1 − ∏(1 − cᵢ). Two mediocre
+        // signals that agree (e.g. a 0.58 voice match and a 0.62 LLM verdict)
+        // now clear the review bar together, where previously whichever wrote
+        // first masked the corroboration. A lone signal keeps its own score
+        // (single term → unchanged). Disagreeing signals don't contribute —
+        // only the signals backing the chosen name count.
+        for (cluster, finalName) in mapping {
+            let finalLower = finalName.lowercased()
+            var contributions: [Float] = []
+            if let n = voiceMatches[cluster], n.lowercased() == finalLower,
+               let c = voiceConfidence[cluster] { contributions.append(c) }
+            if let n = vocativeResult.mapping[cluster], n.lowercased() == finalLower,
+               let c = vocativeResult.confidence[cluster] { contributions.append(c) }
+            if let n = outcome.mapping[cluster], n.lowercased() == finalLower,
+               let c = outcome.confidenceMap[cluster] { contributions.append(c) }
+            guard !contributions.isEmpty else { continue }
+            let combined = 1 - contributions.reduce(Float(1)) { $0 * (1 - $1) }
+            clusterConfidence[cluster] = min(1.0, combined)
         }
 
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
@@ -2501,15 +2518,15 @@ final class AppState {
             return false
         }
 
-        let remote: Int
-        if accepted.contains(where: isLocalUser) {
-            remote = accepted.filter { !isLocalUser($0) }.count
-        } else {
-            // Couldn't positively identify the user in the list, but the
-            // user is virtually always one of their own meeting's
-            // attendees — subtract one rather than counting them as remote.
-            remote = max(0, accepted.count - 1)
-        }
+        // #5 — only hint when we can positively identify and subtract the
+        // local user. The old `accepted.count - 1` guess fired when the user
+        // ISN'T in their own attendee list (common for externally-organized
+        // invites): it under-counted by one, and since Pyannote treats the
+        // hint as an EXACT count, two real remote speakers collapsed into one
+        // cluster (under-split). When we can't find the user, return nil and
+        // let Pyannote's own clustering decide rather than force a wrong count.
+        guard accepted.contains(where: isLocalUser) else { return nil }
+        let remote = accepted.filter { !isLocalUser($0) }.count
         return remote >= 2 ? remote : nil
     }
 

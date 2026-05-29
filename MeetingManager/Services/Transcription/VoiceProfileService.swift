@@ -203,15 +203,21 @@ final class VoiceProfileService {
             guard collected.count >= frameSize,
                   let newEmb = melSpectrumEmbedding(samples: collected) else { continue }
 
-            // Find the stored profile with highest cosine similarity.
+            // Find the stored profile with highest cosine similarity. #6 — gate
+            // on each profile's own dynamicMatchThreshold (0.82 normally, 0.87
+            // for LLM-only profiles to resist drift), identical to
+            // matchProfilesWithConfidence. Previously this used a flat
+            // matchThreshold, so an LLM-only profile that should require 0.87
+            // could be applied here at 0.82 before the stricter range-based pass
+            // ever ran — defeating the drift protection.
             var bestName: String? = nil
-            var bestSim: Float = matchThreshold  // must exceed threshold
+            var bestSim: Float = 0
 
             for profile in stored {
                 let storedEmb = profile.embedding
                 guard storedEmb.count == newEmb.count else { continue }
                 let sim = cosineSimilarity(newEmb, storedEmb)
-                if sim > bestSim {
+                if sim >= profile.dynamicMatchThreshold && sim > bestSim {
                     bestSim = sim
                     bestName = profile.personName
                 }
