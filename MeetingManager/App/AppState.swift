@@ -1716,10 +1716,14 @@ final class AppState {
             fileLog("Batch transcribe: \(allSamples.count) samples (\(String(format: "%.0f", totalDuration))s raw)")
 
             // Trim leading and trailing silence to improve transcription quality.
-            // WhisperKit hallucinates on long silent sections.
+            // WhisperKit hallucinates on long silent sections. Compute the
+            // bounds once so we can apply the same window to the system-only
+            // WAV below, keeping the diarization timeline aligned with the
+            // WhisperKit timeline.
             let silenceThreshold: Float = 0.005
             let windowSize = Int(fileFormat.sampleRate) // 1-second windows
-            let samples = trimSilence(allSamples, threshold: silenceThreshold, windowSize: windowSize)
+            let trimBounds = trimSilenceBounds(allSamples, threshold: silenceThreshold, windowSize: windowSize)
+            let samples = Array(allSamples[trimBounds.start..<trimBounds.end])
 
             let trimmedDuration = Double(samples.count) / Double(fileFormat.sampleRate)
             fileLog("Batch transcribe: trimmed to \(samples.count) samples (\(String(format: "%.0f", trimmedDuration))s speech)")
@@ -1728,42 +1732,61 @@ final class AppState {
             let segments = try await transcriptionService.transcribe(samples: samples)
             fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
 
-            // Step 2: Run speaker diarization with SpeakerKit
+            // Step 2: Run speaker diarization. Prefer the system-only WAV
+            // (call participant voices, no local mic) when AudioBufferManager
+            // wrote one alongside the mixed WAV; fall back to the mixed
+            // buffer otherwise. Diarizing on system-only avoids the false
+            // splits at speaker overlaps that happen when the local user's
+            // mic is in the input.
             //
-            // TODO Layer 2 follow-up (deferred): SpeakerKit currently runs on
-            // the MIXED buffer that contains both mic and system audio. The
-            // research note for v3.1 calls for diarizing the SYSTEM stream
-            // only — mic is by definition a single speaker (the user) and
-            // diarizing the mix produces false splits at speaker overlaps.
-            //
-            // The blocker is that AudioCaptureService writes a single
-            // `{meetingId}.wav` (see AudioCaptureService.swift:130) — by the
-            // time batchTranscribe loads samples, the per-source separation
-            // is already lost. Splitting requires either:
-            //   (a) AudioBufferManager keeping a parallel system-only file,
-            //   (b) StreamingTranscriber surfacing per-source samples that
-            //       batch path can reuse, or
-            //   (c) source-separating the mixed file post-hoc.
-            //
-            // None of these are localized changes. LLM attribution still
-            // works correctly on Speaker N clusters from the mixed buffer; it
-            // is just suboptimal on overlapping speech. Track in the v3.1
-            // SPRINT_LOG.
+            // Both buffers share a sample clock (system file is opened at
+            // the same instant as the mixed file in AudioBufferManager), so
+            // applying the same `trimBounds` window keeps timestamps aligned
+            // with the WhisperKit segments. Clamp defensively in case the
+            // system file is shorter than the mixed (e.g. system tap failed
+            // partway through the meeting).
+            let meeting = try? await self.meetingRepository.find(id: meetingId)
+            let (diarizationSamples, diarizationSource, participantHint): ([Float], String, Int?) = {
+                let systemURL = AudioBufferManager.systemAudioURL(for: audioURL)
+                guard FileManager.default.fileExists(atPath: systemURL.path),
+                      let systemFile = try? AVAudioFile(forReading: systemURL),
+                      systemFile.processingFormat.sampleRate == expectedSampleRate,
+                      let systemBuffer = AVAudioPCMBuffer(
+                          pcmFormat: systemFile.processingFormat,
+                          frameCapacity: AVAudioFrameCount(systemFile.length)
+                      ),
+                      (try? systemFile.read(into: systemBuffer)) != nil,
+                      let systemChannelData = systemBuffer.floatChannelData else {
+                    // No system-only file (or unreadable) — fall back to mixed
+                    // with the +1 hint that counts the user's voice.
+                    let attendeeCount = meeting?.acceptedParticipantList.count ?? 0
+                    let hint = attendeeCount > 0 ? attendeeCount + 1 : nil
+                    return (samples, "mixed (system WAV missing)", hint)
+                }
+                let allSystemSamples = Array(UnsafeBufferPointer(
+                    start: systemChannelData[0],
+                    count: Int(systemBuffer.frameLength)
+                ))
+                let sStart = min(trimBounds.start, allSystemSamples.count)
+                let sEnd = min(trimBounds.end, allSystemSamples.count)
+                guard sStart < sEnd else {
+                    let attendeeCount = meeting?.acceptedParticipantList.count ?? 0
+                    let hint = attendeeCount > 0 ? attendeeCount + 1 : nil
+                    return (samples, "mixed (system WAV too short)", hint)
+                }
+                let systemSamples = Array(allSystemSamples[sStart..<sEnd])
+                // System-only buffer: user's mic isn't in it. The hint is the
+                // remote-speaker count, computed identically to runDiarization.
+                return (systemSamples, "system-only", remoteParticipantHint(for: meeting))
+            }()
+
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
-                // Speaker-count hint: accepted attendees + 1 for the user
-                // whose mic is mixed into this buffer. When audit #12 lands
-                // and we diarize a system-only WAV, drop the +1 — the user's
-                // voice will no longer be in the input.
-                let attendeeCount = (try? await self.meetingRepository.find(id: meetingId))?
-                    .acceptedParticipantList.count ?? 0
-                let participantHint = attendeeCount > 0 ? attendeeCount + 1 : nil
-
                 let diarResult = try await SpeakerDiarizationService.shared.diarize(
-                    audioArray: samples,
+                    audioArray: diarizationSamples,
                     participantCount: participantHint
                 )
-                fileLog("Diarization: \(diarResult.segments.count) speaker segments found (hint: \(participantHint.map(String.init) ?? "auto"))")
+                fileLog("Diarization: \(diarResult.segments.count) speaker segments from \(diarizationSource) input (hint: \(participantHint.map(String.init) ?? "auto"))")
 
                 // Build a lookup: for each second, which speaker is active
                 for seg in diarResult.segments {
@@ -2404,6 +2427,44 @@ final class AppState {
         await runDiarization(meetingId: meetingId, systemAudioURL: systemURL)
     }
 
+    /// Speaker-count hint passed to Pyannote when diarizing a SYSTEM-ONLY
+    /// audio buffer. Returns the number of expected REMOTE speakers — accepted
+    /// attendees minus the local user, who isn't in the system-only stream.
+    ///
+    /// Pyannote treats `numberOfSpeakers` as an EXACT count, not an upper
+    /// bound: when its own clustering disagrees it re-runs K-Means forced to
+    /// exactly that many clusters. So an over-count splits one real speaker
+    /// into several. Returns nil for 0–1 expected remote speakers and lets
+    /// Pyannote's own clustering decide, rather than forcing a possibly-wrong
+    /// exact count.
+    private func remoteParticipantHint(for meeting: Meeting?) -> Int? {
+        guard let m = meeting else { return nil }
+        let accepted = m.acceptedParticipantList
+        guard !accepted.isEmpty else { return nil }
+
+        let userEmail = googleAuthManager.userEmail?
+            .lowercased().trimmingCharacters(in: .whitespaces)
+        let userName = NSFullUserName()
+            .lowercased().trimmingCharacters(in: .whitespaces)
+        func isLocalUser(_ raw: String) -> Bool {
+            let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+            if let e = userEmail, !e.isEmpty, s == e { return true }
+            if !userName.isEmpty, s == userName { return true }
+            return false
+        }
+
+        let remote: Int
+        if accepted.contains(where: isLocalUser) {
+            remote = accepted.filter { !isLocalUser($0) }.count
+        } else {
+            // Couldn't positively identify the user in the list, but the
+            // user is virtually always one of their own meeting's
+            // attendees — subtract one rather than counting them as remote.
+            remote = max(0, accepted.count - 1)
+        }
+        return remote >= 2 ? remote : nil
+    }
+
     private func runDiarization(meetingId: String, systemAudioURL: URL?) async {
         let service = SpeakerDiarizationService.shared
         let transcriptRepo = TranscriptRepository(database: database)
@@ -2435,33 +2496,7 @@ final class AppState {
         // remote speakers (where a count genuinely prevents under-merge); for
         // 0–1, pass nil and let Pyannote's clustering decide rather than force
         // a possibly-wrong exact count.
-        let participantCount: Int? = {
-            guard let m = meeting else { return nil }
-            let accepted = m.acceptedParticipantList
-            guard !accepted.isEmpty else { return nil }
-
-            let userEmail = googleAuthManager.userEmail?
-                .lowercased().trimmingCharacters(in: .whitespaces)
-            let userName = NSFullUserName()
-                .lowercased().trimmingCharacters(in: .whitespaces)
-            func isLocalUser(_ raw: String) -> Bool {
-                let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
-                if let e = userEmail, !e.isEmpty, s == e { return true }
-                if !userName.isEmpty, s == userName { return true }
-                return false
-            }
-
-            let remote: Int
-            if accepted.contains(where: isLocalUser) {
-                remote = accepted.filter { !isLocalUser($0) }.count
-            } else {
-                // Couldn't positively identify the user in the list, but the
-                // user is virtually always one of their own meeting's
-                // attendees — subtract one rather than counting them as remote.
-                remote = max(0, accepted.count - 1)
-            }
-            return remote >= 2 ? remote : nil
-        }()
+        let participantCount = remoteParticipantHint(for: meeting)
 
         do {
             taskQueueManager.reportCurrentProgress(stage: "Running diarization")
@@ -3017,7 +3052,21 @@ final class AppState {
     /// Trim leading and trailing silence from audio samples.
     /// Uses 1-second windows and checks if the RMS energy exceeds the threshold.
     private func trimSilence(_ samples: [Float], threshold: Float, windowSize: Int) -> [Float] {
-        guard samples.count > windowSize else { return samples }
+        let bounds = trimSilenceBounds(samples, threshold: threshold, windowSize: windowSize)
+        return Array(samples[bounds.start..<bounds.end])
+    }
+
+    /// Find the head/tail sample indices that bound the non-silent region of
+    /// `samples`. Separated from `trimSilence` so the same bounds can be
+    /// applied to a parallel buffer (e.g. the system-only WAV) — keeping the
+    /// diarization timeline aligned with the WhisperKit timeline after both
+    /// are sliced to the same window.
+    ///
+    /// Returns `(0, samples.count)` when the buffer is shorter than one window
+    /// or when no non-silent region is found, so callers always get a valid
+    /// half-open range.
+    private func trimSilenceBounds(_ samples: [Float], threshold: Float, windowSize: Int) -> (start: Int, end: Int) {
+        guard samples.count > windowSize else { return (0, samples.count) }
 
         let windowCount = samples.count / windowSize
 
@@ -3049,8 +3098,8 @@ final class AppState {
             }
         }
 
-        guard firstNonSilent < lastNonSilent else { return samples }
-        return Array(samples[firstNonSilent..<lastNonSilent])
+        guard firstNonSilent < lastNonSilent else { return (0, samples.count) }
+        return (firstNonSilent, lastNonSilent)
     }
 
     // MARK: - File Logging (delegates to AppFileLogger for thread-safe, date-rotated output)
