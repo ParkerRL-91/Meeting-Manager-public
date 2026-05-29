@@ -724,7 +724,33 @@ final class AppState {
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
         Task {
             await taskQueueManager.startUp()
+            await maybeRunVoiceProfileResetFromLaunchArgs()
         }
+    }
+
+    /// Headless trigger for the voice-profile hard reset + rebuild. Pass
+    /// `--rebuild-voice-profiles` to process all qualifying meetings, or
+    /// `--rebuild-voice-profiles=N` to cap at N (validation run). Waits for the
+    /// transcription model and the meeting list before enqueuing.
+    private func maybeRunVoiceProfileResetFromLaunchArgs() async {
+        let arg = CommandLine.arguments.first { $0.hasPrefix("--rebuild-voice-profiles") }
+        guard let arg else { return }
+        var cap: Int? = nil
+        if let eq = arg.firstIndex(of: "="), let n = Int(arg[arg.index(after: eq)...]) { cap = n }
+
+        // Ensure the meeting list is loaded (the reset filters over `meetings`).
+        loadMeetings()
+        for _ in 0..<50 where meetings.isEmpty {
+            try? await Task.sleep(for: .milliseconds(200))
+            loadMeetings()
+        }
+        // Wait up to 5 min for the WhisperKit model so the first re-transcription
+        // doesn't fail before the model finishes loading.
+        for _ in 0..<300 where !transcriptionService.isModelLoaded {
+            try? await Task.sleep(for: .seconds(1))
+        }
+        let count = await runFullVoiceProfileReset(maxMeetings: cap)
+        fileLog("VoiceReset(launch-arg): enqueued \(count) meeting(s)\(cap.map { " (capped at \($0))" } ?? "")")
     }
 
     /// Drive `DetailedOutlineService.generate` with the user's current AI
@@ -2447,6 +2473,78 @@ final class AppState {
             }
             Logger.general.info("Voice profile learned: \(name, privacy: .public) (\(ranges.count) range(s)) for meeting \(meetingId, privacy: .public)")
         }
+    }
+
+    /// HARD RESET of the voice-identity system, then re-transcribe + re-identify
+    /// the target meetings from their original audio so profiles are rebuilt by
+    /// the current (WhisperKit 1.0 + fixed) pipeline.
+    ///
+    /// Steps:
+    ///   1. Wipe voiceProfile, voiceSample, and speakerAlias — every learned
+    ///      fingerprint and manual alias is cleared (the user chose a clean
+    ///      slate). Person rows are kept; they're rebuilt by attribution.
+    ///   2. Select meetings with 1…`maxOtherAttendees` accepted attendees AND a
+    ///      non-empty system-only WAV on disk (no system audio = nothing to
+    ///      diarize/learn). Capped by `maxMeetings` when set (validation runs).
+    ///   3. For each: delete its transcript rows, clear transcriptionAttemptedAt,
+    ///      set status = .transcribing, and enqueue a .transcription task. The
+    ///      queue then re-transcribes (WhisperKit 1.0), diarizes the system WAV,
+    ///      attributes, and — via the handler's new learnVoiceProfiles call —
+    ///      rebuilds the profile DB.
+    ///
+    /// Returns the number of meetings enqueued. The actual work happens
+    /// asynchronously on the task queue and can take a long time.
+    func runFullVoiceProfileReset(maxOtherAttendees: Int = 4, maxMeetings: Int? = nil) async -> Int {
+        // 1. Hard wipe.
+        do {
+            try await database.writer.write { db in
+                try db.execute(sql: "DELETE FROM voiceProfile")
+                try db.execute(sql: "DELETE FROM voiceSample")
+                try db.execute(sql: "DELETE FROM speakerAlias")
+            }
+            fileLog("VoiceReset: wiped voiceProfile + voiceSample + speakerAlias")
+        } catch {
+            fileLog("VoiceReset: wipe failed — \(error.localizedDescription)")
+            return 0
+        }
+
+        // 2. Select targets: small meetings with real system audio.
+        let minSystemBytes: Int64 = 64_000 // ~1s of 16kHz Float32; excludes the 4KB empties
+        let candidates = meetings.filter { m in
+            let others = m.acceptedParticipantList.count
+            guard others >= 1, others <= maxOtherAttendees else { return false }
+            guard let path = m.audioFilePath, !path.isEmpty else { return false }
+            let systemURL = AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: path))
+            guard FileManager.default.fileExists(atPath: systemURL.path) else { return false }
+            let size = (try? FileManager.default.attributesOfItem(atPath: systemURL.path)[.size] as? Int64) ?? 0
+            return (size ?? 0) >= minSystemBytes
+        }
+        let targets = maxMeetings.map { Array(candidates.prefix($0)) } ?? candidates
+        fileLog("VoiceReset: \(candidates.count) candidate meeting(s), enqueuing \(targets.count)")
+
+        // 3. Reset each target's transcript state and enqueue re-transcription.
+        var enqueued = 0
+        for m in targets {
+            do {
+                try await transcriptRepository.deleteForMeeting(m.id)
+                try await database.writer.write { db in
+                    if var meeting = try Meeting.fetchOne(db, key: m.id) {
+                        meeting.transcriptionAttemptedAt = nil
+                        meeting.status = .transcribing
+                        meeting.setSpeakerMap([:])
+                        meeting.setSpeakerConfidenceMap([:])
+                        try meeting.update(db)
+                    }
+                }
+                await taskQueueManager.enqueue(type: .transcription, meetingId: m.id, priority: 2)
+                enqueued += 1
+            } catch {
+                fileLog("VoiceReset: failed to reset meeting \(m.id) — \(error.localizedDescription)")
+            }
+        }
+        loadMeetings()
+        fileLog("VoiceReset: enqueued \(enqueued) meeting(s) for re-transcription + rebuild")
+        return enqueued
     }
 
     /// One-shot rebuild of the entire voice-profile database from history.

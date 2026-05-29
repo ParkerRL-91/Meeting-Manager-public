@@ -13,6 +13,8 @@ struct VoiceProfilesSettingsView: View {
     @State private var isRebuilding: Bool = false
     @State private var rebuildResult: String?
     @State private var errorMessage: String?
+    @State private var showHardResetConfirm: Bool = false
+    @State private var hardResetResult: String?
 
     var body: some View {
         Form {
@@ -69,9 +71,43 @@ struct VoiceProfilesSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Hard reset") {
+                Button(role: .destructive) {
+                    showHardResetConfirm = true
+                } label: {
+                    Label("Hard reset and rebuild from audio", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                }
+                if let result = hardResetResult {
+                    Label(result, systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+                Text("Clears every voice profile, voice sample, and manual speaker alias, then re-transcribes and re-identifies your one-on-one and small-group meetings from their original audio with the current engine. This rebuilds the entire voice-identity database from scratch and can take a long time — it runs in the background through the task queue.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .task { await load() }
+        .confirmationDialog(
+            "Hard reset the voice-identity database?",
+            isPresented: $showHardResetConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Reset and rebuild", role: .destructive) { hardReset() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes all voice profiles, voice samples, and manual speaker aliases, then re-transcribes and re-identifies your one-on-one and small-group meetings. Names you confirmed by hand will be cleared and re-derived. This cannot be undone and can take a long time.")
+        }
+    }
+
+    private func hardReset() {
+        Task {
+            let count = await appState.runFullVoiceProfileReset()
+            hardResetResult = "Re-processing \(count) meeting\(count == 1 ? "" : "s") in the background"
+            await load()
+        }
     }
 
     private func load() async {
