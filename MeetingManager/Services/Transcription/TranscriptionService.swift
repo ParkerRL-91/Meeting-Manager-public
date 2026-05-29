@@ -1,4 +1,5 @@
 import Foundation
+import CoreML
 import WhisperKit
 import os
 
@@ -74,6 +75,24 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
     private var isLoaded = false
     private let lock = NSLock()
 
+    /// Pick compute units appropriate for the current Mac. On Apple Silicon
+    /// the WhisperKit defaults (mel: cpuAndGPU, audio encoder + text decoder:
+    /// cpuAndNeuralEngine) are already optimal. On Intel Macs the Neural
+    /// Engine doesn't exist and CoreML's automatic fallback to CPU is slower
+    /// than just routing to the GPU explicitly. Returns nil on Apple Silicon
+    /// so WhisperKit's own defaults apply.
+    private static func computeOptionsForCurrentHardware() -> ModelComputeOptions? {
+        #if arch(x86_64)
+        return ModelComputeOptions(
+            melCompute: .cpuAndGPU,
+            audioEncoderCompute: .cpuAndGPU,
+            textDecoderCompute: .cpuAndGPU
+        )
+        #else
+        return nil
+        #endif
+    }
+
     /// The default HuggingFace cache path where WhisperKit stores downloaded CoreML models.
     /// Returns the path for the given model if the required CoreML files are already cached.
     private static func cachedModelFolder(for model: WhisperModel) -> String? {
@@ -97,12 +116,14 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
         // Use cached model folder if available — avoids network check on HuggingFace
         // which can intermittently fail and cause "Model not found" errors.
         let cachedFolder = Self.cachedModelFolder(for: model)
+        let computeOptions = Self.computeOptionsForCurrentHardware()
         let config: WhisperKitConfig
         if let cachedFolder {
             Logger.transcription.info("Using cached model at: \(cachedFolder)")
             config = WhisperKitConfig(
                 model: model.rawValue,
                 modelFolder: cachedFolder,
+                computeOptions: computeOptions,
                 verbose: false,
                 logLevel: .error,
                 prewarm: true,
@@ -113,6 +134,7 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
             Logger.transcription.info("No cached model found — downloading from HuggingFace")
             config = WhisperKitConfig(
                 model: model.rawValue,
+                computeOptions: computeOptions,
                 verbose: false,
                 logLevel: .error,
                 prewarm: true,
