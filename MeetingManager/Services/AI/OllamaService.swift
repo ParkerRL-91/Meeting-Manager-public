@@ -277,28 +277,35 @@ final class OllamaService {
 
         Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"), maxOut: \(maxOutputTokens))")
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await URLSession.shared.data(for: request)
-        } catch {
-            Logger.ai.error("Ollama network error: \(error.localizedDescription)")
-            throw OllamaServiceError.networkError(error)
-        }
+        // Retry up to 3 times on transient failures — network errors and 5xx.
+        // /api/chat is idempotent at the protocol level (the model is the only
+        // mutable resource, and we don't pass any state-changing options here),
+        // so re-sending the same prompt is safe. 4xx and decode errors are
+        // terminal — they won't get better with another attempt. Match the
+        // ClaudeService backoff: 2^attempt + random(0...1)s.
+        let decoded: OllamaChatResponse = try await Self.withRetry(maxAttempts: 3) {
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await URLSession.shared.data(for: request)
+            } catch {
+                Logger.ai.error("Ollama network error: \(error.localizedDescription)")
+                throw OllamaServiceError.networkError(error)
+            }
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw OllamaServiceError.networkError(URLError(.badServerResponse))
-        }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw OllamaServiceError.httpError(statusCode: httpResponse.statusCode)
-        }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw OllamaServiceError.networkError(URLError(.badServerResponse))
+            }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                throw OllamaServiceError.httpError(statusCode: httpResponse.statusCode)
+            }
 
-        let decoded: OllamaChatResponse
-        do {
-            decoded = try JSONDecoder().decode(OllamaChatResponse.self, from: data)
-        } catch {
-            Logger.ai.error("Ollama decode error: \(error.localizedDescription)")
-            throw OllamaServiceError.decodingError(error)
+            do {
+                return try JSONDecoder().decode(OllamaChatResponse.self, from: data)
+            } catch {
+                Logger.ai.error("Ollama decode error: \(error.localizedDescription)")
+                throw OllamaServiceError.decodingError(error)
+            }
         }
 
         var text = decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -313,6 +320,37 @@ final class OllamaService {
 
         Logger.ai.info("Ollama response received (\(text.count) chars, model: \(selectedModel))")
         return text
+    }
+
+    /// Retry helper for idempotent Ollama calls. Retries on network errors
+    /// and HTTP 5xx; treats 4xx and decode errors as terminal. Mirrors the
+    /// ClaudeService pattern (2^attempt + random(0...1)s backoff). Static so
+    /// the generate flow can call it without capturing self.
+    private static func withRetry<T>(
+        maxAttempts: Int = 3,
+        operation: () async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                let retryable: Bool
+                switch error {
+                case OllamaServiceError.networkError:
+                    retryable = true
+                case OllamaServiceError.httpError(let status):
+                    retryable = (500...599).contains(status)
+                default:
+                    retryable = false
+                }
+                guard retryable, attempt < maxAttempts - 1 else { throw error }
+                let delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                try? await Task.sleep(for: .seconds(delay))
+            }
+        }
+        throw lastError ?? OllamaServiceError.networkError(URLError(.unknown))
     }
 
     /// Strip a chain-of-thought block from content. Normally Ollama separates
