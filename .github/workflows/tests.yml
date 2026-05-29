@@ -33,6 +33,21 @@ jobs:
           xcode-select -p
           swift --version
 
+      # SPM checkouts and the .build tree are large (WhisperKit/SpeakerKit
+      # CoreML packages + GRDB), and every cold run re-fetches and re-builds
+      # them. Cache keyed on Package.resolved so a dependency change busts it
+      # cleanly. Saves ~3–8 minutes per run on a warm cache hit.
+      - name: Cache SPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/org.swift.swiftpm
+            .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
       - name: Resolve dependencies
         run: swift package resolve
 
