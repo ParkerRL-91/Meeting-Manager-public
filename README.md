@@ -21,15 +21,17 @@ You only do this once.
 
 ---
 
-## What's New in v3.15
+## What's New in v4.0.0
 
-**Meetings name themselves.** When you record an ad-hoc meeting and never give it a title, Meeting Manager generates a short name — eight words or fewer — from what was actually discussed. Generation runs on your local Ollama model first and falls back to Claude, so the transcript stays on your Mac whenever a local model is available. Calendar meetings keep the title from their event, and you can always rename any meeting yourself.
+**Transcription engine upgrade.** WhisperKit has graduated to the Argmax Open-Source SDK 1.0.0 (a major-version jump from the 0.9.x line we were pinned to). On the same audio that produced sparse, fragmented output before, the new engine produces dense coherent paragraphs — in side-by-side testing on a real meeting, the old pipeline returned a single fragment for a 90-second window, and the new one returned nine clean segments and 640 characters of useful text. The upgrade also dropped six transitive dependencies from the build, making the dependency graph dramatically simpler.
 
-**The daily brief draws on your Knowledge Base.** Each meeting's brief can now pull relevant background from your own notes, quoted verbatim and cited to the source file. A deterministic verifier drops any quoted line it can't trace back to your notes, so the brief never attaches one meeting's context to another and never fabricates background.
+**Speaker diarization on the right audio.** Diarization now runs on the system-only audio buffer — the remote participants' voices — instead of the mixed buffer that included your own microphone. On overlapping speech, the old approach falsely split one speaker into several; the new path uses the calendar attendee count as a hint and gives Pyannote the cleaner input it was designed for. The accuracy gain shows up most on group calls.
 
-**Reliability and test coverage.** This release adds an enterprise test suite of roughly 340 cases covering the anti-hallucination verifiers, speaker-identity keys, transcript cleanup, and the data layer, run in continuous integration on every change. The same work fixed a Swift 6 persistence bug in which a saved record's database id was not returned to the caller, which could leave newly created action items, notes, and transcripts referencing a missing row.
+**Network resilience for AI summaries.** Anthropic Claude, local Ollama, and Apollo lookups now retry transient 5xx errors with exponential backoff, and the Claude path honors the server's `Retry-After` hint on rate limits instead of falling back to a generic backoff. Ollama is also pinned to a known-good version (v0.24.0) with a runtime compatibility check, so an upstream breaking change can't silently strand a new install.
 
-**+ everything from 3.11–3.14** (KB-grounded summaries and chat, the auto-generated daily brief, inline task progress, Apollo-powered attendee profiles, bulletproof note autosave, and audio-capture reliability fixes).
+**Honest privacy permissions.** The macOS screen-capture permission prompt now states that Meeting Manager captures system audio during recording (the previous text claimed it did not — a real inaccuracy that the new copy fixes). Apple Events authorization was added so the in-app Chrome tab detection for meeting joins actually works on macOS 14+ instead of failing silently. Four legacy permission keys that were no longer required on macOS 14+ were removed.
+
+**Smaller, faster build.** Intel Macs now route WhisperKit work to the GPU explicitly (the Apple Neural Engine doesn't exist there). The CI pipeline caches Swift Package Manager checkouts so each push is several minutes faster. A long-dormant streaming-transcription service that was never used by the live path was removed.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
