@@ -38,7 +38,7 @@ final class TaskQueueManager {
     private var calendarPollTimer: Timer?
 
     /// Closures injected by AppState to execute actual work.
-    var transcriptionHandler: ((String, URL?) async throws -> Void)?
+    var transcriptionHandler: ((String, URL?, String?) async throws -> Void)?
     /// Speaker diarization handler — meetingId, system audio URL (may be nil if not recorded).
     var diarizationHandler: ((String, URL?) async throws -> Void)?
     var summaryHandler: ((String) async throws -> Void)?
@@ -586,7 +586,7 @@ final class TaskQueueManager {
                       let path = meeting.audioFilePath else { return nil }
                 return URL(fileURLWithPath: path)
             }
-            try await handler(task.meetingId, audioURL)
+            try await handler(task.meetingId, audioURL, task.metadata)
 
         case .diarization:
             guard let handler = diarizationHandler else {
