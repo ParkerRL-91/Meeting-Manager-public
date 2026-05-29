@@ -82,10 +82,19 @@ struct VoiceProfilesSettingsView: View {
             .sorted { ($0.sampleCount, $0.personName) > ($1.sampleCount, $1.personName) }
     }
 
+    /// Reset a person's voice memory entirely: remove the EMA centroid AND the
+    /// per-utterance samples it was built from. Clearing both is what makes this
+    /// a real recovery path for a poisoned profile — deleting only the profile
+    /// row used to leave orphaned samples behind that a later rebuild would
+    /// resurrect. The voice is re-learned cleanly from future meetings.
     private func delete(_ profile: VoiceProfile) {
         Task {
-            let repo = VoiceProfileRepository(database: AppDatabase.shared)
-            try? await repo.delete(personName: profile.personName)
+            let profileRepo = VoiceProfileRepository(database: AppDatabase.shared)
+            try? await profileRepo.delete(personName: profile.personName)
+            if let pid = profile.personId {
+                let sampleRepo = VoiceSampleRepository(database: AppDatabase.shared)
+                try? await sampleRepo.deleteSamples(forPersonId: pid)
+            }
             await load()
         }
     }
