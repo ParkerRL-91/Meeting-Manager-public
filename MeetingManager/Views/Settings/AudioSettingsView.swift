@@ -7,12 +7,18 @@ struct AudioSettingsView: View {
 
     // MARK: - State
 
-    @State private var selectedDeviceID: String = ""
+    @Environment(AppState.self) private var appState
+
     @State private var availableDevices: [AVCaptureDevice] = []
     @State private var hasMicPermission: Bool = false
     @State private var hasScreenRecordingPermission: Bool = false
 
     private let audioManager = AudioSessionManager()
+
+    /// The microphone auto-detection would currently pick.
+    private var autoDetectedDeviceName: String {
+        audioManager.bestInputDevice()?.localizedName ?? "system default"
+    }
 
     // MARK: - Body
 
@@ -28,24 +34,46 @@ struct AudioSettingsView: View {
     // MARK: - Sections
 
     private var inputDeviceSection: some View {
-        Section {
-            if availableDevices.isEmpty {
-                Text("No audio input devices found")
-                    .foregroundStyle(.secondary)
-            } else {
-                Picker("Input Device", selection: $selectedDeviceID) {
-                    ForEach(availableDevices, id: \.uniqueID) { device in
-                        Text(device.localizedName).tag(device.uniqueID)
+        @Bindable var appState = appState
+        return Section {
+            Toggle("Override microphone selection", isOn: Binding(
+                get: { appState.settings.micOverrideEnabled },
+                set: { newValue in
+                    appState.settings.micOverrideEnabled = newValue
+                    // Pre-fill with the auto-detected device so enabling the
+                    // override starts from a sensible, working selection.
+                    if newValue, appState.settings.micOverrideDeviceID.isEmpty,
+                       let best = audioManager.bestInputDevice() {
+                        appState.settings.micOverrideDeviceID = best.uniqueID
                     }
                 }
-                .onChange(of: selectedDeviceID) { _, newValue in
-                    Logger.audio.info("Selected audio device: \(newValue)")
+            ))
+
+            if appState.settings.micOverrideEnabled {
+                if availableDevices.isEmpty {
+                    Text("No audio input devices found")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Microphone", selection: Binding(
+                        get: { appState.settings.micOverrideDeviceID },
+                        set: { appState.settings.micOverrideDeviceID = $0 }
+                    )) {
+                        ForEach(availableDevices, id: \.uniqueID) { device in
+                            Text(device.localizedName).tag(device.uniqueID)
+                        }
+                    }
                 }
+            } else {
+                Label("Automatically using \(autoDetectedDeviceName)", systemImage: "wand.and.stars")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         } header: {
             Text("Input Device")
         } footer: {
-            Text("Select the microphone used for recording meeting audio.")
+            Text(appState.settings.micOverrideEnabled
+                 ? "Recording from the microphone you selected. If it's unplugged or can't capture audio, Meeting Manager falls back to automatic selection so recordings are never silent."
+                 : "Meeting Manager automatically selects the best available microphone and adapts when you plug or unplug devices. Turn on the override only if you need to force a specific microphone.")
         }
     }
 
@@ -114,13 +142,6 @@ struct AudioSettingsView: View {
     private func loadState() {
         availableDevices = audioManager.availableInputDevices()
         hasScreenRecordingPermission = audioManager.hasScreenRecordingPermission()
-
-        // Set default selection
-        if let defaultDevice = audioManager.defaultInputDevice() {
-            selectedDeviceID = defaultDevice.uniqueID
-        } else if let first = availableDevices.first {
-            selectedDeviceID = first.uniqueID
-        }
 
         // Check current mic permission status
         let status = AVCaptureDevice.authorizationStatus(for: .audio)

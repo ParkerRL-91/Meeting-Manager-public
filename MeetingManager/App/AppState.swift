@@ -304,6 +304,15 @@ final class AppState {
             meetingRepository: meetingRepository
         )
 
+        // Supply the (off-by-default) microphone override to the capture
+        // service. Returns nil unless the user has explicitly turned the
+        // override on AND picked a device, so auto-detection stays the default.
+        audioCaptureService.preferredInputDeviceIDProvider = { [weak self] in
+            guard let self, self.settings.micOverrideEnabled else { return nil }
+            let id = self.settings.micOverrideDeviceID
+            return id.isEmpty ? nil : id
+        }
+
         // Auto-stop recording after sustained silence (meeting ended)
         audioCaptureService.onSilenceDetected = { [weak self] in
             Task { @MainActor in

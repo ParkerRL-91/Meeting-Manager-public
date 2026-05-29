@@ -46,6 +46,23 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// 5 minutes — meetings often have long pauses (presentations, screen sharing, muted mic).
     var silenceTimeout: TimeInterval = 300
 
+    /// Supplies the user's overridden microphone UID at capture start, or nil to
+    /// auto-detect. Set by AppState from the (off-by-default) mic-override
+    /// setting. Read at each capture start so it always reflects current
+    /// settings without needing to hook every settings-save site.
+    var preferredInputDeviceIDProvider: (() -> String?)?
+
+    /// The device to record from: the user's override when it's set and usable,
+    /// otherwise the auto-detected best input. Auto-detection is the default and
+    /// the fallback when an overridden device is missing or output-only.
+    private func resolveInputDevice() -> AVCaptureDevice? {
+        if let uid = preferredInputDeviceIDProvider?(),
+           let overridden = sessionManager.inputDevice(forUID: uid) {
+            return overridden
+        }
+        return sessionManager.bestInputDevice()
+    }
+
     /// Diagnostic counters for buffer callbacks (logged periodically by test harness).
     /// Accessed from audio callback queues via lock — stored as nonisolated to allow
     /// mutation from nonisolated contexts (audio thread callbacks).
@@ -166,10 +183,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             self?.onWriteError?(error)
         }
 
-        // Select the best available input device and configure mic capture
-        if let bestDevice = sessionManager.bestInputDevice() {
-            Logger.audio.info("Selected input device: \(bestDevice.localizedName) (id: \(bestDevice.uniqueID))")
-            micCapture.configure(inputDeviceID: bestDevice.uniqueID)
+        // Select the input device (user override if set and usable, else
+        // auto-detected best) and configure mic capture.
+        if let chosenDevice = resolveInputDevice() {
+            Logger.audio.info("Selected input device: \(chosenDevice.localizedName) (id: \(chosenDevice.uniqueID))")
+            micCapture.configure(inputDeviceID: chosenDevice.uniqueID)
         } else {
             Logger.audio.info("No preferred input device found; using system default")
         }
@@ -256,9 +274,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
         // Now start mic capture AFTER system tap (so the aggregate device is already created
         // and won't hijack the mic input). Re-configure to the real hardware device.
-        if let bestDevice = sessionManager.bestInputDevice() {
-            logToFile("Audio: re-setting mic to hardware device '\(bestDevice.localizedName)' after system tap setup")
-            micCapture.configure(inputDeviceID: bestDevice.uniqueID)
+        if let chosenDevice = resolveInputDevice() {
+            logToFile("Audio: re-setting mic to hardware device '\(chosenDevice.localizedName)' after system tap setup")
+            micCapture.configure(inputDeviceID: chosenDevice.uniqueID)
         } else {
             // No preferred device found — clear any stale preference so MicrophoneCapture
             // uses the system default, which is the safest fallback on an unfamiliar Mac.
@@ -279,7 +297,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         let engineRunning = micCapture.engine.isRunning
         let inputFormat = micCapture.engine.inputNode.outputFormat(forBus: 0)
-        logToFile("Audio: mic capture STARTED (device: \(sessionManager.bestInputDevice()?.localizedName ?? "default"), engine.running=\(engineRunning), inputFormat=\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch)")
+        logToFile("Audio: mic capture STARTED (device: \(resolveInputDevice()?.localizedName ?? "default"), engine.running=\(engineRunning), inputFormat=\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch)")
 
         // Start silence monitoring AFTER both captures are running
         consecutiveSilentSeconds = 0

@@ -907,5 +907,12 @@ enum Migrations {
                 t.add(column: "apolloKeyLastValidatedAt", .datetime)
             }
         }
+
+        migrator.registerMigration("v42-mic-override") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "micOverrideEnabled", .boolean).notNull().defaults(to: false)
+                t.add(column: "micOverrideDeviceID", .text).notNull().defaults(to: "")
+            }
+        }
     }
 }

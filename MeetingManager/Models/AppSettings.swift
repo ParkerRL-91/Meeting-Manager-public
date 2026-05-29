@@ -94,6 +94,17 @@ struct AppSettings: Codable, Equatable {
     /// Settings as a "Last verified" timestamp.
     var apolloKeyLastValidatedAt: Date? = nil
 
+    /// When true, the app uses the microphone the user explicitly picked
+    /// (`micOverrideDeviceID`) instead of auto-detecting. Defaults off:
+    /// auto-detection is the recommended path because it adapts when devices
+    /// are plugged/unplugged and can't be left pointing at a device that's gone.
+    var micOverrideEnabled: Bool = false
+
+    /// UID of the user-selected microphone, used only when `micOverrideEnabled`
+    /// is true. If the device is missing or can't capture input, the app falls
+    /// back to auto-detection rather than recording silence.
+    var micOverrideDeviceID: String = ""
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -125,6 +136,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case apolloProfilePrepEnabled
         case apolloKeyValidated
         case apolloKeyLastValidatedAt
+        case micOverrideEnabled, micOverrideDeviceID
     }
 }
 

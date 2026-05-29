@@ -110,6 +110,15 @@ final class AudioSessionManager {
         return devices.first
     }
 
+    /// Returns the input-capable device matching `uid`, or nil if it's missing
+    /// or can't actually capture input. Used for the opt-in microphone override:
+    /// when the chosen device is gone (unplugged) or output-only, the caller
+    /// falls back to auto-detection instead of recording silence.
+    func inputDevice(forUID uid: String) -> AVCaptureDevice? {
+        guard !uid.isEmpty else { return nil }
+        return availableInputDevices().first { $0.uniqueID == uid && hasInputChannels($0) }
+    }
+
     /// Auto-created / Continuity input devices that frequently capture silence
     /// when picked automatically: the transient CoreAudio "default device"
     /// aggregate (named like `CADefaultDeviceAggregate-…`) and Continuity
