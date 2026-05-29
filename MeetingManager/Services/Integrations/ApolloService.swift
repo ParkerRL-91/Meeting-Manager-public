@@ -102,7 +102,7 @@ final class ApolloService {
     func validate(apiKey: String) async throws -> Bool {
         // Use a real, unambiguously-public email so Apollo will respond 200
         // with either a hit or null person — both prove the key works.
-        let (status, _) = try await postMatch(apiKey: apiKey, email: "no-reply@apollo.io")
+        let (status, _, _) = try await postMatch(apiKey: apiKey, email: "no-reply@apollo.io")
         switch status {
         case 200:           return true
         case 401, 403:      throw ApolloError.invalidKey
@@ -129,7 +129,9 @@ final class ApolloService {
             throw ApolloError.invalidKey
         }
 
-        let (status, data) = try await postMatch(apiKey: apiKey, email: key)
+        let (status, data, retryAfter) = try await withRetry {
+            try await self.postMatch(apiKey: apiKey, email: key)
+        }
         switch status {
         case 200:
             let profile = try Self.decodeProfile(from: data)
@@ -138,10 +140,59 @@ final class ApolloService {
         case 401, 403:
             throw ApolloError.invalidKey
         case 429:
+            // Retry exhausted (or already honored). Surface the server's
+            // Retry-After hint when present so the caller can show a useful
+            // message; existing ApolloError.rateLimited doesn't carry it, so
+            // log for visibility.
+            if let retryAfter {
+                Logger.general.warning("Apollo 429 after retries; server Retry-After=\(retryAfter)s")
+            }
             throw ApolloError.rateLimited
         default:
             throw ApolloError.http(status)
         }
+    }
+
+    /// Retry wrapper for Apollo network calls. Mirrors the ClaudeService
+    /// pattern: up to 3 attempts with `2^attempt + random(0...1)s` backoff.
+    /// Honors the server's `Retry-After` header on 429 instead of the default
+    /// backoff when present. Terminal statuses (200/401/403/404) short-circuit
+    /// so the caller's switch handles them on the first response.
+    private func withRetry(
+        maxAttempts: Int = 3,
+        operation: () async throws -> (Int, Data, TimeInterval?)
+    ) async throws -> (Int, Data, TimeInterval?) {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            do {
+                let result = try await operation()
+                let status = result.0
+                // Terminal — return immediately so the caller's switch decides.
+                if status == 200 || status == 401 || status == 403 || status == 404 {
+                    return result
+                }
+                // 429 and 5xx are retryable. On 429, prefer the server's
+                // Retry-After hint when present.
+                if attempt < maxAttempts - 1 {
+                    let delay: Double
+                    if status == 429, let hint = result.2 {
+                        delay = max(0.1, hint)
+                    } else {
+                        delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                    }
+                    try? await Task.sleep(for: .seconds(delay))
+                    continue
+                }
+                return result
+            } catch {
+                lastError = error
+                if attempt < maxAttempts - 1 {
+                    let delay = pow(2.0, Double(attempt)) + Double.random(in: 0...1)
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+            }
+        }
+        throw lastError ?? URLError(.unknown)
     }
 
     /// Clears the in-memory cache. Called when the user changes their key
@@ -152,7 +203,7 @@ final class ApolloService {
 
     // MARK: - Internal
 
-    private func postMatch(apiKey: String, email: String) async throws -> (Int, Data) {
+    private func postMatch(apiKey: String, email: String) async throws -> (Int, Data, TimeInterval?) {
         var req = URLRequest(url: Self.endpointMatch)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -168,9 +219,18 @@ final class ApolloService {
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await session.data(for: req)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        // Retry-After can be either delta-seconds or an HTTP-date. Apollo
+        // emits delta-seconds in practice; parse that and ignore the
+        // (rarely-used) date form to keep this simple.
+        let retryAfter: TimeInterval? = {
+            guard let raw = http?.value(forHTTPHeaderField: "Retry-After"),
+                  let seconds = Double(raw.trimmingCharacters(in: .whitespaces)) else { return nil }
+            return seconds
+        }()
         Logger.general.debug("Apollo /people/match → HTTP \(status) (\(data.count) bytes)")
-        return (status, data)
+        return (status, data, retryAfter)
     }
 
     // MARK: - Decoding
