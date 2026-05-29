@@ -293,15 +293,33 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         do {
-            try micCapture.start()
-        } catch {
-            // Log the failure and try once more with a completely clean slate
-            logToFile("Audio: mic capture FAILED on first attempt: \(error.localizedDescription)")
-            Logger.audio.error("Mic capture failed: \(error.localizedDescription) — retrying with system default")
+            do {
+                try micCapture.start()
+            } catch {
+                // Log the failure and try once more with a completely clean slate
+                logToFile("Audio: mic capture FAILED on first attempt: \(error.localizedDescription)")
+                Logger.audio.error("Mic capture failed: \(error.localizedDescription) — retrying with system default")
 
-            // Reset preference and let MicrophoneCapture pick the system default
-            micCapture.configure(inputDeviceID: "")
-            try micCapture.start()
+                // Reset preference and let MicrophoneCapture pick the system default
+                micCapture.configure(inputDeviceID: "")
+                try micCapture.start()
+            }
+        } catch {
+            // Terminal mic failure. The system-audio tap is already running, so
+            // tear it down before bailing — otherwise its ScreenCaptureKit stream
+            // is leaked. Each failed auto-record retry would leak another, and
+            // the accumulating streams wedge the audio HAL so AVAudioEngine input
+            // then fails with -10868 (FormatNotSupported) on EVERY device until
+            // the app is relaunched. Clean up fully so the next attempt starts
+            // from a clean slate.
+            logToFile("Audio: mic capture FAILED terminally — tearing down system tap to avoid leaking a ScreenCaptureKit stream (HAL wedge / -10868)")
+            micCapture.stop()
+            if #available(macOS 14.2, *) {
+                systemAudioTap?.stop()
+            }
+            bufferManager.finishRecording()
+            isCapturing = false
+            throw error
         }
         let engineRunning = micCapture.engine.isRunning
         let inputFormat = micCapture.engine.inputNode.outputFormat(forBus: 0)
