@@ -914,5 +914,14 @@ enum Migrations {
                 t.add(column: "micOverrideDeviceID", .text).notNull().defaults(to: "")
             }
         }
+
+        // v43: FluidAudio diarization engine flag (speaker-id re-architecture
+        // Phase 1). Default off — SpeakerKit stays the diarizer until the flag
+        // is flipped, so this is a no-op for existing installs.
+        migrator.registerMigration("v43-fluidaudio-diarization") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "useFluidAudioDiarization", .boolean).notNull().defaults(to: false)
+            }
+        }
     }
 }

@@ -1924,29 +1924,43 @@ final class AppState {
 
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
-                let diarResult = try await SpeakerDiarizationService.shared.diarize(
-                    audioArray: diarizationSamples,
-                    participantCount: participantHint
-                )
-                fileLog("Diarization: \(diarResult.segments.count) speaker segments from \(diarizationSource) input (hint: \(participantHint.map(String.init) ?? "auto"))")
+                // Diarize through the engine the flag selects. Both engines emit
+                // 1-based "Speaker N" labels; FluidAudio normalizes its string
+                // cluster ids in FluidDiarizationResult, SpeakerKit's are 0-based
+                // here (hence +1). Energy-aware source selection (above) is
+                // engine-agnostic and applies to whichever runs.
+                let segments: [(sid: Int, start: Float, end: Float)]
+                if settings.useFluidAudioDiarization {
+                    let r = try await FluidAudioDiarizationService.shared.diarize(
+                        audioArray: diarizationSamples,
+                        participantCount: participantHint
+                    )
+                    segments = r.segments.map { (sid: $0.speakerId, start: $0.startTime, end: $0.endTime) }
+                } else {
+                    let r = try await SpeakerDiarizationService.shared.diarize(
+                        audioArray: diarizationSamples,
+                        participantCount: participantHint
+                    )
+                    segments = r.segments.map { (sid: ($0.speaker.speakerId ?? 0) + 1, start: $0.startTime, end: $0.endTime) }
+                }
+                fileLog("Diarization: \(segments.count) speaker segments from \(diarizationSource) input (engine: \(settings.useFluidAudioDiarization ? "FluidAudio" : "SpeakerKit"), hint: \(participantHint.map(String.init) ?? "auto"))")
 
                 // Build a lookup: for each second, which speaker is active
-                for seg in diarResult.segments {
-                    let sid = seg.speaker.speakerId ?? 0
-                    let label = "Speaker \(sid + 1)"
-                    var t = Int(seg.startTime)
-                    while t < Int(seg.endTime) + 1 {
+                for seg in segments {
+                    let label = "Speaker \(seg.sid)"
+                    var t = Int(seg.start)
+                    while t < Int(seg.end) + 1 {
                         speakerMap[t] = label
                         t += 1
                     }
                 }
 
-                let uniqueSpeakers = Set(diarResult.segments.compactMap { $0.speaker.speakerId })
+                let uniqueSpeakers = Set(segments.map { $0.sid })
                 fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
 
                 // Capture speaker labels — written atomically with transcripts in the caller
                 if uniqueSpeakers.count > 1 {
-                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
+                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0)" }.joined(separator: ", ")
                 }
             } catch {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
@@ -2799,37 +2813,13 @@ final class AppState {
 
         do {
             taskQueueManager.reportCurrentProgress(stage: "Running diarization")
-            let result = try await service.diarize(
-                systemAudioURL: audioURL,
-                participantCount: participantCount
-            )
-            guard result.speakerCount > 0 else {
-                fileLog("Diarization: 0 speakers detected for \(meetingId)")
-                return
-            }
 
-            taskQueueManager.reportCurrentProgress(stage: "Matching voice profiles")
-
-            let resultBox = DiarizationResultBox(result)
-            let profileRepo = VoiceProfileRepository(database: database)
-            let voiceService = VoiceProfileService.shared
-
-            // Phase 3 — match stored voice profiles before LLM attribution.
-            // Clusters that match a known voice are pre-assigned, skipping the LLM entirely.
-            // Use allProfilesResolved so each profile's personName reflects the
-            // Person's current canonical name (Phase 2: personId-keyed matching).
-            let personRepo2 = PersonRepository(database: database)
-            let storedProfiles = (try? await profileRepo.allProfilesResolved(personRepo: personRepo2)) ?? []
-            let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
-            let voiceMatches = await voiceService.matchProfiles(
-                clusters: Array(clusterLabels),
-                audioURL: audioURL,
-                diarizationResult: resultBox,
-                stored: storedProfiles
-            )
-            if !voiceMatches.isEmpty {
-                fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
-            }
+            // FluidAudio path is diarization-only in Phase 1: it produces the
+            // cluster alignment but doesn't feed the SpeakerKit-shaped voice
+            // profile match/learn (FluidAudio enrollment replaces that in
+            // Phase 2). SpeakerKit path is unchanged. `resultBox`/`voiceService`
+            // are only built on the SpeakerKit path.
+            let useFluid = settings.useFluidAudioDiarization
 
             // Fetch all transcript rows for alignment and echo suppression.
             let transcripts = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
@@ -2844,8 +2834,62 @@ final class AppState {
                 return
             }
 
-            // Align diarization segments → transcript rows → "Speaker N" labels.
-            var labelMapping = service.alignToTranscripts(systemTranscripts, result: result)
+            let profileRepo = VoiceProfileRepository(database: database)
+            let voiceService = VoiceProfileService.shared
+            var speakerCount = 0
+            var labelMapping: [Int64: String]
+            var voiceMatches: [String: String] = [:]
+            var resultBox: DiarizationResultBox? = nil
+
+            if useFluid {
+                let result = try await FluidAudioDiarizationService.shared.diarize(
+                    systemAudioURL: audioURL,
+                    participantCount: participantCount
+                )
+                guard result.speakerCount > 0 else {
+                    fileLog("Diarization: 0 speakers detected for \(meetingId) (FluidAudio)")
+                    return
+                }
+                speakerCount = result.speakerCount
+                labelMapping = FluidAudioDiarizationService.shared.alignToTranscripts(
+                    systemTranscripts, result: result
+                )
+            } else {
+                let result = try await service.diarize(
+                    systemAudioURL: audioURL,
+                    participantCount: participantCount
+                )
+                guard result.speakerCount > 0 else {
+                    fileLog("Diarization: 0 speakers detected for \(meetingId)")
+                    return
+                }
+                speakerCount = result.speakerCount
+
+                taskQueueManager.reportCurrentProgress(stage: "Matching voice profiles")
+
+                let box = DiarizationResultBox(result)
+                resultBox = box
+
+                // Phase 3 — match stored voice profiles before LLM attribution.
+                // Clusters that match a known voice are pre-assigned, skipping the LLM entirely.
+                // Use allProfilesResolved so each profile's personName reflects the
+                // Person's current canonical name (Phase 2: personId-keyed matching).
+                let personRepo2 = PersonRepository(database: database)
+                let storedProfiles = (try? await profileRepo.allProfilesResolved(personRepo: personRepo2)) ?? []
+                let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
+                voiceMatches = await voiceService.matchProfiles(
+                    clusters: Array(clusterLabels),
+                    audioURL: audioURL,
+                    diarizationResult: box,
+                    stored: storedProfiles
+                )
+                if !voiceMatches.isEmpty {
+                    fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
+                }
+
+                labelMapping = service.alignToTranscripts(systemTranscripts, result: result)
+            }
+
             guard !labelMapping.isEmpty else {
                 fileLog("Diarization: alignment produced no matches for \(meetingId)")
                 return
@@ -2890,7 +2934,7 @@ final class AppState {
             }
 
             try await transcriptRepo.updateSpeakerLabels(labelMapping)
-            fileLog("Diarization: labelled \(labelMapping.count) transcript rows for \(meetingId) (\(result.speakerCount) speakers)")
+            fileLog("Diarization: labelled \(labelMapping.count) transcript rows for \(meetingId) (\(speakerCount) speakers)")
 
             // Now run LLM attribution for any remaining "Speaker N" clusters.
             if let m = meeting {
@@ -2910,27 +2954,33 @@ final class AppState {
                 // the pre-match voice dictionary, treat as voiceMatch (high
                 // trust); otherwise it came from the LLM (low trust, stricter
                 // future threshold to prevent drift).
-                let finalSpeakerMap = attributed.speakerMapDictionary
-                let personRepo = PersonRepository(database: database)
-                for (clusterLabel, personName) in finalSpeakerMap {
-                    guard !personName.isEmpty else { continue }
-                    // Never learn a generic/unresolved label as a person — this is
-                    // what produced junk "Speaker 3" / "Everyone" voice profiles.
-                    guard !Self.isGenericSpeakerLabel(personName) else { continue }
-                    let source: VoiceProfileRepository.EmbeddingSource =
-                        voiceMatches[clusterLabel] != nil ? .voiceMatch : .llm
-                    if let embedding = await voiceService.extractEmbedding(
-                        forSpeaker: clusterLabel,
-                        from: audioURL,
-                        diarizationResult: resultBox
-                    ) {
-                        try? await profileRepo.merge(
-                            personName: personName,
-                            newEmbedding: embedding,
-                            personRepo: personRepo,
-                            source: source
-                        )
-                        fileLog("Diarization: updated voice profile for \(personName) (source=\(source.rawValue))")
+                // SpeakerKit-only: the mel-spectrum embedding extractor consumes
+                // a SpeakerKit-shaped `resultBox`. On the FluidAudio path this is
+                // skipped (FluidAudio enrollment replaces voice-profile learning
+                // in Phase 2).
+                if let box = resultBox {
+                    let finalSpeakerMap = attributed.speakerMapDictionary
+                    let personRepo = PersonRepository(database: database)
+                    for (clusterLabel, personName) in finalSpeakerMap {
+                        guard !personName.isEmpty else { continue }
+                        // Never learn a generic/unresolved label as a person — this is
+                        // what produced junk "Speaker 3" / "Everyone" voice profiles.
+                        guard !Self.isGenericSpeakerLabel(personName) else { continue }
+                        let source: VoiceProfileRepository.EmbeddingSource =
+                            voiceMatches[clusterLabel] != nil ? .voiceMatch : .llm
+                        if let embedding = await voiceService.extractEmbedding(
+                            forSpeaker: clusterLabel,
+                            from: audioURL,
+                            diarizationResult: box
+                        ) {
+                            try? await profileRepo.merge(
+                                personName: personName,
+                                newEmbedding: embedding,
+                                personRepo: personRepo,
+                                source: source
+                            )
+                            fileLog("Diarization: updated voice profile for \(personName) (source=\(source.rawValue))")
+                        }
                     }
                 }
             }

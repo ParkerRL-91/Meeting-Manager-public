@@ -105,6 +105,12 @@ struct AppSettings: Codable, Equatable {
     /// back to auto-detection rather than recording silence.
     var micOverrideDeviceID: String = ""
 
+    /// When true, speaker diarization runs through FluidAudio
+    /// (`FluidAudioDiarizationService`) instead of SpeakerKit. Defaults off so
+    /// FluidAudio can be A/B-tested against the shipped SpeakerKit path without
+    /// risk; flipping it back to false instantly reverts to SpeakerKit.
+    var useFluidAudioDiarization: Bool = false
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -137,6 +143,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case apolloKeyValidated
         case apolloKeyLastValidatedAt
         case micOverrideEnabled, micOverrideDeviceID
+        case useFluidAudioDiarization
     }
 }
 

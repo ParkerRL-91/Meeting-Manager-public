@@ -83,6 +83,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v40-transcription-attempt-marker",
         "v41-apollo-profile-prep",
         "v42-mic-override",
+        "v43-fluidaudio-diarization",
     ]
 
     override func setUpWithError() throws {
