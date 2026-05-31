@@ -10,6 +10,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "6.0.0"),
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift", from: "1.0.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.0"),
     ],
     targets: [
         .executableTarget(
@@ -61,6 +62,17 @@ let package = Package(
             name: "prompt-eval",
             path: "Tests/PromptOptimization",
             exclude: ["Fixtures", "results"]
+        ),
+        // Phase 0 gate spike — verifies FluidAudio resolves, links with
+        // WhisperKit, and its diarization/enrollment API works on real audio.
+        // Not shipped in the app bundle. Removed after the gate decision.
+        .executableTarget(
+            name: "fluid-spike",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+            ],
+            path: "Tools/FluidSpike"
         ),
     ]
 )
