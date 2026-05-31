@@ -1888,6 +1888,35 @@ final class AppState {
                     return (samples, "mixed (system WAV too short)", hint)
                 }
                 let systemSamples = Array(allSystemSamples[sStart..<sEnd])
+
+                // The system track can EXIST yet be effectively silent — an
+                // in-person/hybrid meeting where no remote audio played through
+                // the speakers. Diarizing that silence collapses every voice
+                // (all captured on the mic, i.e. in the MIXED track) into one
+                // "Speaker" — the dominant cause of all-generic meetings. Detect
+                // a silent system track by its speech-window fraction and fall
+                // back to diarizing the MIXED audio so in-room speakers split.
+                let sysSpeechFloor: Float = 0.005
+                let win = Int(expectedSampleRate) // 1s windows
+                var activeWindows = 0, totalWindows = 0, w = 0
+                while w + win <= systemSamples.count {
+                    var sum: Float = 0, i = w
+                    while i < w + win { sum += systemSamples[i] * systemSamples[i]; i += 1 }
+                    if sqrtf(sum / Float(win)) > sysSpeechFloor { activeWindows += 1 }
+                    totalWindows += 1
+                    w += win
+                }
+                let activeFraction = totalWindows > 0 ? Double(activeWindows) / Double(totalWindows) : 0
+                if activeFraction < 0.02 {
+                    // Essentially silent system → in-person/hybrid. Diarize the
+                    // mixed track; everyone (incl. the user) is an in-room
+                    // speaker to be named by attribution. Hint = attendee count.
+                    let attendeeCount = meeting?.acceptedParticipantList.count ?? 0
+                    let hint = attendeeCount >= 2 ? attendeeCount : nil
+                    fileLog("Diarization: system track silent (\(String(format: "%.1f", activeFraction * 100))% active) — diarizing MIXED audio instead")
+                    return (samples, "mixed (system silent)", hint)
+                }
+
                 // System-only buffer: user's mic isn't in it. The hint is the
                 // remote-speaker count, computed identically to runDiarization.
                 return (systemSamples, "system-only", remoteParticipantHint(for: meeting))
