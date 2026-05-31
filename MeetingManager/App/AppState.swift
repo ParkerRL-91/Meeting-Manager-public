@@ -2106,9 +2106,27 @@ final class AppState {
     /// The hook fires AFTER WhisperKit + SpeakerKit have produced raw
     /// `Speaker N` labels but BEFORE persistence so the rewritten labels land
     /// in the DB on the first save.
+    /// Confidence assigned to a cluster that FluidAudio matched to a known
+    /// person via Phase-2 enrollment. This is the highest NON-manual signal:
+    /// it sits above vocative (≤0.85) and LLM (≤0.78) but below a manual
+    /// rename (1.0). The match is audio-grounded AND already RSVP-gated to this
+    /// meeting (only accepted attendees are enrolled), so the attendance gate is
+    /// moot. Default ~0.85 per the Phase-0 spike; FluidAudio doesn't expose a
+    /// per-match score, so we use a fixed tier rather than a similarity value.
+    static let enrollmentMatchConfidence: Float = 0.85
+
+    /// - Parameter enrollmentMatches: clusters FluidAudio pre-named via Phase-2
+    ///   enrollment (`["Speaker N": personName]`). Treated as the highest
+    ///   non-manual signal — seeded into the mapping above vocative/LLM and
+    ///   scored at `enrollmentMatchConfidence`. Empty on the SpeakerKit path and
+    ///   on retry (where transcripts are already relabelled and the pass is
+    ///   fill-only). These clusters' transcript rows are relabelled upstream in
+    ///   `runDiarization`, so passing them here is what gets them into the
+    ///   persisted `speakerMap`/`speakerConfidenceMap` with a real score.
     private func applySpeakerAttribution(
         transcripts: [Transcript],
-        meeting: Meeting
+        meeting: Meeting,
+        enrollmentMatches: [String: String] = [:]
     ) async -> (transcripts: [Transcript], meeting: Meeting) {
         // v3.10 #1 RSVP gate: never consider declined attendees as candidates.
         // Falls back to the full participant list when no RSVP data is present
@@ -2280,6 +2298,19 @@ final class AppState {
             guard !contributions.isEmpty else { continue }
             let combined = 1 - contributions.reduce(Float(1)) { $0 * (1 - $1) }
             clusterConfidence[cluster] = min(1.0, combined)
+        }
+
+        // Enrollment matches (FluidAudio Phase-2) are the highest NON-manual
+        // signal: audio-grounded and already RSVP-gated to this meeting. They
+        // win over vocative/LLM on a name collision and are scored at the fixed
+        // enrollment tier. Applied AFTER the combine step so the tier isn't
+        // diluted by a weaker corroborating signal. Their transcript rows were
+        // relabelled upstream in runDiarization; seeding the mapping here is what
+        // persists them in the meeting's speakerMap + speakerConfidenceMap.
+        for (cluster, name) in enrollmentMatches {
+            mapping[cluster] = name
+            clusterConfidence[cluster] = Self.enrollmentMatchConfidence
+            Logger.general.info("[Enrollment] cluster \(cluster, privacy: .public) → \(name, privacy: .public) (conf \(Self.enrollmentMatchConfidence))")
         }
 
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
@@ -2844,6 +2875,11 @@ final class AppState {
             // can have their per-Person voice reference (re)built after attribution.
             var fluidResult: FluidDiarizationResult? = nil
             var enrolledSpeakers: [EnrolledSpeaker] = []
+            // FluidAudio enrollment matches ("Speaker N" → person), passed to
+            // applySpeakerAttribution as the highest non-manual signal. Distinct
+            // from `voiceMatches` (which also carries SpeakerKit mel-spectrum
+            // matches) so the SpeakerKit path doesn't get an enrollment tier.
+            var enrollmentMatches: [String: String] = [:]
 
             if useFluid {
                 // Phase 2 — seed cross-meeting voice identity: enroll the known
@@ -2883,6 +2919,7 @@ final class AppState {
                 )
                 if !enrolledNames.isEmpty {
                     voiceMatches = enrolledNames
+                    enrollmentMatches = enrolledNames
                     fileLog("Diarization: enrollment matched \(enrolledNames.count) cluster(s) for \(meetingId) (FluidAudio)")
                 }
             } else {
@@ -2972,7 +3009,8 @@ final class AppState {
                 let relabelled = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
                 let (_, attributed) = await applySpeakerAttribution(
                     transcripts: relabelled,
-                    meeting: m
+                    meeting: m,
+                    enrollmentMatches: enrollmentMatches
                 )
                 try? await database.writer.write { db in
                     var updated = attributed
