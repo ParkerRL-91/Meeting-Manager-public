@@ -2840,20 +2840,51 @@ final class AppState {
             var labelMapping: [Int64: String]
             var voiceMatches: [String: String] = [:]
             var resultBox: DiarizationResultBox? = nil
+            // Phase 2 — held when the FluidAudio path runs so confirmed clusters
+            // can have their per-Person voice reference (re)built after attribution.
+            var fluidResult: FluidDiarizationResult? = nil
+            var enrolledSpeakers: [EnrolledSpeaker] = []
 
             if useFluid {
+                // Phase 2 — seed cross-meeting voice identity: enroll the known
+                // references of this meeting's RSVP-accepted attendees so matching
+                // clusters come back already named (audio-grounded, highest signal).
+                let enrollPersonRepo = PersonRepository(database: database)
+                let referenceRepo = VoiceReferenceRepository(database: database)
+                if let m = meeting {
+                    enrolledSpeakers = await SpeakerEnrollmentService.shared.enrolledSpeakers(
+                        for: m,
+                        personRepo: enrollPersonRepo,
+                        referenceRepo: referenceRepo
+                    )
+                }
+
                 let result = try await FluidAudioDiarizationService.shared.diarize(
                     systemAudioURL: audioURL,
-                    participantCount: participantCount
+                    participantCount: participantCount,
+                    enrolledSpeakers: enrolledSpeakers
                 )
                 guard result.speakerCount > 0 else {
                     fileLog("Diarization: 0 speakers detected for \(meetingId) (FluidAudio)")
                     return
                 }
                 speakerCount = result.speakerCount
+                fluidResult = result
                 labelMapping = FluidAudioDiarizationService.shared.alignToTranscripts(
                     systemTranscripts, result: result
                 )
+
+                // Clusters FluidAudio matched to an enrolled reference resolve
+                // straight to a name — treat as voice matches (the attendance gate
+                // is moot since enrollment is already RSVP-gated to this meeting).
+                let enrolledNames = SpeakerEnrollmentService.shared.enrolledClusterNames(
+                    result: result,
+                    enrolledSpeakers: enrolledSpeakers
+                )
+                if !enrolledNames.isEmpty {
+                    voiceMatches = enrolledNames
+                    fileLog("Diarization: enrollment matched \(enrolledNames.count) cluster(s) for \(meetingId) (FluidAudio)")
+                }
             } else {
                 let result = try await service.diarize(
                     systemAudioURL: audioURL,
@@ -2981,6 +3012,32 @@ final class AppState {
                             )
                             fileLog("Diarization: updated voice profile for \(personName) (source=\(source.rawValue))")
                         }
+                    }
+                }
+
+                // Phase 2 — FluidAudio path: (re)build each confirmed speaker's
+                // per-Person voice reference from this meeting's highest-confidence
+                // segment embeddings, so future meetings match the voice via
+                // enrollment instead of falling back to vocative/LLM. Only rebuild
+                // for clusters whose final attribution is high-confidence (≥ 0.85,
+                // the audio-grounded tier) — low-confidence LLM guesses must not
+                // poison the reference. Enrollment matches are already confident.
+                if let fr = fluidResult {
+                    let finalSpeakerMap = attributed.speakerMapDictionary
+                    let confidence = attributed.speakerConfidenceMapDictionary
+                    let referenceRepo = VoiceReferenceRepository(database: database)
+                    let personRepo = PersonRepository(database: database)
+                    for (clusterLabel, personName) in finalSpeakerMap {
+                        guard !personName.isEmpty,
+                              !Self.isGenericSpeakerLabel(personName) else { continue }
+                        guard (confidence[clusterLabel] ?? 0) >= 0.85 else { continue }
+                        await SpeakerEnrollmentService.shared.rebuildReference(
+                            personName: personName,
+                            clusterLabel: clusterLabel,
+                            result: fr,
+                            personRepo: personRepo,
+                            referenceRepo: referenceRepo
+                        )
                     }
                 }
             }

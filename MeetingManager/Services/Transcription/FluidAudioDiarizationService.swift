@@ -125,16 +125,22 @@ final class FluidAudioDiarizationService {
     // MARK: - Diarization
 
     /// Diarize a system-audio (or mixed) WAV file.
+    ///
+    /// - Parameter enrolledSpeakers: Phase 2 cross-meeting identity. Known voices
+    ///   (built by `SpeakerEnrollmentService` from prior confirmed segments) seeded
+    ///   into the clusterer so matching clusters come back tagged with the enrolled
+    ///   `Speaker.id` (= `Person.id`) instead of a fresh numeric cluster.
     func diarize(
         systemAudioURL: URL,
-        participantCount: Int?
+        participantCount: Int?,
+        enrolledSpeakers: [Speaker] = []
     ) async throws -> FluidDiarizationResult {
         guard FileManager.default.fileExists(atPath: systemAudioURL.path) else {
             throw DiarizationError.audioFileNotFound(systemAudioURL.path)
         }
         let samples = try loadAsSamples(url: systemAudioURL)
-        logger.info("FluidAudio diarizing \(systemAudioURL.lastPathComponent), speakers hint: \(participantCount.map(String.init) ?? "auto")")
-        return try await diarize(audioArray: samples, participantCount: participantCount)
+        logger.info("FluidAudio diarizing \(systemAudioURL.lastPathComponent), speakers hint: \(participantCount.map(String.init) ?? "auto"), enrolled: \(enrolledSpeakers.count)")
+        return try await diarize(audioArray: samples, participantCount: participantCount, enrolledSpeakers: enrolledSpeakers)
     }
 
     /// Diarize an already-loaded 16 kHz mono Float32 sample buffer.
@@ -145,7 +151,8 @@ final class FluidAudioDiarizationService {
     ///   footgun this engine swap is meant to remove.
     func diarize(
         audioArray: [Float],
-        participantCount: Int?
+        participantCount: Int?,
+        enrolledSpeakers: [Speaker] = []
     ) async throws -> FluidDiarizationResult {
         guard !audioArray.isEmpty else {
             throw DiarizationError.emptyAudio
@@ -156,6 +163,16 @@ final class FluidAudioDiarizationService {
         }
         guard let manager else {
             throw DiarizationError.modelNotLoaded
+        }
+
+        // Seed cross-meeting voice identity. `.reset` clears any enrollment from
+        // a previous diarize call so references don't leak between meetings — the
+        // shared manager is reused, so without the reset a person enrolled for an
+        // earlier meeting would keep matching in later ones they aren't in.
+        if !enrolledSpeakers.isEmpty {
+            manager.speakerManager.initializeKnownSpeakers(enrolledSpeakers, mode: .reset)
+        } else {
+            manager.speakerManager.reset()
         }
 
         let result = try manager.performCompleteDiarization(audioArray, sampleRate: 16000)
@@ -237,17 +254,29 @@ final class FluidAudioDiarizationService {
 struct FluidDiarizationResult: Sendable {
     struct Segment: Sendable {
         let speakerId: Int        // 1-based, matches the "Speaker N" convention
+        /// The raw FluidAudio cluster id. For a newly-discovered cluster this is
+        /// an arbitrary string ("1", "2", ...). When a known speaker was enrolled
+        /// (Phase 2) and this segment matched it, FluidAudio returns the enrolled
+        /// `Speaker.id` here — which `SpeakerEnrollmentService` sets to the
+        /// `Person.id`. This is how an enrolled cluster is mapped back to a name.
+        let rawSpeakerId: String
         let startTime: Float
         let endTime: Float
         let qualityScore: Float
+        /// 256-dim wespeaker embedding for this segment. Used to (re)build a
+        /// person's `VoiceReference` from their highest-confidence segments.
+        let embedding: [Float]
     }
 
     let segments: [Segment]
     let speakerCount: Int
 
     init(_ result: DiarizationResult) {
-        // FluidAudio cluster ids are arbitrary strings ("1", "2", "spk0", ...).
-        // Map them to deterministic 1-based Ints in first-appearance order.
+        // FluidAudio cluster ids are arbitrary strings ("1", "2", "spk0", ...),
+        // OR an enrolled Speaker.id when known speakers were seeded. Map each
+        // distinct id to a deterministic 1-based Int (in first-appearance order)
+        // for the engine-neutral "Speaker N" labelling, but keep the raw id so
+        // enrollment matches can be resolved back to a Person.
         var idForCluster: [String: Int] = [:]
         var next = 1
         var segs: [Segment] = []
@@ -262,9 +291,11 @@ struct FluidDiarizationResult: Sendable {
             }
             segs.append(Segment(
                 speakerId: mapped,
+                rawSpeakerId: s.speakerId,
                 startTime: s.startTimeSeconds,
                 endTime: s.endTimeSeconds,
-                qualityScore: s.qualityScore
+                qualityScore: s.qualityScore,
+                embedding: s.embedding
             ))
         }
         self.segments = segs
