@@ -20,12 +20,19 @@ import os
 /// FluidAudio emits string cluster ids ("1", "2", ...); they're normalized to
 /// 1-based Ints in `FluidDiarizationResult` so the downstream "Speaker N"
 /// labelling is identical regardless of which engine ran.
-@MainActor
-final class FluidAudioDiarizationService {
+/// Not `@MainActor`: FluidAudio's `performCompleteDiarization` is a SYNCHRONOUS,
+/// multi-minute CPU/ANE call. Running it on the main actor would freeze the UI
+/// for the whole meeting (SpeakerKit's path is async and suspends internally, so
+/// it could be @MainActor; this one can't). We mirror `WhisperEngine`: a plain
+/// `@unchecked Sendable` class with an `NSLock` guarding the model, and the heavy
+/// call dispatched onto a background queue.
+final class FluidAudioDiarizationService: @unchecked Sendable {
     static let shared = FluidAudioDiarizationService()
 
-    private var manager: DiarizerManager?
-    private(set) var modelState: ModelState = .unloaded
+    private let lock = NSLock()
+    private var manager: DiarizerManager?          // guarded by `lock`
+    private var _modelState: ModelState = .unloaded // guarded by `lock`
+    var modelState: ModelState { lock.withLock { _modelState } }
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager",
                                 category: "FluidAudioDiarization")
@@ -34,7 +41,7 @@ final class FluidAudioDiarizationService {
 
     // MARK: - Model Management
 
-    enum ModelState {
+    enum ModelState: Sendable {
         case unloaded, downloading, loaded, failed
     }
 
@@ -43,11 +50,11 @@ final class FluidAudioDiarizationService {
     /// because the HuggingFace download can hang on a bad network or corrupt
     /// cache, matching the SpeakerKit/WhisperKit pattern.
     func loadModels() async throws {
-        guard modelState != .loaded else { return }
+        guard lock.withLock({ _modelState != .loaded }) else { return }
 
         try Self.ensureDiskSpaceForDownload()
 
-        modelState = .downloading
+        lock.withLock { _modelState = .downloading }
         logger.info("Loading FluidAudio diarization models...")
 
         do {
@@ -70,13 +77,15 @@ final class FluidAudioDiarizationService {
             // speaker count itself. Auto-clustering is precisely what fixes the
             // collapse the count-hint heuristics were working around, so we let it
             // decide rather than forcing a possibly-wrong K.
-            let manager = DiarizerManager(config: .default)
-            manager.initialize(models: models)
-            self.manager = manager
-            modelState = .loaded
+            let mgr = DiarizerManager(config: .default)
+            mgr.initialize(models: models)
+            lock.withLock {
+                self.manager = mgr
+                self._modelState = .loaded
+            }
             logger.info("FluidAudio diarization models ready.")
         } catch {
-            modelState = .failed
+            lock.withLock { _modelState = .failed }
             logger.error("FluidAudio model load failed: \(error.localizedDescription)")
             throw error
         }
@@ -86,16 +95,18 @@ final class FluidAudioDiarizationService {
     /// caller. Used at app idle so the first real diarization isn't gated on a
     /// cold download/compile.
     func prewarm() {
-        guard modelState == .unloaded else { return }
+        guard lock.withLock({ _modelState == .unloaded }) else { return }
         Task(priority: .utility) { [weak self] in
             try? await self?.loadModels()
         }
     }
 
     func unloadModels() {
-        manager?.cleanup()
-        manager = nil
-        modelState = .unloaded
+        lock.withLock {
+            manager?.cleanup()
+            manager = nil
+            _modelState = .unloaded
+        }
     }
 
     /// FluidAudio downloads pyannote_segmentation + wespeaker_v2 (~100 MB
@@ -158,27 +169,43 @@ final class FluidAudioDiarizationService {
             throw DiarizationError.emptyAudio
         }
 
-        if modelState != .loaded {
+        if lock.withLock({ _modelState != .loaded }) {
             try await loadModels()
         }
-        guard let manager else {
-            throw DiarizationError.modelNotLoaded
-        }
 
-        // Seed cross-meeting voice identity. `.reset` clears any enrollment from
-        // a previous diarize call so references don't leak between meetings — the
-        // shared manager is reused, so without the reset a person enrolled for an
-        // earlier meeting would keep matching in later ones they aren't in.
-        if !enrolledSpeakers.isEmpty {
-            manager.speakerManager.initializeKnownSpeakers(enrolledSpeakers, mode: .reset)
-        } else {
-            manager.speakerManager.reset()
+        // FluidAudio's performCompleteDiarization is synchronous and runs for
+        // minutes on a long meeting. Dispatch it to a background queue so it
+        // never blocks the main thread / cooperative pool. The NSLock serializes
+        // access to the shared manager (one diarization at a time).
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<FluidDiarizationResult, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                lock.lock()
+                defer { lock.unlock() }
+                guard let manager else {
+                    cont.resume(throwing: DiarizationError.modelNotLoaded)
+                    return
+                }
+                do {
+                    // Seed cross-meeting voice identity, then FULLY clear it for
+                    // the next call. mode:.reset with preserveIfPermanent:false
+                    // wipes ALL prior known speakers — including the permanent
+                    // enrolled voices from an earlier meeting — so a person
+                    // enrolled for one meeting can't keep matching in later
+                    // meetings they aren't in. Within THIS meeting the enrolled
+                    // speakers stay permanent (set by SpeakerEnrollmentService),
+                    // protecting them from mid-meeting pruning/merging.
+                    manager.speakerManager.initializeKnownSpeakers(
+                        enrolledSpeakers, mode: .reset, preserveIfPermanent: false
+                    )
+                    let result = try manager.performCompleteDiarization(audioArray, sampleRate: 16000)
+                    let mapped = FluidDiarizationResult(result)
+                    logger.info("FluidAudio diarization complete: \(mapped.speakerCount) speakers, \(mapped.segments.count) segments")
+                    cont.resume(returning: mapped)
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
         }
-
-        let result = try manager.performCompleteDiarization(audioArray, sampleRate: 16000)
-        let mapped = FluidDiarizationResult(result)
-        logger.info("FluidAudio diarization complete: \(mapped.speakerCount) speakers, \(mapped.segments.count) segments")
-        return mapped
     }
 
     // MARK: - Alignment
