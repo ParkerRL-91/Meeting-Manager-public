@@ -451,18 +451,42 @@ final class AudioBufferManager {
     private func writePositioned(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime, isMic: Bool) {
         let host = time.isHostTimeValid ? time.hostTime : mach_absolute_time()
 
+        // Invariant: each stream is single-writer — the mic thread owns
+        // `audioFile`+`samplesWrittenMic`, the system thread owns
+        // `systemAudioFile`+`samplesWrittenSystem`. They never touch each other's
+        // file or counter, so reading `written` under `lock` then appending under
+        // `fileWriteLock` is consistent without holding one lock across the other.
         lock.lock()
-        if recordingStartHostTime == nil { recordingStartHostTime = host }
-        let t0 = recordingStartHostTime ?? host
+        // Anchor the shared timeline to the MIC stream only. The system tap is
+        // started BEFORE the mic (AudioCaptureService) and emits ONLY while remote
+        // audio plays, so letting it define t0 would anchor a meeting that is
+        // silent at the start to the first remote utterance and misalign mic
+        // against system. Mic is continuous from recording start, so it is the
+        // correct origin. System buffers that arrive before the first mic buffer
+        // (t0 unknown) are written at the current position (≈ sample 0), bounded
+        // by the few-ms tap-start lead.
+        if isMic && recordingStartHostTime == nil { recordingStartHostTime = host }
+        let t0 = recordingStartHostTime
         let file = isMic ? audioFile : systemAudioFile
         let written = isMic ? samplesWrittenMic : samplesWrittenSystem
         lock.unlock()
 
         guard let file else { return }
 
-        // Target sample offset of this buffer from t0 on the 16 kHz timeline.
-        let offsetSec = max(0, hostSeconds(host) - hostSeconds(t0))
-        let target = Int(offsetSec * sampleRate)
+        // Bound the file writer by the same 2-hour cap as the ring buffers, so a
+        // long silence gap can't silence-pad the file unboundedly (the ring-buffer
+        // cap gates `micSamples`/`systemSamples`, not the file).
+        guard written < maxSampleCount else { return }
+
+        // Target sample offset from t0 on the 16 kHz timeline. Before the first
+        // mic buffer t0 is nil → append at the current position. Clamp to the cap.
+        let target: Int
+        if let t0 {
+            let offsetSec = max(0, hostSeconds(host) - hostSeconds(t0))
+            target = min(Int(offsetSec * sampleRate), maxSampleCount)
+        } else {
+            target = written
+        }
 
         var writeError: Error?
         fileWriteLock.lock()
@@ -535,24 +559,45 @@ final class AudioBufferManager {
               let sysBuf = AVAudioPCMBuffer(pcmFormat: sysIn.processingFormat, frameCapacity: AVAudioFrameCount(block)),
               let outBuf = AVAudioPCMBuffer(pcmFormat: canonicalFormat, frameCapacity: AVAudioFrameCount(block)) else { return }
 
+        // Streaming merge that is resilient to short reads AND different file
+        // lengths: each file refills its buffer only when fully consumed and we
+        // mix by absolute frame position. A short read just yields a smaller batch
+        // this round; the rest comes on the next refill (no permanent desync, the
+        // bug a naive "read both, mix max, repeat" loop has). EOF on one side →
+        // zero-fill that side for the remaining tail.
+        var micIdx = 0, sysIdx = 0      // frames consumed within the current buffer
+        var micLen = 0, sysLen = 0      // valid frames in the current buffer
+        var micEOF = false, sysEOF = false
         do {
             while true {
-                micBuf.frameLength = 0; sysBuf.frameLength = 0
-                try? micIn.read(into: micBuf, frameCount: AVAudioFrameCount(block))
-                try? sysIn.read(into: sysBuf, frameCount: AVAudioFrameCount(block))
-                let n = Int(max(micBuf.frameLength, sysBuf.frameLength))
-                if n == 0 { break }
+                if micIdx >= micLen && !micEOF {
+                    micBuf.frameLength = 0
+                    try micIn.read(into: micBuf, frameCount: AVAudioFrameCount(block))
+                    micLen = Int(micBuf.frameLength); micIdx = 0
+                    if micLen == 0 { micEOF = true }
+                }
+                if sysIdx >= sysLen && !sysEOF {
+                    sysBuf.frameLength = 0
+                    try sysIn.read(into: sysBuf, frameCount: AVAudioFrameCount(block))
+                    sysLen = Int(sysBuf.frameLength); sysIdx = 0
+                    if sysLen == 0 { sysEOF = true }
+                }
+                let micAvail = micLen - micIdx
+                let sysAvail = sysLen - sysIdx
+                if micAvail == 0 && sysAvail == 0 { break }
+                let n = (micAvail > 0 && sysAvail > 0) ? min(micAvail, sysAvail) : max(micAvail, sysAvail)
                 let m = micBuf.floatChannelData?[0]
                 let s = sysBuf.floatChannelData?[0]
                 guard let o = outBuf.floatChannelData?[0] else { break }
-                let mc = Int(micBuf.frameLength), sc = Int(sysBuf.frameLength)
                 for i in 0..<n {
-                    let mv = i < mc ? (m?[i] ?? 0) : 0
-                    let sv = i < sc ? (s?[i] ?? 0) : 0
+                    let mv = micAvail > 0 ? (m?[micIdx + i] ?? 0) : 0
+                    let sv = sysAvail > 0 ? (s?[sysIdx + i] ?? 0) : 0
                     o[i] = (mv + sv) * 0.5
                 }
                 outBuf.frameLength = AVAudioFrameCount(n)
                 try out.write(from: outBuf)
+                if micAvail > 0 { micIdx += n }
+                if sysAvail > 0 { sysIdx += n }
             }
         } catch {
             try? FileManager.default.removeItem(at: tmpURL)
@@ -560,12 +605,22 @@ final class AudioBufferManager {
         }
 
         // Replace the mic-only file with the mixed temp. Prefer the atomic
-        // replaceItemAt; fall back to remove+move if it throws.
+        // replaceItemAt. The fallback NEVER leaves zero valid files: move the
+        // existing file aside, move the temp in, then drop the backup; on any
+        // failure restore the backup.
         do {
             _ = try FileManager.default.replaceItemAt(mixedURL, withItemAt: tmpURL)
         } catch {
-            try? FileManager.default.removeItem(at: mixedURL)
-            try? FileManager.default.moveItem(at: tmpURL, to: mixedURL)
+            let bakURL = mixedURL.deletingPathExtension().appendingPathExtension("bak.wav")
+            try? FileManager.default.removeItem(at: bakURL)
+            do {
+                try FileManager.default.moveItem(at: mixedURL, to: bakURL)
+                try FileManager.default.moveItem(at: tmpURL, to: mixedURL)
+                try? FileManager.default.removeItem(at: bakURL)
+            } catch {
+                try? FileManager.default.moveItem(at: bakURL, to: mixedURL)
+                try? FileManager.default.removeItem(at: tmpURL)
+            }
         }
     }
 }

@@ -56,6 +56,7 @@ for (idx, job) in jobs.enumerated() {
     let isGold = !job.userLabels.contains("Parker Reid.s")
     diar.speakerManager.initializeKnownSpeakers([], mode: .reset, preserveIfPermanent: false)
     guard let mixed = load16k(job.mixedWav), let system = load16k(job.systemWav),
+          !mixed.isEmpty, !system.isEmpty,
           let result = try? diar.performCompleteDiarization(mixed, sampleRate: 16000) else {
         print("\(job.meetingId.prefix(8)),\(isGold ? "gold":"cons"),LOAD_FAIL,,,,skip,,"); log("  [\(idx+1)/\(jobs.count)] LOAD_FAIL"); continue
     }
