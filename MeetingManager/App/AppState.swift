@@ -2325,30 +2325,66 @@ final class AppState {
             clusterConfidence["mic"] = 1.0
         }
 
-        // 2-person meeting auto-assignment. If the calendar invite has the
-        // user + exactly one other participant, AND the transcript has
-        // exactly one un-mapped cluster (everything else is mic or already
-        // resolved by voice/LLM), name that cluster the lone non-user
-        // participant. Cheap, deterministic, and removes the most common
-        // "click each fragment to label" friction for 1:1s.
         let allClusters = Set(transcripts.compactMap { $0.speakerLabel })
             .filter { $0 != "mic" && $0 != "system" && $0.hasPrefix("Speaker ") }
-        let unmappedClusters = allClusters.filter { mapping[$0] == nil }
 
-        if unmappedClusters.count == 1,
-           let onlyCluster = unmappedClusters.first {
-            // Calendar participants minus anyone matching the user's first name.
-            let nonUserParticipants = participants.filter { name in
-                guard let userFirst = userFirst else { return true }
-                return !name.lowercased().contains(userFirst.lowercased())
+        // ─── P1: energy "you" anchor ───────────────────────────────────
+        // On the FluidAudio mixed-audio path the local user is a "Speaker N"
+        // cluster (no "mic" label), so nothing above identified them. Pin the
+        // user's cluster by mic-vs-system energy. Only fires when the system
+        // track has real remote speech to contrast against (else nil — e.g.
+        // in-person). This is what unblocks 1:1/elimination on mixed audio.
+        if let audioPath = meeting.audioFilePath {
+            let mixedURL = URL(fileURLWithPath: audioPath)
+            let systemURL = AudioBufferManager.systemAudioURL(for: mixedURL)
+            if FileManager.default.fileExists(atPath: systemURL.path) {
+                var ranges: [String: [(start: Float, end: Float)]] = [:]
+                for t in transcripts {
+                    let raw = (t.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
+                    guard raw.hasPrefix("Speaker "), mapping[raw] == nil else { continue }
+                    ranges[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
+                }
+                if !ranges.isEmpty,
+                   let hit = identifyUserClusterByEnergy(clusterRanges: ranges, mixedURL: mixedURL, systemURL: systemURL),
+                   mapping[hit.cluster] == nil {
+                    let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+                    let displayName = fullName.isEmpty ? (userFirst ?? "Me") : fullName
+                    mapping[hit.cluster] = displayName
+                    clusterConfidence[hit.cluster] = hit.confidence
+                    Logger.general.info("[Energy] local user cluster \(hit.cluster, privacy: .public) → \(displayName, privacy: .public) (conf \(hit.confidence))")
+                }
             }
-            if nonUserParticipants.count == 1 {
-                let inferred = nonUserParticipants[0]
-                mapping[onlyCluster] = inferred
-                // Deterministic, single-candidate inference — high confidence.
-                clusterConfidence[onlyCluster] = 0.95
-                Logger.general.info("Auto-assigned 2-person meeting: \(onlyCluster, privacy: .public) → \(inferred, privacy: .public)")
-            }
+        }
+
+        // ─── P2: margin-guarded elimination (generalizes the old 2-person
+        // auto-assign to N people). Assigns only when exactly one cluster and
+        // one candidate remain — never forces a guess when counts are ambiguous.
+        let nonUserParticipants = participants.filter { name in
+            guard let userFirst = userFirst else { return true }
+            return !name.lowercased().contains(userFirst.lowercased())
+        }
+        let eliminated = SpeakerNamingEngine.eliminate(
+            allClusters: allClusters,
+            candidates: nonUserParticipants,
+            assigned: mapping.filter { $0.key.hasPrefix("Speaker ") }
+        )
+        for (cluster, asg) in eliminated {
+            mapping[cluster] = asg.name
+            clusterConfidence[cluster] = asg.confidence
+            Logger.general.info("[Elimination] \(cluster, privacy: .public) → \(asg.name, privacy: .public) (conf \(asg.confidence))")
+        }
+
+        // ─── P3: contradiction flags (computed + logged; Speakers-tab
+        // surfacing + persistence is the next phase). Flags don't change the
+        // mapping — they record where a result needs human confirmation.
+        let namingFlags = SpeakerNamingEngine.flags(
+            finalMapping: mapping.filter { $0.key.hasPrefix("Speaker ") },
+            allClusters: allClusters,
+            acceptedCandidates: participants,
+            userNames: [NSFullUserName(), userFirst ?? ""]
+        )
+        for f in namingFlags {
+            Logger.general.info("[NamingFlag] \(f.kind.rawValue, privacy: .public): \(f.reason, privacy: .public)")
         }
 
         // Persist the diagnostic reason to the in-memory cache so the
@@ -2380,6 +2416,67 @@ final class AppState {
         updated.setSpeakerConfidenceMap(finalConfidence)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
+    }
+
+    /// Load a 16 kHz mono WAV into a [Float] sample buffer (nil if unreadable
+    /// or not 16 kHz). Used by the energy-based local-user identifier.
+    private static func loadSamples16k(_ url: URL) -> [Float]? {
+        guard let f = try? AVAudioFile(forReading: url) else { return nil }
+        let fmt = f.processingFormat
+        guard fmt.sampleRate == 16000,
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(f.length)) else { return nil }
+        do { try f.read(into: buf) } catch { return nil }
+        guard let ch = buf.floatChannelData else { return nil }
+        return Array(UnsafeBufferPointer(start: ch[0], count: Int(buf.frameLength)))
+    }
+
+    /// P1 (naming design): identify which "Speaker N" cluster is the LOCAL USER
+    /// by mic-vs-system energy. The user is on the mic and (near-)absent from the
+    /// system track, so their cluster's segments carry mixed energy while the
+    /// system track is quiet. Returns nil when the system track has no speech
+    /// (in-person — every cluster looks "mic-only", can't distinguish) or no
+    /// cluster is clearly mic-dominant. This is what lets a 1:1 recorded as two
+    /// "Speaker N" clusters (FluidAudio mixed-audio path) get the user pinned so
+    /// elimination can name the other person.
+    private func identifyUserClusterByEnergy(
+        clusterRanges: [String: [(start: Float, end: Float)]],
+        mixedURL: URL,
+        systemURL: URL
+    ) -> (cluster: String, confidence: Float)? {
+        guard let mixed = Self.loadSamples16k(mixedURL),
+              let system = Self.loadSamples16k(systemURL),
+              !mixed.isEmpty, !system.isEmpty else { return nil }
+        let sr = 16000.0
+        let speechFloor: Float = 0.005
+        let userRatio: Float = 0.35  // system < 35% of mixed ⇒ mic-dominant (user)
+        func rms(_ b: [Float], _ s: Int, _ e: Int) -> Float {
+            guard s < e, s >= 0, e <= b.count else { return -1 }
+            var sum: Float = 0; var i = s
+            while i < e { sum += b[i] * b[i]; i += 1 }
+            return sqrtf(sum / Float(e - s))
+        }
+        var bestCluster: String?
+        var bestFrac: Float = 0
+        var anySystemSpeech = false
+        for (cluster, ranges) in clusterRanges {
+            var userWin = 0, totalWin = 0
+            for r in ranges {
+                let s = Int(Double(r.start) * sr), e = Int(Double(r.end) * sr)
+                let m = rms(mixed, s, e)
+                if m < 0 || m <= speechFloor { continue }
+                let sy = rms(system, min(s, system.count), min(e, system.count))
+                if sy < 0 { continue }
+                if sy > speechFloor { anySystemSpeech = true }
+                totalWin += 1
+                if sy <= m * userRatio { userWin += 1 }
+            }
+            guard totalWin >= 3 else { continue }
+            let frac = Float(userWin) / Float(totalWin)
+            if frac > bestFrac { bestFrac = frac; bestCluster = cluster }
+        }
+        // Need real remote audio to contrast against AND a clearly mic-dominant cluster.
+        guard anySystemSpeech, let c = bestCluster, bestFrac >= 0.7 else { return nil }
+        return (c, 0.9)
     }
 
     // MARK: - Retry Attribution (v3.10 #7)
