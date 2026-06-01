@@ -84,5 +84,16 @@ let package = Package(
             ],
             path: "Tools/RefValidate"
         ),
+        // Dev-only NON-DESTRUCTIVE validation of the P1 energy "you" anchor.
+        // Diarizes mixed WAVs with FluidAudio and checks whether the energy
+        // heuristic picks the user's true cluster (ground truth = known rows).
+        // Writes nothing; prints a CSV + summary. Build: swift build --product naming-validate
+        .executableTarget(
+            name: "naming-validate",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Tools/NamingValidate"
+        ),
     ]
 )
