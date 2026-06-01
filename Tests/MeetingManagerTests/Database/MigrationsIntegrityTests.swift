@@ -85,6 +85,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v42-mic-override",
         "v43-fluidaudio-diarization",
         "v44-voice-reference",
+        "v45-attribution-flags",
     ]
 
     override func setUpWithError() throws {

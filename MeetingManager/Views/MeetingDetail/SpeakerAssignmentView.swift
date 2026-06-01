@@ -125,6 +125,24 @@ struct SpeakerAssignmentView: View {
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        if let flags = meeting?.attributionFlagList, !flags.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label("Review these speaker matches", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.appWarning)
+                                ForEach(Array(flags.enumerated()), id: \.offset) { _, flag in
+                                    Text("• \(flag.reason)")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.appTextSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.appWarning.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(.horizontal, 16)
+                        }
                         ForEach(clusters) { cluster in
                             SpeakerClusterCard(
                                 cluster: cluster,

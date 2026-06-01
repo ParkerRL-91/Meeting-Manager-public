@@ -944,5 +944,11 @@ enum Migrations {
                 t.column("updatedAt", .datetime).notNull()
             }
         }
+
+        migrator.registerMigration("v45-attribution-flags") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "attributionFlags", .text)
+            }
+        }
     }
 }

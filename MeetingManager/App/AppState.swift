@@ -2414,6 +2414,8 @@ final class AppState {
         // Only keep entries that ended up in the final mapping.
         let finalConfidence = clusterConfidence.filter { mapping[$0.key] != nil }
         updated.setSpeakerConfidenceMap(finalConfidence)
+        // P3: persist contradiction flags so the Speakers tab can surface them.
+        updated.setAttributionFlags(namingFlags)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
     }

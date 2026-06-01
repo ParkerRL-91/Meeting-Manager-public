@@ -35,6 +35,10 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// attribution decision. Lets the UI badge low-confidence labels for
     /// review without retraining the user to interpret them.
     var speakerConfidenceMap: String?
+    /// Naming-engine review flags: JSON array of `{kind, reason}` recording where
+    /// attribution needs human confirmation (e.g. a name matched but isn't on the
+    /// invite, or more voices than invitees). Surfaced in the Speakers tab.
+    var attributionFlags: String?
     /// Timestamp of the most recent transcription *attempt* (set whether or not
     /// it produced segments). The startup orphan scan uses this to avoid
     /// re-enqueuing transcription for meetings that were already tried but
@@ -62,6 +66,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         speakerMap: String? = nil,
         declinedAttendees: String? = nil,
         speakerConfidenceMap: String? = nil,
+        attributionFlags: String? = nil,
         transcriptionAttemptedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -83,6 +88,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.speakerMap = speakerMap
         self.declinedAttendees = declinedAttendees
         self.speakerConfidenceMap = speakerConfidenceMap
+        self.attributionFlags = attributionFlags
         self.transcriptionAttemptedAt = transcriptionAttemptedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -133,6 +139,25 @@ struct Meeting: Identifiable, Codable, Equatable {
         } else if let data = try? JSONEncoder().encode(map),
                   let str = String(data: data, encoding: .utf8) {
             speakerConfidenceMap = str
+        }
+    }
+
+    /// Decoded naming-engine review flags for this meeting (empty if none).
+    var attributionFlagList: [SpeakerNamingEngine.Flag] {
+        guard let json = attributionFlags?.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([SpeakerNamingEngine.Flag].self, from: json) else {
+            return []
+        }
+        return decoded
+    }
+
+    /// Persist naming-engine review flags. Empty clears the column.
+    mutating func setAttributionFlags(_ flags: [SpeakerNamingEngine.Flag]) {
+        if flags.isEmpty {
+            attributionFlags = nil
+        } else if let data = try? JSONEncoder().encode(flags),
+                  let str = String(data: data, encoding: .utf8) {
+            attributionFlags = str
         }
     }
 
@@ -257,7 +282,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, transcriptionAttemptedAt, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, attributionFlags, transcriptionAttemptedAt, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {
