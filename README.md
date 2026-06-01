@@ -21,17 +21,15 @@ You only do this once.
 
 ---
 
-## What's New in v4.0.0
+## What's New in v4.1.1
 
-**Transcription engine upgrade.** WhisperKit has graduated to the Argmax Open-Source SDK 1.0.0 (a major-version jump from the 0.9.x line we were pinned to). On the same audio that produced sparse, fragmented output before, the new engine produces dense coherent paragraphs — in side-by-side testing on a real meeting, the old pipeline returned a single fragment for a 90-second window, and the new one returned nine clean segments and 640 characters of useful text. The upgrade also dropped six transitive dependencies from the build, making the dependency graph dramatically simpler.
+**Recording no longer fails with a CoreAudio format error.** A leaked screen-capture audio stream could leave the input hardware in a state that rejected the next recording with error -10868, which then recurred across launches. Meeting Manager now tears that stream down whenever microphone capture fails to start, so the failure clears instead of compounding.
 
-**Speaker diarization on the right audio.** Diarization now runs on the system-only audio buffer — the remote participants' voices — instead of the mixed buffer that included your own microphone. On overlapping speech, the old approach falsely split one speaker into several; the new path uses the calendar attendee count as a hint and gives Pyannote the cleaner input it was designed for. The accuracy gain shows up most on group calls.
+**Meeting Manager now runs cleanly on a fresh Mac.** Several assumptions that only held on the original development machine were removed, so a first launch on another Mac no longer trips over a malformed entitlement, a hardcoded locale, or a missing speech-recognition authorization. The app also tells you specifically which permission is missing — Screen Recording or Apple Events — instead of failing silently when meeting-join detection can't run.
 
-**Network resilience for AI summaries.** Anthropic Claude, local Ollama, and Apollo lookups now retry transient 5xx errors with exponential backoff, and the Claude path honors the server's `Retry-After` hint on rate limits instead of falling back to a generic backoff. Ollama is also pinned to a known-good version (v0.24.0) with a runtime compatibility check, so an upstream breaking change can't silently strand a new install.
+**Local AI summaries return reliably on smaller models.** The on-device summary path now uses Ollama's JSON-schema structured output instead of the unreliable `think:false` flag, which had been returning empty results on qwen3:4b. Each speaker card also shows talk time, share of meeting, and top topic keywords computed without any model, so the card is useful even when the language model is unavailable.
 
-**Honest privacy permissions.** The macOS screen-capture permission prompt now states that Meeting Manager captures system audio during recording (the previous text claimed it did not — a real inaccuracy that the new copy fixes). Apple Events authorization was added so the in-app Chrome tab detection for meeting joins actually works on macOS 14+ instead of failing silently. Four legacy permission keys that were no longer required on macOS 14+ were removed.
-
-**Smaller, faster build.** Intel Macs now route WhisperKit work to the GPU explicitly (the Apple Neural Engine doesn't exist there). The CI pipeline caches Swift Package Manager checkouts so each push is several minutes faster. A long-dormant streaming-transcription service that was never used by the live path was removed.
+**A new speaker-identification engine is available as an opt-in preview.** A prior release diarized the system-audio buffer alone, which collapsed every in-person or hybrid meeting into a single speaker and left 62% of meetings labeled with generic placeholders. The new path diarizes the microphone-plus-system mix with FluidAudio, an on-device model that runs on the Apple Neural Engine, so people sharing a room are separated into distinct speakers. The engine proposes a name only when the attendee list, the speaker count, and the audio agree, and it flags the rest for review rather than guessing. This path is **off by default** while its local-user detection is validated and hardened; you can enable it under Settings → Transcription.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
@@ -62,7 +60,8 @@ Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manag
 - **Swift 6** + **SwiftUI** + **macOS 14.4+**
 - **GRDB** — local SQLite for meetings, transcripts, persons, voice profiles
 - **WhisperKit** — on-device transcription (large-v3-turbo by default)
-- **SpeakerKit** — pyannote-based speaker diarization
+- **SpeakerKit** — pyannote-based speaker diarization (default path)
+- **FluidAudio** — on-device diarization + voice identity on the Apple Neural Engine (opt-in preview)
 - **Claude API** — optional, for summarization + attribution
 - **Ollama** — optional, for fully local AI
 - **GitHub Releases** — update distribution via manual download (self-signed DMG; no auto-update)

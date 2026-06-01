@@ -2471,6 +2471,16 @@ final class AppState {
         let sr = 16000.0
         let speechFloor: Float = 0.005
         let userRatio: Float = 0.35  // system < 35% of mixed ⇒ mic-dominant (user)
+        // The persisted mixed and system WAVs do NOT share a sample timeline:
+        // the manual resamplers in MicrophoneCapture/SystemAudioTap land them at
+        // different effective lengths (observed mixed ≈ 3× system frames despite
+        // both being labeled 16 kHz). Indexing system by the mixed sample index
+        // reads ~3× off in real time. Map the system index by PROPORTION — both
+        // tracks span the same recording wall-clock, just at different effective
+        // rates. (Validated 2026-05-31: lifts gold precision 25% → 57%.)
+        // TODO: the real fix is capture-side parity (AVAudioConverter); until
+        // then this anchor remains a soft signal, not an auto-naming source.
+        let systemScale = Double(system.count) / Double(mixed.count)
         func rms(_ b: [Float], _ s: Int, _ e: Int) -> Float {
             guard s < e, s >= 0, e <= b.count else { return -1 }
             var sum: Float = 0; var i = s
@@ -2486,7 +2496,8 @@ final class AppState {
                 let s = Int(Double(r.start) * sr), e = Int(Double(r.end) * sr)
                 let m = rms(mixed, s, e)
                 if m < 0 || m <= speechFloor { continue }
-                let sy = rms(system, min(s, system.count), min(e, system.count))
+                let ss = Int(Double(s) * systemScale), se = Int(Double(e) * systemScale)
+                let sy = rms(system, min(ss, system.count), min(se, system.count))
                 if sy < 0 { continue }
                 if sy > speechFloor { anySystemSpeech = true }
                 totalWin += 1

@@ -83,10 +83,38 @@ final class AudioBufferManager {
     /// Circular buffers: 30 seconds at 16kHz = 480,000 samples capacity.
     private var micSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
     private var systemSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
+    /// During capture this holds the MIC stream only (continuous → its own
+    /// timeline is the recording wall-clock); `finishRecording` overwrites it
+    /// with the true mic+system mix once both timelines are aligned. Writing
+    /// mic-only during capture keeps a usable file if the app dies mid-record.
     private var audioFile: AVAudioFile?
-    /// Separate file capturing only system audio — used as input for speaker diarization.
+    /// System-audio-only file — input for diarization AND the energy "you"
+    /// anchor, which both need it on the SAME timeline as the mixed file. System
+    /// buffers arrive sparsely (only while remote audio plays), so they are
+    /// silence-padded to their true wall-clock position rather than concatenated.
     private var systemAudioFile: AVAudioFile?
     private let sampleRate: Double = 16000
+
+    // MARK: - Aligned-timeline writing
+    //
+    // The mixed and system WAVs MUST share a sample timeline (sample N = the same
+    // wall-clock instant in both) or any cross-track work — the energy anchor,
+    // offline diarization — reads misaligned audio. We position every buffer at
+    // its real offset from a common t0 (first buffer's host time) and silence-pad
+    // gaps, so both files run the full recording length and line up.
+    private var mixedFileURL: URL?
+    private var systemFileURL: URL?
+    private var recordingStartHostTime: UInt64?
+    private var samplesWrittenMic: Int = 0
+    private var samplesWrittenSystem: Int = 0
+    private let timebase: mach_timebase_info_data_t = {
+        var t = mach_timebase_info_data_t()
+        mach_timebase_info(&t)
+        return t
+    }()
+    private func hostSeconds(_ host: UInt64) -> Double {
+        Double(host) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000
+    }
 
     /// Canonical capture format that EVERY incoming buffer is converted to before
     /// it touches the sample buffers or the WAV files: 16 kHz mono Float32. Mic
@@ -242,11 +270,16 @@ final class AudioBufferManager {
             )
         }
         audioFile = file
+        mixedFileURL = outputURL
 
         // System-only file is best-effort (used for diarization). Same fallback.
         let systemURL = Self.systemAudioURL(for: outputURL)
         systemAudioFile = Self.makeAudioFile(at: systemURL, primary: canonicalFormat.settings)
+        systemFileURL = systemAudioFile != nil ? systemURL : nil
 
+        recordingStartHostTime = nil
+        samplesWrittenMic = 0
+        samplesWrittenSystem = 0
         consecutiveWriteFailures = 0
         startMemoryPressureMonitoring()
     }
@@ -296,7 +329,7 @@ final class AudioBufferManager {
         }
         lock.unlock()
 
-        writeToFile(buffer)
+        writePositioned(buffer, at: time, isMic: true)
     }
 
     func appendSystemBuffer(_ rawBuffer: AVAudioPCMBuffer, at time: AVAudioTime) {
@@ -319,8 +352,7 @@ final class AudioBufferManager {
         }
         lock.unlock()
 
-        writeToFile(buffer)
-        writeSystemToFile(buffer)
+        writePositioned(buffer, at: time, isMic: false)
     }
 
     /// Returns the next mixed audio chunk for transcription, or nil if not enough data.
@@ -375,14 +407,30 @@ final class AudioBufferManager {
         converters.removeAll()
         converterLock.unlock()
 
+        // Close the capture files first (releasing the AVAudioFile flushes it),
+        // guarding against any in-flight positioned write, THEN merge mic+system
+        // into the aligned mix on disk. Callers stop both capture streams before
+        // calling finishRecording, so no further appends arrive here.
+        fileWriteLock.lock()
         lock.lock()
         audioFile = nil
         systemAudioFile = nil
+        lock.unlock()
+        fileWriteLock.unlock()
+
+        mergeMixIntoFile()
+
+        lock.lock()
         micSamples.removeAll()
         systemSamples.removeAll()
         totalMicSamplesAppended = 0
         totalSystemSamplesAppended = 0
         consecutiveWriteFailures = 0
+        mixedFileURL = nil
+        systemFileURL = nil
+        recordingStartHostTime = nil
+        samplesWrittenMic = 0
+        samplesWrittenSystem = 0
         // Reset capacity flag — the same AudioBufferManager instance is reused
         // across recordings, so a stale `true` from a 2-hour-cap hit would
         // immediately auto-stop the next recording.
@@ -393,54 +441,131 @@ final class AudioBufferManager {
         memoryPressureSource = nil
     }
 
-    // MARK: - Private
+    // MARK: - Private — aligned-timeline writing
 
-    private func writeSystemToFile(_ buffer: AVAudioPCMBuffer) {
+    /// Write a canonicalized (16 kHz mono) buffer to its stream's file at its true
+    /// wall-clock position, silence-padding any gap since the last write so the
+    /// mic and system files stay on one shared timeline. `isMic` selects the file
+    /// and the per-stream written-sample counter; both are anchored to the same
+    /// `recordingStartHostTime`. Called on the mic and system capture threads.
+    private func writePositioned(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime, isMic: Bool) {
+        let host = time.isHostTimeValid ? time.hostTime : mach_absolute_time()
+
         lock.lock()
-        let file = systemAudioFile
-        lock.unlock()
-        guard let file else { return }
-        fileWriteLock.lock()
-        defer { fileWriteLock.unlock() }
-        try? file.write(from: buffer)
-    }
-
-    private func writeToFile(_ buffer: AVAudioPCMBuffer) {
-        lock.lock()
-        let file = audioFile
+        if recordingStartHostTime == nil { recordingStartHostTime = host }
+        let t0 = recordingStartHostTime ?? host
+        let file = isMic ? audioFile : systemAudioFile
+        let written = isMic ? samplesWrittenMic : samplesWrittenSystem
         lock.unlock()
 
         guard let file else { return }
 
-        // Serialize the write itself (mic + system threads share `audioFile`).
+        // Target sample offset of this buffer from t0 on the 16 kHz timeline.
+        let offsetSec = max(0, hostSeconds(host) - hostSeconds(t0))
+        let target = Int(offsetSec * sampleRate)
+
         var writeError: Error?
         fileWriteLock.lock()
         do {
+            if target > written {
+                try writeSilence(to: file, frames: target - written)
+            }
             try file.write(from: buffer)
         } catch {
             writeError = error
         }
         fileWriteLock.unlock()
 
+        let advanced = max(written, target) + Int(buffer.frameLength)
+        lock.lock()
+        if isMic { samplesWrittenMic = advanced } else { samplesWrittenSystem = advanced }
+        lock.unlock()
+
+        // Write-failure accounting only auto-stops on the required mixed (mic) file.
         guard let writeError else {
-            lock.lock()
-            consecutiveWriteFailures = 0
-            lock.unlock()
+            if isMic { lock.lock(); consecutiveWriteFailures = 0; lock.unlock() }
             return
         }
-
+        guard isMic else { return }
         lock.lock()
         consecutiveWriteFailures += 1
         let failures = consecutiveWriteFailures
         lock.unlock()
-
         onWriteError?(writeError)
-
         if failures >= maxConsecutiveWriteFailures {
-            // Auto-stop writing to prevent repeated failures
-            lock.lock()
-            audioFile = nil
-            lock.unlock()
+            lock.lock(); audioFile = nil; lock.unlock()
+        }
+    }
+
+    /// Append `frames` of silence to an open file, in bounded chunks so a long
+    /// system gap (minutes of no remote audio) doesn't allocate one huge buffer.
+    private func writeSilence(to file: AVAudioFile, frames: Int) throws {
+        guard frames > 0 else { return }
+        let chunk = 16_000
+        guard let zero = AVAudioPCMBuffer(pcmFormat: canonicalFormat, frameCapacity: AVAudioFrameCount(chunk)) else { return }
+        var remaining = frames
+        while remaining > 0 {
+            let n = min(chunk, remaining)
+            zero.frameLength = AVAudioFrameCount(n)
+            if let ch = zero.floatChannelData?[0] { for i in 0..<n { ch[i] = 0 } }
+            try file.write(from: zero)
+            remaining -= n
+        }
+    }
+
+    /// Produce the true mic+system mix on disk. During capture `mixedFileURL`
+    /// holds mic-only and `systemFileURL` holds the positioned system track —
+    /// both on the shared timeline — so summing them frame-for-frame yields an
+    /// aligned mix. Writes to a temp file then atomically replaces the mixed
+    /// file. On any failure the mic-only file is left in place (degraded but
+    /// valid), never a broken file. Must run AFTER the capture files are closed.
+    private func mergeMixIntoFile() {
+        guard let mixedURL = mixedFileURL else { return }
+        guard let systemURL = systemFileURL,
+              let micIn = try? AVAudioFile(forReading: mixedURL),
+              let sysIn = try? AVAudioFile(forReading: systemURL) else {
+            return  // no system track → mic-only mixed file is already correct
+        }
+        let tmpURL = mixedURL.deletingPathExtension().appendingPathExtension("mixing.wav")
+        try? FileManager.default.removeItem(at: tmpURL)
+        guard let out = Self.makeAudioFile(at: tmpURL, primary: canonicalFormat.settings) else { return }
+
+        let block = 32_000
+        guard let micBuf = AVAudioPCMBuffer(pcmFormat: micIn.processingFormat, frameCapacity: AVAudioFrameCount(block)),
+              let sysBuf = AVAudioPCMBuffer(pcmFormat: sysIn.processingFormat, frameCapacity: AVAudioFrameCount(block)),
+              let outBuf = AVAudioPCMBuffer(pcmFormat: canonicalFormat, frameCapacity: AVAudioFrameCount(block)) else { return }
+
+        do {
+            while true {
+                micBuf.frameLength = 0; sysBuf.frameLength = 0
+                try? micIn.read(into: micBuf, frameCount: AVAudioFrameCount(block))
+                try? sysIn.read(into: sysBuf, frameCount: AVAudioFrameCount(block))
+                let n = Int(max(micBuf.frameLength, sysBuf.frameLength))
+                if n == 0 { break }
+                let m = micBuf.floatChannelData?[0]
+                let s = sysBuf.floatChannelData?[0]
+                guard let o = outBuf.floatChannelData?[0] else { break }
+                let mc = Int(micBuf.frameLength), sc = Int(sysBuf.frameLength)
+                for i in 0..<n {
+                    let mv = i < mc ? (m?[i] ?? 0) : 0
+                    let sv = i < sc ? (s?[i] ?? 0) : 0
+                    o[i] = (mv + sv) * 0.5
+                }
+                outBuf.frameLength = AVAudioFrameCount(n)
+                try out.write(from: outBuf)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: tmpURL)
+            return  // leave mic-only file untouched
+        }
+
+        // Replace the mic-only file with the mixed temp. Prefer the atomic
+        // replaceItemAt; fall back to remove+move if it throws.
+        do {
+            _ = try FileManager.default.replaceItemAt(mixedURL, withItemAt: tmpURL)
+        } catch {
+            try? FileManager.default.removeItem(at: mixedURL)
+            try? FileManager.default.moveItem(at: tmpURL, to: mixedURL)
         }
     }
 }
