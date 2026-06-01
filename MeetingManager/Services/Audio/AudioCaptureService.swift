@@ -245,6 +245,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // people on the call. Requires Screen Recording permission in System Settings.
         // Failure here is non-fatal — mic-only recording is still useful.
         resetBufferCounts()
+        var systemTapStarted = false
         if #available(macOS 14.2, *) {
             if let tap = systemAudioTap {
                 // Wire diagnostic logging for system audio tap
@@ -264,6 +265,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 }
                 do {
                     try await tap.start()
+                    systemTapStarted = true
                     Logger.audio.info("System audio tap started successfully — capturing remote participants")
                     logToFile("Audio: system audio tap STARTED (remote participant capture active)")
                 } catch {
@@ -293,26 +295,14 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         do {
-            do {
-                try micCapture.start()
-            } catch {
-                // Log the failure and try once more with a completely clean slate
-                logToFile("Audio: mic capture FAILED on first attempt: \(error.localizedDescription)")
-                Logger.audio.error("Mic capture failed: \(error.localizedDescription) — retrying with system default")
-
-                // Reset preference and let MicrophoneCapture pick the system default
-                micCapture.configure(inputDeviceID: "")
-                try micCapture.start()
-            }
+            try await startMicrophoneWithRetry(systemTapRunning: systemTapStarted)
         } catch {
-            // Terminal mic failure. The system-audio tap is already running, so
-            // tear it down before bailing — otherwise its ScreenCaptureKit stream
-            // is leaked. Each failed auto-record retry would leak another, and
-            // the accumulating streams wedge the audio HAL so AVAudioEngine input
-            // then fails with -10868 (FormatNotSupported) on EVERY device until
-            // the app is relaunched. Clean up fully so the next attempt starts
-            // from a clean slate.
-            logToFile("Audio: mic capture FAILED terminally — tearing down system tap to avoid leaking a ScreenCaptureKit stream (HAL wedge / -10868)")
+            // Terminal mic failure after all retries + fallbacks. Tear down the
+            // system-audio tap before bailing — otherwise its ScreenCaptureKit
+            // stream is leaked, and accumulating streams wedge the HAL so input
+            // fails with -10868 on EVERY device until relaunch. Reset all state so
+            // the NEXT attempt starts clean and the app stays usable (no relaunch).
+            logToFile("Audio: mic capture FAILED terminally after retries — full teardown so the app stays usable")
             micCapture.stop()
             if #available(macOS 14.2, *) {
                 systemAudioTap?.stop()
@@ -377,6 +367,72 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         isCapturing = true
+    }
+
+    /// Start the mic engine resiliently against CoreAudio -10868
+    /// (`kAudioUnitErr_FormatNotSupported`). That error means the input device
+    /// couldn't be acquired — almost always TRANSIENT: another app is holding the
+    /// mic (a browser tab or Zoom/Meet/Teams in a call), or the audio HAL is
+    /// briefly wedged after a prior crash/leak. A single immediate retry isn't
+    /// enough because the contending app or HAL often needs a second or two to
+    /// release. We retry with exponential backoff (recreating the engine each
+    /// time via `micCapture.stop()`), and as a last resort tear down the
+    /// system-audio tap — whose aggregate device can itself wedge the hardware
+    /// input — and record mic-only. Backoff uses `Task.sleep`, so the main actor
+    /// stays responsive between attempts (no UI freeze). Throws only if every
+    /// path fails; callers then reset state so the app stays usable.
+    private func startMicrophoneWithRetry(systemTapRunning: Bool) async throws {
+        func attempt(useDefaultDevice: Bool) -> Error? {
+            if useDefaultDevice {
+                micCapture.configure(inputDeviceID: "")
+            } else if let dev = resolveInputDevice() {
+                micCapture.configure(inputDeviceID: dev.uniqueID)
+            } else {
+                micCapture.configure(inputDeviceID: "")
+            }
+            do { try micCapture.start(); return nil } catch { return error }
+        }
+
+        // Attempt 1: the preferred/auto-selected device.
+        if attempt(useDefaultDevice: false) == nil { return }
+
+        // Attempts 2…4: let the contending app / HAL settle, recreate the engine,
+        // and fall back to the system default device.
+        let backoffsNs: [UInt64] = [400_000_000, 900_000_000, 1_800_000_000]  // 0.4s, 0.9s, 1.8s
+        var lastError: Error?
+        for (i, delay) in backoffsNs.enumerated() {
+            micCapture.stop()  // recreates the engine — makes the next start idempotent
+            try? await Task.sleep(nanoseconds: delay)
+            if let err = attempt(useDefaultDevice: true) {
+                lastError = err
+                logToFile("Audio: mic start retry \(i + 2)/\(backoffsNs.count + 1) failed after backoff: \(err.localizedDescription)")
+            } else {
+                logToFile("Audio: mic start SUCCEEDED on retry \(i + 2) (device/HAL had to settle)")
+                return
+            }
+        }
+
+        // Last resort: the system-audio tap's aggregate device may be wedging the
+        // hardware input. Drop it and try mic alone — mic-only recording is still
+        // useful, and system audio returns next session.
+        if systemTapRunning, #available(macOS 14.2, *) {
+            logToFile("Audio: dropping system-audio tap and retrying mic alone (its aggregate device may be wedging the input)")
+            systemAudioTap?.stop()
+            micCapture.stop()
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            if attempt(useDefaultDevice: true) == nil {
+                logToFile("Audio: mic started after dropping the system tap — recording mic only this session")
+                onSystemAudioUnavailable?("Your microphone was busy, so this session records your mic only. Closing other apps using the mic (a browser tab in a call, Zoom, Meet, or Teams) and starting again restores remote-participant capture.")
+                return
+            }
+        }
+
+        throw AudioCaptureError.captureSetupFailed(
+            "Couldn't access the microphone after several tries"
+            + (lastError != nil ? " (\(lastError!.localizedDescription))" : "")
+            + ". Another app is probably using it — close any browser tab or app that's in a call "
+            + "(Zoom, Google Meet, Teams), then start recording again. You don't need to restart Meeting Manager."
+        )
     }
 
     /// Stop all audio capture
