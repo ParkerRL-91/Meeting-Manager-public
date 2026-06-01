@@ -217,13 +217,27 @@ struct OnDeviceSettingsView: View {
             Picker("Model", selection: $appState.settings.ollamaModel) {
                 Text("Auto (Dynamic)").tag("auto")
                 Divider()
-                ForEach(models, id: \.self) { model in
+                // Fast non-thinking instruct models — recommended for speed.
+                // Selecting one downloads it automatically (see onChange below).
+                Text("Qwen2.5 7B Instruct — fast, recommended").tag("qwen2.5:7b-instruct")
+                Text("Qwen2.5 3B Instruct — fastest").tag("qwen2.5:3b-instruct")
+                Divider()
+                ForEach(models.filter { $0 != "qwen2.5:7b-instruct" && $0 != "qwen2.5:3b-instruct" }, id: \.self) { model in
                     Text(model).tag(model)
                 }
-                // If the saved model is not "auto" and not in the list, still show it
-                if appState.settings.ollamaModel != "auto" && !models.contains(appState.settings.ollamaModel) {
+                // If the saved model is not "auto", not a recommended tag, and not
+                // in the installed list, still show it so the picker reflects reality.
+                if appState.settings.ollamaModel != "auto"
+                    && appState.settings.ollamaModel != "qwen2.5:7b-instruct"
+                    && appState.settings.ollamaModel != "qwen2.5:3b-instruct"
+                    && !models.contains(appState.settings.ollamaModel) {
                     Text(appState.settings.ollamaModel).tag(appState.settings.ollamaModel)
                 }
+            }
+            .onChange(of: appState.settings.ollamaModel) { _, newModel in
+                // Pull the newly-selected model if it isn't installed yet.
+                guard newModel != "auto" else { return }
+                Task { await appState.ollamaInstaller.setupIfNeeded(model: newModel) }
             }
 
             // Description text adapts to whichever model the user picked.
@@ -232,6 +246,14 @@ struct OnDeviceSettingsView: View {
             // Strings written as full sentences per the writing-style rule.
             if appState.settings.ollamaModel == "auto" {
                 Label("Auto adapts to each meeting — Qwen3 4B handles short and standard meetings; Qwen3 8B takes over for marathon sessions and long transcripts.", systemImage: "wand.and.stars")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("qwen2.5:7b") {
+                Label("Qwen2.5 7B Instruct generates summaries directly without a reasoning step, so it finishes in roughly one to three minutes instead of the many minutes the Qwen3 thinking models take. It uses about 5 GB of memory.", systemImage: "hare.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("qwen2.5:3b") {
+                Label("Qwen2.5 3B Instruct is the fastest option and finishes most summaries in under a minute, using about 2 GB of memory. It is a good fit for shorter meetings.", systemImage: "hare.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if appState.settings.ollamaModel.contains("qwen3:4b") {

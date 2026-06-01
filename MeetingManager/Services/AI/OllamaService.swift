@@ -265,7 +265,10 @@ final class OllamaService {
                 OllamaMessage(role: "system", content: finalSystem),
                 OllamaMessage(role: "user", content: finalUser),
             ],
-            think: think,
+            // Only send the `think` field to thinking-capable models (qwen3,
+            // deepseek-r1). Instruct models (qwen2.5, llama) don't support it and
+            // can error/stall on it — omit so they just generate directly.
+            think: selectedModel.contains("qwen3") ? think : nil,
             format: jsonMode ? "json" : nil,
             options: OllamaOptions(
                 temperature: 0.3,
