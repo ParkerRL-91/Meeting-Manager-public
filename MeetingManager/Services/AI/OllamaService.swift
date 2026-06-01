@@ -213,7 +213,8 @@ final class OllamaService {
         userPrompt: String,
         model: String,
         maxOutputTokens: Int = 2048,
-        think: Bool = true,
+        think: Bool = false,   // default OFF — thinking chains are slow; bounded
+                               // summarization/titles don't need chain-of-thought
         jsonMode: Bool = false
     ) async throws -> String {
         let selectedModel: String
@@ -409,6 +410,9 @@ final class OllamaService {
                 OllamaMessage(role: "user", content: finalUser),
             ],
             stream: true,
+            // Thinking OFF for Qwen3 (skip the slow reasoning chain); omit the
+            // field entirely for instruct models that don't understand it.
+            think: selectedModel.contains("qwen3") ? false : nil,
             options: OllamaOptions(
                 temperature: 0.3,
                 num_predict: 8192,
