@@ -67,5 +67,22 @@ let package = Package(
             path: "Tests/PromptOptimization",
             exclude: ["Fixtures", "results"]
         ),
+        // Dev-only batch re-diarization + re-attribution tool. Reads a jobs JSON,
+        // diarizes mixed WAVs with FluidAudio, names clusters via local Ollama
+        // (closed attendee set), and EMITS SQL for review. Does not write the DB.
+        .executableTarget(
+            name: "batch-rediarize",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Tools/BatchRediarize"
+        ),
+        .executableTarget(
+            name: "ref-validate",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Tools/RefValidate"
+        ),
     ]
 )
