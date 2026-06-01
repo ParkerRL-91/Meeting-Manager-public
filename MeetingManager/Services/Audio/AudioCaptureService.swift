@@ -412,26 +412,59 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             }
         }
 
-        // Last resort: the system-audio tap's aggregate device may be wedging the
-        // hardware input. Drop it and try mic alone — mic-only recording is still
-        // useful, and system audio returns next session.
-        if systemTapRunning, #available(macOS 14.2, *) {
-            logToFile("Audio: dropping system-audio tap and retrying mic alone (its aggregate device may be wedging the input)")
-            systemAudioTap?.stop()
-            micCapture.stop()
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            if attempt(useDefaultDevice: true) == nil {
-                logToFile("Audio: mic started after dropping the system tap — recording mic only this session")
-                onSystemAudioUnavailable?("Your microphone was busy, so this session records your mic only. Closing other apps using the mic (a browser tab in a call, Zoom, Meet, or Teams) and starting again restores remote-participant capture.")
-                return
+        // AVAudioEngine still can't get the mic. The diagnostics show this is
+        // almost always the conferencing app (Zoom/Meet/Teams) holding the device
+        // — AVAudioEngine's input unit loses that contention with -10868. So
+        // capture the mic through ScreenCaptureKit instead: SCK taps the mic at
+        // the system level and COEXISTS with the call app (it's already capturing
+        // system audio from that same call). macOS 15+.
+        if systemTapRunning, #available(macOS 15.0, *), let tap = systemAudioTap {
+            logToFile("Audio: AVAudioEngine mic blocked (-10868) — switching mic capture to ScreenCaptureKit (coexists with the call app)")
+            micCapture.stop()  // fully release the AVAudioEngine input
+            tap.onMicBuffer = { [weak self] buffer, time in
+                guard let self else { return }
+                self.bufferManager.appendMicBuffer(buffer, at: time)
+                self.updateMicLevel(buffer)
             }
+            // Restart the stream with mic enabled. Try the preferred device, then
+            // the system default; verify buffers actually flow before trusting it.
+            for micUID in [resolveInputDevice()?.uniqueID, nil] {
+                tap.stop()
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                do {
+                    try await tap.start(captureMicrophone: true, micDeviceUID: micUID)
+                } catch {
+                    logToFile("Audio: SCK mic start failed (device=\(micUID ?? "default")): \(error.localizedDescription)")
+                    continue
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)  // let mic buffers arrive
+                if tap.micBufferCount > 0 {
+                    logToFile("Audio: mic now captured via ScreenCaptureKit (\(tap.micBufferCount) buffers, device=\(micUID ?? "default")) — full mic+system recording")
+                    return
+                }
+                logToFile("Audio: SCK mic produced no buffers (device=\(micUID ?? "default"))")
+            }
+            // SCK mic didn't produce audio — drop it and keep system audio only.
+            tap.onMicBuffer = nil
+            tap.stop()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await tap.start()
         }
 
+        // Non-fatal degradation: if we have system audio, record SYSTEM-ONLY
+        // rather than failing the whole meeting. The user still gets the other
+        // participants and a transcript — never a blocking error mid-meeting.
+        if systemTapRunning {
+            logToFile("Audio: recording SYSTEM-ONLY this session — mic unavailable (held by another app)")
+            onSystemAudioUnavailable?("Your microphone is in use by another app, so this recording captures the other participants but not your own voice. Quit the app using the mic (a browser tab in a call, Zoom, Meet, or Teams) and start again to capture both sides.")
+            return
+        }
+
+        // Truly nothing to record — no mic AND no system audio.
         throw AudioCaptureError.captureSetupFailed(
-            "Couldn't access the microphone after several tries"
+            "Couldn't access the microphone"
             + (lastError != nil ? " (\(lastError!.localizedDescription))" : "")
-            + ". Another app is probably using it — close any browser tab or app that's in a call "
-            + "(Zoom, Google Meet, Teams), then start recording again. You don't need to restart Meeting Manager."
+            + ", and no system audio is available. Close any app using the mic, or grant Screen Recording permission, then start again. You don't need to restart Meeting Manager."
         )
     }
 

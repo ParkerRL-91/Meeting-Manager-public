@@ -13,12 +13,21 @@ import os
 final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
 
+    /// Microphone buffers, when this stream is started with `captureMicrophone:`.
+    /// Used as the resilient mic path when AVAudioEngine can't acquire the input
+    /// device (e.g. -10868 because the conferencing app holds the mic). SCK taps
+    /// the mic at the system level, so it COEXISTS with Zoom/Meet/Teams.
+    var onMicBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+
     /// Diagnostic callback for logging (set by AudioCaptureService)
     var onDiagnostic: ((String) -> Void)?
 
     private var stream: SCStream?
     private var isRunning = false
     private var bufferCount: Int = 0
+    /// Count of microphone sample buffers delivered (to confirm the SCK mic path
+    /// is actually producing audio, not just that the stream started).
+    private(set) var micBufferCount: Int = 0
 
     /// Lock protecting `isRunning`, `stream`, and `bufferCount` against
     /// races between the audio callback queue and callers of start/stop.
@@ -34,9 +43,14 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
 
     /// Start capturing system audio via ScreenCaptureKit.
     /// This captures all system audio output except our own app's audio.
-    func start(processID: pid_t? = nil) async throws {
+    /// - Parameters:
+    ///   - captureMicrophone: also capture the microphone through this SCStream
+    ///     (macOS 15+). The resilient mic path when AVAudioEngine is contended.
+    ///   - micDeviceUID: preferred microphone device UID (nil = system default).
+    func start(processID: pid_t? = nil, captureMicrophone: Bool = false, micDeviceUID: String? = nil) async throws {
         lock.lock()
         guard !isRunning else { lock.unlock(); return }
+        micBufferCount = 0
         lock.unlock()
 
         // Get available content for filtering
@@ -74,13 +88,34 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         config.channelCount = 2         // Stereo system audio
         config.excludesCurrentProcessAudio = true  // Don't capture our own audio
 
-        onDiagnostic?("DIAG:sys_tap configuring SCStream: audio=48kHz/2ch, excludeSelf=true")
+        // Microphone capture through ScreenCaptureKit (macOS 15+). SCK taps the
+        // mic at the system level, so unlike AVAudioEngine it coexists with the
+        // conferencing app that's holding the device — this is the fix for the
+        // recurring -10868 during calls.
+        var micRequested = false
+        if captureMicrophone {
+            if #available(macOS 15.0, *) {
+                config.captureMicrophone = true
+                if let uid = micDeviceUID { config.microphoneCaptureDeviceID = uid }
+                micRequested = true
+                onDiagnostic?("DIAG:sys_tap captureMicrophone=true (SCK mic path) device=\(micDeviceUID ?? "system default")")
+            } else {
+                onDiagnostic?("DIAG:sys_tap captureMicrophone requested but needs macOS 15+")
+            }
+        }
+
+        onDiagnostic?("DIAG:sys_tap configuring SCStream: audio=48kHz/2ch, mic=\(micRequested), excludeSelf=true")
 
         // Create stream
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
 
         // Add audio output handler
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "com.meetingmanager.systemaudio", qos: .userInteractive))
+
+        // Add microphone output handler (macOS 15+).
+        if micRequested, #available(macOS 15.0, *) {
+            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: DispatchQueue(label: "com.meetingmanager.scmic", qos: .userInteractive))
+        }
 
         // Start capture
         do {
@@ -118,14 +153,19 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     // MARK: - SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        // Only process audio buffers
-        guard type == .audio else { return }
+        // Process system-audio AND microphone buffers (mic only when started with
+        // captureMicrophone: on macOS 15+).
+        let isMic: Bool
+        if #available(macOS 15.0, *) { isMic = (type == .microphone) } else { isMic = false }
+        guard type == .audio || isMic else { return }
         guard sampleBuffer.isValid else { return }
+        let tag = isMic ? "sc_mic" : "sys_sckit"
 
         lock.lock()
         guard isRunning else { lock.unlock(); return }
-        bufferCount += 1
-        let currentBufferCount = bufferCount
+        let currentBufferCount: Int
+        if isMic { micBufferCount += 1; currentBufferCount = micBufferCount }
+        else { bufferCount += 1; currentBufferCount = bufferCount }
         lock.unlock()
 
         // Extract audio data from CMSampleBuffer
@@ -170,7 +210,7 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
                     }
                     let rawRMS = checkN > 0 ? sqrtf(sum / Float(checkN)) : 0
                     let samples = (0..<min(5, totalFloats)).map { String(format: "%.6f", srcPtr[$0]) }.joined(separator: ",")
-                    onDiagnostic?("DIAG:sys_sckit #\(currentBufferCount) frames=\(frameCount) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", rawRMS)) samples=[\(samples)]")
+                    onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) frames=\(frameCount) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", rawRMS)) samples=[\(samples)]")
                 }
 
                 // Mix to mono
@@ -214,11 +254,11 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
                 }
 
                 let time = AVAudioTime(hostTime: mach_absolute_time())
-                onBuffer?(pcmBuffer, time)
+                if isMic { onMicBuffer?(pcmBuffer, time) } else { onBuffer?(pcmBuffer, time) }
             }
         } catch {
             if currentBufferCount <= 3 {
-                onDiagnostic?("DIAG:sys_sckit #\(currentBufferCount) buffer extraction error: \(error.localizedDescription)")
+                onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) buffer extraction error: \(error.localizedDescription)")
             }
         }
     }
