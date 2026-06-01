@@ -67,6 +67,48 @@ enum SpeakerNamingEngine {
         case moreVoicesThanInvited
         case duplicateName       // same name on >1 cluster (over-split)
         case unexpectedSpeaker   // unassigned cluster but candidates remain (someone unrecognized)
+        case voiceMatchAdvisory  // name rests only on uncorroborated cross-meeting voice (~57% precise)
+    }
+
+    // MARK: - P5: candidate hygiene
+
+    /// Bot / notetaker / room / distribution-list patterns that are "attendees"
+    /// but never have a voice cluster. Leaving them in the candidate pool
+    /// corrupts elimination (a phantom candidate). Matched case-insensitively
+    /// against the attendee string (name or email).
+    private static let nonPersonPatterns: [String] = [
+        "otter.ai", "fireflies", "read.ai", "fathom", "avoma", "tldv", "tl;dv",
+        "notetaker", "note taker", "notes bot", "meeting bot", "recording bot",
+        "transcription", "zoom room", "meet room", "teams room", "boardroom",
+        "conference room", "(room)", "resource", "no-reply", "noreply", "calendar",
+    ]
+
+    /// Clean the accepted-attendee list before attribution/elimination:
+    /// drop bots/notetakers/rooms, drop unenumerable distribution lists, trim,
+    /// and dedupe near-identical entries (same person as name and email).
+    /// Conservative — only clear non-person patterns are removed.
+    static func cleanCandidates(_ raw: [String]) -> [String] {
+        var seen: [String] = []
+        for a in raw {
+            let trimmed = a.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let lower = trimmed.lowercased()
+            // Drop bots / rooms / resources.
+            if nonPersonPatterns.contains(where: { lower.contains($0) }) { continue }
+            // Drop obvious distribution lists (team@, all@, group aliases).
+            if let at = lower.firstIndex(of: "@") {
+                let localPart = String(lower[lower.startIndex..<at])
+                let listy: Set<String> = ["team", "all", "everyone", "staff", "group", "dl", "list", "announce", "info", "sales", "support"]
+                if listy.contains(localPart) { continue }
+            }
+            // Dedupe: skip if an already-kept entry is the same person (fuzzy).
+            if seen.contains(where: { kept in
+                let kl = kept.lowercased()
+                return kl == lower || kl.contains(lower) || lower.contains(kl)
+            }) { continue }
+            seen.append(trimmed)
+        }
+        return seen
     }
 
     struct Flag: Codable, Sendable, Equatable {

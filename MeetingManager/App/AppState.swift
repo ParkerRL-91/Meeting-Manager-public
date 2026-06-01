@@ -2131,7 +2131,10 @@ final class AppState {
         // v3.10 #1 RSVP gate: never consider declined attendees as candidates.
         // Falls back to the full participant list when no RSVP data is present
         // (manual ad-hoc meetings, calendars that don't expose responseStatus).
-        let participants = meeting.acceptedParticipantList
+        // P5: clean the candidate pool — drop bots/notetakers/rooms and
+        // distribution lists, dedupe near-identical entries — so elimination
+        // isn't corrupted by phantom "attendees" that never speak.
+        let participants = SpeakerNamingEngine.cleanCandidates(meeting.acceptedParticipantList)
         guard !participants.isEmpty else { return (transcripts, meeting) }
         if meeting.declinedAttendeeList.count > 0 {
             Logger.general.info("[RSVP] excluding \(meeting.declinedAttendeeList.count) declined attendee(s) from attribution candidates for meeting \(meeting.id, privacy: .public)")
@@ -2377,12 +2380,29 @@ final class AppState {
         // ─── P3: contradiction flags (computed + logged; Speakers-tab
         // surfacing + persistence is the next phase). Flags don't change the
         // mapping — they record where a result needs human confirmation.
-        let namingFlags = SpeakerNamingEngine.flags(
+        var namingFlags = SpeakerNamingEngine.flags(
             finalMapping: mapping.filter { $0.key.hasPrefix("Speaker ") },
             allClusters: allClusters,
             acceptedCandidates: participants,
             userNames: [NSFullUserName(), userFirst ?? ""]
         )
+        // P4 advisory: a name resting ONLY on cross-meeting voice/enrollment
+        // (no independent signal agrees, confidence below the strong bar) is
+        // ~57% reliable on this audio — flag it for review rather than trust it.
+        for (cluster, name) in mapping where cluster.hasPrefix("Speaker ") {
+            let nl = name.lowercased()
+            let fromVoice = (voiceMatches[cluster]?.lowercased() == nl)
+                || (enrollmentMatches[cluster]?.lowercased() == nl)
+            guard fromVoice else { continue }
+            let corroborated = (vocativeResult.mapping[cluster]?.lowercased() == nl)
+                || (outcome.mapping[cluster]?.lowercased() == nl)
+                || ((clusterConfidence[cluster] ?? 0) >= 0.95)
+            if !corroborated {
+                namingFlags.append(SpeakerNamingEngine.Flag(
+                    kind: .voiceMatchAdvisory,
+                    reason: "“\(name)” was matched only by voice (no other signal agrees) — please confirm."))
+            }
+        }
         for f in namingFlags {
             Logger.general.info("[NamingFlag] \(f.kind.rawValue, privacy: .public): \(f.reason, privacy: .public)")
         }
