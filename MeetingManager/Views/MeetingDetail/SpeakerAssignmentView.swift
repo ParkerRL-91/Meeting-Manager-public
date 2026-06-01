@@ -125,9 +125,28 @@ struct SpeakerAssignmentView: View {
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        if let flags = meeting?.attributionFlagList, !flags.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label("Review these speaker matches", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.appWarning)
+                                ForEach(Array(flags.enumerated()), id: \.offset) { _, flag in
+                                    Text("• \(flag.reason)")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.appTextSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.appWarning.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(.horizontal, 16)
+                        }
                         ForEach(clusters) { cluster in
                             SpeakerClusterCard(
                                 cluster: cluster,
+                                totalMeetingSeconds: totalClusterSeconds,
                                 meeting: meeting,
                                 suggestions: orderedSuggestions(for: cluster),
                                 bestGuess: bestGuesses[cluster.id],
@@ -154,6 +173,12 @@ struct SpeakerAssignmentView: View {
         ) {
             Task { await reload() }
         }
+    }
+
+    /// Total spoken seconds across every displayed cluster — the denominator for
+    /// each card's share-of-meeting %. Computed once from the loaded clusters.
+    private var totalClusterSeconds: Int {
+        clusters.reduce(0) { $0 + $1.totalSeconds }
     }
 
     // MARK: - Loading
@@ -242,14 +267,14 @@ struct SpeakerAssignmentView: View {
         let toSummarize = targets ?? clusters.filter { summaries[$0.id] == nil && $0.segments.count >= 3 }
         guard !toSummarize.isEmpty else { return }
 
-        // think defaults ON here: Qwen3 reasons regardless, and with thinking
-        // ON Ollama cleanly separates the reasoning into a `thinking` field so
-        // the returned content is just the profile. With think:false the model
-        // dumps its reasoning INTO the content (a "Hmm, the user wants…" preamble
-        // ending in a stray </think>) — no faster, just messier. 4096 leaves
-        // room for the think pass plus the <=160-word profile. (OllamaService
-        // also strips any stray <think> block defensively.)
-        let textGen = await appState.makeTextGenerator(maxOutputTokens: 4096)
+        // think:false + jsonMode: mirrors the name-suggestion call. On qwen3:4b
+        // think:false is unreliable (Ollama #12917) — the model either burns the
+        // budget reasoning and returns EMPTY content, or dumps reasoning into the
+        // content. Forcing JSON structured output (Ollama format:"json") makes it
+        // emit just {"profile": "..."}, which is both reliable to parse and the
+        // robust local fix for the empty-profile bug. 2048 is ample for a
+        // <=160-word profile object.
+        let textGen = await appState.makeTextGenerator(maxOutputTokens: 2048, think: false, jsonMode: true)
         guard let textGen else {
             Self.logger.info("[SpeakerAssignment] no AI configured — skipping summaries")
             return
@@ -307,7 +332,7 @@ struct SpeakerAssignmentView: View {
         // (ADR-005). Name guessing happens separately against a closed
         // candidate set.
         let system = """
-            You are profiling ONE anonymous speaker in a meeting to help a reader recognize who they are. You see only this speaker's own utterances — no names, no other speakers.
+            You are profiling ONE anonymous speaker in a meeting to help a reader recognize who they are. You see only this speaker's own utterances — no names, no other speakers. Reply with JSON only.
 
             Describe, drawing only on the text:
             - Their apparent ROLE or function (e.g. leads/facilitates the meeting, presents an update, makes decisions, asks questions, takes notes, mostly listens and reacts).
@@ -317,14 +342,25 @@ struct SpeakerAssignmentView: View {
             Rules:
             - Do NOT state or guess any person's name. Refer to them as "this speaker."
             - Do NOT invent anything not supported by the text. If they say little of substance, say so plainly.
-            - No preamble like "Here is a summary." Output only the profile.
-            - Do NOT include a word count, notes to yourself, or any meta-commentary.
             - \(lengthGuidance)
+
+            Respond with ONLY this JSON object:
+            {"profile": "<the recognition profile text>"}
             """
         let user = "This speaker's utterances:\n\n\(truncated)\n\nProfile this speaker for recognition."
         do {
-            let result = try await textGen(system, user)
-            return result.trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = try await textGen(system, user)
+            // Structured output: parse {"profile": "..."}. Fall back to the raw
+            // text if the model returned bare prose (defensive — some backends
+            // ignore the format hint).
+            if let json = SpeakerAttributionService.extractJSONObject(from: raw),
+               let data = json.data(using: .utf8),
+               let dict = try? JSONDecoder().decode([String: String].self, from: data),
+               let profile = dict["profile"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !profile.isEmpty {
+                return profile
+            }
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             logger.warning("[SpeakerAssignment] summarize failed for \(cluster.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return ""
@@ -466,6 +502,37 @@ struct SpeakerCluster: Identifiable {
         Int(segments.reduce(0) { $0 + ($1.endTime - $1.startTime) })
     }
 
+    /// Top topic keywords this speaker uses, computed locally with no LLM:
+    /// term frequency over the cluster's text, minus a stopword list, ranked.
+    /// Distinguishes speakers at a glance even when the AI profile is absent.
+    var topKeywords: [String] {
+        var counts: [String: Int] = [:]
+        for segment in segments {
+            for token in segment.text.lowercased().split(whereSeparator: { !$0.isLetter && $0 != "-" }) {
+                let word = String(token)
+                guard word.count >= 4, !Self.stopwords.contains(word) else { continue }
+                counts[word, default: 0] += 1
+            }
+        }
+        return counts
+            .filter { $0.value >= 2 }
+            .sorted { a, b in a.value != b.value ? a.value > b.value : a.key < b.key }
+            .prefix(5)
+            .map { $0.key }
+    }
+
+    /// Common English filler removed before ranking keywords. Kept deliberately
+    /// short — anything ≥4 letters that recurs is usually topical.
+    private static let stopwords: Set<String> = [
+        "that", "this", "with", "have", "they", "from", "what", "your", "would",
+        "there", "their", "about", "which", "when", "will", "been", "were", "them",
+        "then", "than", "into", "just", "like", "know", "think", "going", "really",
+        "yeah", "okay", "right", "well", "kind", "sort", "thing", "things", "want",
+        "need", "make", "good", "some", "more", "much", "very", "also", "could",
+        "should", "because", "actually", "basically", "maybe", "stuff", "gonna",
+        "wanna", "sure", "mean", "guess", "those", "these", "here", "kinda"
+    ]
+
     /// A representative sample of what this speaker said. Picks the longest
     /// utterances first because long ones are more identifying than "yeah" /
     /// "right". Caps at ~5 lines / 600 chars total — enough to recognise the
@@ -490,6 +557,8 @@ struct SpeakerCluster: Identifiable {
 
 private struct SpeakerClusterCard: View {
     let cluster: SpeakerCluster
+    /// Sum of spoken seconds across all clusters — denominator for share %.
+    let totalMeetingSeconds: Int
     let meeting: Meeting?
     let suggestions: [String]
     /// AI best-match guess (closed-set, hallucination-safe) + a short reason.
@@ -535,6 +604,11 @@ private struct SpeakerClusterCard: View {
                 }
                 Spacer()
             }
+
+            // Always-on, LLM-free signals: talk time, share of meeting, and the
+            // speaker's top topic keywords. Distinguishes clusters at a glance
+            // even when the AI profile is missing or still generating.
+            signalsRow
 
             // What they discussed — a 1-2 sentence summary when AI is
             // available, otherwise a short utterance excerpt fallback.
@@ -703,6 +777,49 @@ private struct SpeakerClusterCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.appSurfaceSecondary.opacity(0.4))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// LLM-free distinguishing signals. Talk time + share % are metric pills;
+    /// the top keywords render as small topic chips. All computed locally.
+    @ViewBuilder
+    private var signalsRow: some View {
+        let keywords = cluster.topKeywords
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                metricPill(icon: "clock", text: durationLabel)
+                if let share = shareLabel {
+                    metricPill(icon: "chart.pie", text: share)
+                }
+            }
+            if !keywords.isEmpty {
+                SpeakerSuggestionFlow(spacing: 6) {
+                    ForEach(keywords, id: \.self) { word in
+                        Text(word)
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.appSurfaceSecondary.opacity(0.6))
+                            .foregroundStyle(Color.appTextSecondary)
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+        }
+    }
+
+    private func metricPill(icon: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.caption2)
+            Text(text).font(.caption.weight(.medium))
+        }
+        .foregroundStyle(Color.appTextSecondary)
+    }
+
+    /// Share of total spoken time across all clusters, e.g. "42% of talk time".
+    private var shareLabel: String? {
+        guard totalMeetingSeconds > 0 else { return nil }
+        let pct = Int((Double(cluster.totalSeconds) / Double(totalMeetingSeconds) * 100).rounded())
+        return "\(pct)% of talk time"
     }
 
     private var initial: String {

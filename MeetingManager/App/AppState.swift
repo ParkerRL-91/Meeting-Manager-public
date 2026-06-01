@@ -1924,29 +1924,43 @@ final class AppState {
 
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
-                let diarResult = try await SpeakerDiarizationService.shared.diarize(
-                    audioArray: diarizationSamples,
-                    participantCount: participantHint
-                )
-                fileLog("Diarization: \(diarResult.segments.count) speaker segments from \(diarizationSource) input (hint: \(participantHint.map(String.init) ?? "auto"))")
+                // Diarize through the engine the flag selects. Both engines emit
+                // 1-based "Speaker N" labels; FluidAudio normalizes its string
+                // cluster ids in FluidDiarizationResult, SpeakerKit's are 0-based
+                // here (hence +1). Energy-aware source selection (above) is
+                // engine-agnostic and applies to whichever runs.
+                let segments: [(sid: Int, start: Float, end: Float)]
+                if settings.useFluidAudioDiarization {
+                    let r = try await FluidAudioDiarizationService.shared.diarize(
+                        audioArray: diarizationSamples,
+                        participantCount: participantHint
+                    )
+                    segments = r.segments.map { (sid: $0.speakerId, start: $0.startTime, end: $0.endTime) }
+                } else {
+                    let r = try await SpeakerDiarizationService.shared.diarize(
+                        audioArray: diarizationSamples,
+                        participantCount: participantHint
+                    )
+                    segments = r.segments.map { (sid: ($0.speaker.speakerId ?? 0) + 1, start: $0.startTime, end: $0.endTime) }
+                }
+                fileLog("Diarization: \(segments.count) speaker segments from \(diarizationSource) input (engine: \(settings.useFluidAudioDiarization ? "FluidAudio" : "SpeakerKit"), hint: \(participantHint.map(String.init) ?? "auto"))")
 
                 // Build a lookup: for each second, which speaker is active
-                for seg in diarResult.segments {
-                    let sid = seg.speaker.speakerId ?? 0
-                    let label = "Speaker \(sid + 1)"
-                    var t = Int(seg.startTime)
-                    while t < Int(seg.endTime) + 1 {
+                for seg in segments {
+                    let label = "Speaker \(seg.sid)"
+                    var t = Int(seg.start)
+                    while t < Int(seg.end) + 1 {
                         speakerMap[t] = label
                         t += 1
                     }
                 }
 
-                let uniqueSpeakers = Set(diarResult.segments.compactMap { $0.speaker.speakerId })
+                let uniqueSpeakers = Set(segments.map { $0.sid })
                 fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
 
                 // Capture speaker labels — written atomically with transcripts in the caller
                 if uniqueSpeakers.count > 1 {
-                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0 + 1)" }.joined(separator: ", ")
+                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0)" }.joined(separator: ", ")
                 }
             } catch {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
@@ -2092,14 +2106,35 @@ final class AppState {
     /// The hook fires AFTER WhisperKit + SpeakerKit have produced raw
     /// `Speaker N` labels but BEFORE persistence so the rewritten labels land
     /// in the DB on the first save.
+    /// Confidence assigned to a cluster that FluidAudio matched to a known
+    /// person via Phase-2 enrollment. This is the highest NON-manual signal:
+    /// it sits above vocative (≤0.85) and LLM (≤0.78) but below a manual
+    /// rename (1.0). The match is audio-grounded AND already RSVP-gated to this
+    /// meeting (only accepted attendees are enrolled), so the attendance gate is
+    /// moot. Default ~0.85 per the Phase-0 spike; FluidAudio doesn't expose a
+    /// per-match score, so we use a fixed tier rather than a similarity value.
+    static let enrollmentMatchConfidence: Float = 0.85
+
+    /// - Parameter enrollmentMatches: clusters FluidAudio pre-named via Phase-2
+    ///   enrollment (`["Speaker N": personName]`). Treated as the highest
+    ///   non-manual signal — seeded into the mapping above vocative/LLM and
+    ///   scored at `enrollmentMatchConfidence`. Empty on the SpeakerKit path and
+    ///   on retry (where transcripts are already relabelled and the pass is
+    ///   fill-only). These clusters' transcript rows are relabelled upstream in
+    ///   `runDiarization`, so passing them here is what gets them into the
+    ///   persisted `speakerMap`/`speakerConfidenceMap` with a real score.
     private func applySpeakerAttribution(
         transcripts: [Transcript],
-        meeting: Meeting
+        meeting: Meeting,
+        enrollmentMatches: [String: String] = [:]
     ) async -> (transcripts: [Transcript], meeting: Meeting) {
         // v3.10 #1 RSVP gate: never consider declined attendees as candidates.
         // Falls back to the full participant list when no RSVP data is present
         // (manual ad-hoc meetings, calendars that don't expose responseStatus).
-        let participants = meeting.acceptedParticipantList
+        // P5: clean the candidate pool — drop bots/notetakers/rooms and
+        // distribution lists, dedupe near-identical entries — so elimination
+        // isn't corrupted by phantom "attendees" that never speak.
+        let participants = SpeakerNamingEngine.cleanCandidates(meeting.acceptedParticipantList)
         guard !participants.isEmpty else { return (transcripts, meeting) }
         if meeting.declinedAttendeeList.count > 0 {
             Logger.general.info("[RSVP] excluding \(meeting.declinedAttendeeList.count) declined attendee(s) from attribution candidates for meeting \(meeting.id, privacy: .public)")
@@ -2268,6 +2303,19 @@ final class AppState {
             clusterConfidence[cluster] = min(1.0, combined)
         }
 
+        // Enrollment matches (FluidAudio Phase-2) are the highest NON-manual
+        // signal: audio-grounded and already RSVP-gated to this meeting. They
+        // win over vocative/LLM on a name collision and are scored at the fixed
+        // enrollment tier. Applied AFTER the combine step so the tier isn't
+        // diluted by a weaker corroborating signal. Their transcript rows were
+        // relabelled upstream in runDiarization; seeding the mapping here is what
+        // persists them in the meeting's speakerMap + speakerConfidenceMap.
+        for (cluster, name) in enrollmentMatches {
+            mapping[cluster] = name
+            clusterConfidence[cluster] = Self.enrollmentMatchConfidence
+            Logger.general.info("[Enrollment] cluster \(cluster, privacy: .public) → \(name, privacy: .public) (conf \(Self.enrollmentMatchConfidence))")
+        }
+
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
         // labelled "mic" by the capture pipeline, never "Speaker N", so they
         // don't go through the LLM. Surface the user's name on those rows by
@@ -2280,30 +2328,83 @@ final class AppState {
             clusterConfidence["mic"] = 1.0
         }
 
-        // 2-person meeting auto-assignment. If the calendar invite has the
-        // user + exactly one other participant, AND the transcript has
-        // exactly one un-mapped cluster (everything else is mic or already
-        // resolved by voice/LLM), name that cluster the lone non-user
-        // participant. Cheap, deterministic, and removes the most common
-        // "click each fragment to label" friction for 1:1s.
         let allClusters = Set(transcripts.compactMap { $0.speakerLabel })
             .filter { $0 != "mic" && $0 != "system" && $0.hasPrefix("Speaker ") }
-        let unmappedClusters = allClusters.filter { mapping[$0] == nil }
 
-        if unmappedClusters.count == 1,
-           let onlyCluster = unmappedClusters.first {
-            // Calendar participants minus anyone matching the user's first name.
-            let nonUserParticipants = participants.filter { name in
-                guard let userFirst = userFirst else { return true }
-                return !name.lowercased().contains(userFirst.lowercased())
+        // ─── P1: energy "you" anchor ───────────────────────────────────
+        // On the FluidAudio mixed-audio path the local user is a "Speaker N"
+        // cluster (no "mic" label), so nothing above identified them. Pin the
+        // user's cluster by mic-vs-system energy. Only fires when the system
+        // track has real remote speech to contrast against (else nil — e.g.
+        // in-person). This is what unblocks 1:1/elimination on mixed audio.
+        if let audioPath = meeting.audioFilePath {
+            let mixedURL = URL(fileURLWithPath: audioPath)
+            let systemURL = AudioBufferManager.systemAudioURL(for: mixedURL)
+            if FileManager.default.fileExists(atPath: systemURL.path) {
+                var ranges: [String: [(start: Float, end: Float)]] = [:]
+                for t in transcripts {
+                    let raw = (t.speakerLabel ?? "").trimmingCharacters(in: .whitespaces)
+                    guard raw.hasPrefix("Speaker "), mapping[raw] == nil else { continue }
+                    ranges[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
+                }
+                if !ranges.isEmpty,
+                   let hit = identifyUserClusterByEnergy(clusterRanges: ranges, mixedURL: mixedURL, systemURL: systemURL),
+                   mapping[hit.cluster] == nil {
+                    let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+                    let displayName = fullName.isEmpty ? (userFirst ?? "Me") : fullName
+                    mapping[hit.cluster] = displayName
+                    clusterConfidence[hit.cluster] = hit.confidence
+                    Logger.general.info("[Energy] local user cluster \(hit.cluster, privacy: .public) → \(displayName, privacy: .public) (conf \(hit.confidence))")
+                }
             }
-            if nonUserParticipants.count == 1 {
-                let inferred = nonUserParticipants[0]
-                mapping[onlyCluster] = inferred
-                // Deterministic, single-candidate inference — high confidence.
-                clusterConfidence[onlyCluster] = 0.95
-                Logger.general.info("Auto-assigned 2-person meeting: \(onlyCluster, privacy: .public) → \(inferred, privacy: .public)")
+        }
+
+        // ─── P2: margin-guarded elimination (generalizes the old 2-person
+        // auto-assign to N people). Assigns only when exactly one cluster and
+        // one candidate remain — never forces a guess when counts are ambiguous.
+        let nonUserParticipants = participants.filter { name in
+            guard let userFirst = userFirst else { return true }
+            return !name.lowercased().contains(userFirst.lowercased())
+        }
+        let eliminated = SpeakerNamingEngine.eliminate(
+            allClusters: allClusters,
+            candidates: nonUserParticipants,
+            assigned: mapping.filter { $0.key.hasPrefix("Speaker ") }
+        )
+        for (cluster, asg) in eliminated {
+            mapping[cluster] = asg.name
+            clusterConfidence[cluster] = asg.confidence
+            Logger.general.info("[Elimination] \(cluster, privacy: .public) → \(asg.name, privacy: .public) (conf \(asg.confidence))")
+        }
+
+        // ─── P3: contradiction flags (computed + logged; Speakers-tab
+        // surfacing + persistence is the next phase). Flags don't change the
+        // mapping — they record where a result needs human confirmation.
+        var namingFlags = SpeakerNamingEngine.flags(
+            finalMapping: mapping.filter { $0.key.hasPrefix("Speaker ") },
+            allClusters: allClusters,
+            acceptedCandidates: participants,
+            userNames: [NSFullUserName(), userFirst ?? ""]
+        )
+        // P4 advisory: a name resting ONLY on cross-meeting voice/enrollment
+        // (no independent signal agrees, confidence below the strong bar) is
+        // ~57% reliable on this audio — flag it for review rather than trust it.
+        for (cluster, name) in mapping where cluster.hasPrefix("Speaker ") {
+            let nl = name.lowercased()
+            let fromVoice = (voiceMatches[cluster]?.lowercased() == nl)
+                || (enrollmentMatches[cluster]?.lowercased() == nl)
+            guard fromVoice else { continue }
+            let corroborated = (vocativeResult.mapping[cluster]?.lowercased() == nl)
+                || (outcome.mapping[cluster]?.lowercased() == nl)
+                || ((clusterConfidence[cluster] ?? 0) >= 0.95)
+            if !corroborated {
+                namingFlags.append(SpeakerNamingEngine.Flag(
+                    kind: .voiceMatchAdvisory,
+                    reason: "“\(name)” was matched only by voice (no other signal agrees) — please confirm."))
             }
+        }
+        for f in namingFlags {
+            Logger.general.info("[NamingFlag] \(f.kind.rawValue, privacy: .public): \(f.reason, privacy: .public)")
         }
 
         // Persist the diagnostic reason to the in-memory cache so the
@@ -2333,8 +2434,71 @@ final class AppState {
         // Only keep entries that ended up in the final mapping.
         let finalConfidence = clusterConfidence.filter { mapping[$0.key] != nil }
         updated.setSpeakerConfidenceMap(finalConfidence)
+        // P3: persist contradiction flags so the Speakers tab can surface them.
+        updated.setAttributionFlags(namingFlags)
         Logger.general.info("Speaker attribution: mapped \(mapping.count) cluster(s) (outcome=\(String(describing: outcome.reason), privacy: .public)) for meeting \(meeting.id, privacy: .public)")
         return (relabelled, updated)
+    }
+
+    /// Load a 16 kHz mono WAV into a [Float] sample buffer (nil if unreadable
+    /// or not 16 kHz). Used by the energy-based local-user identifier.
+    private static func loadSamples16k(_ url: URL) -> [Float]? {
+        guard let f = try? AVAudioFile(forReading: url) else { return nil }
+        let fmt = f.processingFormat
+        guard fmt.sampleRate == 16000,
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(f.length)) else { return nil }
+        do { try f.read(into: buf) } catch { return nil }
+        guard let ch = buf.floatChannelData else { return nil }
+        return Array(UnsafeBufferPointer(start: ch[0], count: Int(buf.frameLength)))
+    }
+
+    /// P1 (naming design): identify which "Speaker N" cluster is the LOCAL USER
+    /// by mic-vs-system energy. The user is on the mic and (near-)absent from the
+    /// system track, so their cluster's segments carry mixed energy while the
+    /// system track is quiet. Returns nil when the system track has no speech
+    /// (in-person — every cluster looks "mic-only", can't distinguish) or no
+    /// cluster is clearly mic-dominant. This is what lets a 1:1 recorded as two
+    /// "Speaker N" clusters (FluidAudio mixed-audio path) get the user pinned so
+    /// elimination can name the other person.
+    private func identifyUserClusterByEnergy(
+        clusterRanges: [String: [(start: Float, end: Float)]],
+        mixedURL: URL,
+        systemURL: URL
+    ) -> (cluster: String, confidence: Float)? {
+        guard let mixed = Self.loadSamples16k(mixedURL),
+              let system = Self.loadSamples16k(systemURL),
+              !mixed.isEmpty, !system.isEmpty else { return nil }
+        let sr = 16000.0
+        let speechFloor: Float = 0.005
+        let userRatio: Float = 0.35  // system < 35% of mixed ⇒ mic-dominant (user)
+        func rms(_ b: [Float], _ s: Int, _ e: Int) -> Float {
+            guard s < e, s >= 0, e <= b.count else { return -1 }
+            var sum: Float = 0; var i = s
+            while i < e { sum += b[i] * b[i]; i += 1 }
+            return sqrtf(sum / Float(e - s))
+        }
+        var bestCluster: String?
+        var bestFrac: Float = 0
+        var anySystemSpeech = false
+        for (cluster, ranges) in clusterRanges {
+            var userWin = 0, totalWin = 0
+            for r in ranges {
+                let s = Int(Double(r.start) * sr), e = Int(Double(r.end) * sr)
+                let m = rms(mixed, s, e)
+                if m < 0 || m <= speechFloor { continue }
+                let sy = rms(system, min(s, system.count), min(e, system.count))
+                if sy < 0 { continue }
+                if sy > speechFloor { anySystemSpeech = true }
+                totalWin += 1
+                if sy <= m * userRatio { userWin += 1 }
+            }
+            guard totalWin >= 3 else { continue }
+            let frac = Float(userWin) / Float(totalWin)
+            if frac > bestFrac { bestFrac = frac; bestCluster = cluster }
+        }
+        // Need real remote audio to contrast against AND a clearly mic-dominant cluster.
+        guard anySystemSpeech, let c = bestCluster, bestFrac >= 0.7 else { return nil }
+        return (c, 0.9)
     }
 
     // MARK: - Retry Attribution (v3.10 #7)
@@ -2799,37 +2963,13 @@ final class AppState {
 
         do {
             taskQueueManager.reportCurrentProgress(stage: "Running diarization")
-            let result = try await service.diarize(
-                systemAudioURL: audioURL,
-                participantCount: participantCount
-            )
-            guard result.speakerCount > 0 else {
-                fileLog("Diarization: 0 speakers detected for \(meetingId)")
-                return
-            }
 
-            taskQueueManager.reportCurrentProgress(stage: "Matching voice profiles")
-
-            let resultBox = DiarizationResultBox(result)
-            let profileRepo = VoiceProfileRepository(database: database)
-            let voiceService = VoiceProfileService.shared
-
-            // Phase 3 — match stored voice profiles before LLM attribution.
-            // Clusters that match a known voice are pre-assigned, skipping the LLM entirely.
-            // Use allProfilesResolved so each profile's personName reflects the
-            // Person's current canonical name (Phase 2: personId-keyed matching).
-            let personRepo2 = PersonRepository(database: database)
-            let storedProfiles = (try? await profileRepo.allProfilesResolved(personRepo: personRepo2)) ?? []
-            let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
-            let voiceMatches = await voiceService.matchProfiles(
-                clusters: Array(clusterLabels),
-                audioURL: audioURL,
-                diarizationResult: resultBox,
-                stored: storedProfiles
-            )
-            if !voiceMatches.isEmpty {
-                fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
-            }
+            // FluidAudio path is diarization-only in Phase 1: it produces the
+            // cluster alignment but doesn't feed the SpeakerKit-shaped voice
+            // profile match/learn (FluidAudio enrollment replaces that in
+            // Phase 2). SpeakerKit path is unchanged. `resultBox`/`voiceService`
+            // are only built on the SpeakerKit path.
+            let useFluid = settings.useFluidAudioDiarization
 
             // Fetch all transcript rows for alignment and echo suppression.
             let transcripts = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
@@ -2844,8 +2984,99 @@ final class AppState {
                 return
             }
 
-            // Align diarization segments → transcript rows → "Speaker N" labels.
-            var labelMapping = service.alignToTranscripts(systemTranscripts, result: result)
+            let profileRepo = VoiceProfileRepository(database: database)
+            let voiceService = VoiceProfileService.shared
+            var speakerCount = 0
+            var labelMapping: [Int64: String]
+            var voiceMatches: [String: String] = [:]
+            var resultBox: DiarizationResultBox? = nil
+            // Phase 2 — held when the FluidAudio path runs so confirmed clusters
+            // can have their per-Person voice reference (re)built after attribution.
+            var fluidResult: FluidDiarizationResult? = nil
+            var enrolledSpeakers: [EnrolledSpeaker] = []
+            // FluidAudio enrollment matches ("Speaker N" → person), passed to
+            // applySpeakerAttribution as the highest non-manual signal. Distinct
+            // from `voiceMatches` (which also carries SpeakerKit mel-spectrum
+            // matches) so the SpeakerKit path doesn't get an enrollment tier.
+            var enrollmentMatches: [String: String] = [:]
+
+            if useFluid {
+                // Phase 2 — seed cross-meeting voice identity: enroll the known
+                // references of this meeting's RSVP-accepted attendees so matching
+                // clusters come back already named (audio-grounded, highest signal).
+                let enrollPersonRepo = PersonRepository(database: database)
+                let referenceRepo = VoiceReferenceRepository(database: database)
+                if let m = meeting {
+                    enrolledSpeakers = await SpeakerEnrollmentService.shared.enrolledSpeakers(
+                        for: m,
+                        personRepo: enrollPersonRepo,
+                        referenceRepo: referenceRepo
+                    )
+                }
+
+                let result = try await FluidAudioDiarizationService.shared.diarize(
+                    systemAudioURL: audioURL,
+                    participantCount: participantCount,
+                    enrolledSpeakers: enrolledSpeakers
+                )
+                guard result.speakerCount > 0 else {
+                    fileLog("Diarization: 0 speakers detected for \(meetingId) (FluidAudio)")
+                    return
+                }
+                speakerCount = result.speakerCount
+                fluidResult = result
+                labelMapping = FluidAudioDiarizationService.shared.alignToTranscripts(
+                    systemTranscripts, result: result
+                )
+
+                // Clusters FluidAudio matched to an enrolled reference resolve
+                // straight to a name — treat as voice matches (the attendance gate
+                // is moot since enrollment is already RSVP-gated to this meeting).
+                let enrolledNames = SpeakerEnrollmentService.shared.enrolledClusterNames(
+                    result: result,
+                    enrolledSpeakers: enrolledSpeakers
+                )
+                if !enrolledNames.isEmpty {
+                    voiceMatches = enrolledNames
+                    enrollmentMatches = enrolledNames
+                    fileLog("Diarization: enrollment matched \(enrolledNames.count) cluster(s) for \(meetingId) (FluidAudio)")
+                }
+            } else {
+                let result = try await service.diarize(
+                    systemAudioURL: audioURL,
+                    participantCount: participantCount
+                )
+                guard result.speakerCount > 0 else {
+                    fileLog("Diarization: 0 speakers detected for \(meetingId)")
+                    return
+                }
+                speakerCount = result.speakerCount
+
+                taskQueueManager.reportCurrentProgress(stage: "Matching voice profiles")
+
+                let box = DiarizationResultBox(result)
+                resultBox = box
+
+                // Phase 3 — match stored voice profiles before LLM attribution.
+                // Clusters that match a known voice are pre-assigned, skipping the LLM entirely.
+                // Use allProfilesResolved so each profile's personName reflects the
+                // Person's current canonical name (Phase 2: personId-keyed matching).
+                let personRepo2 = PersonRepository(database: database)
+                let storedProfiles = (try? await profileRepo.allProfilesResolved(personRepo: personRepo2)) ?? []
+                let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
+                voiceMatches = await voiceService.matchProfiles(
+                    clusters: Array(clusterLabels),
+                    audioURL: audioURL,
+                    diarizationResult: box,
+                    stored: storedProfiles
+                )
+                if !voiceMatches.isEmpty {
+                    fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
+                }
+
+                labelMapping = service.alignToTranscripts(systemTranscripts, result: result)
+            }
+
             guard !labelMapping.isEmpty else {
                 fileLog("Diarization: alignment produced no matches for \(meetingId)")
                 return
@@ -2890,14 +3121,15 @@ final class AppState {
             }
 
             try await transcriptRepo.updateSpeakerLabels(labelMapping)
-            fileLog("Diarization: labelled \(labelMapping.count) transcript rows for \(meetingId) (\(result.speakerCount) speakers)")
+            fileLog("Diarization: labelled \(labelMapping.count) transcript rows for \(meetingId) (\(speakerCount) speakers)")
 
             // Now run LLM attribution for any remaining "Speaker N" clusters.
             if let m = meeting {
                 let relabelled = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
                 let (_, attributed) = await applySpeakerAttribution(
                     transcripts: relabelled,
-                    meeting: m
+                    meeting: m,
+                    enrollmentMatches: enrollmentMatches
                 )
                 try? await database.writer.write { db in
                     var updated = attributed
@@ -2910,27 +3142,59 @@ final class AppState {
                 // the pre-match voice dictionary, treat as voiceMatch (high
                 // trust); otherwise it came from the LLM (low trust, stricter
                 // future threshold to prevent drift).
-                let finalSpeakerMap = attributed.speakerMapDictionary
-                let personRepo = PersonRepository(database: database)
-                for (clusterLabel, personName) in finalSpeakerMap {
-                    guard !personName.isEmpty else { continue }
-                    // Never learn a generic/unresolved label as a person — this is
-                    // what produced junk "Speaker 3" / "Everyone" voice profiles.
-                    guard !Self.isGenericSpeakerLabel(personName) else { continue }
-                    let source: VoiceProfileRepository.EmbeddingSource =
-                        voiceMatches[clusterLabel] != nil ? .voiceMatch : .llm
-                    if let embedding = await voiceService.extractEmbedding(
-                        forSpeaker: clusterLabel,
-                        from: audioURL,
-                        diarizationResult: resultBox
-                    ) {
-                        try? await profileRepo.merge(
+                // SpeakerKit-only: the mel-spectrum embedding extractor consumes
+                // a SpeakerKit-shaped `resultBox`. On the FluidAudio path this is
+                // skipped (FluidAudio enrollment replaces voice-profile learning
+                // in Phase 2).
+                if let box = resultBox {
+                    let finalSpeakerMap = attributed.speakerMapDictionary
+                    let personRepo = PersonRepository(database: database)
+                    for (clusterLabel, personName) in finalSpeakerMap {
+                        guard !personName.isEmpty else { continue }
+                        // Never learn a generic/unresolved label as a person — this is
+                        // what produced junk "Speaker 3" / "Everyone" voice profiles.
+                        guard !Self.isGenericSpeakerLabel(personName) else { continue }
+                        let source: VoiceProfileRepository.EmbeddingSource =
+                            voiceMatches[clusterLabel] != nil ? .voiceMatch : .llm
+                        if let embedding = await voiceService.extractEmbedding(
+                            forSpeaker: clusterLabel,
+                            from: audioURL,
+                            diarizationResult: box
+                        ) {
+                            try? await profileRepo.merge(
+                                personName: personName,
+                                newEmbedding: embedding,
+                                personRepo: personRepo,
+                                source: source
+                            )
+                            fileLog("Diarization: updated voice profile for \(personName) (source=\(source.rawValue))")
+                        }
+                    }
+                }
+
+                // Phase 2 — FluidAudio path: (re)build each confirmed speaker's
+                // per-Person voice reference from this meeting's highest-confidence
+                // segment embeddings, so future meetings match the voice via
+                // enrollment instead of falling back to vocative/LLM. Only rebuild
+                // for clusters whose final attribution is high-confidence (≥ 0.85,
+                // the audio-grounded tier) — low-confidence LLM guesses must not
+                // poison the reference. Enrollment matches are already confident.
+                if let fr = fluidResult {
+                    let finalSpeakerMap = attributed.speakerMapDictionary
+                    let confidence = attributed.speakerConfidenceMapDictionary
+                    let referenceRepo = VoiceReferenceRepository(database: database)
+                    let personRepo = PersonRepository(database: database)
+                    for (clusterLabel, personName) in finalSpeakerMap {
+                        guard !personName.isEmpty,
+                              !Self.isGenericSpeakerLabel(personName) else { continue }
+                        guard (confidence[clusterLabel] ?? 0) >= 0.85 else { continue }
+                        await SpeakerEnrollmentService.shared.rebuildReference(
                             personName: personName,
-                            newEmbedding: embedding,
+                            clusterLabel: clusterLabel,
+                            result: fr,
                             personRepo: personRepo,
-                            source: source
+                            referenceRepo: referenceRepo
                         )
-                        fileLog("Diarization: updated voice profile for \(personName) (source=\(source.rawValue))")
                     }
                 }
             }

@@ -914,5 +914,41 @@ enum Migrations {
                 t.add(column: "micOverrideDeviceID", .text).notNull().defaults(to: "")
             }
         }
+
+        // v43: FluidAudio diarization engine flag (speaker-id re-architecture
+        // Phase 1). Default off — SpeakerKit stays the diarizer until the flag
+        // is flipped, so this is a no-op for existing installs.
+        migrator.registerMigration("v43-fluidaudio-diarization") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "useFluidAudioDiarization", .boolean).notNull().defaults(to: false)
+            }
+        }
+
+        // v44: cross-meeting voice identity (speaker-id re-architecture Phase 2).
+        // Stores one FluidAudio speaker reference per Person — a 256-dim wespeaker
+        // embedding (l2-normalized, little-endian Float32) aggregated from that
+        // person's highest-confidence diarization segments. Before diarizing a
+        // meeting, SpeakerEnrollmentService loads these references for the RSVP-
+        // accepted attendees and seeds them into FluidAudio via
+        // initializeKnownSpeakers so matching clusters come back already named.
+        // Keyed by personId so the reference survives renames/email drift, just
+        // like voiceProfile. Distinct from the v26 mel-spectrum voiceProfile
+        // table (kept compiled-but-unused until Phase 8) — the embeddings have
+        // different dimensions and semantics, so they cannot share a table.
+        migrator.registerMigration("v44-voice-reference") { db in
+            try db.create(table: "voiceReference") { t in
+                t.column("personId", .text).primaryKey()
+                t.column("personName", .text).notNull()
+                t.column("embeddingData", .blob).notNull()
+                t.column("segmentCount", .integer).notNull().defaults(to: 0)
+                t.column("updatedAt", .datetime).notNull()
+            }
+        }
+
+        migrator.registerMigration("v45-attribution-flags") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "attributionFlags", .text)
+            }
+        }
     }
 }

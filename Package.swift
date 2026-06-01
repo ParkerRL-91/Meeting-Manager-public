@@ -10,6 +10,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "6.0.0"),
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift", from: "1.0.0"),
+        // Pinned exact: FluidAudio is pre-1.0, so a minor bump can change the
+        // diarization/enrollment API we depend on (initializeKnownSpeakers(_:mode:),
+        // speakerManager, 256-dim embeddings). Bump deliberately after re-verifying.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.14.7"),
     ],
     targets: [
         .executableTarget(
@@ -18,6 +22,7 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
                 .product(name: "SpeakerKit", package: "argmax-oss-swift"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "MeetingManager",
             exclude: ["Resources/Info.plist", "Resources/MeetingManager.entitlements"],
@@ -61,6 +66,23 @@ let package = Package(
             name: "prompt-eval",
             path: "Tests/PromptOptimization",
             exclude: ["Fixtures", "results"]
+        ),
+        // Dev-only batch re-diarization + re-attribution tool. Reads a jobs JSON,
+        // diarizes mixed WAVs with FluidAudio, names clusters via local Ollama
+        // (closed attendee set), and EMITS SQL for review. Does not write the DB.
+        .executableTarget(
+            name: "batch-rediarize",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Tools/BatchRediarize"
+        ),
+        .executableTarget(
+            name: "ref-validate",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Tools/RefValidate"
         ),
     ]
 )

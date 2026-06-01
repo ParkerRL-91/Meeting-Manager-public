@@ -83,6 +83,9 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v40-transcription-attempt-marker",
         "v41-apollo-profile-prep",
         "v42-mic-override",
+        "v43-fluidaudio-diarization",
+        "v44-voice-reference",
+        "v45-attribution-flags",
     ]
 
     override func setUpWithError() throws {
@@ -121,6 +124,11 @@ final class MigrationsIntegrityTests: XCTestCase {
 
     func testVoiceProfileTableExists() throws {
         let exists = try db.writer.read { try $0.tableExists("voiceProfile") }
+        XCTAssertTrue(exists)
+    }
+
+    func testVoiceReferenceTableExists() throws {
+        let exists = try db.writer.read { try $0.tableExists("voiceReference") }
         XCTAssertTrue(exists)
     }
 

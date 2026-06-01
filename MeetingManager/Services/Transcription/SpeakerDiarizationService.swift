@@ -220,6 +220,7 @@ enum DiarizationError: LocalizedError {
     case modelLoadTimeout
     case audioFileNotFound(String)
     case emptyAudio
+    case insufficientDiskSpace(freeMB: Int64)
 
     var errorDescription: String? {
         switch self {
@@ -231,6 +232,8 @@ enum DiarizationError: LocalizedError {
             return "System audio file not found at \(path)."
         case .emptyAudio:
             return "System audio file is empty — nothing to diarize."
+        case .insufficientDiskSpace(let freeMB):
+            return "Not enough disk space to download the speaker diarization models. Only \(freeMB) MB free — free up space and try again."
         }
     }
 }
