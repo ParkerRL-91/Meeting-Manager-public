@@ -42,11 +42,22 @@ final class AudioBufferAlignmentTests: XCTestCase {
     }
 
     private func read(_ url: URL) -> [Float] {
-        guard let f = try? AVAudioFile(forReading: url),
-              let b = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length)) else { return [] }
-        try? f.read(into: b)
-        guard let ch = b.floatChannelData else { return [] }
-        return Array(UnsafeBufferPointer(start: ch[0], count: Int(b.frameLength)))
+        // AVAudioFile.read returns SHORT reads (it stops at internal packet
+        // boundaries), so a single read yields fewer than `length` frames. Loop,
+        // bounding each read by the frames remaining, until EOF.
+        guard let f = try? AVAudioFile(forReading: url) else { return [] }
+        let block: AVAudioFrameCount = 32768
+        guard let b = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: block) else { return [] }
+        var out: [Float] = []
+        while f.framePosition < f.length {
+            let want = min(block, AVAudioFrameCount(f.length - f.framePosition))
+            b.frameLength = 0
+            do { try f.read(into: b, frameCount: want) } catch { break }
+            let n = Int(b.frameLength)
+            if n == 0 { break }
+            if let ch = b.floatChannelData { out.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: n)) }
+        }
+        return out
     }
 
     private func cleanup(_ url: URL) {

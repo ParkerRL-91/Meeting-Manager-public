@@ -568,18 +568,26 @@ final class AudioBufferManager {
         var micIdx = 0, sysIdx = 0      // frames consumed within the current buffer
         var micLen = 0, sysLen = 0      // valid frames in the current buffer
         var micEOF = false, sysEOF = false
+        // Read at most the frames REMAINING in the file. Calling
+        // read(into:frameCount:) with the full block when fewer frames remain (or
+        // none) throws `nilError` at/near EOF — that throw previously bailed the
+        // whole merge and left the raw mic-only file on disk. Bounding by
+        // (length - framePosition) and skipping a zero-remaining read avoids it.
+        func readBlock(_ f: AVAudioFile, _ b: AVAudioPCMBuffer) throws -> Int {
+            let remaining = f.length - f.framePosition
+            guard remaining > 0 else { return 0 }
+            b.frameLength = 0
+            try f.read(into: b, frameCount: min(AVAudioFrameCount(block), AVAudioFrameCount(remaining)))
+            return Int(b.frameLength)
+        }
         do {
             while true {
                 if micIdx >= micLen && !micEOF {
-                    micBuf.frameLength = 0
-                    try micIn.read(into: micBuf, frameCount: AVAudioFrameCount(block))
-                    micLen = Int(micBuf.frameLength); micIdx = 0
+                    micLen = try readBlock(micIn, micBuf); micIdx = 0
                     if micLen == 0 { micEOF = true }
                 }
                 if sysIdx >= sysLen && !sysEOF {
-                    sysBuf.frameLength = 0
-                    try sysIn.read(into: sysBuf, frameCount: AVAudioFrameCount(block))
-                    sysLen = Int(sysBuf.frameLength); sysIdx = 0
+                    sysLen = try readBlock(sysIn, sysBuf); sysIdx = 0
                     if sysLen == 0 { sysEOF = true }
                 }
                 let micAvail = micLen - micIdx
