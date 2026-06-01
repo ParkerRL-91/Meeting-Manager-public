@@ -9,6 +9,13 @@ struct AudioLevelIndicator: View {
     private let maxWidth: CGFloat = 80
     private let barHeight: CGFloat = 6
 
+    /// Clamp the fill to [0, 1] of the track. `level` is RMS in [0, 1]; we
+    /// amplify for visibility but NEVER let the fill exceed the track width.
+    private var fillFraction: CGFloat {
+        let amplified = CGFloat(level) * 20
+        return min(max(amplified, 0), 1)
+    }
+
     var body: some View {
         VStack(spacing: 2) {
             ZStack(alignment: .leading) {
@@ -18,15 +25,19 @@ struct AudioLevelIndicator: View {
 
                 RoundedRectangle(cornerRadius: barHeight / 2)
                     .fill(color)
-                    // Amplify level by 20x for visibility — raw RMS from USB mics is ~0.002-0.01
-                    .frame(width: CGFloat(min(max(level * 20, 0), 1)) * maxWidth, height: barHeight)
+                    .frame(width: fillFraction * maxWidth, height: barHeight)
                     .animation(.linear(duration: 0.1), value: level)
             }
+            // Hard-pin the whole meter to the track width so no surrounding
+            // layout (e.g. the Ask-anything bar's internal Spacer) can stretch it.
+            .frame(width: maxWidth)
 
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(Color.appTextSecondary)
         }
+        .frame(width: maxWidth)
+        .fixedSize()
     }
 }
 
