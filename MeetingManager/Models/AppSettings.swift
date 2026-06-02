@@ -39,9 +39,14 @@ struct AppSettings: Codable, Equatable {
     var useLocalLLM: Bool = false
 
     /// The Ollama model name to use for on-device summarization.
-    /// `"auto"` enables adaptive selection — picks the best model for each transcript's size.
-    /// `"llama3.2:3b"` forces the 3B model only (recommended for slower Macs).
-    var ollamaModel: String = "auto"
+    /// Default `qwen3:8b`: the hybrid Qwen3 8B with thinking disabled (see
+    /// OllamaService — `think:false` for qwen3). It produces good summaries in
+    /// 1–3 min instead of the multi-minute reasoning stalls of the thinking
+    /// variants, and runs comfortably on Apple Silicon (~5 GB). `"auto"` enables
+    /// adaptive size-based selection; an explicit tag (e.g. `qwen2.5:7b-instruct`)
+    /// forces one model. Existing users keep their saved choice; this default
+    /// only applies to fresh installs.
+    var ollamaModel: String = "qwen3:8b"
 
     /// When true, automatically generate a summary ~10 minutes after transcription completes.
     var autoGenerateSummary: Bool = false
