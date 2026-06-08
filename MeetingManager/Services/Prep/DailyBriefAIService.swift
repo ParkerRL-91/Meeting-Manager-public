@@ -78,7 +78,7 @@ struct DailyBriefAIService {
                 userPrompt: prepared.userPrompt,
                 model: claudeModel
             )
-            return Result(text: Self.verify(text: raw, citations: prepared.citations), model: claudeModel)
+            return Result(text: Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations), model: claudeModel)
         }
 
         // think:true — Qwen3 with think:false still leaks chain-of-thought into
@@ -94,7 +94,7 @@ struct DailyBriefAIService {
                 think: true,
                 jsonMode: false
             )
-            return Result(text: Self.verify(text: raw, citations: prepared.citations), model: ollamaModel)
+            return Result(text: Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations), model: ollamaModel)
         }
 
         throw BriefError.noAIService
@@ -106,8 +106,13 @@ struct DailyBriefAIService {
         You write a one-person morning briefing.
 
         Output only the brief itself in Markdown. No preamble, no commentary about the rules. \
-        The first line of your reply is the literal text "## Today's read". The last line is the \
-        final bullet of "## Day-end goals". Anything else is wrong output.
+        The first line of your reply is the literal text "## Summary". The last line is \
+        the final bullet of "## How the day should close". Anything else is wrong output.
+
+        Every line you write is a complete sentence with a subject, verb, and object. No fragments, \
+        no two-word labels, no parallel-adjective stacks. Write as a knowledgeable colleague briefing \
+        the reader — confident and specific, never hype-y. Avoid words like "powerful", "seamless", \
+        "transform", "unlock", "supercharge".
 
         Facts: copy attendees, titles, and times verbatim from INPUT. Never invent topics, \
         decisions, action items, prior conversations, or commitments that are not in INPUT.
@@ -244,18 +249,17 @@ struct DailyBriefAIService {
             ? "(no open action items)"
             : openItemsLines.joined(separator: "\n")
 
-        let attentionInstruction: String
+        let carryOverInstruction: String
         if openItemsLines.isEmpty && !hasUsefulCarryOver {
-            attentionInstruction = """
+            carryOverInstruction = """
                 There are no open items and no usable carry-over context today. \
-                Write the single line: "Nothing carried over from previous meetings."
+                Write the single full sentence: "No commitments or prior threads from earlier meetings come due today."
                 """
         } else {
-            attentionInstruction = """
-                Two to four bullets. Each bullet names the meeting in **bold**, \
-                quotes or directly paraphrases a specific item from "Open action items" \
-                or from that meeting's "Last time" excerpt, and ends with the prep step \
-                the excerpt itself implies. Do not invent prep steps that are not grounded \
+            carryOverInstruction = """
+                Write two to four bullets, each a complete sentence. Each bullet starts with the meeting name in **bold**, \
+                states the specific commitment or thread from "Open action items" or that meeting's "Last time" excerpt, \
+                and closes with the prep step the excerpt itself implies. Do not invent prep steps that are not grounded \
                 in a specific sentence above.
                 """
         }
@@ -296,24 +300,24 @@ struct DailyBriefAIService {
         - **Sam Lee** — Send Acme volume-discount proposal *(from Acme renewal)*\(exampleBackgroundInput)
 
         EXAMPLE OUTPUT
-        ## Today's read
-        The Acme renewal at 11 AM is the day's pivot — the volume-discount proposal is due and Alex is waiting on the procurement contact.
+        ## Summary
+        The day pivots on the 11 AM Acme renewal, where the volume-discount proposal is due and Alex is still waiting on the procurement contact you committed to send. The morning standup is a routine sync with no carry-over, and the 2 PM candidate intro is a first conversation with Jane Doe. Plan to spend the late morning finalizing the Acme draft so the afternoon is free for the intro and follow-up notes.
 
-        ## What needs attention
-        - **Acme renewal** — Sam owes the volume-discount proposal Alex requested on Dec 20; bring a draft and the procurement contact you confirmed.
+        ## What carries in from prior meetings
+        - **Acme renewal** — Sam owes the volume-discount proposal Alex requested on December 20, so bring a draft and the procurement contact you confirmed earlier this week.
 
-        ## Meeting-by-meeting
-        - **9:00 AM–9:30 AM** **Engineering standup** — First conversation — no prior context.
-        - **11:00 AM–12:00 PM** **Acme renewal** — Alex committed Dec 20 to send the procurement contact this week and asked for a 12-month proposal with volume discount above 50 seats.\(exampleBackgroundBullet)
-        - **2:00 PM–2:30 PM** **Candidate intro — Jane Doe** — First conversation — no prior context.
+        ## Today's schedule with prior context
+        - **9:00 AM–9:30 AM** **Engineering standup** — This is a first conversation, so there is no prior context to carry forward.
+        - **11:00 AM–12:00 PM** **Acme renewal** — Alex committed on December 20 to send the procurement contact this week and asked for a 12-month proposal with a volume discount above 50 seats.\(exampleBackgroundBullet)
+        - **2:00 PM–2:30 PM** **Candidate intro — Jane Doe** — This is a first conversation, so there is no prior context to carry forward.
 
-        ## Day-end goals
-        - Send Sam's Acme volume-discount proposal before EOD to close the loop from Dec 20.
-        - Capture a clear go/no-go on Jane Doe after the 2 PM intro.
+        ## How the day should close
+        - Send Sam's Acme volume-discount proposal before end of day to close the loop from the December 20 conversation.
+        - Capture a clear go or no-go on Jane Doe in writing within an hour of the 2 PM intro.
 
         END OF EXAMPLE
 
-        Now produce the brief for the real INPUT below. Same four sections, same shape. Length 150–250 words.
+        Now produce the brief for the real INPUT below. Same four sections, same shape, complete sentences throughout. Length 150–250 words.
 
         ## INPUT
 
@@ -326,11 +330,12 @@ struct DailyBriefAIService {
         \(openItemsBlock)\(backgroundInputSection)
 
         Section rules for the real output:
-        - **What needs attention**: \(attentionInstruction)
-        - **Meeting-by-meeting**: one bullet per meeting in order. If a meeting has no "Last time" excerpt above, write exactly "First conversation — no prior context." for that bullet.\(backgroundRule)
-        - **Day-end goals**: two or three bullets, each tied to a meeting from the schedule.
+        - **Summary**: two to four full sentences that frame the day. Name the meeting that anchors the day and say why, note any meetings that are routine or first-time, and (if useful) suggest how to pace the day. If the day is light, state that plainly. Do not enumerate every meeting bullet-style here.
+        - **What carries in from prior meetings**: \(carryOverInstruction)
+        - **Today's schedule with prior context**: one bullet per meeting in order. Each bullet is a complete sentence. If a meeting has no "Last time" excerpt above, write exactly "This is a first conversation, so there is no prior context to carry forward." for that bullet.\(backgroundRule)
+        - **How the day should close**: two or three bullets, each a complete sentence tied to a specific meeting from the schedule and describing what closing the loop looks like.
 
-        Begin your response with the literal line "## Today's read".
+        Begin your response with the literal line "## Summary".
         """
 
         return PreparedPrompt(userPrompt: userPrompt, citations: citations)
@@ -417,6 +422,20 @@ struct DailyBriefAIService {
     ///   - an indented Background sub-bullet is dropped entirely;
     ///   - a top-level line keeps its text but loses the unverifiable marker.
     /// Surviving citations are listed in a `_Sources: …_` footer for provenance.
+    /// Discards anything the model emitted before the actual brief: echoed
+    /// prompt text, inline `<think>…</think>` reasoning, scratchpad commentary.
+    /// The prompt requires the response to begin with the literal line
+    /// `## Summary`, so we anchor on that. Uses the *last* occurrence so that
+    /// models which echo the example output (which itself contains the header)
+    /// still land on the real brief.
+    static func trimToBrief(_ raw: String) -> String {
+        let marker = "## Summary"
+        if let r = raw.range(of: marker, options: .backwards) {
+            return String(raw[r.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func verify(text rawText: String, citations: [String: Citation]) -> String {
         // Nothing to check and nothing claimed → return untouched.
         if citations.isEmpty && !rawText.contains("[KB") { return rawText }
