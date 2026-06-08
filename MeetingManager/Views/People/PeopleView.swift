@@ -451,6 +451,9 @@ private struct PersonDetailView: View {
     @State private var showManage = false
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false
+    @State private var personOpenItems: [ActionItem] = []
+    @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
+    private let rollups = MeetingRollupService()
 
     private var apolloEnabled: Bool {
         appState.settings.apolloProfilePrepEnabled && appState.settings.apolloKeyValidated
@@ -558,6 +561,9 @@ private struct PersonDetailView: View {
 
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
 
+                if !personOpenItems.isEmpty { rollupActionItems }
+                if !recentSummaries.isEmpty { rollupSummaries }
+
                 // Meeting history
                 if meetings.isEmpty {
                     VStack(spacing: 8) {
@@ -590,7 +596,10 @@ private struct PersonDetailView: View {
             }
         }
         .background(Color.appBackground)
-        .task(id: person.id) { await loadApollo(force: false) }
+        .task(id: person.id) {
+            await loadRollups()
+            await loadApollo(force: false)
+        }
     }
 
     private func loadApollo(force: Bool) async {
@@ -603,6 +612,69 @@ private struct PersonDetailView: View {
         } else {
             apolloProfile = await coordinator.personProfile(email: email, gateEnabled: apolloEnabled)
         }
+    }
+
+    private func loadRollups() async {
+        personOpenItems = await rollups.openActionItems(forParticipants: [person.canonicalName] + person.aliases)
+        recentSummaries = await rollups.recentSummaries(forMeetings: meetings)
+    }
+
+    private var rollupActionItems: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            rollupSectionHeader("Open Action Items")
+            ForEach(personOpenItems) { item in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "circle").font(.caption2).foregroundStyle(Color.appTextTertiary).padding(.top, 3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.title).font(.callout).foregroundStyle(Color.appTextPrimary)
+                        if let title = meetingTitle(item.meetingId) {
+                            Text(title).font(.caption).foregroundStyle(Color.appTextTertiary)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 8)
+    }
+
+    private var rollupSummaries: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            rollupSectionHeader("Recent Summaries")
+            ForEach(recentSummaries, id: \.meeting.id) { entry in
+                Button {
+                    appState.selectedMeetingId = entry.meeting.id
+                    appState.sidebarDestination = .meetings
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.meeting.title).font(.subheadline.weight(.medium)).foregroundStyle(Color.appTextPrimary)
+                        Text(snippet(entry.summary.summaryText)).font(.caption).foregroundStyle(Color.appTextSecondary).lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 8)
+    }
+
+    private func rollupSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Color.appTextTertiary)
+            .textCase(.uppercase)
+            .tracking(0.6)
+    }
+
+    private func snippet(_ text: String) -> String {
+        let firstLine = text
+            .components(separatedBy: .newlines)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? text
+        let trimmed = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces))
+        return String(trimmed.prefix(160))
+    }
+
+    private func meetingTitle(_ meetingId: String) -> String? {
+        meetings.first { $0.id == meetingId }?.title
     }
 
     private func relativeDate(_ date: Date) -> String {
