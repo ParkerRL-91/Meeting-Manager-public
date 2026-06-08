@@ -1,10 +1,19 @@
 import SwiftUI
 import Contacts
 
+/// People vs Companies lens for the directory. Persisted via @AppStorage so
+/// the chosen lens survives navigation and relaunch.
+enum PeopleDirectoryMode: String {
+    case people
+    case companies
+}
+
 /// Main People directory — lists every known Person, shows their meeting
 /// history in the detail pane, and surfaces inline identity management
 /// (aliases, voice fingerprint, merge, Contacts import) via an expandable
-/// "Manage Identity" section. No separate Settings tab required.
+/// "Manage Identity" section. A People/Companies toggle switches to a
+/// runtime-derived Companies lens (see CompanyGroupingService, ADR-014).
+/// No separate Settings tab required.
 struct PeopleView: View {
     @Environment(AppState.self) private var appState
 
@@ -12,6 +21,9 @@ struct PeopleView: View {
     @State private var voiceProfiles: [VoiceProfile] = []
     @State private var searchQuery = ""
     @State private var selectedPersonId: String?
+    @State private var selectedCompanyId: String?
+    @State private var companies: [Company] = []
+    @AppStorage("peopleDirectoryMode") private var mode: PeopleDirectoryMode = .people
     @State private var isLoadingPersons = false
 
     // Contacts import
@@ -28,6 +40,14 @@ struct PeopleView: View {
         }
     }
 
+    private var filteredCompanies: [Company] {
+        guard !searchQuery.isEmpty else { return companies }
+        let q = searchQuery.lowercased()
+        return companies.filter {
+            $0.displayName.lowercased().contains(q) || $0.domain.lowercased().contains(q)
+        }
+    }
+
     private var meetings: [Meeting] { appState.meetings }
 
     var body: some View {
@@ -41,29 +61,10 @@ struct PeopleView: View {
                     Spacer()
                     ProgressView().controlSize(.small)
                     Spacer()
-                } else if filteredPersons.isEmpty {
-                    emptyState
+                } else if mode == .companies {
+                    if filteredCompanies.isEmpty { emptyState } else { companiesList }
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 4) {
-                            ForEach(filteredPersons) { person in
-                                PersonListRow(
-                                    person: person,
-                                    meetingCount: meetingCount(for: person),
-                                    lastMeeting: lastMeetingDate(for: person),
-                                    hasVoiceProfile: voiceProfiles.contains { $0.personId == person.id },
-                                    isSelected: selectedPersonId == person.id
-                                )
-                                .onTapGesture {
-                                    withAnimation(.easeInOut(duration: 0.15)) {
-                                        selectedPersonId = person.id
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                    }
+                    if filteredPersons.isEmpty { emptyState } else { peopleList }
                 }
             }
             .frame(width: 280)
@@ -72,35 +73,113 @@ struct PeopleView: View {
             Divider().background(Color.appSeparator)
 
             // MARK: - Right: Detail
-            if let pid = selectedPersonId,
-               let person = persons.first(where: { $0.id == pid }) {
-                PersonDetailView(
-                    person: person,
-                    meetings: meetingsFor(person: person),
-                    voiceProfile: voiceProfiles.first(where: { $0.personId == pid }),
-                    allPersons: persons,
-                    onUpdated: { loadData() }
-                )
-                .id(pid)
-                .frame(maxWidth: .infinity)
+            if mode == .companies {
+                companyDetail
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "person.fill")
-                        .font(.system(size: 44))
-                        .foregroundStyle(Color.appTextTertiary)
-                    Text("Select a person")
-                        .font(.title3)
-                        .foregroundStyle(Color.appTextSecondary)
-                    Text("View meeting history and manage their identity")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.appTextTertiary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.appBackground)
+                personDetail
             }
         }
         .background(Color.appBackground)
         .task { loadData() }
+    }
+
+    // MARK: - List & detail panes
+
+    private var peopleList: some View {
+        ScrollView {
+            LazyVStack(spacing: 4) {
+                ForEach(filteredPersons) { person in
+                    PersonListRow(
+                        person: person,
+                        meetingCount: meetingCount(for: person),
+                        lastMeeting: lastMeetingDate(for: person),
+                        hasVoiceProfile: voiceProfiles.contains { $0.personId == person.id },
+                        isSelected: selectedPersonId == person.id
+                    )
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.15)) { selectedPersonId = person.id }
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var companiesList: some View {
+        ScrollView {
+            LazyVStack(spacing: 4) {
+                ForEach(filteredCompanies) { company in
+                    CompanyListRow(company: company, isSelected: selectedCompanyId == company.id)
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.15)) { selectedCompanyId = company.id }
+                        }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var personDetail: some View {
+        if let pid = selectedPersonId,
+           let person = persons.first(where: { $0.id == pid }) {
+            PersonDetailView(
+                person: person,
+                meetings: meetingsFor(person: person),
+                voiceProfile: voiceProfiles.first(where: { $0.personId == pid }),
+                allPersons: persons,
+                onUpdated: { loadData() }
+            )
+            .id(pid)
+            .frame(maxWidth: .infinity)
+        } else {
+            detailEmptyState(
+                icon: "person.fill",
+                title: "Select a person",
+                subtitle: "View meeting history and manage their identity"
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var companyDetail: some View {
+        if let cid = selectedCompanyId,
+           let company = companies.first(where: { $0.id == cid }) {
+            CompanyDetailView(
+                company: company,
+                voiceProfiles: voiceProfiles,
+                onSelectPerson: { person in
+                    mode = .people
+                    selectedPersonId = person.id
+                }
+            )
+            .id(cid)
+            .frame(maxWidth: .infinity)
+        } else {
+            detailEmptyState(
+                icon: "building.2.fill",
+                title: "Select a company",
+                subtitle: "See everyone you've met there and every meeting"
+            )
+        }
+    }
+
+    private func detailEmptyState(icon: String, title: String, subtitle: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 44))
+                .foregroundStyle(Color.appTextTertiary)
+            Text(title)
+                .font(.title3)
+                .foregroundStyle(Color.appTextSecondary)
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextTertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.appBackground)
     }
 
     // MARK: - Header with search + import
@@ -109,32 +188,45 @@ struct PeopleView: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("People")
+                    Text(mode == .companies ? "Companies" : "People")
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(Color.appTextPrimary)
-                    Text("\(filteredPersons.count) contacts")
+                    Text(mode == .companies
+                         ? "\(filteredCompanies.count) compan\(filteredCompanies.count == 1 ? "y" : "ies")"
+                         : "\(filteredPersons.count) contacts")
                         .font(.caption)
                         .foregroundStyle(Color.appTextSecondary)
                 }
                 Spacer()
-                Button {
-                    runContactsImport()
-                } label: {
-                    if isImporting {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "person.crop.circle.badge.plus")
-                            .font(.system(size: 15))
-                            .foregroundStyle(Color.appAccent)
+                if mode == .people {
+                    Button {
+                        runContactsImport()
+                    } label: {
+                        if isImporting {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.appAccent)
+                        }
                     }
+                    .buttonStyle(.borderless)
+                    .disabled(isImporting)
+                    .help(contactsAuthStatus == .authorized ? "Sync from Contacts" : "Import from Contacts")
                 }
-                .buttonStyle(.borderless)
-                .disabled(isImporting)
-                .help(contactsAuthStatus == .authorized ? "Sync from Contacts" : "Import from Contacts")
             }
             .padding(.horizontal, 20)
             .padding(.top, 20)
             .padding(.bottom, importResult != nil ? 6 : 10)
+
+            Picker("", selection: $mode) {
+                Text("People").tag(PeopleDirectoryMode.people)
+                Text("Companies").tag(PeopleDirectoryMode.companies)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
 
             if let result = importResult {
                 HStack(spacing: 4) {
@@ -206,11 +298,16 @@ struct PeopleView: View {
             async let p = (try? await pr.allPersons()) ?? []
             async let v = (try? await vr.allProfiles()) ?? []
             let (loaded, profiles) = await (p, v)
-            persons = loaded.sorted { $0.canonicalName < $1.canonicalName }
+            let sortedPersons = loaded.sorted { $0.canonicalName < $1.canonicalName }
+            persons = sortedPersons
             voiceProfiles = profiles
+            companies = CompanyGroupingService.companies(from: sortedPersons, meetings: appState.meetings)
             isLoadingPersons = false
-            if selectedPersonId == nil, let first = loaded.first {
+            if selectedPersonId == nil, let first = sortedPersons.first {
                 selectedPersonId = first.id
+            }
+            if selectedCompanyId == nil, let firstCompany = companies.first {
+                selectedCompanyId = firstCompany.id
             }
         }
     }
@@ -237,7 +334,7 @@ struct PeopleView: View {
 
 // MARK: - Person list row
 
-private struct PersonListRow: View {
+struct PersonListRow: View {
     let person: Person
     let meetingCount: Int
     let lastMeeting: Date?
@@ -299,6 +396,45 @@ private struct PersonListRow: View {
         if days < 7 { return "\(days)d ago" }
         if days < 30 { return "\(days / 7)w ago" }
         return date.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
+// MARK: - Company list row
+
+private struct CompanyListRow: View {
+    let company: Company
+    var isSelected: Bool = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.appAccent.opacity(0.12))
+                    .frame(width: 36, height: 36)
+                Image(systemName: company.isPersonalBucket ? "person.crop.circle" : "building.2.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Color.appAccent)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(company.displayName)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text("\(company.people.count) \(company.people.count == 1 ? "person" : "people")")
+                        .font(.caption).foregroundStyle(Color.appTextSecondary)
+                    Text("\u{00B7}").font(.caption).foregroundStyle(Color.appTextTertiary)
+                    Text("\(company.meetingCount) meeting\(company.meetingCount == 1 ? "" : "s")")
+                        .font(.caption).foregroundStyle(Color.appTextSecondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.appAccent.opacity(0.12) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -653,7 +789,7 @@ private struct IdentityManagementSection: View {
 
 // MARK: - Meeting row
 
-private struct PersonMeetingRow: View {
+struct PersonMeetingRow: View {
     let meeting: Meeting
     var personName: String = ""
 
