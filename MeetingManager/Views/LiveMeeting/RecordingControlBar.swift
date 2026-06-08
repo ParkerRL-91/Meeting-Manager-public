@@ -119,6 +119,24 @@ struct RecordingControlBar: View {
                 color: .appAccent
             )
 
+            // Shown while the mic disconnected and we're waiting for a replacement.
+            // The call is still being recorded via system audio in the meantime.
+            if appState.isMicRecovering {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                        .font(.caption)
+                    Text("Reconnecting mic…")
+                        .font(.caption)
+                }
+                .foregroundStyle(Color.appWarning)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.appWarningSubtle)
+                .clipShape(Capsule())
+                .help("Your microphone disconnected. Meeting Manager is still recording the call — reconnect a microphone and your audio resumes automatically.")
+                .accessibilityLabel("Microphone disconnected, reconnecting. The call is still being recorded.")
+            }
+
             AudioLevelIndicator(
                 label: "\u{1F50A}",
                 level: appState.systemLevel,

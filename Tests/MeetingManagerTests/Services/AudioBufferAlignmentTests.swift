@@ -228,6 +228,45 @@ final class AudioBufferAlignmentTests: XCTestCase {
         XCTAssertEqual(system[56000], 0.3, accuracy: 0.02, "0.3 at 3.5s")
     }
 
+    // MARK: - Mic gap from a mid-recording switch silence-pads the mixed timeline (ADR-012)
+
+    // ADR-012 (dynamic mic switching) leans on writePositioned to keep one
+    // timeline across a switch: switchDevice does a stop()/start() that halts mic
+    // buffers for the swap, then they resume. Because t0 is anchored on the FIRST
+    // mic buffer and forward gaps are silence-padded, the resumed audio must land
+    // at its true wall-clock offset (~5s here), not be spliced right after the
+    // pre-switch audio. This is the mic-stream analog of testModerateGapSilencePads.
+    func testMicGapFromSwitchIsSilencePadded() throws {
+        let mgr = AudioBufferManager()
+        let url = tmpURL("micgap"); defer { cleanup(url) }
+        try mgr.prepareForRecording(outputURL: url)
+        let t0 = mach_absolute_time()
+        let pre = 4000     // 0.25s of mic before the switch
+        let post = 4000    // 0.25s of mic after resuming
+        let gapSeconds = 5.0
+        let resumeOffset = Int(gapSeconds * 16000)  // 80000 — where the resume buffer must land
+
+        // First mic buffer anchors the shared timeline at t0.
+        mgr.appendMicBuffer(constBuffer(0.5, frames: pre), at: AVAudioTime(hostTime: t0))
+        // Mic buffers stop for ~5s (the engine swap), then resume.
+        mgr.appendMicBuffer(constBuffer(0.3, frames: post), at: AVAudioTime(hostTime: host(t0, plus: gapSeconds)))
+        mgr.finishRecording()
+
+        let mixed = read(url)
+        // ~5s*16000 of silence-padded gap + the 0.25s resume buffer. A splice (the
+        // bug this guards) would be only pre+post = 8000 frames (~0.5s) total.
+        XCTAssertEqual(Double(mixed.count), Double(resumeOffset + post), accuracy: 1600,
+                       "mic gap must be silence-padded to wall-clock (~5s), not spliced to ~0.5s")
+        // Pre-switch mic audio present near t=0 (mic 0.5 → 0.25; the empty-system merge halves it).
+        XCTAssertEqual(mixed[pre / 2], 0.25, accuracy: 0.02, "pre-switch mic audio present near t=0")
+        // The entire gap is interpolated silence (not pre/post audio shifted into it).
+        XCTAssertLessThan(abs(mixed[8000]), 0.01, "silence just after the pre-switch buffer")
+        XCTAssertLessThan(abs(mixed[40000]), 0.01, "silence in the middle of the gap")
+        XCTAssertLessThan(abs(mixed[72000]), 0.01, "silence just before the resume")
+        // Resumed mic audio present at its true ~5s offset (mic 0.3 → 0.15).
+        XCTAssertEqual(mixed[resumeOffset + post / 2], 0.15, accuracy: 0.02, "resumed mic audio at t≈5s")
+    }
+
     // MARK: - Invalid host time does not crash and stays bounded (BUG-2)
 
     func testInvalidHostTimeIsHandled() throws {

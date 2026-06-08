@@ -27,7 +27,12 @@ enum MicrophoneCaptureError: LocalizedError {
 ///
 /// Uses simple linear interpolation for downsampling instead of AVAudioConverter,
 /// which produces near-silent output in real-time streaming scenarios.
-final class MicrophoneCapture {
+///
+/// `@unchecked Sendable`: every mutable field is either confined to the serialized
+/// start/stop/switch lifecycle or guarded by `lock` (`isRunning`, `rawBufferCount`,
+/// `activeDeviceID` via `currentDeviceID`). The engine itself is only mutated inside
+/// `start`/`stop`/`switchDevice`, which never run concurrently with each other.
+final class MicrophoneCapture: @unchecked Sendable {
     /// 16kHz mono Float32 buffers for WhisperKit + WAV recording.
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
     /// Raw hardware-format buffers for SFSpeechRecognizer.
@@ -60,6 +65,10 @@ final class MicrophoneCapture {
 
     /// The actual AudioDeviceID being used (for diagnostics)
     private(set) var activeDeviceID: AudioDeviceID = 0
+
+    /// Lock-guarded snapshot of `activeDeviceID` for callers on other actors
+    /// (e.g. `AudioCaptureService.switchMicrophone` doing a no-op identity compare).
+    var currentDeviceID: AudioDeviceID { lock.withLock { activeDeviceID } }
 
     /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
@@ -212,6 +221,26 @@ final class MicrophoneCapture {
         lastStopAt = Date()
 
         Logger.audio.info("MicrophoneCapture stopped (engine recreated for next session)")
+    }
+
+    /// Live mid-recording switch to a different input device WITHOUT tearing down
+    /// the recording. Internally: `stop()` (recreates the engine, sets `lastStopAt`)
+    /// → `configure(inputDeviceID:)` → `start()`. The WAV file and system-audio tap
+    /// live in AudioCaptureService/AudioBufferManager and are untouched; the speech
+    /// recognizer is buffer-fed (no engine tap), so the only observable effect is a
+    /// sub-second silence gap that AudioBufferManager silence-pads. `start()` updates
+    /// `activeDeviceID`, so the config-change re-pin guard follows the NEW device.
+    /// May block up to ~0.25s on the HAL-release throttle — callers run it off the
+    /// main actor. Returns `start()`'s error on failure, `nil` on success.
+    func switchDevice(toUID uid: String) -> Error? {
+        stop()
+        configure(inputDeviceID: uid)
+        do {
+            try start()
+            return nil
+        } catch {
+            return error
+        }
     }
 
     // MARK: - Device Configuration

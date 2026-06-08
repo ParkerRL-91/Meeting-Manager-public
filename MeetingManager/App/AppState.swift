@@ -31,6 +31,14 @@ final class AppState {
     var isRecording = false
     var activeMeeting: Meeting?
 
+    /// True while the recording mic has disconnected and the app is holding the
+    /// recording open waiting for a replacement (system audio keeps capturing).
+    /// Mirrored from `AudioCaptureService`; drives the "reconnecting mic" banner.
+    var isMicRecovering = false
+
+    /// Debounces rapid in-app mic-picker changes into a single live switch.
+    private var micSwitchDebounceTask: Task<Void, Never>?
+
     /// The resolved template for the current/most-recently-started recording.
     /// Set when recording starts (from meeting.templateId or series inheritance).
     /// Read by LiveMeetingView to pre-populate the notepad.
@@ -148,6 +156,12 @@ final class AppState {
                 Task {
                     await self.calendarSyncManager.startPeriodicSync(interval: intervalSeconds)
                 }
+            }
+            // Hot-swap the recording mic when the user changes the override mid-meeting.
+            if isRecording,
+               settings.micOverrideEnabled != oldValue.micOverrideEnabled ||
+               settings.micOverrideDeviceID != oldValue.micOverrideDeviceID {
+                scheduleMicSwitch()
             }
         }
     }
@@ -311,6 +325,17 @@ final class AppState {
             guard let self, self.settings.micOverrideEnabled else { return nil }
             let id = self.settings.micOverrideDeviceID
             return id.isEmpty ? nil : id
+        }
+
+        // Tells the capture service whether the user has pinned a mic, so the
+        // system-default auto-follow can suppress itself when an override is set.
+        audioCaptureService.isMicOverrideEnabledProvider = { [weak self] in
+            self?.settings.micOverrideEnabled ?? false
+        }
+
+        // Mirror the mic-recovery state so the UI can show a "reconnecting" banner.
+        audioCaptureService.onMicRecoveryStateChanged = { [weak self] recovering in
+            Task { @MainActor in self?.isMicRecovering = recovering }
         }
 
         // Auto-stop recording after sustained silence (meeting ended)
@@ -1510,6 +1535,20 @@ final class AppState {
         try await meetingRepository.save(&meeting)
         loadMeetings()
         return meeting
+    }
+
+    /// Debounce an in-app mic-picker change, then apply it to the live recording.
+    /// 400ms coalesces picker scrubbing; the capture service coalesces again at the
+    /// engine level. Passing the override-resolved UID (nil when the override is
+    /// off) means toggling the override off mid-meeting switches back to auto.
+    private func scheduleMicSwitch() {
+        micSwitchDebounceTask?.cancel()
+        micSwitchDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self, self.isRecording else { return }
+            let uid = self.audioCaptureService.preferredInputDeviceIDProvider?()
+            await self.audioCaptureService.switchMicrophone(toUID: uid)
+        }
     }
 
     /// Start recording — delegates to the state machine. No live transcription needed —

@@ -143,9 +143,10 @@ final class AudioSessionManager {
         return count > 0
     }
 
-    /// Number of input channels for a CoreAudio device identified by its UID string.
-    /// Returns nil if the device cannot be resolved.
-    private func inputChannelCount(forUID uid: String) -> Int? {
+    /// Translate a CoreAudio device UID string to its `AudioDeviceID`, or
+    /// `kAudioObjectUnknown` if no device matches.
+    func deviceID(forUID uid: String) -> AudioDeviceID {
+        guard !uid.isEmpty else { return AudioDeviceID(kAudioObjectUnknown) }
         var deviceID = AudioDeviceID(kAudioObjectUnknown)
         var cfUID = uid as CFString
         var uidAddress = AudioObjectPropertyAddress(
@@ -163,7 +164,51 @@ final class AudioSessionManager {
         let lookup = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &uidAddress, 0, nil, &translationSize, &translation
         )
-        guard lookup == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        guard lookup == noErr else { return AudioDeviceID(kAudioObjectUnknown) }
+        return deviceID
+    }
+
+    /// The system default input device's `AudioDeviceID`, or `kAudioObjectUnknown`.
+    func defaultInputDeviceID() -> AudioDeviceID {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
+        return deviceID
+    }
+
+    /// The CoreAudio UID string for a device id, or nil if it can't be resolved.
+    func uid(forDeviceID id: AudioDeviceID) -> String? {
+        guard id != kAudioObjectUnknown else { return nil }
+        var cfUID: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &cfUID) == noErr else { return nil }
+        return cfUID as String
+    }
+
+    /// UID-based passthrough to the private device-quality check, so the
+    /// CoreAudio-listener path (which only has a UID) can reuse the same
+    /// Continuity/aggregate filtering. Unknown UIDs are treated as reliable —
+    /// a device we can't introspect shouldn't be silently rejected.
+    func isUnreliableInput(uid: String) -> Bool {
+        guard let device = availableInputDevices().first(where: { $0.uniqueID == uid }) else { return false }
+        return isUnreliableInput(device)
+    }
+
+    /// Number of input channels for a CoreAudio device identified by its UID string.
+    /// Returns nil if the device cannot be resolved.
+    private func inputChannelCount(forUID uid: String) -> Int? {
+        let deviceID = deviceID(forUID: uid)
+        guard deviceID != kAudioObjectUnknown else { return nil }
 
         var streamAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,

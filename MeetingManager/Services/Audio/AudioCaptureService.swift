@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreAudio
 import os
 
 // MARK: - AudioCapturing Protocol
@@ -161,6 +162,45 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private let bufferManager = AudioBufferManager()
     private let sessionManager = AudioSessionManager()
 
+    // MARK: - Dynamic mic switching
+
+    /// Where the live mic audio comes from. `.engine` is the normal AVAudioEngine
+    /// path; `.screenCaptureKit` is the fallback used when a conferencing app holds
+    /// the mic (set in `startMicrophoneWithRetry`). The two paths switch devices
+    /// differently, so the coordinator branches on this.
+    enum MicSource { case engine, screenCaptureKit }
+    private(set) var micSource: MicSource = .engine
+
+    /// Serializes `switchMicrophone` so rapid requests don't race. While a switch
+    /// is in flight, the latest request is parked in `pendingSwitchUID` (only the
+    /// final selection wins) and run when the current switch finishes.
+    private var isMicSwitching = false
+    private var pendingSwitchUID: (String?)?
+
+    /// Reads whether the user has pinned a specific mic (override on). Wired by
+    /// AppState. When override is on, the system-default auto-follow is suppressed.
+    var isMicOverrideEnabledProvider: (() -> Bool)?
+
+    /// Fired when mic recovery starts (true) / ends (false), so AppState can show a
+    /// "reconnecting microphone" banner. Event-driven, not polled.
+    var onMicRecoveryStateChanged: ((Bool) -> Void)?
+
+    /// True while the mic is disconnected and we're holding the recording open
+    /// waiting for a replacement device (system audio keeps capturing meanwhile).
+    private(set) var isMicRecovering = false
+    private var micRecoveryDeadlineTask: Task<Void, Never>?
+    /// How long to wait for a replacement mic before ending the meeting.
+    private let micRecoveryWindow: TimeInterval = 30
+
+    /// CoreAudio property listeners (default-input-changed for auto-follow,
+    /// device-list-changed as the recovery retry signal). Stored so the exact same
+    /// block reference can be removed. Callbacks fire on `listenerQueue`, then hop
+    /// to the main actor before touching any state.
+    private var defaultInputListenerBlock: AudioObjectPropertyListenerBlock?
+    private var devicesListListenerBlock: AudioObjectPropertyListenerBlock?
+    private let listenerQueue = DispatchQueue(label: "com.meetingmanager.coreaudio-listener")
+    private var defaultFollowDebounceTask: Task<Void, Never>?
+
     /// The URL of the current recording's WAV file. Used for batch transcription after meeting ends.
     private(set) var currentAudioFileURL: URL?
 
@@ -180,6 +220,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         let audioDir = try audioDirectory()
         let fileURL = audioDir.appendingPathComponent("\(meetingId).wav")
         currentAudioFileURL = fileURL
+        micSource = .engine   // SCK-mic fallback (if any) flips this in startMicrophoneWithRetry
 
         try bufferManager.prepareForRecording(outputURL: fileURL)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
@@ -209,13 +250,16 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             self?.logToFile(msg)
         }
 
-        // Wire device disconnection handler (Task 6)
+        // Wire device disconnection handler. Instead of ending the meeting, enter
+        // bounded recovery: keep the file + system tap alive and wait for a
+        // replacement mic (see beginMicRecovery). System audio keeps capturing
+        // remote participants throughout.
         micCapture.onDeviceDisconnected = { [weak self] error in
             guard let self else { return }
             Logger.audio.error("Mic device disconnected: \(error.localizedDescription)")
-            self.logToFile("Audio: mic device DISCONNECTED — \(error.localizedDescription)")
+            self.logToFile("Audio: mic device DISCONNECTED — \(error.localizedDescription); entering bounded recovery (system audio continues)")
             Task { @MainActor in
-                _ = self.stopCapture()
+                self.beginMicRecovery(reason: .disconnected)
             }
         }
 
@@ -334,6 +378,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             // headphone dongle selected as the mic) — the call records remote audio
             // fine but the local mic is silent, so we warn the user without stopping.
             if !self.micProblemWarned
+                && !self.isMicRecovering
                 && self.micLevel < self.micDeadThreshold
                 && self.systemLevel >= self.systemActiveThreshold {
                 self.consecutiveMicDeadSeconds += 1
@@ -367,6 +412,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         isCapturing = true
+
+        // Install device-change listeners LAST — after isCapturing is set and all
+        // start-time device churn (aggregate creation, the tap dance) is done — so
+        // they only fire on genuine mid-recording changes.
+        installAudioDeviceListeners()
     }
 
     /// Start the mic engine resiliently against CoreAudio -10868
@@ -440,6 +490,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)  // let mic buffers arrive
                 if tap.micBufferCount > 0 {
                     logToFile("Audio: mic now captured via ScreenCaptureKit (\(tap.micBufferCount) buffers, device=\(micUID ?? "default")) — full mic+system recording")
+                    micSource = .screenCaptureKit
                     return
                 }
                 logToFile("Audio: SCK mic produced no buffers (device=\(micUID ?? "default"))")
@@ -470,6 +521,17 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     /// Stop all audio capture
     func stopCapture() -> URL? {
+        // Cancel any in-flight mic recovery / switching and tear down listeners
+        // up front, so nothing tries to resume a recording we're ending.
+        removeAudioDeviceListeners()
+        micRecoveryDeadlineTask?.cancel()
+        micRecoveryDeadlineTask = nil
+        if isMicRecovering {
+            isMicRecovering = false
+            onMicRecoveryStateChanged?(false)
+        }
+        pendingSwitchUID = nil
+
         silenceCheckTimer?.invalidate()
         silenceCheckTimer = nil
         consecutiveSilentSeconds = 0
@@ -491,6 +553,259 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// Get the buffer manager for the transcription service
     var transcriptionBuffer: AudioBufferManager {
         bufferManager
+    }
+
+    // MARK: - Dynamic mic switching
+
+    private enum MicRecoveryReason { case disconnected, switchFailed }
+
+    /// Switch the active microphone mid-recording WITHOUT ending the meeting.
+    /// `uid` nil = resolve via override/auto. No-ops when not capturing, when the
+    /// target is already active, or (for auto-follow) on the SCK mic path. Serialized
+    /// so rapid requests collapse to the final selection. The WAV file and the
+    /// system-audio tap are never touched — only the mic engine re-points.
+    func switchMicrophone(toUID requestedUID: String?) async {
+        guard isCapturing else {
+            logToFile("Audio: mic switch ignored — not capturing")
+            return
+        }
+        guard !isMicSwitching else {
+            pendingSwitchUID = .some(requestedUID)   // overwrite — only the latest wins
+            return
+        }
+        isMicSwitching = true
+        defer {
+            isMicSwitching = false
+            if case let .some(next) = pendingSwitchUID {
+                pendingSwitchUID = nil
+                Task { @MainActor in await self.switchMicrophone(toUID: next) }
+            }
+        }
+
+        // Resolve target: an explicit (validated) UID wins, else override/best.
+        let target: AVCaptureDevice?
+        if let requestedUID, let dev = sessionManager.inputDevice(forUID: requestedUID) {
+            target = dev
+        } else {
+            target = resolveInputDevice()
+        }
+        guard let target else {
+            logToFile("Audio: mic switch — no usable device, keeping current")
+            return
+        }
+
+        // No-op if we're already on it.
+        let targetID = sessionManager.deviceID(forUID: target.uniqueID)
+        if targetID != AudioDeviceID(kAudioObjectUnknown), targetID == micCapture.currentDeviceID {
+            logToFile("Audio: mic switch no-op — already on \(target.localizedName)")
+            return
+        }
+
+        // SCK fallback path: no AVAudioEngine mic to swap; restart the stream instead.
+        if micSource == .screenCaptureKit {
+            await switchSCKMic(toUID: target.uniqueID, label: target.localizedName)
+            return
+        }
+
+        // Engine path — run the (briefly blocking) switch off the main actor.
+        let targetUID = target.uniqueID
+        let failure: String? = await Task.detached(priority: .userInitiated) { [micCapture] in
+            micCapture.switchDevice(toUID: targetUID)?.localizedDescription
+        }.value
+
+        if let failure {
+            logToFile("Audio: mic switch FAILED (\(target.localizedName)): \(failure) — entering recovery")
+            beginMicRecovery(reason: .switchFailed)
+            return
+        }
+        consecutiveMicDeadSeconds = 0
+        micProblemWarned = false
+        logToFile("Audio: mic switch OK — now on \(target.localizedName) (engine.running=\(micCapture.engine.isRunning))")
+    }
+
+    /// Switch the microphone while on the ScreenCaptureKit fallback path. Restarting
+    /// the SCK stream also restarts system capture, so this is reserved for explicit
+    /// user picks / recovery — auto-follow suppresses it upstream.
+    private func switchSCKMic(toUID uid: String, label: String) async {
+        guard #available(macOS 15.0, *), let tap = systemAudioTap else {
+            logToFile("Audio: SCK mic switch unavailable on this OS — keeping current")
+            return
+        }
+        logToFile("Audio: switching SCK mic to \(label)")
+        tap.stop()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        do {
+            try await tap.start(captureMicrophone: true, micDeviceUID: uid)
+        } catch {
+            logToFile("Audio: SCK mic switch failed (\(label)): \(error.localizedDescription)")
+            return
+        }
+        try? await Task.sleep(nanoseconds: 1_000_000_000)  // let mic buffers arrive
+        logToFile(tap.micBufferCount > 0
+            ? "Audio: SCK mic switch OK — now on \(label)"
+            : "Audio: SCK mic switch produced no buffers (\(label))")
+    }
+
+    // MARK: - Mic recovery (disconnect)
+
+    /// Enter bounded recovery: keep the recording + file + system tap alive, warn
+    /// once, and wait `micRecoveryWindow` for a usable replacement mic. Ends the
+    /// meeting (via the existing auto-stop) only if the window expires.
+    private func beginMicRecovery(reason: MicRecoveryReason) {
+        guard isCapturing, !isMicRecovering else { return }
+        isMicRecovering = true
+        onMicRecoveryStateChanged?(true)
+        micProblemWarned = true   // suppress the generic dead-mic warning; we have our own
+        logToFile("Audio: mic recovery STARTED (\(reason)) — holding recording open; system audio continues")
+        onMicProblemDetected?(
+            "Your microphone disconnected. Meeting Manager is still recording the call — "
+            + "reconnect a microphone and your audio will resume automatically."
+        )
+        micRecoveryDeadlineTask?.cancel()
+        micRecoveryDeadlineTask = Task { [weak self] in
+            guard let self else { return }
+            if await self.attemptMicResume() { return }   // a replacement may already be present
+            try? await Task.sleep(nanoseconds: UInt64(self.micRecoveryWindow * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self.failMicRecovery()
+        }
+    }
+
+    /// Try to resume onto the best currently-available input. Safe to call
+    /// concurrently (deadline task + devices-list listener) — guarded and serialized.
+    @discardableResult
+    private func attemptMicResume() async -> Bool {
+        guard isMicRecovering else { return true }
+        guard let target = resolveInputDevice(),
+              sessionManager.inputDevice(forUID: target.uniqueID) != nil,
+              !sessionManager.isUnreliableInput(uid: target.uniqueID) else {
+            return false
+        }
+        await switchMicrophone(toUID: target.uniqueID)
+        guard isMicRecovering else { return true }   // a concurrent attempt may have ended it
+        if micCapture.engine.isRunning {
+            endMicRecovery(resumedOn: target.localizedName)
+            return true
+        }
+        return false
+    }
+
+    private func endMicRecovery(resumedOn label: String) {
+        guard isMicRecovering else { return }
+        micRecoveryDeadlineTask?.cancel()
+        micRecoveryDeadlineTask = nil
+        isMicRecovering = false
+        onMicRecoveryStateChanged?(false)
+        consecutiveMicDeadSeconds = 0
+        consecutiveSilentSeconds = 0
+        micProblemWarned = false
+        logToFile("Audio: mic recovery ENDED — resumed on \(label)")
+    }
+
+    private func failMicRecovery() {
+        guard isMicRecovering, isCapturing else { return }
+        isMicRecovering = false
+        onMicRecoveryStateChanged?(false)
+        micRecoveryDeadlineTask = nil
+        logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired — no replacement; ending recording")
+        onSilenceDetected?()   // reuse the established auto-stop → AppState.stopRecording
+    }
+
+    // MARK: - CoreAudio device listeners
+
+    /// Install listeners for default-input change (auto-follow) and device-list
+    /// change (recovery retry). Installed at the END of startCapture so start-time
+    /// device churn never fires them; idempotent.
+    private func installAudioDeviceListeners() {
+        guard defaultInputListenerBlock == nil else { return }
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in self?.handleDefaultInputChanged() }
+        }
+        defaultInputListenerBlock = defaultBlock
+        AudioObjectAddPropertyListenerBlock(systemObject, &defaultAddr, listenerQueue, defaultBlock)
+
+        var devicesAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let devicesBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in self?.handleDevicesListChanged() }
+        }
+        devicesListListenerBlock = devicesBlock
+        AudioObjectAddPropertyListenerBlock(systemObject, &devicesAddr, listenerQueue, devicesBlock)
+
+        logToFile("Audio: CoreAudio device listeners installed")
+    }
+
+    private func removeAudioDeviceListeners() {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        if let block = defaultInputListenerBlock {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, listenerQueue, block)
+            defaultInputListenerBlock = nil
+        }
+        if let block = devicesListListenerBlock {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, listenerQueue, block)
+            devicesListListenerBlock = nil
+        }
+        defaultFollowDebounceTask?.cancel()
+        defaultFollowDebounceTask = nil
+    }
+
+    /// System default input changed. Follow it only when the user hasn't pinned a
+    /// mic, we're on the engine path, and the new default is a real (non-phantom)
+    /// input. Debounced to absorb Control-Center / aggregate flapping.
+    private func handleDefaultInputChanged() {
+        guard isCapturing, !isMicRecovering else { return }
+        guard isMicOverrideEnabledProvider?() != true else {
+            logToFile("Audio: default input changed — override ON, not following")
+            return
+        }
+        guard micSource == .engine else {
+            logToFile("Audio: default input changed — on SCK mic path, not auto-following")
+            return
+        }
+        defaultFollowDebounceTask?.cancel()
+        defaultFollowDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled, let self, self.isCapturing, !self.isMicRecovering,
+                  self.isMicOverrideEnabledProvider?() != true else { return }
+            let newID = self.sessionManager.defaultInputDeviceID()
+            guard newID != AudioDeviceID(kAudioObjectUnknown),
+                  let uid = self.sessionManager.uid(forDeviceID: newID),
+                  let device = self.sessionManager.inputDevice(forUID: uid),
+                  !self.sessionManager.isUnreliableInput(uid: uid) else {
+                self.logToFile("Audio: default input changed — new default is unusable/phantom, not following")
+                return
+            }
+            if newID == self.micCapture.currentDeviceID { return }   // already on it
+            self.logToFile("Audio: default input changed — following to \(device.localizedName)")
+            await self.switchMicrophone(toUID: uid)
+        }
+    }
+
+    /// Device list changed. Only meaningful during recovery, where a newly-appeared
+    /// device is our cue to retry the resume.
+    private func handleDevicesListChanged() {
+        guard isMicRecovering else { return }
+        Task { @MainActor in await self.attemptMicResume() }
     }
 
     // MARK: - Private
