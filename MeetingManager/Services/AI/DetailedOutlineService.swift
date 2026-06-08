@@ -67,6 +67,7 @@ final class DetailedOutlineService {
         cleanedRepo: CleanedTranscriptRepository = CleanedTranscriptRepository(),
         transcriptRepo: TranscriptRepository = TranscriptRepository(database: AppDatabase.shared),
         outlineRepo: DetailedOutlineRepository = DetailedOutlineRepository(),
+        noteRepo: NoteRepository = NoteRepository(database: AppDatabase.shared),
         settings: AppSettings,
         textGenerator: ((String, String) async throws -> String)?,
         modelLabel: String
@@ -102,11 +103,16 @@ final class DetailedOutlineService {
             return DefaultPrompts.detailedOutline
         }()
 
+        // Feed the user's own notes into the outline so it reflects what the
+        // attendee captured (names, decisions, emphasis), not just the
+        // transcript. Empty when no notes exist — a harmless no-op.
+        let noteText = (try? await noteRepo.combinedNotes(meetingId: meetingId)) ?? ""
+
         let userPrompt = promptManager.substituteVariables(
             template: template,
             meeting: meeting,
             transcript: transcriptText,
-            notes: ""
+            notes: noteText
         )
 
         // System prompt narrows the role + reinforces the "no preamble"

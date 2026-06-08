@@ -379,6 +379,9 @@ enum DefaultPrompts {
     Transcript:
     {{transcript}}
 
+    User Notes (what the attendee typed during the meeting — treat as authoritative for emphasis and corrections; prefer them over transcript guesses for names, decisions, and figures, but never invent sections they don't support):
+    {{notes}}
+
     Now produce the detailed outline.
     """
 }
