@@ -764,8 +764,10 @@ final class ModelsHardeningTests: XCTestCase {
         XCTAssertFalse(AppSettings.default.useLocalLLM)
     }
 
-    func testDefaultOllamaModelIsAuto() {
-        XCTAssertEqual(AppSettings.default.ollamaModel, "auto")
+    func testDefaultOllamaModelIsQwen3() {
+        // Default is the hybrid qwen3:8b (run with thinking on, see ADR-007 +
+        // TASK-024), not "auto" — "auto" stays selectable but isn't the default.
+        XCTAssertEqual(AppSettings.default.ollamaModel, "qwen3:8b")
     }
 
     func testDefaultAutoGenerateSummaryFalse() {

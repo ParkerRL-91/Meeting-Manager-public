@@ -86,6 +86,8 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v43-fluidaudio-diarization",
         "v44-voice-reference",
         "v45-attribution-flags",
+        "v46-enhanced-note",
+        "v47-apollo-profile",
     ]
 
     override func setUpWithError() throws {
