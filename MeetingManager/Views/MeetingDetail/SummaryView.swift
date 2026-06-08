@@ -283,6 +283,17 @@ struct SummaryView: View {
                         .clipShape(Capsule())
                 }
 
+                if summary.notesInformedSummary {
+                    Label("Shaped by your notes", systemImage: "note.text")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color.appAccent.opacity(0.14))
+                        .clipShape(Capsule())
+                        .help("This summary was anchored to the notes you captured.")
+                }
+
                 if showSavedFlash {
                     Label("Saved", systemImage: "checkmark")
                         .labelStyle(.titleAndIcon)

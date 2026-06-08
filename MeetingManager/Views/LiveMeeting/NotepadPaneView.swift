@@ -19,6 +19,32 @@ struct NotepadPaneView: View {
     /// previous session was killed before SQLite could commit). Surfaced as a
     /// small "Recovered unsaved draft" notice in the header.
     @State private var didRestoreFromDraft = false
+    /// Presents the enhanced-notes result sheet (read-only) without disturbing
+    /// the live editor's text. Set when the user taps "View enhanced".
+    @State private var showEnhancedSheet = false
+
+    /// True while an `.enhanceNotes` task for this meeting is pending or running.
+    private var isEnhancing: Bool {
+        appState.taskQueueManager.allTasks.contains {
+            $0.type == .enhanceNotes &&
+            $0.meetingId == meetingId &&
+            ($0.status == .pending || $0.status == .running)
+        }
+    }
+
+    /// True once an `.enhanceNotes` task for this meeting has completed — drives
+    /// the "Enhanced ready" affordance.
+    private var hasEnhancedResult: Bool {
+        appState.taskQueueManager.allTasks.contains {
+            $0.type == .enhanceNotes &&
+            $0.meetingId == meetingId &&
+            $0.status == .completed
+        }
+    }
+
+    private var notesAreEmpty: Bool {
+        noteContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -40,6 +66,36 @@ struct NotepadPaneView: View {
                         .font(.caption)
                         .foregroundStyle(Color.appTextTertiary)
                 }
+
+                if hasEnhancedResult && !isEnhancing {
+                    Button {
+                        showEnhancedSheet = true
+                    } label: {
+                        Label("View enhanced", systemImage: "checkmark.seal.fill")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.appSuccess)
+                    .help("Your enhanced notes are ready")
+                }
+
+                Button {
+                    enhanceNotes()
+                } label: {
+                    if isEnhancing {
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("Enhancing…").font(.caption)
+                        }
+                    } else {
+                        Label("Enhance Notes", systemImage: "sparkles")
+                            .font(.caption.weight(.medium))
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(notesAreEmpty || isEnhancing ? Color.appTextTertiary : Color.appAccent)
+                .disabled(notesAreEmpty || isEnhancing)
+                .help("Polish your notes into a cleaner version in your own structure")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -102,6 +158,28 @@ struct NotepadPaneView: View {
             // this just kicks off one more SQLite save attempt.
             NoteDraftStore.saveDraft(meetingId: meetingId, content: noteContent)
             saveNoteImmediately()
+        }
+        .sheet(isPresented: $showEnhancedSheet) {
+            EnhancedNotesSheet(meetingId: meetingId)
+                .environment(appState)
+        }
+    }
+
+    // MARK: - Enhance Notes
+
+    /// Flush the debounced note save, then enqueue the `.enhanceNotes` task.
+    /// The save MUST land first so the generator reads the latest keystrokes —
+    /// otherwise an enhancement could run against a 1-second-stale note. The
+    /// live editor's text is never touched; the result surfaces in a sheet.
+    private func enhanceNotes() {
+        Task {
+            saveTask?.cancel()
+            await saveNote()
+            _ = await appState.taskQueueManager.enqueue(
+                type: .enhanceNotes,
+                meetingId: meetingId,
+                priority: 4
+            )
         }
     }
 
@@ -283,6 +361,37 @@ struct NotepadPaneView: View {
             line += " (due \(formatted))"
         }
         return line
+    }
+}
+
+// MARK: - Enhanced Notes Sheet
+
+/// Read-only sheet that surfaces the enhanced-notes result over the live
+/// notepad. Reuses `EnhancedNotesView` so the render/staleness/re-enhance
+/// states stay in one place; the editor underneath is never modified.
+private struct EnhancedNotesSheet: View {
+    let meetingId: String
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Enhanced Notes")
+                    .font(.headline)
+                    .foregroundStyle(Color.appTextPrimary)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.bordered)
+            }
+            .padding(12)
+
+            Divider()
+
+            EnhancedNotesView(meetingId: meetingId)
+        }
+        .frame(minWidth: 520, idealWidth: 600, minHeight: 420, idealHeight: 560)
+        .background(Color.appBackground)
     }
 }
 

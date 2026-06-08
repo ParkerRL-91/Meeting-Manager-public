@@ -468,12 +468,13 @@ struct MeetingDetailView: View {
             // Once recording starts, the same `MeetingNote` row carries
             // forward into LiveMeetingView's NotepadPane (both load via
             // `noteRepository.latestNote(meetingId:)`).
-            // Post-recording meetings stay read-only via NotesReviewView.
+            // Post-recording meetings get a Raw | Enhanced toggle (NotesTabView)
+            // so the user can polish their captured notes (PRJ-007).
             if isPreRecording {
                 NotepadPaneView(meetingId: meetingId)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                NotesReviewView(meetingId: meetingId)
+                NotesTabView(meetingId: meetingId)
             }
         case .speakers:
             SpeakerAssignmentView(meetingId: meetingId)

@@ -108,6 +108,13 @@ struct PromptConfigView: View {
                         tag: .summaryPrompt,
                         isBuiltIn: true
                     )
+                    sidebarRow(
+                        icon: "sparkles",
+                        title: "Enhance Notes",
+                        subtitle: "Polishes your raw notes",
+                        tag: .enhanceNotesPrompt,
+                        isBuiltIn: false
+                    )
                 }
 
                 // Built-in recipes
@@ -282,6 +289,15 @@ struct PromptConfigView: View {
                     .fixedSize()
                 }
 
+                if selection == .enhanceNotesPrompt {
+                    Button("Reset to Default") {
+                        editingTemplate = DefaultPrompts.enhanceNotes
+                        hasChanges = true
+                    }
+                    .buttonStyle(.bordered)
+                    .fixedSize()
+                }
+
                 if !isCurrentSelectionBuiltIn {
                     Button("Save") {
                         saveCurrentPrompt()
@@ -376,6 +392,8 @@ struct PromptConfigView: View {
         switch selection {
         case .summaryPrompt:
             return false
+        case .enhanceNotesPrompt:
+            return false
         case .recipe(let id):
             return recipes.first(where: { $0.id == id })?.isBuiltIn ?? false
         }
@@ -385,6 +403,8 @@ struct PromptConfigView: View {
         switch selection {
         case .summaryPrompt:
             return "Meeting Summary"
+        case .enhanceNotesPrompt:
+            return "Enhance Notes"
         case .recipe(let id):
             return recipes.first(where: { $0.id == id })?.name ?? "Prompt"
         }
@@ -394,6 +414,8 @@ struct PromptConfigView: View {
         switch selection {
         case .summaryPrompt:
             return "The default prompt used when generating meeting summaries."
+        case .enhanceNotesPrompt:
+            return "Rewrites your raw notes into a polished version in your own structure. The transcript, when present, corrects names and figures."
         case .recipe(let id):
             return recipes.first(where: { $0.id == id })?.description
         }
@@ -415,6 +437,8 @@ struct PromptConfigView: View {
         switch sel {
         case .summaryPrompt:
             editingTemplate = promptManager.loadTemplate(settings: appState.settings)
+        case .enhanceNotesPrompt:
+            editingTemplate = promptManager.loadEnhanceTemplate(settings: appState.settings)
         case .recipe(let id):
             editingTemplate = recipes.first(where: { $0.id == id })?.promptTemplate ?? ""
         }
@@ -426,6 +450,11 @@ struct PromptConfigView: View {
         switch selection {
         case .summaryPrompt:
             promptManager.saveTemplate(editingTemplate)
+            hasChanges = false
+            flashBanner("Saved")
+
+        case .enhanceNotesPrompt:
+            promptManager.saveEnhanceTemplate(editingTemplate)
             hasChanges = false
             flashBanner("Saved")
 
@@ -465,6 +494,7 @@ struct PromptConfigView: View {
 
 enum PromptSelection: Hashable {
     case summaryPrompt
+    case enhanceNotesPrompt
     case recipe(String)
 }
 
