@@ -1048,6 +1048,13 @@ final class AppState {
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
         }
 
+        // Defensive strip at the save boundary: never persist a summary that
+        // still contains the model's <think> reasoning. generate() and
+        // generateStreaming already strip, but enforcing it again here
+        // guarantees a clean summary for every backend and code path —
+        // belt-and-suspenders against the chain-of-thought leak.
+        let cleanSummary = OllamaService.stripThinkBlock(summaryText)
+
         // Save summary. Record whether the user had notes at generation time —
         // the summary was anchored to them as ground truth above. Persisted
         // (not re-derived at view time) so the "Shaped by your notes" cue
@@ -1055,12 +1062,12 @@ final class AppState {
         var summary = MeetingSummary(
             meetingId: meetingId,
             promptUsed: systemPrompt,
-            summaryText: summaryText,
+            summaryText: cleanSummary,
             modelUsed: backend.modelIdentifier,
             notesInformedSummary: !noteText.isEmpty
         )
         try await summaryRepository.save(&summary)
-        fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
+        fileLog("TaskQueue: summary saved for \(meetingId) (\(cleanSummary.count) chars)")
 
         // After saving, append a strictly-scoped "How this connects to other
         // work" section sourced ONLY from the Knowledge Base — see comment on
