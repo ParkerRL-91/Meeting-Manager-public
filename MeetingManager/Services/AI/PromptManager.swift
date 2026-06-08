@@ -68,6 +68,47 @@ final class PromptManager {
         }
     }
 
+    // MARK: - Enhance-Notes Template Persistence
+
+    /// Loads the "Enhance Notes" prompt template, falling back to the built-in
+    /// default when the stored value is empty/nil. Reads fresh from the DB for
+    /// the same reason `loadTemplate` does — the in-memory settings snapshot
+    /// can be stale right after a save, which made edits appear to revert.
+    func loadEnhanceTemplate(settings: AppSettings = .default) -> String {
+        let stored: String? = {
+            if let fresh = try? AppDatabase.shared.writer.read({ db in
+                try AppSettings.fetchOne(db)?.enhanceNotesPromptTemplate
+            }) {
+                return fresh ?? settings.enhanceNotesPromptTemplate
+            }
+            return settings.enhanceNotesPromptTemplate
+        }()
+        let value = stored?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? DefaultPrompts.enhanceNotes : value
+    }
+
+    /// Persists a custom "Enhance Notes" prompt template. Pass an empty string
+    /// to revert to the default on next load. Posts the shared prompt-change
+    /// notification so AppState refreshes its in-memory settings snapshot.
+    func saveEnhanceTemplate(_ template: String) {
+        do {
+            try AppDatabase.shared.writer.write { db in
+                if var settings = try AppSettings.fetchOne(db) {
+                    settings.enhanceNotesPromptTemplate = template
+                    try settings.update(db)
+                } else {
+                    var settings = AppSettings.default
+                    settings.enhanceNotesPromptTemplate = template
+                    try settings.insert(db)
+                }
+            }
+            Logger.ai.info("Enhance-notes prompt template saved (\(template.count) characters)")
+            NotificationCenter.default.post(name: .summaryPromptTemplateDidChange, object: nil)
+        } catch {
+            Logger.ai.error("Failed to save enhance-notes prompt template: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Variable Substitution
 
     /// Replaces template placeholders with concrete meeting data.

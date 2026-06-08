@@ -82,6 +82,12 @@ struct AppSettings: Codable, Equatable {
     /// the default at use time. Edited via Settings → Prompts → Detailed Outline.
     var detailedOutlinePromptTemplate: String? = nil
 
+    /// Prompt template for the "Enhance Notes" pass. nil → fall back to
+    /// `DefaultPrompts.enhanceNotes`. Nullable for the same reason as the
+    /// outline template — added by migration v46 without backfill, resolved to
+    /// the default at use time. Edited via Settings → Prompts → Enhance Notes.
+    var enhanceNotesPromptTemplate: String? = nil
+
     // MARK: - Integrated Profile Prep (Apollo)
 
     /// User-facing toggle for surfacing attendee profile cards (title,
@@ -144,6 +150,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case selectedGoogleCalendarIds, selectedAppleCalendarIds
         case contactsImportEnabled
         case detailedOutlinePromptTemplate
+        case enhanceNotesPromptTemplate
         case apolloProfilePrepEnabled
         case apolloKeyValidated
         case apolloKeyLastValidatedAt
@@ -383,5 +390,55 @@ enum DefaultPrompts {
     {{notes}}
 
     Now produce the detailed outline.
+    """
+
+    // MARK: - Enhance Notes (PRJ-007)
+
+    /// The "Enhance Notes" prompt rewrites the user's raw notes into a polished
+    /// version that keeps the user's *own* structure — their headings, their
+    /// order, their emphasis. It is the deliberate opposite of the summary
+    /// prompt, which imposes a fixed TL;DR / Decisions / Action Items shape.
+    ///
+    /// The transcript is OPTIONAL. Post-meeting it is present and used only to
+    /// correct names/figures and to expand the user's terse bullets. During a
+    /// live meeting the app does not transcribe (transcription is post-stop),
+    /// so the transcript section reads "(no transcript available)" — in that
+    /// case this is a pure polish: grammar, clarity, structure, nothing added.
+    ///
+    /// Editable via Settings → Prompts → "Enhance Notes" — the value lives on
+    /// `appSettings.enhanceNotesPromptTemplate`. nil/empty falls back to this
+    /// default at call time.
+    static let enhanceNotes = """
+    You are a careful editor polishing a person's own meeting notes. Output ONLY the polished notes as Markdown — no preamble, no meta commentary, no "Here are your enhanced notes", no closing remarks.
+
+    Your single job is to make the user's notes clearer and more complete WITHOUT changing what they chose to capture or how they organized it. The notes belong to the user; you are tidying them, not rewriting them into your own format.
+
+    Meeting: {{meetingTitle}}
+    Date: {{date}}
+    Participants: {{participants}}
+
+    The user's raw notes (this is the ground truth — preserve its structure):
+    {{notes}}
+
+    Transcript (supporting evidence only — may be absent during a live meeting):
+    {{transcript}}
+
+    ### What to do
+
+    - Keep the user's headings, sections, and their order EXACTLY. If the notes have no headings, do not invent a heading structure — keep the same flat or bulleted shape the user used.
+    - Expand the user's terse fragments and shorthand into clear, complete sentences, preserving their meaning. "pricing — push back, margin" becomes "Pushed back on the proposed pricing because it undercuts margin." Do not add claims the fragment didn't imply.
+    - Fix grammar, spelling, punctuation, and obvious typos.
+    - When a transcript is provided, use it ONLY to correct names, figures, dates, and product/company terms the user got slightly wrong or abbreviated, and to fill a detail the user clearly started writing but left incomplete. Prefer the user's framing; the transcript settles facts, not emphasis.
+    - Preserve the user's task/checkbox markers (`- [ ]`, `- [x]`), bullet style, and any inline emphasis.
+
+    ### What NOT to do
+
+    - Do NOT reshape the notes into a summary format. No "## TL;DR", no "## Key Discussion Points", no "## Decisions", no "## Action Items" unless the user themselves used those exact headings. The detailed summary already does that; this artifact must mirror the user's structure.
+    - Do NOT add new sections, topics, decisions, action items, or participants that the user did not write. Expanding a bullet is allowed; inventing a bullet is not.
+    - Do NOT invent facts, names, organisations, dates, numbers, or quotes that appear in neither the notes nor the transcript. If the user's note is vague and the transcript doesn't clarify it, leave it vague rather than guessing.
+    - Do NOT contradict the user's notes. If the transcript disagrees with a clearly intentional note, keep the user's note.
+    - When no transcript is provided, make NO factual additions at all — this is a pure polish of grammar, clarity, and structure. Do not infer detail that isn't already in the notes.
+
+    Output the polished notes now, as Markdown, beginning with the user's first line.
     """
 }

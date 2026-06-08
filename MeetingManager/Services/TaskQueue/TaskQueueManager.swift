@@ -69,6 +69,10 @@ final class TaskQueueManager {
     /// task completes; can be enqueued manually by the user via the Outline
     /// tab's Regenerate button.
     var detailedOutlineHandler: ((String) async throws -> Void)?
+    /// PRJ-007: "Enhance Notes" — rewrites the user's raw notes into a polished
+    /// version in their own structure. Never auto-enqueued; the user triggers
+    /// it from the Notes tab or the live notepad button.
+    var enhanceNotesHandler: ((String) async throws -> Void)?
 
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
@@ -591,6 +595,7 @@ final class TaskQueueManager {
         case .transcriptCleanup:  stage = "Cleaning transcript"
         case .retryAttribution:   stage = "Re-checking speakers"
         case .detailedOutline:    stage = "Generating outline"
+        case .enhanceNotes:       stage = "Enhancing notes"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -681,6 +686,12 @@ final class TaskQueueManager {
         case .detailedOutline:
             guard let handler = detailedOutlineHandler else {
                 throw TaskQueueError.noHandler("detailedOutline")
+            }
+            try await handler(task.meetingId)
+
+        case .enhanceNotes:
+            guard let handler = enhanceNotesHandler else {
+                throw TaskQueueError.noHandler("enhanceNotes")
             }
             try await handler(task.meetingId)
         }

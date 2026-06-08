@@ -35,6 +35,11 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// after summary completes; can be re-run on demand from the
         /// Outline tab. See `Services/AI/DetailedOutlineService.swift`.
         case detailedOutline
+        /// PRJ-007: "Enhance Notes" — rewrites the user's raw notes into a
+        /// polished version in their own structure. User-initiated only
+        /// (never auto-enqueued): the Notes tab and the live notepad button
+        /// enqueue it. See `AppState.generateEnhancedNotesForTask`.
+        case enhanceNotes
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -57,6 +62,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .transcriptCleanup:  return "Cleaning Transcript"
         case .retryAttribution:   return "Re-checking Speakers"
         case .detailedOutline:    return "Generating Outline"
+        case .enhanceNotes:       return "Enhance Notes"
         }
     }
 

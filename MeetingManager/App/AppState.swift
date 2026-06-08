@@ -174,6 +174,7 @@ final class AppState {
     let transcriptRepository: TranscriptRepository
     let noteRepository: NoteRepository
     let summaryRepository: SummaryRepository
+    let enhancedNoteRepository: EnhancedNoteRepository
     let audioCaptureService: AudioCaptureService
     let transcriptionService: TranscriptionService
     let appleSpeechTranscriber: AppleSpeechTranscriber
@@ -264,6 +265,7 @@ final class AppState {
             self.transcriptRepository = existing.transcriptRepository
             self.noteRepository = existing.noteRepository
             self.summaryRepository = existing.summaryRepository
+            self.enhancedNoteRepository = existing.enhancedNoteRepository
             self.audioCaptureService = existing.audioCaptureService
             self.transcriptionService = existing.transcriptionService
             self.appleSpeechTranscriber = existing.appleSpeechTranscriber
@@ -299,6 +301,7 @@ final class AppState {
         self.transcriptRepository = TranscriptRepository(database: database)
         self.noteRepository = NoteRepository(database: database)
         self.summaryRepository = SummaryRepository(database: database)
+        self.enhancedNoteRepository = EnhancedNoteRepository(database: database)
         self.audioCaptureService = AudioCaptureService()
 
         let txService = TranscriptionService()
@@ -790,6 +793,16 @@ final class AppState {
             await self.runDetailedOutlineGeneration(meetingId: meetingId)
         }
 
+        // PRJ-007: "Enhance Notes" — rewrites the user's raw notes into a
+        // polished version in their own structure. User-initiated only; the
+        // throw propagates so the queue surfaces "No AI backend" as a failed
+        // task with a clear error (mirrors the summary handler).
+        taskQueueManager.enhanceNotesHandler = { [weak self] meetingId in
+            guard let self else { return }
+            self.fileLog("TaskQueue: enhancing notes for \(meetingId)")
+            try await self.generateEnhancedNotesForTask(meetingId: meetingId)
+        }
+
         // When the queue drains, retry any daily brief that was deferred due to
         // backend contention (e.g. while a bulk re-transcription was running).
         taskQueueManager.onQueueIdle = { [weak self] in
@@ -1035,12 +1048,16 @@ final class AppState {
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
         }
 
-        // Save summary
+        // Save summary. Record whether the user had notes at generation time —
+        // the summary was anchored to them as ground truth above. Persisted
+        // (not re-derived at view time) so the "Shaped by your notes" cue
+        // survives the user editing or deleting their notes afterwards.
         var summary = MeetingSummary(
             meetingId: meetingId,
             promptUsed: systemPrompt,
             summaryText: summaryText,
-            modelUsed: backend.modelIdentifier
+            modelUsed: backend.modelIdentifier,
+            notesInformedSummary: !noteText.isEmpty
         )
         try await summaryRepository.save(&summary)
         fileLog("TaskQueue: summary saved for \(meetingId) (\(summaryText.count) chars)")
@@ -1050,6 +1067,97 @@ final class AppState {
         // the removed KB injection above for why we keep KB out of the main
         // summary. No-op when no KB folder is set or no entities match.
         await appendConnectionsSection(meeting: meeting, summary: &summary)
+    }
+
+    /// PRJ-007: "Enhance Notes". Rewrites the user's raw notes into a polished
+    /// version that keeps the user's own structure (their headings, order,
+    /// emphasis) — a distinct artifact from the fixed-format `MeetingSummary`
+    /// and never mutating the source `MeetingNote`. Driven by the user-initiated
+    /// `.enhanceNotes` task type.
+    ///
+    /// Structure mirrors `generateSummaryForTask`: resolve the backend, build
+    /// the prompt, run Ollama (streaming) or Claude, persist. Two differences:
+    ///   - The transcript is OPTIONAL. During a live meeting the app hasn't
+    ///     transcribed yet (transcription is post-stop), so an empty transcript
+    ///     turns this into a pure polish — grammar/clarity only, no facts added.
+    ///   - Empty notes is a hard guard — there is nothing to enhance, and the
+    ///     UI disables the button in that case, so reaching here means a race.
+    private func generateEnhancedNotesForTask(meetingId: String) async throws {
+        guard let meeting = try await meetingRepository.find(id: meetingId) else {
+            throw TaskQueueError.noHandler("Meeting not found.")
+        }
+
+        let noteText = (try await noteRepository.combinedNotes(meetingId: meetingId))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !noteText.isEmpty else {
+            throw TaskQueueError.noHandler("There are no notes to enhance. Write some notes first.")
+        }
+
+        // Transcript is optional. Prefer the cleaned blob (resolved speaker
+        // names, consistent timestamps); fall back to raw segments; empty when
+        // neither exists (live meeting) — which the prompt builder reads as a
+        // notes-only polish.
+        let transcript: String = await {
+            if let cleaned = try? await CleanedTranscriptRepository(database: database).cleanedTranscript(meetingId: meetingId),
+               !cleaned.text.isEmpty {
+                return cleaned.text
+            }
+            if let segments = try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000),
+               !segments.isEmpty {
+                return segments.map { $0.text }.joined(separator: "\n")
+            }
+            return ""
+        }()
+
+        // Resolve template fresh: user-edited value if present, else the
+        // built-in default (mirrors PromptManager.loadEnhanceTemplate, but
+        // reads the in-memory snapshot which AppState keeps current via the
+        // summaryPromptTemplateDidChange observer).
+        let template: String = {
+            if let custom = settings.enhanceNotesPromptTemplate?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !custom.isEmpty {
+                return custom
+            }
+            return DefaultPrompts.enhanceNotes
+        }()
+
+        let prompts = EnhanceNotesPromptBuilder.build(
+            template: template,
+            meeting: meeting,
+            notes: noteText,
+            transcript: transcript
+        )
+
+        let backend = await resolveAIBackend(refreshOllama: true)
+        let content: String
+        switch backend {
+        case .ollama(let model):
+            content = try await ollamaService.generateStreaming(
+                systemPrompt: prompts.system,
+                userPrompt: prompts.user,
+                model: model
+            )
+        case .claude(let model):
+            let claude = ClaudeService()
+            content = try await claude.sendMessage(
+                systemPrompt: prompts.system,
+                userPrompt: prompts.user,
+                model: model
+            )
+        case .none:
+            throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
+        }
+
+        let enhanced = EnhancedNote(
+            meetingId: meetingId,
+            content: content.trimmingCharacters(in: .whitespacesAndNewlines),
+            modelUsed: backend.modelIdentifier,
+            generatedAt: Date(),
+            sourceNotesHash: EnhancedNote.stableHash(noteText),
+            sourceNotesLength: noteText.count
+        )
+        try await enhancedNoteRepository.save(enhanced)
+        fileLog("TaskQueue: enhanced notes saved for \(meetingId) (\(content.count) chars)")
     }
 
     /// Append a "How this connects to other work" section to a freshly-saved

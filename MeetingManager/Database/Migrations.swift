@@ -950,5 +950,40 @@ enum Migrations {
                 t.add(column: "attributionFlags", .text)
             }
         }
+
+        // v46: "Enhance Notes" (PRJ-007 TASK-020, ADR-013). A derived AI
+        // artifact that rewrites the user's raw notes into a polished version
+        // in *their own* structure — kept distinct from `meetingNote` (user
+        // ground truth, never overwritten) and `meetingSummary` (fixed
+        // TL;DR/Decisions format). One row per meeting, replace-on-write —
+        // mirrors `detailedOutline` (v35).
+        //
+        // `sourceNotesHash` stores a stable hash (CryptoKit SHA256) of the
+        // notes the enhancement was built from; the viewer compares it to the
+        // current combined notes and offers "Re-enhance" on mismatch. NOT
+        // `String.hashValue`, which is salted per process and would falsely
+        // flag every enhancement as stale on the next launch.
+        migrator.registerMigration("v46-enhanced-note") { db in
+            try db.create(table: "enhancedNote") { t in
+                t.column("meetingId", .text).primaryKey()
+                t.column("content", .text).notNull()
+                t.column("modelUsed", .text)
+                t.column("generatedAt", .datetime).notNull()
+                t.column("sourceNotesHash", .text).notNull().defaults(to: "")
+                t.column("sourceNotesLength", .integer).notNull().defaults(to: 0)
+            }
+            // Editable in Settings → Prompts → Enhance Notes. Nullable so the
+            // column can be added without backfill — readers resolve nil to
+            // `DefaultPrompts.enhanceNotes` at call time.
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "enhanceNotesPromptTemplate", .text)
+            }
+            // Persisted at generation time so the summary's "Shaped by your
+            // notes" cue survives the user editing or deleting notes after the
+            // summary was produced. Re-deriving at view time would lie.
+            try db.alter(table: "meetingSummary") { t in
+                t.add(column: "notesInformedSummary", .boolean).notNull().defaults(to: false)
+            }
+        }
     }
 }
