@@ -449,6 +449,20 @@ private struct PersonDetailView: View {
 
     @Environment(AppState.self) private var appState
     @State private var showManage = false
+    @State private var apolloProfile: ApolloService.Profile?
+    @State private var apolloLoading = false
+
+    private var apolloEnabled: Bool {
+        appState.settings.apolloProfilePrepEnabled && appState.settings.apolloKeyValidated
+    }
+
+    /// Person card renders only for a corporate-email contact with the
+    /// integration on — consumer-domain / no-email people get no lookup.
+    private var showApolloCard: Bool {
+        guard apolloEnabled, let email = person.primaryEmail else { return false }
+        let domain = email.components(separatedBy: "@").last ?? ""
+        return !domain.isEmpty && !CompanyGroupingService.isConsumerDomain(domain)
+    }
 
     var body: some View {
         ScrollView {
@@ -492,6 +506,17 @@ private struct PersonDetailView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 28)
+
+                if showApolloCard {
+                    ApolloProfileCard(
+                        mode: .person,
+                        profile: apolloProfile,
+                        isLoading: apolloLoading,
+                        fallbackName: person.canonicalName,
+                        onRefresh: { Task { await loadApollo(force: true) } }
+                    )
+                    .padding(.bottom, 16)
+                }
 
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
 
@@ -565,6 +590,19 @@ private struct PersonDetailView: View {
             }
         }
         .background(Color.appBackground)
+        .task(id: person.id) { await loadApollo(force: false) }
+    }
+
+    private func loadApollo(force: Bool) async {
+        guard showApolloCard, let email = person.primaryEmail else { return }
+        apolloLoading = true
+        defer { apolloLoading = false }
+        let coordinator = ApolloEnrichmentCoordinator.shared
+        if force {
+            apolloProfile = await coordinator.refreshPerson(email: email, gateEnabled: apolloEnabled)
+        } else {
+            apolloProfile = await coordinator.personProfile(email: email, gateEnabled: apolloEnabled)
+        }
     }
 
     private func relativeDate(_ date: Date) -> String {

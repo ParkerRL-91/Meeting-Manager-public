@@ -14,8 +14,28 @@ struct CompanyDetailView: View {
 
     @State private var openItems: [(meeting: Meeting, items: [ActionItem])] = []
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
+    @State private var apolloProfile: ApolloService.Profile?
+    @State private var apolloLoading = false
 
     private let rollups = MeetingRollupService()
+
+    /// Apollo card renders only with the integration on, a validated key, a
+    /// real (non-consumer) domain, and at least one member email to look up.
+    private var apolloEnabled: Bool {
+        appState.settings.apolloProfilePrepEnabled && appState.settings.apolloKeyValidated
+    }
+
+    /// First member email that shares the company's domain — drives the
+    /// company-level Apollo lookup.
+    private var representativeEmail: String? {
+        company.people.lazy.compactMap(\.primaryEmail).first {
+            $0.components(separatedBy: "@").last?.lowercased() == company.domain
+        }
+    }
+
+    private var showApolloCard: Bool {
+        apolloEnabled && !company.isPersonalBucket && representativeEmail != nil
+    }
 
     private var companyMeetings: [Meeting] {
         CompanyGroupingService.meetingsInvolving(people: company.people, in: appState.meetings)
@@ -26,6 +46,16 @@ struct CompanyDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 header
+                if showApolloCard {
+                    ApolloProfileCard(
+                        mode: .company,
+                        profile: apolloProfile,
+                        isLoading: apolloLoading,
+                        fallbackName: company.displayName,
+                        onRefresh: { Task { await loadApollo(force: true) } }
+                    )
+                    .padding(.bottom, 8)
+                }
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
                 peopleSection
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
@@ -35,7 +65,10 @@ struct CompanyDetailView: View {
             }
         }
         .background(Color.appBackground)
-        .task(id: company.id) { await loadRollups() }
+        .task(id: company.id) {
+            await loadRollups()
+            await loadApollo(force: false)
+        }
     }
 
     // MARK: - Header
@@ -173,6 +206,22 @@ struct CompanyDetailView: View {
         let meetings = companyMeetings
         openItems = await rollups.openActionItems(forMeetings: meetings)
         recentSummaries = await rollups.recentSummaries(forMeetings: meetings)
+    }
+
+    private func loadApollo(force: Bool) async {
+        guard showApolloCard, let email = representativeEmail else { return }
+        apolloLoading = true
+        defer { apolloLoading = false }
+        let coordinator = ApolloEnrichmentCoordinator.shared
+        if force {
+            apolloProfile = await coordinator.refreshCompany(
+                domain: company.domain, representativeEmail: email, gateEnabled: apolloEnabled
+            )
+        } else {
+            apolloProfile = await coordinator.companyProfile(
+                domain: company.domain, representativeEmail: email, gateEnabled: apolloEnabled
+            )
+        }
     }
 
     private func snippet(_ text: String) -> String {

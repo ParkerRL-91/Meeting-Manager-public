@@ -985,5 +985,31 @@ enum Migrations {
                 t.add(column: "notesInformedSummary", .boolean).notNull().defaults(to: false)
             }
         }
+
+        // v47: persisted Apollo enrichment cache (PRJ-007 TASK-023, ADR-014).
+        // ApolloService only caches profiles in memory for the session, so
+        // enrichment re-fetches on every launch — burning API credits and
+        // adding latency. This table persists each person/company lookup so
+        // the Companies lens and richer profile cards load instantly across
+        // launches, bounded to roughly one fetch per email/domain per week by
+        // a 7-day TTL.
+        //
+        // `cacheKey` is the lowercased email for people and `domain:<domain>`
+        // for companies — the prefix keeps the two namespaces from colliding.
+        // `found = 0` is a negative cache: Apollo returned no match, so the
+        // coordinator must not re-fetch until the row goes stale.
+        //
+        // No FK: the key is an email/domain, not a `person.id`, so there's
+        // nothing to cascade. Orphaned rows are harmless and age out via
+        // `purgeStale` — same rationale as `voiceReference` (v44).
+        migrator.registerMigration("v47-apollo-profile") { db in
+            try db.create(table: "apolloProfile") { t in
+                t.column("cacheKey", .text).primaryKey()
+                t.column("kind", .text).notNull()
+                t.column("payloadJSON", .text).notNull()
+                t.column("fetchedAt", .datetime).notNull()
+                t.column("found", .boolean).notNull().defaults(to: true)
+            }
+        }
     }
 }

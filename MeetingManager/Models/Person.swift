@@ -47,6 +47,17 @@ struct Person: Codable, Identifiable, FetchableRecord, MutablePersistableRecord 
         aliasesJSON = (try? String(data: JSONEncoder().encode(deduped), encoding: .utf8)) ?? "[]"
     }
 
+    /// First email alias for this person, lowercased, e.g. "dave@acme.com".
+    /// Drives Apollo enrichment lookups (the cache key for the person card and
+    /// the representative-member lookup for the company card).
+    var primaryEmail: String? {
+        for alias in aliases where alias.contains("@") {
+            let trimmed = alias.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
     /// Primary email domain extracted from the first email alias, e.g. "acme.com".
     /// Used for disambiguation when two people share the same first name but
     /// work at different organisations.
