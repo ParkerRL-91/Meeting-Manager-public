@@ -39,10 +39,11 @@ struct AppSettings: Codable, Equatable {
     var useLocalLLM: Bool = false
 
     /// The Ollama model name to use for on-device summarization.
-    /// Default `qwen3:8b`: the hybrid Qwen3 8B with thinking disabled (see
-    /// OllamaService — `think:false` for qwen3). It produces good summaries in
-    /// 1–3 min instead of the multi-minute reasoning stalls of the thinking
-    /// variants, and runs comfortably on Apple Silicon (~5 GB). `"auto"` enables
+    /// Default `qwen3:8b`: the hybrid Qwen3 8B run with thinking ON (see
+    /// OllamaService — `think:true` for qwen3, with `<think>` blocks stripped
+    /// from the output). Thinking-on produces cleaner, higher-quality summaries
+    /// and avoids the chain-of-thought leak `think:false` caused on rule-heavy
+    /// prompts; it runs comfortably on Apple Silicon (~5 GB). `"auto"` enables
     /// adaptive size-based selection; an explicit tag (e.g. `qwen2.5:7b-instruct`)
     /// forces one model. Existing users keep their saved choice; this default
     /// only applies to fresh installs.

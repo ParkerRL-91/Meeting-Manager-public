@@ -300,6 +300,25 @@ final class OllamaInstaller {
 
     private func launch(appURL: URL) async {
         phase = .launching
+        // Prefer launching the server binary directly at userInitiated QoS so
+        // its inference threads are scheduled on the performance (P) cores. A
+        // default/GUI-app launch can land the heavy work on the efficiency (E)
+        // cores, which makes on-device summaries crawl. Only reached when no
+        // server is already listening (the caller gates on isServerReachable),
+        // so there's no port conflict with an existing instance.
+        if let serverBinary = Self.findServerBinary(appURL: appURL) {
+            let process = Process()
+            process.executableURL = serverBinary
+            process.arguments = ["serve"]
+            process.qualityOfService = .userInitiated
+            do {
+                try process.run()
+                Logger.ai.info("Ollama: launched `ollama serve` at userInitiated QoS (\(serverBinary.path, privacy: .public))")
+                return
+            } catch {
+                Logger.ai.warning("Ollama: direct server launch failed (\(error.localizedDescription, privacy: .public)) — falling back to opening the app")
+            }
+        }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
         do {
@@ -308,6 +327,19 @@ final class OllamaInstaller {
             // NSWorkspace might throw even on success on some macOS versions — check if running
             Logger.ai.info("NSWorkspace.openApplication result: \(error.localizedDescription)")
         }
+    }
+
+    /// Locate the bundled `ollama` server binary so the server can be launched
+    /// directly at an elevated QoS (P-cores). Falls through the common install
+    /// locations; returns nil when none is executable, in which case the caller
+    /// opens the GUI app instead (which schedules at its own QoS).
+    private static func findServerBinary(appURL: URL) -> URL? {
+        let candidates = [
+            appURL.appendingPathComponent("Contents/Resources/ollama"),
+            URL(fileURLWithPath: "/usr/local/bin/ollama"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/ollama"),
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
     private func waitForServer() async {

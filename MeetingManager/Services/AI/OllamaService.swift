@@ -213,8 +213,10 @@ final class OllamaService {
         userPrompt: String,
         model: String,
         maxOutputTokens: Int = 2048,
-        think: Bool = false,   // default OFF — thinking chains are slow; bounded
-                               // summarization/titles don't need chain-of-thought
+        think: Bool = true,    // default ON — Qwen3 with think:false leaks its
+                               // chain-of-thought (and restated prompt text) into
+                               // the content field; think:true keeps reasoning in
+                               // the separate `thinking` field, then we strip it.
         jsonMode: Bool = false
     ) async throws -> String {
         let selectedModel: String
@@ -410,9 +412,13 @@ final class OllamaService {
                 OllamaMessage(role: "user", content: finalUser),
             ],
             stream: true,
-            // Thinking OFF for Qwen3 (skip the slow reasoning chain); omit the
-            // field entirely for instruct models that don't understand it.
-            think: selectedModel.contains("qwen3") ? false : nil,
+            // Thinking ON for Qwen3: with think:false the hybrid models leak
+            // chain-of-thought (and restated prompt text) into the content
+            // field, which then surfaced verbatim in summaries. think:true keeps
+            // the reasoning in the separate `thinking` field; we strip any stray
+            // <think> block from the content below. Mirrors DailyBriefAIService,
+            // which already learned this. Instruct models omit the field.
+            think: selectedModel.contains("qwen3") ? true : nil,
             options: OllamaOptions(
                 temperature: 0.3,
                 num_predict: 8192,
@@ -433,10 +439,9 @@ final class OllamaService {
 
         // Read NDJSON chunks — each line is a JSON object with
         // {"message":{"content":"...", "thinking":"..."}, "done":bool}.
-        // With think:false the thinking field should be absent, but we
-        // collect it as a defensive fallback in case the model still
-        // produces thinking tokens (e.g. user switches to a model that
-        // ignores the think flag).
+        // With think:true the reasoning arrives in the `thinking` field; we keep
+        // `content` (the answer) and collect `thinking` only as a defensive
+        // fallback for the rare case where a model puts everything in reasoning.
         var fullText = ""
         var fullThinking = ""
         for try await line in bytes.lines {
@@ -458,9 +463,8 @@ final class OllamaService {
             }
         }
 
-        // Prefer content; fall back to thinking if the model burned all
-        // tokens on chain-of-thought (shouldn't happen with think:false
-        // but guards against edge cases).
+        // Prefer content; fall back to thinking only if the model put its
+        // whole answer in the reasoning field (rare edge case).
         var trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && !fullThinking.isEmpty {
             Logger.ai.warning("Ollama: content was empty but thinking had \(fullThinking.count) chars — using thinking as fallback")
@@ -470,8 +474,14 @@ final class OllamaService {
             throw OllamaServiceError.emptyResponse
         }
 
-        Logger.ai.info("Streaming response complete (\(trimmed.count) chars, model: \(selectedModel))")
-        return trimmed
+        // Strip any <think>…</think> block emitted inline (the non-streaming
+        // generate() path does this too). Without it, Qwen3's reasoning — which
+        // restates the prompt while it works — leaked verbatim into summaries.
+        let cleaned = Self.stripThinkBlock(trimmed)
+        guard !cleaned.isEmpty else { throw OllamaServiceError.emptyResponse }
+
+        Logger.ai.info("Streaming response complete (\(cleaned.count) chars, model: \(selectedModel))")
+        return cleaned
     }
 
     // MARK: - Status Check
