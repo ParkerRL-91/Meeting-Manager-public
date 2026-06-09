@@ -32,6 +32,13 @@ final class MeetingRepository {
                 if fm.fileExists(atPath: path) {
                     try fm.removeItem(atPath: path)
                 }
+                // Each mixed WAV has a derived "_system.wav" sibling (remote
+                // audio) that isn't listed in audioFilePaths — half the disk
+                // footprint, previously orphaned forever on delete.
+                let systemURL = AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: path))
+                if fm.fileExists(atPath: systemURL.path) {
+                    try fm.removeItem(at: systemURL)
+                }
             } catch {
                 Logger.database.warning("Failed to remove audio file '\(path, privacy: .public)': \(error.localizedDescription, privacy: .public)")
             }

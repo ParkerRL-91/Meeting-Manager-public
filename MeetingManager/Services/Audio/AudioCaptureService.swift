@@ -170,6 +170,14 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// switch's stop→configure→start can't land after teardown.
     private var activeMicSwitchTask: Task<String?, Never>?
 
+    /// Set synchronously at stopCapture entry. `isCapturing` stays true
+    /// through the awaited merge (a new start must not race the file
+    /// rewrite), so liveness guards in mic recovery / mic switch / tap-death
+    /// recovery must check THIS flag — otherwise a disconnect Task queued
+    /// just before stop can restart the mic or SCK stream after the meeting
+    /// ended.
+    private var isStoppingCapture = false
+
     // MARK: - Dynamic mic switching
 
     /// Where the live mic audio comes from. `.engine` is the normal AVAudioEngine
@@ -320,7 +328,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 systemTapRestartAttempted = false
                 tap.onStreamStopped = { [weak self] error in
                     Task { @MainActor [weak self] in
-                        guard let self, self.isCapturing else { return }
+                        guard let self, self.isCapturing, !self.isStoppingCapture else { return }
                         self._atomicSystemLevel.pointee = 0
                         self.systemLevel = 0
                         if self.micSource == .screenCaptureKit {
@@ -336,7 +344,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                            let tap = self.systemAudioTap {
                             self.systemTapRestartAttempted = true
                             try? await Task.sleep(for: .seconds(2))
-                            guard self.isCapturing else { return }
+                            guard self.isCapturing, !self.isStoppingCapture else { return }
                             do {
                                 try await tap.start()
                                 self.logToFile("Audio: system tap RESTARTED after mid-capture death")
@@ -573,6 +581,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     /// Stop all audio capture
     func stopCapture() async -> URL? {
+        isStoppingCapture = true
+        defer { isStoppingCapture = false }
         // Cancel any in-flight mic recovery / switching and tear down listeners
         // up front, so nothing tries to resume a recording we're ending.
         removeAudioDeviceListeners()
@@ -633,8 +643,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// so rapid requests collapse to the final selection. The WAV file and the
     /// system-audio tap are never touched — only the mic engine re-points.
     func switchMicrophone(toUID requestedUID: String?) async {
-        guard isCapturing else {
-            logToFile("Audio: mic switch ignored — not capturing")
+        guard isCapturing, !isStoppingCapture else {
+            logToFile("Audio: mic switch ignored — not capturing (or stopping)")
             return
         }
         guard !isMicSwitching else {
@@ -726,7 +736,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// once, and wait `micRecoveryWindow` for a usable replacement mic. Ends the
     /// meeting (via the existing auto-stop) only if the window expires.
     private func beginMicRecovery(reason: MicRecoveryReason) {
-        guard isCapturing, !isMicRecovering else { return }
+        guard isCapturing, !isStoppingCapture, !isMicRecovering else { return }
         isMicRecovering = true
         onMicRecoveryStateChanged?(true)
         micProblemWarned = true   // suppress the generic dead-mic warning; we have our own

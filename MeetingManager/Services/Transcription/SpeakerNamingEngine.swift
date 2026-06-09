@@ -101,11 +101,13 @@ enum SpeakerNamingEngine {
                 let listy: Set<String> = ["team", "all", "everyone", "staff", "group", "dl", "list", "announce", "info", "sales", "support"]
                 if listy.contains(localPart) { continue }
             }
-            // Dedupe: skip only when an already-kept entry is the same person.
-            // Same person = identical string, or one is the other's email/name
-            // form sharing the SAME first token ("Dave Smith" / "dave@x.com").
-            // A bare substring test collapsed DISTINCT attendees ("Sam" ate
-            // "Sam Smith"), shrinking the roster elimination works against.
+            // Dedupe: skip only when an already-kept entry is provably the
+            // same person — the identical string, or an email form sharing
+            // the same first token ("Dave Smith" / "dave@x.com"). Two plain
+            // NAMES are never merged: "Sam" and "Sam Smith" can be distinct
+            // attendees, and collapsing them hands elimination a wrong
+            // roster. Keeping both is the safe direction — elimination then
+            // requires both to be consumed before it auto-assigns.
             func firstToken(_ s: String) -> String {
                 s.split(whereSeparator: { $0 == " " || $0 == "@" || $0 == "." || $0 == "<" })
                     .first.map(String.init) ?? s
@@ -113,8 +115,8 @@ enum SpeakerNamingEngine {
             if seen.contains(where: { kept in
                 let kl = kept.lowercased()
                 if kl == lower { return true }
-                guard firstToken(kl) == firstToken(lower) else { return false }
-                return kl.contains(lower) || lower.contains(kl)
+                let oneIsEmail = kl.contains("@") || lower.contains("@")
+                return oneIsEmail && firstToken(kl) == firstToken(lower)
             }) { continue }
             seen.append(trimmed)
         }

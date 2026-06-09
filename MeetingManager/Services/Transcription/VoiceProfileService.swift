@@ -25,8 +25,13 @@ import os
 ///      fingerprints for each speaker cluster in the new meeting.
 ///   2. Clusters with cosine similarity ≥ 0.82 against a stored profile are
 ///      pre-assigned to that person — the LLM never needs to guess.
-@MainActor
-final class VoiceProfileService {
+/// Deliberately NOT MainActor: the class is stateless (immutable config +
+/// logger only), and its methods decode full WAVs and run FFT mel pipelines —
+/// per cluster. As nonisolated async functions they run on the global
+/// concurrent executor, so MainActor callers (AppState's attribution paths)
+/// automatically hop off the main thread for the heavy work instead of
+/// beachballing the UI after every meeting.
+final class VoiceProfileService: Sendable {
     static let shared = VoiceProfileService()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager",
                                 category: "VoiceProfile")

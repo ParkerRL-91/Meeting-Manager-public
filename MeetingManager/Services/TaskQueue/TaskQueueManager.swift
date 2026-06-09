@@ -844,6 +844,11 @@ final class TaskQueueManager {
         } catch {
             Logger.general.error("TaskQueue: poll failed: \(error.localizedDescription)")
         }
+        // Safety kick regardless of what was enqueued above: the parked
+        // processor's drain re-check is a `try?` read — a transient DB error
+        // at exactly that instant could strand a pending row, and this
+        // 15-minute tick is the only other periodic wake-up.
+        kickProcessor()
     }
 }
 

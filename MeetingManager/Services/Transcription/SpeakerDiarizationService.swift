@@ -92,7 +92,17 @@ final class SpeakerDiarizationService {
         }
     }
 
+    /// Diarizations currently executing. Guards unload: SpeakerKit's
+    /// unloadModels nils the MLModels under a running prediction (the
+    /// in-flight diarize then throws modelUnavailable, killing minutes of
+    /// user-requested work).
+    private(set) var inFlightDiarizations = 0
+
+    /// Best-effort: skips when a diarization is mid-run (the idle-unload
+    /// hook fires on queue drain, which can overlap a user-triggered
+    /// re-analysis that runs outside the queue).
     func unloadModels() async {
+        guard inFlightDiarizations == 0 else { return }
         await speakerKit?.unloadModels()
         speakerKit = nil
         modelState = .unloaded
@@ -142,6 +152,9 @@ final class SpeakerDiarizationService {
         guard let kit = speakerKit else {
             throw DiarizationError.modelNotLoaded
         }
+
+        inFlightDiarizations += 1
+        defer { inFlightDiarizations -= 1 }
 
         let options = PyannoteDiarizationOptions(
             numberOfSpeakers: participantCount,

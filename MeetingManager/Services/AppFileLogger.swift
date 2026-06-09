@@ -75,9 +75,15 @@ final class AppFileLogger {
         handle?.closeFile()
         handle = nil
 
-        // Move the old log to a dated archive
-        let rotatedURL = logURL.deletingLastPathComponent()
+        // Move the old log to a dated archive. If that exact archive name
+        // already exists, suffix it — a failed move followed by createFile
+        // would truncate the live log and destroy the un-archived day.
+        var rotatedURL = logURL.deletingLastPathComponent()
             .appendingPathComponent("app-\(activeDay).log")
+        if fm.fileExists(atPath: rotatedURL.path) {
+            rotatedURL = logURL.deletingLastPathComponent()
+                .appendingPathComponent("app-\(activeDay)-\(Int(Date().timeIntervalSince1970)).log")
+        }
         try? fm.moveItem(at: logURL, to: rotatedURL)
 
         // Start a fresh log file

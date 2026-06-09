@@ -28,11 +28,15 @@ final class BrowserCallDetector {
     /// and detection falls through to tab/window-title checks.
     var isRecordingProvider: (() -> Bool)?
 
-    /// Number of consecutive "not in call" polls before we declare the call ended.
-    /// At 5s intervals, 3 misses = 15 seconds of no-call before stop fires.
-    /// This prevents false stops from transient detection glitches (tab switches,
-    /// brief mic pauses, AppleScript timeouts, etc.).
+    /// Number of consecutive "not in call" polls before we declare the call
+    /// ended. At the 10 s default interval, 3 misses = 30 seconds of no-call
+    /// before stop fires. This prevents false stops from transient detection
+    /// glitches (tab switches, brief mic pauses, AppleScript timeouts, etc.).
+    /// While a recording is active the bar doubles: the mic-usage probe is
+    /// suppressed then, so detection rests on title probes alone — which
+    /// can't see a minimized window or a backgrounded non-Chrome tab.
     private let endedDebounceThreshold = 3
+    private let endedDebounceThresholdWhileRecording = 6
     private var consecutiveNotInCall = 0
 
     deinit {
@@ -85,15 +89,18 @@ final class BrowserCallDetector {
             // Call was active but this poll says no call — increment debounce counter
             consecutiveNotInCall += 1
 
-            if consecutiveNotInCall >= endedDebounceThreshold {
+            let threshold = isRecordingProvider?() == true
+                ? endedDebounceThresholdWhileRecording
+                : endedDebounceThreshold
+            if consecutiveNotInCall >= threshold {
                 // Confirmed: call has truly ended (N consecutive polls with no call)
                 isInBrowserCall = false
                 consecutiveNotInCall = 0
-                fileLog("ENDED: \(detectedMeetingName ?? "unknown") (confirmed after \(endedDebounceThreshold) polls)")
+                fileLog("ENDED: \(detectedMeetingName ?? "unknown") (confirmed after \(threshold) polls)")
                 postNotification(.callAppTerminated, meetingName: detectedMeetingName)
                 detectedMeetingName = nil
             } else {
-                fileLog("Call may have ended — miss \(consecutiveNotInCall)/\(endedDebounceThreshold) (debouncing)")
+                fileLog("Call may have ended — miss \(consecutiveNotInCall)/\(threshold) (debouncing)")
             }
         }
     }

@@ -45,13 +45,33 @@ final class FluidAudioDiarizationService: @unchecked Sendable {
         case unloaded, downloading, loaded, failed
     }
 
-    /// Load (and download if needed) the FluidAudio CoreML models. Safe to call
-    /// repeatedly — no-ops once loaded. Wrapped in a 5-minute timeout race
-    /// because the HuggingFace download can hang on a bad network or corrupt
-    /// cache, matching the SpeakerKit/WhisperKit pattern.
-    func loadModels() async throws {
-        guard lock.withLock({ _modelState != .loaded }) else { return }
+    /// In-flight load shared by concurrent callers (guarded by `lock`).
+    /// The queued diarization task and the user's Re-analyze button can hit
+    /// different meetings concurrently — without sharing, the loser's
+    /// duplicate ~100 MB download and abandoned DiarizerManager leak.
+    private var _loadTask: Task<Void, Error>?
 
+    /// Load (and download if needed) the FluidAudio CoreML models. Safe to call
+    /// repeatedly — no-ops once loaded; concurrent callers await one in-flight
+    /// load. Wrapped in a 5-minute timeout race because the HuggingFace
+    /// download can hang on a bad network or corrupt cache, matching the
+    /// SpeakerKit/WhisperKit pattern.
+    func loadModels() async throws {
+        let inFlight: Task<Void, Error>? = lock.withLock {
+            if _modelState == .loaded { return nil }
+            if let existing = _loadTask { return existing }
+            let task = Task<Void, Error> { try await self.performLoad() }
+            _loadTask = task
+            return task
+        }
+        guard let task = inFlight else { return }
+        defer {
+            lock.withLock { if _loadTask == task { _loadTask = nil } }
+        }
+        try await task.value
+    }
+
+    private func performLoad() async throws {
         try Self.ensureDiskSpaceForDownload()
 
         lock.withLock { _modelState = .downloading }
@@ -88,16 +108,6 @@ final class FluidAudioDiarizationService: @unchecked Sendable {
             lock.withLock { _modelState = .failed }
             logger.error("FluidAudio model load failed: \(error.localizedDescription)")
             throw error
-        }
-    }
-
-    /// Prewarm the models on a background-priority task without blocking the
-    /// caller. Used at app idle so the first real diarization isn't gated on a
-    /// cold download/compile.
-    func prewarm() {
-        guard lock.withLock({ _modelState == .unloaded }) else { return }
-        Task(priority: .utility) { [weak self] in
-            try? await self?.loadModels()
         }
     }
 

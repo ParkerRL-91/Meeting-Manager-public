@@ -590,7 +590,40 @@ final class AppState {
             let replaceExisting = (metadata == "retranscribe")
             self.fileLog("TaskQueue: running transcription for \(meetingId)\(replaceExisting ? " (retranscribe/replace)" : "")")
             self.taskQueueManager.reportCurrentProgress(stage: "Transcribing audio")
-            let (rawTranscripts, speakerLabels) = await self.batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+
+            // Multi-session resolution. A reopened meeting carries one WAV per
+            // capture session; the queue resolves `audioFilePaths.first`. When
+            // prior transcript rows exist and a newer session file is present,
+            // transcribe the LATEST session and APPEND its rows after the
+            // existing timeline — re-transcribing session 1 produced duplicate
+            // (meetingId, startTime, endTime) rows that the unique index
+            // silently swallowed, so reopened audio never reached the
+            // transcript. With no rows yet (crash recovery can leave a 44-byte
+            // husk as .first), transcribe the largest file instead.
+            var effectiveURL = audioURL
+            var timebaseOffset: Double = 0
+            if !replaceExisting,
+               let meeting = try? await self.meetingRepository.find(id: meetingId),
+               meeting.audioFilePaths.count > 1 {
+                let existingMaxEnd: Double = (try? await self.database.writer.read { db in
+                    try Double.fetchOne(db, sql: "SELECT MAX(endTime) FROM transcript WHERE meetingId = ?", arguments: [meetingId]) ?? 0
+                }) ?? 0
+                if existingMaxEnd > 0, let lastPath = meeting.audioFilePaths.last {
+                    effectiveURL = URL(fileURLWithPath: lastPath)
+                    timebaseOffset = existingMaxEnd + 1.0
+                    self.fileLog("TaskQueue: append-mode transcription — session file \(URL(fileURLWithPath: lastPath).lastPathComponent), offset \(Int(timebaseOffset))s")
+                } else if existingMaxEnd == 0 {
+                    func fileSize(_ path: String) -> Int {
+                        ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int) ?? 0
+                    }
+                    if let largest = meeting.audioFilePaths.max(by: { fileSize($0) < fileSize($1) }) {
+                        effectiveURL = URL(fileURLWithPath: largest)
+                        self.fileLog("TaskQueue: multi-file meeting with no rows — transcribing largest file \(URL(fileURLWithPath: largest).lastPathComponent)")
+                    }
+                }
+            }
+
+            let (rawTranscripts, speakerLabels) = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
 
             // Atomically commit transcripts + meeting-status update + speaker labels in one write.
             // Previously three separate writer.write calls; now a single transaction so a crash
@@ -606,6 +639,16 @@ final class AppState {
                 // persistence so the rewritten labels land in the DB on the
                 // first save. No-op when Ollama is down, no other participants
                 // exist, or the LLM fails — labels just stay as Speaker N.
+                // Replace mode rebuilds the transcript from scratch — the old
+                // speakerMap/confidence/flags are keyed to the OLD clustering's
+                // ids. Left in place, a later fill-only pass would stamp stale
+                // names onto unrelated new clusters.
+                if replaceExisting, !rawTranscripts.isEmpty {
+                    meeting.setSpeakerMap([:])
+                    meeting.setSpeakerConfidenceMap([:])
+                    meeting.setAttributionFlags([])
+                }
+
                 self.taskQueueManager.reportCurrentProgress(stage: "Attributing speakers")
                 let (transcripts, attributedMeeting) = await self.applySpeakerAttribution(
                     transcripts: rawTranscripts,
@@ -1348,7 +1391,8 @@ final class AppState {
 
         let (_, attributed) = await applySpeakerAttribution(
             transcripts: transcripts,
-            meeting: meeting
+            meeting: meeting,
+            existingAssignments: existingMap
         )
 
         // FILL-ONLY merge — same invariant as runRetryAttribution. A re-run
@@ -1375,7 +1419,7 @@ final class AppState {
         let safeRelabelled: [Transcript] = transcripts.compactMap { t in
             guard let old = t.speakerLabel else { return nil }
             let oldLower = old.lowercased()
-            guard oldLower.hasPrefix("speaker ") || oldLower == "mic",
+            guard oldLower.hasPrefix("speaker ") || oldLower == "mic" || oldLower == "system",
                   let newName = mergedMap[old], newName != old else { return nil }
             var copy = t
             copy.speakerLabel = newName
@@ -1547,7 +1591,18 @@ final class AppState {
                             try m.update(db)
                             toTranscribe.append(m)
                         } else {
-                            // No audio or only WAV header — reset to scheduled so user can re-record
+                            // No audio or only WAV header — reset to scheduled so
+                            // user can re-record. Delete the husk file(s) and clear
+                            // the paths: a dead 44-byte canonical left in
+                            // audioFilePaths becomes `.first` after the re-record
+                            // appends a real session, and transcription would
+                            // resolve the husk instead of the audio.
+                            for path in m.audioFilePaths where !path.isEmpty {
+                                try? FileManager.default.removeItem(atPath: path)
+                                try? FileManager.default.removeItem(
+                                    at: AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: path)))
+                            }
+                            m.audioFilePaths = []
                             m.status = .scheduled
                             m.endDate = nil
                             try m.update(db)
@@ -1622,6 +1677,13 @@ final class AppState {
     /// fires when THIS app terminates — Teams self-updating in the background
     /// must not kill a Zoom recording.
     private var autoRecordTriggerBundleId: String?
+
+    /// Last instant the system (remote) audio level was above the noise
+    /// floor. Used as a keep-alive for browser-call end detection: while
+    /// recording, the mic-usage probe is suppressed and title probes go
+    /// blind when the meeting tab is minimized or backgrounded — but a live
+    /// call keeps producing remote audio.
+    private var lastActiveSystemAudioAt: Date?
 
     /// Create an ad-hoc meeting and start recording. Called from the sidebar "New Meeting"
     /// button, menu bar, Home view, and the `.createNewMeeting` notification observer.
@@ -1818,6 +1880,10 @@ final class AppState {
         // Start participant detection if calendar didn't provide attendees.
         // Calendar attendees are written to meeting.participants during sync;
         // if still empty here, fall back to screen/window title detection.
+        // Defensive stop: if a prior stop's Task errored before its teardown
+        // lines ran, the old service's 30s poll timer would leak for the app
+        // lifetime and stack with this one.
+        self.participantDetectionService?.stop()
         let service = ParticipantDetectionService(
             meetingRepository: self.meetingRepository,
             database: self.database
@@ -2308,7 +2374,18 @@ final class AppState {
     /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
     /// Returns the filtered transcripts and diarisation speaker labels to the caller, which
     /// is responsible for the atomic DB write (see transcriptionHandler in setupTaskQueue).
-    private func batchTranscribe(meetingId: String, audioURL: URL?) async -> (transcripts: [Transcript], speakerLabels: String?) {
+    ///
+    /// Throws ONLY for audio-preparation I/O failures (unreadable WAV) so the
+    /// task queue's retry path engages — a crash-recovered file may not have
+    /// had its header repaired yet on the first attempt. Transcription/
+    /// diarization failures still degrade to empty results (model problems
+    /// don't get better with a blind retry; the user-facing recovery is the
+    /// re-transcribe flow).
+    ///
+    /// `timebaseOffset` shifts every persisted row's timestamps — used by
+    /// append-mode (reopened meetings) so a second session's rows sort after
+    /// the first session's timeline.
+    private func batchTranscribe(meetingId: String, audioURL: URL?, timebaseOffset: Double = 0) async throws -> (transcripts: [Transcript], speakerLabels: String?) {
         guard let audioURL else {
             fileLog("Batch transcribe: no audio file URL")
             return ([], nil)
@@ -2331,23 +2408,33 @@ final class AppState {
         var capturedSpeakerLabels: String?
         fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
 
-        do {
-            // The hint helpers are MainActor and cheap — resolve both up
-            // front so the heavy audio preparation can run detached.
-            let meeting = try? await self.meetingRepository.find(id: meetingId)
-            let remoteHint = remoteParticipantHint(for: meeting)
-            let mixedHint = mixedAudioHint(for: meeting)
+        // The hint helpers are MainActor and cheap — resolve both up
+        // front so the heavy audio preparation can run detached.
+        let meeting = try? await self.meetingRepository.find(id: meetingId)
+        let remoteHint = remoteParticipantHint(for: meeting)
+        let mixedHint = mixedAudioHint(for: meeting)
 
-            // Decode both WAVs, silence-trim, and pick the diarization source
-            // OFF the main actor. A 2-hour meeting is ~460 MB per Float
-            // buffer; the synchronous read/copy/RMS work used to beachball
-            // the UI for seconds right after every meeting ended. Only
-            // Sendable value types cross back.
-            guard let prepared = try await Task.detached(priority: .userInitiated, operation: {
+        // Decode both WAVs, silence-trim, and pick the diarization source
+        // OFF the main actor. A 2-hour meeting is ~460 MB per Float
+        // buffer; the synchronous read/copy/RMS work used to beachball
+        // the UI for seconds right after every meeting ended. Only
+        // Sendable value types cross back. I/O errors rethrow (see doc
+        // comment); refuse-conditions (wrong sample rate) return nil and
+        // complete without a retry storm.
+        let maybePrepared: PreparedBatchAudio?
+        do {
+            maybePrepared = try await Task.detached(priority: .userInitiated, operation: {
                 try Self.prepareBatchAudio(audioURL: audioURL)
-            }).value else {
-                return ([], nil)
-            }
+            }).value
+        } catch {
+            fileLog("Batch transcribe: audio preparation FAILED — \(error.localizedDescription)")
+            throw error
+        }
+        guard let prepared = maybePrepared else {
+            return ([], nil)
+        }
+
+        do {
             let samples = prepared.samples
             let diarizationSamples = prepared.diarizationSamples
             let diarizationSource = prepared.diarizationSource
@@ -2458,10 +2545,17 @@ final class AppState {
     ///   fill-only). These clusters' transcript rows are relabelled upstream in
     ///   `runDiarization`, so passing them here is what gets them into the
     ///   persisted `speakerMap`/`speakerConfidenceMap` with a real score.
+    /// - Parameter existingAssignments: the meeting's already-persisted
+    ///   cluster→name map, passed by RE-RUN paths (retry, Re-run AI, series
+    ///   propagation). Resolved rows hide their clusters from this pass, so
+    ///   without it elimination can re-assign a name the first pass already
+    ///   used — minting a duplicate at 0.8 confidence — and the duplicate-name
+    ///   flag can't fire.
     private func applySpeakerAttribution(
         transcripts: [Transcript],
         meeting: Meeting,
-        enrollmentMatches: [String: String] = [:]
+        enrollmentMatches: [String: String] = [:],
+        existingAssignments: [String: String] = [:]
     ) async -> (transcripts: [Transcript], meeting: Meeting) {
         // v3.10 #1 RSVP gate: never consider declined attendees as candidates.
         // Falls back to the full participant list when no RSVP data is present
@@ -2556,8 +2650,11 @@ final class AppState {
         let userFirstLower = userFirst?.lowercased()
         let droppedMatches = voiceMatches.filter { (_, name) in
             let lower = name.lowercased()
-            // Always allow the user — mic channel is ground truth.
-            if let uf = userFirstLower, lower.contains(uf) { return false }
+            // Always allow the user — mic channel is ground truth. First-token
+            // equality, not substring: a poisoned profile name merely
+            // CONTAINING the user's first name must not skip the gate.
+            if let uf = userFirstLower,
+               lower.components(separatedBy: .whitespacesAndNewlines).first == uf { return false }
             // Keep when name fuzzy-matches any attendee.
             let isAttendee = attendeeNamesLower.contains { att in
                 att.contains(lower) || lower.contains(att)
@@ -2582,11 +2679,15 @@ final class AppState {
         // overwhelmingly likely to be that named person. Hallucination-proof
         // because names come only from the calendar attendee list — the
         // model isn't picking from training data.
+        // Pass ONLY the series-alias memory as the skip-set — NOT the voice
+        // matches. Vocative evaluating voice-matched clusters is what makes
+        // genuine cross-signal corroboration possible (the confidence combine
+        // below); skipping them made every cluster a single-signal verdict.
         let vocativeResult = VocativeMiningService.attributeWithConfidence(
             transcripts: transcripts,
             attendees: participants,
             userFirstName: userFirst,
-            existingMapping: combinedPriorAliases
+            existingMapping: priorAliases
         )
         for (cluster, name) in vocativeResult.mapping where combinedPriorAliases[cluster] == nil {
             Logger.general.info("[Vocative] mined \(cluster, privacy: .public) → \(name, privacy: .public)")
@@ -2723,15 +2824,19 @@ final class AppState {
                     guard raw.hasPrefix("Speaker "), mapping[raw] == nil else { continue }
                     ranges[raw, default: []].append((Float(t.startTime), Float(t.endTime)))
                 }
-                if !ranges.isEmpty,
-                   let hit = identifyUserClusterByEnergy(clusterRanges: ranges, mixedURL: mixedURL, systemURL: systemURL),
-                   mapping[hit.cluster] == nil {
-                    let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
-                    let displayName = fullName.isEmpty ? (userFirst ?? "Me") : fullName
-                    mapping[hit.cluster] = displayName
-                    clusterConfidence[hit.cluster] = min(hit.confidence, 0.55)
-                    energyAnchorCluster = hit.cluster
-                    Logger.general.info("[Energy] local user cluster \(hit.cluster, privacy: .public) → \(displayName, privacy: .public) (soft, conf capped at 0.55)")
+                if !ranges.isEmpty {
+                    let detachedRanges = ranges
+                    let hit = await Task.detached(priority: .userInitiated) {
+                        Self.identifyUserClusterByEnergy(clusterRanges: detachedRanges, mixedURL: mixedURL, systemURL: systemURL)
+                    }.value
+                    if let hit, mapping[hit.cluster] == nil {
+                        let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+                        let displayName = fullName.isEmpty ? (userFirst ?? "Me") : fullName
+                        mapping[hit.cluster] = displayName
+                        clusterConfidence[hit.cluster] = min(hit.confidence, 0.55)
+                        energyAnchorCluster = hit.cluster
+                        Logger.general.info("[Energy] local user cluster \(hit.cluster, privacy: .public) → \(displayName, privacy: .public) (soft, conf capped at 0.55)")
+                    }
                 }
             }
         }
@@ -2750,7 +2855,11 @@ final class AppState {
         let eliminated = SpeakerNamingEngine.eliminate(
             allClusters: eliminationClusters,
             candidates: nonUserParticipants,
+            // Existing assignments (re-run paths) consume their names too —
+            // a name used by an already-resolved cluster must not be minted
+            // again for the lone remaining anonymous cluster.
             assigned: mapping.filter { $0.key.hasPrefix("Speaker ") && $0.key != energyAnchorCluster }
+                .merging(existingAssignments) { current, _ in current }
         )
         for (cluster, asg) in eliminated {
             mapping[cluster] = asg.name
@@ -2758,11 +2867,13 @@ final class AppState {
             Logger.general.info("[Elimination] \(cluster, privacy: .public) → \(asg.name, privacy: .public) (conf \(asg.confidence))")
         }
 
-        // ─── P3: contradiction flags (computed + logged; Speakers-tab
-        // surfacing + persistence is the next phase). Flags don't change the
-        // mapping — they record where a result needs human confirmation.
+        // ─── P3: contradiction flags — persisted on the meeting (migration
+        // v45 attributionFlags) and surfaced in the Speakers tab. Flags don't
+        // change the mapping — they record where a result needs human
+        // confirmation.
         var namingFlags = SpeakerNamingEngine.flags(
-            finalMapping: mapping.filter { $0.key.hasPrefix("Speaker ") },
+            finalMapping: mapping.filter { $0.key.hasPrefix("Speaker ") }
+                .merging(existingAssignments) { current, _ in current },
             allClusters: allClusters,
             acceptedCandidates: participants,
             userNames: [NSFullUserName(), userFirst ?? ""]
@@ -2827,7 +2938,7 @@ final class AppState {
 
     /// Load a 16 kHz mono WAV into a [Float] sample buffer (nil if unreadable
     /// or not 16 kHz). Used by the energy-based local-user identifier.
-    private static func loadSamples16k(_ url: URL) -> [Float]? {
+    private nonisolated static func loadSamples16k(_ url: URL) -> [Float]? {
         guard let f = try? AVAudioFile(forReading: url) else { return nil }
         let fmt = f.processingFormat
         guard fmt.sampleRate == 16000,
@@ -2845,7 +2956,9 @@ final class AppState {
     /// cluster is clearly mic-dominant. This is what lets a 1:1 recorded as two
     /// "Speaker N" clusters (FluidAudio mixed-audio path) get the user pinned so
     /// elimination can name the other person.
-    private func identifyUserClusterByEnergy(
+    /// nonisolated static: decodes BOTH full WAVs and RMS-scans every cluster
+    /// range — called via Task.detached so the scan never runs on the MainActor.
+    private nonisolated static func identifyUserClusterByEnergy(
         clusterRanges: [String: [(start: Float, end: Float)]],
         mixedURL: URL,
         systemURL: URL
@@ -2954,7 +3067,8 @@ final class AppState {
 
         let (_, attributed) = await applySpeakerAttribution(
             transcripts: transcripts,
-            meeting: meeting
+            meeting: meeting,
+            existingAssignments: existingMap
         )
         let newMap = attributed.speakerMapDictionary
         let newConf = attributed.speakerConfidenceMapDictionary
@@ -2986,7 +3100,7 @@ final class AppState {
         let safeRelabelled: [Transcript] = transcripts.compactMap { t in
             guard let old = t.speakerLabel else { return nil }
             let oldLower = old.lowercased()
-            guard oldLower.hasPrefix("speaker ") || oldLower == "mic",
+            guard oldLower.hasPrefix("speaker ") || oldLower == "mic" || oldLower == "system",
                   let newName = mergedMap[old], newName != old else { return nil }
             var copy = t
             copy.speakerLabel = newName
@@ -3287,6 +3401,11 @@ final class AppState {
     /// Re-run diarization for a meeting, resolving the system audio URL
     /// from the meeting's stored audio paths. Called from the Speakers tab's
     /// "Re-analyze speakers" button.
+    // EXEMPT: user-driven re-analysis — the Speakers tab awaits completion
+    // inline to refresh its cluster cards, so it can't be a fire-and-forget
+    // queue task. Serialized against queued diarization via the
+    // `diarizationInFlight` per-meeting guard, and the idle model unload
+    // skips while `inFlightDiarizations > 0`.
     func rerunDiarization(meetingId: String) async {
         guard let meeting = try? await meetingRepository.find(id: meetingId),
               let firstPath = meeting.audioFilePaths.first,
@@ -3368,7 +3487,21 @@ final class AppState {
         return accepted.count >= 2 ? accepted.count : nil
     }
 
+    /// Meetings with a diarization pass currently executing. The queued
+    /// `.diarization` task and the user's Re-analyze button (which runs
+    /// outside the queue — see the EXEMPT note at its call site) can target
+    /// the same meeting; without this guard they become concurrent writers
+    /// relabelling the same rows.
+    private var diarizationInFlight: Set<String> = []
+
     private func runDiarization(meetingId: String, systemAudioURL: URL?) async throws {
+        guard !diarizationInFlight.contains(meetingId) else {
+            fileLog("Diarization: already running for \(meetingId) — skipping duplicate")
+            return
+        }
+        diarizationInFlight.insert(meetingId)
+        defer { diarizationInFlight.remove(meetingId) }
+
         let service = SpeakerDiarizationService.shared
         let transcriptRepo = TranscriptRepository(database: database)
 
@@ -3528,13 +3661,22 @@ final class AppState {
                 // rows directly below, so it must pass the same gate as the
                 // attribution-path voice match — a poisoned profile must not
                 // stamp a non-attendee's name into rows with no review signal.
+                // With NO attendee list at all (participant-less ad-hoc
+                // meetings) there is nothing to gate against, so nothing is
+                // stamped — that is exactly the unattended scenario the
+                // poisoned-profile failure mode lives in.
                 let accepted = meeting?.acceptedParticipantList ?? []
-                if !accepted.isEmpty {
+                if accepted.isEmpty {
+                    if !voiceMatches.isEmpty {
+                        fileLog("Diarization: [AttendanceGate] no attendee list — dropping \(voiceMatches.count) ungated voice pre-match(es)")
+                        voiceMatches = [:]
+                    }
+                } else {
                     let acceptedLower = accepted.map { $0.lowercased() }
                     let userLower = NSFullUserName().lowercased()
                     for (cluster, name) in voiceMatches {
                         let lower = name.lowercased()
-                        let isUser = !userLower.isEmpty && (lower.contains(userLower) || userLower.contains(lower))
+                        let isUser = !userLower.isEmpty && (lower.components(separatedBy: .whitespacesAndNewlines).first == userLower.components(separatedBy: .whitespacesAndNewlines).first)
                         let isAttendee = acceptedLower.contains { $0.contains(lower) || lower.contains($0) }
                         if !isUser && !isAttendee {
                             fileLog("Diarization: [AttendanceGate] dropping pre-match \(cluster) → \(name) — not an attendee")
@@ -3604,11 +3746,23 @@ final class AppState {
                 // Preserve manual renames across a re-analysis: diarization
                 // re-shuffles cluster ids, so the new map replaces anonymous
                 // entries — but confidence-1.0 entries (only manual renames
-                // write 1.0) always survive.
+                // write 1.0) survive UNLESS the new clustering re-issued the
+                // same cluster id to a DIFFERENT name. In that case the old
+                // entry describes a cluster that no longer exists; keeping it
+                // would override the fresh assignment in the map while the
+                // rows (written in this same transaction) carry the new name
+                // — the exact map/row divergence the atomic write prevents.
+                // The manual name itself is safe either way: its rows are
+                // resolved labels this pass never touches, and the series
+                // alias row preserves the memory.
                 var mergedMap = attributed.speakerMapDictionary
                 var mergedConf = attributed.speakerConfidenceMapDictionary
                 let oldConf = m.speakerConfidenceMapDictionary
                 for (cluster, name) in m.speakerMapDictionary where (oldConf[cluster] ?? 0) >= 1.0 {
+                    if let reissued = mergedMap[cluster],
+                       reissued.lowercased() != name.lowercased() {
+                        continue
+                    }
                     mergedMap[cluster] = name
                     mergedConf[cluster] = 1.0
                 }
@@ -3848,7 +4002,16 @@ final class AppState {
                 continue
             }
             // Use same atomic-write pattern as transcriptionHandler
-            let (rawTranscripts, speakerLabels) = await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            let rawTranscripts: [Transcript]
+            let speakerLabels: String?
+            do {
+                (rawTranscripts, speakerLabels) = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+            } catch {
+                // Legacy UserDefaults drain path has no queue retry — log and
+                // leave the entry for the next launch.
+                fileLog("Pending transcription: prepare failed for \(meetingId) — \(error.localizedDescription)")
+                continue
+            }
             if var meeting = try? await meetingRepository.find(id: meetingId) {
                 // Speaker labels are NOT written to meeting.participants — real
                 // attendee names (from calendar) must not be overwritten by
@@ -4184,6 +4347,13 @@ final class AppState {
                 // Read directly from atomic storage — bypasses @Published / MainActor scheduling
                 self.micLevel = self.audioCaptureService.latestMicLevel
                 self.systemLevel = self.audioCaptureService.latestSystemLevel
+                // Track when remote audio was last genuinely active — the
+                // browser call-end keep-alive reads this (title probes can't
+                // see a minimized/tab-switched meeting, but a live call keeps
+                // producing system audio).
+                if self.systemLevel > 0.01 {
+                    self.lastActiveSystemAudioAt = Date()
+                }
                 // Log every ~5 seconds (50 ticks) for debugging
                 logCounter += 1
                 if logCounter % 50 == 1 {
@@ -4408,12 +4578,16 @@ final class AppState {
             } catch {
                 await MainActor.run {
                     guard let self else { return }
-                    self.isGeneratingDailyBrief = false
-                    if error is CancellationError {
+                    if error is CancellationError || (error as? URLError)?.code == .cancelled {
                         // Stale-signature cancel — a newer generation superseded
-                        // this one. Not user-facing.
+                        // this one. URLSession surfaces a cancelled in-flight
+                        // request as URLError.cancelled, NOT CancellationError.
+                        // Touch NO shared state here (including the
+                        // isGeneratingDailyBrief flag) — it belongs to the
+                        // newer run now.
                         return
                     }
+                    self.isGeneratingDailyBrief = false
                     // If the task queue is busy (e.g. a bulk re-transcription is
                     // monopolizing the local model), the AI backend was reachable
                     // but couldn't serve the brief in time. Present this as
@@ -4706,6 +4880,18 @@ final class AppState {
                            let terminated = terminatedBundleId,
                            trigger != terminated {
                             Logger.general.info("Call app \(terminated) ended but recording was triggered by \(trigger) — keeping recording alive")
+                            return
+                        }
+                        // Browser "ended" verdicts come from title probes,
+                        // which go blind when the meeting tab is minimized or
+                        // backgrounded (the mic-usage probe is suppressed
+                        // while we record). A live call keeps producing
+                        // remote audio — require recent system-audio silence
+                        // before trusting a browser end signal.
+                        if terminatedBundleId == "browser.googleMeet",
+                           let lastActive = self.lastActiveSystemAudioAt,
+                           Date().timeIntervalSince(lastActive) < 45 {
+                            Logger.general.info("Browser call 'ended' but remote audio was active \(Int(Date().timeIntervalSince(lastActive)))s ago — keeping recording alive")
                             return
                         }
                         self.detectedCallApp = nil
