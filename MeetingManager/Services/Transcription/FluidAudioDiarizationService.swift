@@ -220,8 +220,11 @@ final class FluidAudioDiarizationService: @unchecked Sendable {
         var mapping: [Int64: String] = [:]
 
         for transcript in transcripts {
+            // Legacy "system" bucket plus anonymous "Speaker N"/"Speaker" rows
+            // are re-alignable; resolved names and "mic" are never re-labelled.
+            let label = (transcript.speakerLabel ?? "").lowercased().trimmingCharacters(in: .whitespaces)
             guard let id = transcript.id,
-                  (transcript.speakerLabel ?? "").lowercased() == "system" else { continue }
+                  label == "system" || label == "speaker" || label.hasPrefix("speaker ") else { continue }
 
             let txStart = Float(transcript.startTime)
             let txEnd   = Float(transcript.endTime)

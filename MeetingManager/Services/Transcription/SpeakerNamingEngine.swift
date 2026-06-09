@@ -101,10 +101,20 @@ enum SpeakerNamingEngine {
                 let listy: Set<String> = ["team", "all", "everyone", "staff", "group", "dl", "list", "announce", "info", "sales", "support"]
                 if listy.contains(localPart) { continue }
             }
-            // Dedupe: skip if an already-kept entry is the same person (fuzzy).
+            // Dedupe: skip only when an already-kept entry is the same person.
+            // Same person = identical string, or one is the other's email/name
+            // form sharing the SAME first token ("Dave Smith" / "dave@x.com").
+            // A bare substring test collapsed DISTINCT attendees ("Sam" ate
+            // "Sam Smith"), shrinking the roster elimination works against.
+            func firstToken(_ s: String) -> String {
+                s.split(whereSeparator: { $0 == " " || $0 == "@" || $0 == "." || $0 == "<" })
+                    .first.map(String.init) ?? s
+            }
             if seen.contains(where: { kept in
                 let kl = kept.lowercased()
-                return kl == lower || kl.contains(lower) || lower.contains(kl)
+                if kl == lower { return true }
+                guard firstToken(kl) == firstToken(lower) else { return false }
+                return kl.contains(lower) || lower.contains(kl)
             }) { continue }
             seen.append(trimmed)
         }

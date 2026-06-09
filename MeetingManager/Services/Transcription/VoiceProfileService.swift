@@ -373,9 +373,12 @@ final class VoiceProfileService {
     }
 
     private func parseSpeakerId(from label: String) -> Int? {
+        // Labels are 1-based ("Speaker 1" = SpeakerKit cluster 0); SpeakerKit
+        // segment speakerIds are 0-based — convert here, the only seam where
+        // a label maps back to raw segments.
         let parts = label.split(separator: " ")
-        guard parts.count == 2, parts[0] == "Speaker" else { return nil }
-        return Int(parts[1])
+        guard parts.count == 2, parts[0] == "Speaker", let n = Int(parts[1]) else { return nil }
+        return n - 1
     }
 }
 

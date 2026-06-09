@@ -171,10 +171,18 @@ enum VocativeMiningService {
             // name — first one wins (deterministic).
             if result[firstLower] == nil {
                 result[firstLower] = trimmed
+            } else if result[firstLower]?.lowercased() != trimmed.lowercased() {
+                // Two DIFFERENT attendees share a first name ("Hey Sam" with
+                // two Sams) — a vocative vote would name an arbitrary one at
+                // up to 0.85 confidence. Ambiguous first names are dropped.
+                result[firstLower] = Self.ambiguousMarker
             }
         }
-        return result
+        return result.filter { $0.value != Self.ambiguousMarker }
     }
+
+    /// Sentinel marking a first name shared by ≥2 distinct attendees.
+    private static let ambiguousMarker = "\u{0}ambiguous"
 
     /// Build a canonical lowercase first-name key for an attendee string —
     /// used by callers that need to dedup attendee lists across email and

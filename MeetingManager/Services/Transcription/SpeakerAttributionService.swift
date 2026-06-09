@@ -26,9 +26,10 @@ final class SpeakerAttributionService {
     ///   - userFirstName: First name of the authenticated user. Used to
     ///     filter the user out of the candidate list (mic-labelled turns are
     ///     already excluded — they're tagged "mic", not "Speaker N").
-    ///   - ollama: Live Ollama service (preferred for privacy + cost).
-    ///   - claude: Optional Claude service (currently unused fallback —
-    ///     Ollama is the primary path; pass nil from call sites).
+    ///   - ollama: Ollama service — the cheap-pass fallback when no Claude
+    ///     key is configured.
+    ///   - claude: Optional Claude service. When present it is PREFERRED:
+    ///     haiku runs the cheap pass and Sonnet handles escalation.
     func attribute(
         transcripts: [Transcript],
         participantNames: [String],
@@ -48,10 +49,15 @@ final class SpeakerAttributionService {
         // single attributable cluster when no Speaker N labels exist (i.e.
         // diarization didn't split or wasn't run). With ≥1 candidate the LLM
         // can still pick the most likely speaker.
+        //
+        // ONLY anonymous "Speaker N" labels are attributable. A label that is
+        // already a resolved name (prior attribution pass or a manual rename)
+        // must never be re-presented to the LLM as a cluster — on a re-run the
+        // model would happily "re-attribute" Alice to Bob, and the candidate
+        // list doesn't even contain drop-in guests the user named manually.
         let grouped = Dictionary(grouping: systemTurns) { $0.speakerLabel ?? "Unknown" }
         var clusters = grouped.keys.filter { id in
-            let lower = id.lowercased()
-            return lower != "system" && lower != "mic" && lower != "unknown"
+            id.lowercased().hasPrefix("speaker ")
         }
         // System-cluster fallback: if there are no Speaker N clusters but a
         // system bucket exists, attribute the system cluster as a single
@@ -82,11 +88,18 @@ final class SpeakerAttributionService {
             clusterPreviews[clusterId] = String(turns.prefix(1500))
         }
 
-        // Strip the user from candidates if present (case-insensitive substring).
+        // Strip the user from candidates if present. First-token equality, NOT
+        // substring — substring removes legitimate attendees ("Samantha Jones"
+        // disappears when the user is "Sam"), the exact failure mode ADR-004
+        // documents for the RSVP gate.
         let candidates: [String] = {
             guard let first = userFirstName, !first.isEmpty else { return participantNames }
             let needle = first.lowercased()
-            return participantNames.filter { !$0.lowercased().contains(needle) }
+            return participantNames.filter { name in
+                let firstToken = name.lowercased()
+                    .components(separatedBy: .whitespacesAndNewlines).first ?? ""
+                return firstToken != needle
+            }
         }()
 
         guard !candidates.isEmpty else {
@@ -401,15 +414,12 @@ final class SpeakerAttributionService {
         if let hit = candidates.first(where: { $0.lowercased() == lowered }) {
             return hit
         }
-        // Grade 3 — substring in either direction (handles email-suffixed names)
-        if let hit = candidates.first(where: {
-            let cand = $0.lowercased()
-            return cand.contains(lowered) || lowered.contains(cand)
-        }) {
-            return hit
-        }
-        // Grade 4 — first-token uniqueness (e.g. LLM said "Sarah" → unique
-        // attendee starting with "Sarah" wins; ambiguous "Sarah" → reject)
+        // Grade 3 — first-token uniqueness (e.g. LLM said "Sarah" → unique
+        // attendee starting with "Sarah" wins; ambiguous "Sarah" → reject).
+        // Runs BEFORE the substring grade: with attendees {"Samantha Jones",
+        // "Sam Smith"} and name "Sam", substring would return an arbitrary
+        // Set element (Set order is nondeterministic), while token matching
+        // resolves it correctly or rejects.
         let firstToken = lowered
             .split(separator: " ")
             .first
@@ -419,6 +429,16 @@ final class SpeakerAttributionService {
             return candFirst == firstToken
         }
         if firstTokenMatches.count == 1, let only = firstTokenMatches.first {
+            return only
+        }
+        // Grade 4 — substring in either direction (handles email-suffixed
+        // names). Only when exactly ONE candidate matches — multiple matches
+        // would pick a nondeterministic Set element.
+        let substringMatches = candidates.filter {
+            let cand = $0.lowercased()
+            return cand.contains(lowered) || lowered.contains(cand)
+        }
+        if substringMatches.count == 1, let only = substringMatches.first {
             return only
         }
         return nil
@@ -439,8 +459,8 @@ struct AttributionOutcome: Sendable {
     let mapping: [String: String]
     /// v3.10 confidence per attributed cluster, in [0, 1]. Higher is better.
     /// Sources: voice match → cosine similarity; vocative → vote-based
-    /// heuristic; LLM cheap pass → 0.55; LLM escalated → 0.70; manual rename
-    /// (set by AppState) → 1.0.
+    /// heuristic; LLM cheap pass → 0.62 (Ollama) / 0.72 (Claude haiku);
+    /// escalated Claude pass → 0.78; manual rename (set by AppState) → 1.0.
     let confidenceMap: [String: Float]
     let reason: AttributionReason
 

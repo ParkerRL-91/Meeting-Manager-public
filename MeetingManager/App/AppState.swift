@@ -681,7 +681,10 @@ final class AppState {
         taskQueueManager.diarizationHandler = { [weak self] meetingId, systemAudioURL in
             guard let self else { return }
             self.fileLog("TaskQueue: diarization starting for \(meetingId)")
-            await self.runDiarization(meetingId: meetingId, systemAudioURL: systemAudioURL)
+            // Rethrows so the queue's retry/failed machinery engages — a
+            // swallowed diarization error used to mark the task completed
+            // with the transcript silently stuck at "Speaker N".
+            try await self.runDiarization(meetingId: meetingId, systemAudioURL: systemAudioURL)
         }
 
         taskQueueManager.enrichmentHandler = { [weak self] meetingId in
@@ -1317,22 +1320,61 @@ final class AppState {
         let transcripts = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 10_000)) ?? []
         guard !transcripts.isEmpty else { return }
 
-        let (relabelled, updated) = await applySpeakerAttribution(
+        let existingMap = meeting.speakerMapDictionary
+        let existingConf = meeting.speakerConfidenceMapDictionary
+
+        let (_, attributed) = await applySpeakerAttribution(
             transcripts: transcripts,
             meeting: meeting
         )
 
+        // FILL-ONLY merge — same invariant as runRetryAttribution. A re-run
+        // (manual "Re-run AI" button, series propagation, retro scan) must
+        // never flip an existing attribution: replacing the whole map silently
+        // dropped manual renames (confidence 1.0) and let the LLM rename
+        // confirmed speakers. Re-runs only resolve still-anonymous clusters.
+        var mergedMap = existingMap
+        var mergedConf = existingConf
+        var newCount = 0
+        for (cluster, name) in attributed.speakerMapDictionary where mergedMap[cluster] == nil {
+            mergedMap[cluster] = name
+            if let c = attributed.speakerConfidenceMapDictionary[cluster] { mergedConf[cluster] = c }
+            newCount += 1
+        }
+        guard newCount > 0 else {
+            Logger.general.info("rerunSpeakerAttribution: no new mappings for \(meetingId, privacy: .public) — keeping existing")
+            return
+        }
+
+        // Rewrite rows from the MERGED map (not the re-run's raw output) so
+        // rows can never disagree with the persisted map, and only touch rows
+        // that are still anonymous ("Speaker N") or the raw mic bucket.
+        let safeRelabelled: [Transcript] = transcripts.compactMap { t in
+            guard let old = t.speakerLabel else { return nil }
+            let oldLower = old.lowercased()
+            guard oldLower.hasPrefix("speaker ") || oldLower == "mic",
+                  let newName = mergedMap[old], newName != old else { return nil }
+            var copy = t
+            copy.speakerLabel = newName
+            return copy
+        }
+
+        var updatedMeeting = meeting
+        updatedMeeting.setSpeakerMap(mergedMap)
+        updatedMeeting.setSpeakerConfidenceMap(mergedConf)
+        let meetingToSave = updatedMeeting
+
         // Persist relabelled transcripts + speakerMap update atomically.
         do {
             try await database.writer.write { db in
-                for t in relabelled {
+                for t in safeRelabelled {
                     var copy = t
                     try copy.update(db)
                 }
-                var m = updated
+                var m = meetingToSave
                 try m.update(db)
             }
-            Logger.general.info("rerunSpeakerAttribution: persisted updates for \(meetingId)")
+            Logger.general.info("rerunSpeakerAttribution: filled \(newCount) new cluster(s) for \(meetingId, privacy: .public)")
         } catch {
             Logger.general.error("rerunSpeakerAttribution: persist failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -2018,6 +2060,10 @@ final class AppState {
             let windowSize = Int(fileFormat.sampleRate) // 1-second windows
             let trimBounds = trimSilenceBounds(allSamples, threshold: silenceThreshold, windowSize: windowSize)
             let samples = Array(allSamples[trimBounds.start..<trimBounds.end])
+            // Offset between the trimmed in-memory timeline (WhisperKit,
+            // diarization, RMS checks below) and the on-disk file timeline.
+            // Added back when persisting transcript rows.
+            let trimOffsetSeconds = Double(trimBounds.start) / fileFormat.sampleRate
 
             let trimmedDuration = Double(samples.count) / Double(fileFormat.sampleRate)
             fileLog("Batch transcribe: trimmed to \(samples.count) samples (\(String(format: "%.0f", trimmedDuration))s speech)")
@@ -2051,11 +2097,8 @@ final class AppState {
                       ),
                       (try? systemFile.read(into: systemBuffer)) != nil,
                       let systemChannelData = systemBuffer.floatChannelData else {
-                    // No system-only file (or unreadable) — fall back to mixed
-                    // with the +1 hint that counts the user's voice.
-                    let attendeeCount = meeting?.acceptedParticipantList.count ?? 0
-                    let hint = attendeeCount > 0 ? attendeeCount + 1 : nil
-                    return (samples, "mixed (system WAV missing)", hint)
+                    // No system-only file (or unreadable) — fall back to mixed.
+                    return (samples, "mixed (system WAV missing)", mixedAudioHint(for: meeting))
                 }
                 let allSystemSamples = Array(UnsafeBufferPointer(
                     start: systemChannelData[0],
@@ -2064,9 +2107,7 @@ final class AppState {
                 let sStart = min(trimBounds.start, allSystemSamples.count)
                 let sEnd = min(trimBounds.end, allSystemSamples.count)
                 guard sStart < sEnd else {
-                    let attendeeCount = meeting?.acceptedParticipantList.count ?? 0
-                    let hint = attendeeCount > 0 ? attendeeCount + 1 : nil
-                    return (samples, "mixed (system WAV too short)", hint)
+                    return (samples, "mixed (system WAV too short)", mixedAudioHint(for: meeting))
                 }
                 let systemSamples = Array(allSystemSamples[sStart..<sEnd])
 
@@ -2091,11 +2132,9 @@ final class AppState {
                 if activeFraction < 0.02 {
                     // Essentially silent system → in-person/hybrid. Diarize the
                     // mixed track; everyone (incl. the user) is an in-room
-                    // speaker to be named by attribution. Hint = attendee count.
-                    let attendeeCount = meeting?.acceptedParticipantList.count ?? 0
-                    let hint = attendeeCount >= 2 ? attendeeCount : nil
+                    // speaker to be named by attribution.
                     fileLog("Diarization: system track silent (\(String(format: "%.1f", activeFraction * 100))% active) — diarizing MIXED audio instead")
-                    return (samples, "mixed (system silent)", hint)
+                    return (samples, "mixed (system silent)", mixedAudioHint(for: meeting))
                 }
 
                 // System-only buffer: user's mic isn't in it. The hint is the
@@ -2254,12 +2293,19 @@ final class AppState {
                     speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
                 }
 
+                // Persist FILE-ABSOLUTE times (trim offset added back). All
+                // in-memory work above is trimmed-relative, but every later
+                // consumer of row times reads the FULL on-disk WAV — voice
+                // profile match/learn, the energy anchor. Trimmed-relative
+                // rows made those slice audio shifted early by the leading
+                // silence, folding the wrong speaker's audio into voice
+                // fingerprints (a standing profile-poisoning vector).
                 toSave.append(Transcript(
                     meetingId: meetingId,
                     speakerLabel: speaker,
                     text: text,
-                    startTime: seg.startTime,
-                    endTime: seg.endTime,
+                    startTime: seg.startTime + trimOffsetSeconds,
+                    endTime: seg.endTime + trimOffsetSeconds,
                     confidence: seg.confidence
                 ))
             }
@@ -2454,10 +2500,29 @@ final class AppState {
             claude: claudeForAttribution
         )
 
-        // Voice-pre-matches are authoritative on their own. Even if the LLM
-        // skipped a cluster, if the profile DB matched it, we still apply that.
+        // Signal precedence on a per-cluster collision: the gated voice
+        // fingerprint (cosine ≥ 0.82, attendance-checked) outranks the LLM
+        // tier (0.62–0.78) — see speaker-id-pipeline.md "higher signal wins".
+        // Compare actual confidences so an escalated LLM verdict can still
+        // beat a borderline voice match if tiers ever shift.
         var mapping = outcome.mapping
-        for (cluster, name) in voiceMatches where mapping[cluster] == nil {
+        for (cluster, name) in voiceMatches {
+            if let llmName = mapping[cluster], llmName.lowercased() != name.lowercased() {
+                let llmConf = outcome.confidenceMap[cluster] ?? 0
+                if (voiceConfidence[cluster] ?? 0) >= llmConf {
+                    Logger.general.info("[Precedence] voice match overrides LLM for \(cluster, privacy: .public): \(llmName, privacy: .public) → \(name, privacy: .public)")
+                    mapping[cluster] = name
+                }
+            } else if mapping[cluster] == nil {
+                mapping[cluster] = name
+            }
+        }
+
+        // Vocative mining is a direct signal (signal 3 of 5), not just a
+        // prompt hint. Fill clusters the LLM and voice match left empty —
+        // without this, a local-only setup with Ollama unreachable drops
+        // every vocative hit on the floor.
+        for (cluster, name) in vocativeResult.mapping where mapping[cluster] == nil {
             mapping[cluster] = name
         }
 
@@ -2469,7 +2534,10 @@ final class AppState {
         // now clear the review bar together, where previously whichever wrote
         // first masked the corroboration. A lone signal keeps its own score
         // (single term → unchanged). Disagreeing signals don't contribute —
-        // only the signals backing the chosen name count.
+        // only the signals backing the chosen name count. The LLM's verdict is
+        // NOT independent when the prompt already seeded the same name for the
+        // cluster (prior alias / voice / vocative) — an echo must not inflate
+        // the combined score, so it's excluded.
         for (cluster, finalName) in mapping {
             let finalLower = finalName.lowercased()
             var contributions: [Float] = []
@@ -2478,8 +2546,21 @@ final class AppState {
             if let n = vocativeResult.mapping[cluster], n.lowercased() == finalLower,
                let c = vocativeResult.confidence[cluster] { contributions.append(c) }
             if let n = outcome.mapping[cluster], n.lowercased() == finalLower,
-               let c = outcome.confidenceMap[cluster] { contributions.append(c) }
-            guard !contributions.isEmpty else { continue }
+               let c = outcome.confidenceMap[cluster],
+               combinedPriorAliases[cluster]?.lowercased() != finalLower {
+                contributions.append(c)
+            }
+            guard !contributions.isEmpty else {
+                // Echo-only cluster (e.g. series-alias seed the LLM confirmed):
+                // keep the plain LLM tier rather than combining — confirmed,
+                // not corroborated.
+                if clusterConfidence[cluster] == nil,
+                   outcome.mapping[cluster]?.lowercased() == finalLower,
+                   let c = outcome.confidenceMap[cluster] {
+                    clusterConfidence[cluster] = c
+                }
+                continue
+            }
             let combined = 1 - contributions.reduce(Float(1)) { $0 * (1 - $1) }
             clusterConfidence[cluster] = min(1.0, combined)
         }
@@ -2515,10 +2596,16 @@ final class AppState {
         // ─── P1: energy "you" anchor ───────────────────────────────────
         // On the FluidAudio mixed-audio path the local user is a "Speaker N"
         // cluster (no "mic" label), so nothing above identified them. Pin the
-        // user's cluster by mic-vs-system energy. Only fires when the system
-        // track has real remote speech to contrast against (else nil — e.g.
-        // in-person). This is what unblocks 1:1/elimination on mixed audio.
-        if let audioPath = meeting.audioFilePath {
+        // user's cluster by mic-vs-system energy. SOFT signal: validated at
+        // ~57% precision when it fires (harness/evaluations/2026-05-31), so
+        // it is (a) gated to the FluidAudio path it was built for — on the
+        // default SpeakerKit path diarization runs on system-only audio where
+        // every cluster is remote by construction, making any fire a wrong
+        // name — (b) capped below the 0.60 review threshold so the amber dot
+        // shows, and (c) excluded from seeding P2 elimination. Re-raise after
+        // it re-validates ≥90% on correctly-captured recordings.
+        var energyAnchorCluster: String? = nil
+        if settings.useFluidAudioDiarization, let audioPath = meeting.audioFilePath {
             let mixedURL = URL(fileURLWithPath: audioPath)
             let systemURL = AudioBufferManager.systemAudioURL(for: mixedURL)
             if FileManager.default.fileExists(atPath: systemURL.path) {
@@ -2534,8 +2621,9 @@ final class AppState {
                     let fullName = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
                     let displayName = fullName.isEmpty ? (userFirst ?? "Me") : fullName
                     mapping[hit.cluster] = displayName
-                    clusterConfidence[hit.cluster] = hit.confidence
-                    Logger.general.info("[Energy] local user cluster \(hit.cluster, privacy: .public) → \(displayName, privacy: .public) (conf \(hit.confidence))")
+                    clusterConfidence[hit.cluster] = min(hit.confidence, 0.55)
+                    energyAnchorCluster = hit.cluster
+                    Logger.general.info("[Energy] local user cluster \(hit.cluster, privacy: .public) → \(displayName, privacy: .public) (soft, conf capped at 0.55)")
                 }
             }
         }
@@ -2543,14 +2631,18 @@ final class AppState {
         // ─── P2: margin-guarded elimination (generalizes the old 2-person
         // auto-assign to N people). Assigns only when exactly one cluster and
         // one candidate remain — never forces a guess when counts are ambiguous.
+        // The soft energy-anchor cluster is removed from BOTH sides: it must
+        // not drive elimination (57% precision would cascade a second wrong
+        // name), and it must not be treated as an open cluster either.
         let nonUserParticipants = participants.filter { name in
             guard let userFirst = userFirst else { return true }
             return !name.lowercased().contains(userFirst.lowercased())
         }
+        let eliminationClusters = allClusters.subtracting(energyAnchorCluster.map { [$0] } ?? [])
         let eliminated = SpeakerNamingEngine.eliminate(
-            allClusters: allClusters,
+            allClusters: eliminationClusters,
             candidates: nonUserParticipants,
-            assigned: mapping.filter { $0.key.hasPrefix("Speaker ") }
+            assigned: mapping.filter { $0.key.hasPrefix("Speaker ") && $0.key != energyAnchorCluster }
         )
         for (cluster, asg) in eliminated {
             mapping[cluster] = asg.name
@@ -2575,8 +2667,12 @@ final class AppState {
             let fromVoice = (voiceMatches[cluster]?.lowercased() == nl)
                 || (enrollmentMatches[cluster]?.lowercased() == nl)
             guard fromVoice else { continue }
+            // An LLM verdict that merely echoes the prompt-seeded name is not
+            // independent corroboration.
+            let llmAgreesIndependently = (outcome.mapping[cluster]?.lowercased() == nl)
+                && combinedPriorAliases[cluster]?.lowercased() != nl
             let corroborated = (vocativeResult.mapping[cluster]?.lowercased() == nl)
-                || (outcome.mapping[cluster]?.lowercased() == nl)
+                || llmAgreesIndependently
                 || ((clusterConfidence[cluster] ?? 0) >= 0.95)
             if !corroborated {
                 namingFlags.append(SpeakerNamingEngine.Flag(
@@ -2748,7 +2844,7 @@ final class AppState {
         let existingConf = meeting.speakerConfidenceMapDictionary
         let beforeCount = existingMap.count
 
-        let (relabelled, attributed) = await applySpeakerAttribution(
+        let (_, attributed) = await applySpeakerAttribution(
             transcripts: transcripts,
             meeting: meeting
         )
@@ -2775,25 +2871,28 @@ final class AppState {
             return
         }
 
-        // Only rewrite transcript rows whose label still starts with "Speaker"
-        // — leave already-resolved (or user-renamed) labels untouched.
-        let safeRelabelled: [Transcript] = relabelled.map { t in
-            guard let oldLabel = transcripts.first(where: { $0.id == t.id })?.speakerLabel,
-                  oldLabel.lowercased().hasPrefix("speaker ") else {
-                // Not safe to overwrite — return original.
-                if let original = transcripts.first(where: { $0.id == t.id }) { return original }
-                return t
-            }
-            return t
+        // Rewrite rows from the MERGED map so rows can never disagree with the
+        // persisted map (the raw re-run output could propose a different name
+        // for a cluster the merge kept). Only rows still labelled "Speaker N"
+        // or the raw mic bucket are touched — user renames stay untouched.
+        let safeRelabelled: [Transcript] = transcripts.compactMap { t in
+            guard let old = t.speakerLabel else { return nil }
+            let oldLower = old.lowercased()
+            guard oldLower.hasPrefix("speaker ") || oldLower == "mic",
+                  let newName = mergedMap[old], newName != old else { return nil }
+            var copy = t
+            copy.speakerLabel = newName
+            return copy
         }
 
         var updatedMeeting = meeting
         updatedMeeting.setSpeakerMap(mergedMap)
         updatedMeeting.setSpeakerConfidenceMap(mergedConf)
+        let meetingToSave = updatedMeeting
 
         do {
             try await database.writer.write { db in
-                var m = updatedMeeting
+                var m = meetingToSave
                 try m.update(db)
                 for transcript in safeRelabelled {
                     var t = transcript
@@ -2924,7 +3023,7 @@ final class AppState {
         // name attributed only by a low-confidence LLM guess must NOT be folded
         // into the voice DB — otherwise one wrong guess teaches a fingerprint
         // that then auto-mis-matches that voice forever. Manual confirmations
-        // (alias rows) always learn regardless of this floor.
+        // (alias row + confidence 1.0 in this meeting) bypass the floor.
         let learnConfidenceFloor: Float = 0.70
         let confByCluster = meeting.speakerConfidenceMapDictionary
         let clusterToName = meeting.speakerMapDictionary
@@ -2936,14 +3035,24 @@ final class AppState {
         }
 
         for (name, ranges) in rangesByName {
-            let isManual = manuallyConfirmedNames.contains(name.lowercased())
-            // Skip low-confidence LLM-attributed names. Learn when manual, when
-            // there's no confidence entry (deterministic paths — mic auto-map,
-            // auto-2-person — don't write a cluster confidence and are trusted),
-            // or when confidence clears the floor.
-            if !isManual, let conf = confidenceByName[name.lowercased()], conf < learnConfidenceFloor {
-                Logger.general.info("Voice learn skipped (low confidence \(conf)): \(name, privacy: .public) for meeting \(meetingId, privacy: .public)")
-                continue
+            let nameKey = name.lowercased()
+            let conf = confidenceByName[nameKey]
+            // `.manual` requires BOTH a series alias row AND confidence 1.0 in
+            // THIS meeting's map — only a manual rename writes 1.0. The alias
+            // alone proves a rename in SOME meeting of the series; a later LLM
+            // mis-attribution of a different voice to that same name must not
+            // learn at manual trust (α 0.40) or flip the profile to the laxer
+            // 0.82 match threshold.
+            let isManual = manuallyConfirmedNames.contains(nameKey) && conf == 1.0
+            if !isManual {
+                // Every auto signal writes a cluster confidence (LLM, vocative,
+                // voice, elimination, energy anchor). A missing entry means a
+                // stale or replaced map — treat it as below the floor, not as
+                // trusted.
+                guard let conf, conf >= learnConfidenceFloor else {
+                    Logger.general.info("Voice learn skipped (confidence \(conf.map { String($0) } ?? "missing")): \(name, privacy: .public) for meeting \(meetingId, privacy: .public)")
+                    continue
+                }
             }
             guard let embedding = await voiceService.extractEmbedding(audioURL: systemURL, timeRanges: ranges) else { continue }
             let person = try? await personRepo.findOrCreate(for: name)
@@ -3075,11 +3184,16 @@ final class AppState {
               let firstPath = meeting.audioFilePaths.first,
               !firstPath.isEmpty else {
             fileLog("Diarization re-run: no audio path for \(meetingId)")
+            lastUserError = "Can't re-analyze speakers — this meeting has no audio file on disk."
             return
         }
         let mixedURL = URL(fileURLWithPath: firstPath)
         let systemURL = AudioBufferManager.systemAudioURL(for: mixedURL)
-        await runDiarization(meetingId: meetingId, systemAudioURL: systemURL)
+        do {
+            try await runDiarization(meetingId: meetingId, systemAudioURL: systemURL)
+        } catch {
+            lastUserError = "Re-analyze speakers failed: \(error.localizedDescription)"
+        }
     }
 
     /// Speaker-count hint passed to Pyannote when diarizing a SYSTEM-ONLY
@@ -3120,7 +3234,33 @@ final class AppState {
         return remote >= 2 ? remote : nil
     }
 
-    private func runDiarization(meetingId: String, systemAudioURL: URL?) async {
+    /// Speaker-count hint when diarizing MIXED audio (mic + system fallback
+    /// paths). Expected voices = accepted attendees — but only when the local
+    /// user can be positively identified in the list. Otherwise the count is
+    /// off by one in an unknown direction, and Pyannote treats the hint as
+    /// EXACT (an over-count force-splits a real speaker — the regression the
+    /// old `attendeeCount + 1` caused on every 1:1 fallback). nil lets the
+    /// clusterer decide.
+    private func mixedAudioHint(for meeting: Meeting?) -> Int? {
+        guard let m = meeting else { return nil }
+        let accepted = m.acceptedParticipantList
+        guard !accepted.isEmpty else { return nil }
+
+        let userEmail = googleAuthManager.userEmail?
+            .lowercased().trimmingCharacters(in: .whitespaces)
+        let userName = NSFullUserName()
+            .lowercased().trimmingCharacters(in: .whitespaces)
+        func isLocalUser(_ raw: String) -> Bool {
+            let s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+            if let e = userEmail, !e.isEmpty, s == e { return true }
+            if !userName.isEmpty, s == userName { return true }
+            return false
+        }
+        guard accepted.contains(where: isLocalUser) else { return nil }
+        return accepted.count >= 2 ? accepted.count : nil
+    }
+
+    private func runDiarization(meetingId: String, systemAudioURL: URL?) async throws {
         let service = SpeakerDiarizationService.shared
         let transcriptRepo = TranscriptRepository(database: database)
 
@@ -3164,15 +3304,23 @@ final class AppState {
             let useFluid = settings.useFluidAudioDiarization
 
             // Fetch all transcript rows for alignment and echo suppression.
+            // Re-diarizable rows are the legacy "system" bucket AND anonymous
+            // "Speaker N"/"Speaker" labels — the batch path stopped writing
+            // "system" rows in v4.0, which silently turned this whole function
+            // (queued diarization task, Re-analyze button, FluidAudio
+            // enrollment) into dead code. Resolved-name rows (manual renames,
+            // prior attributions) and "mic" rows are never re-labelled.
             let transcripts = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
-            let systemTranscripts = transcripts.filter {
-                ($0.speakerLabel ?? "").lowercased() == "system"
+            func isReDiarizable(_ label: String?) -> Bool {
+                let l = (label ?? "").lowercased().trimmingCharacters(in: .whitespaces)
+                return l == "system" || l == "speaker" || l.hasPrefix("speaker ")
             }
+            let systemTranscripts = transcripts.filter { isReDiarizable($0.speakerLabel) }
             let micTranscripts = transcripts.filter {
                 ($0.speakerLabel ?? "").lowercased() == "mic"
             }
             guard !systemTranscripts.isEmpty else {
-                fileLog("Diarization: no system-audio transcript rows for \(meetingId)")
+                fileLog("Diarization: no re-diarizable transcript rows for \(meetingId)")
                 return
             }
 
@@ -3255,7 +3403,9 @@ final class AppState {
                 // Person's current canonical name (Phase 2: personId-keyed matching).
                 let personRepo2 = PersonRepository(database: database)
                 let storedProfiles = (try? await profileRepo.allProfilesResolved(personRepo: personRepo2)) ?? []
-                let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0)" })
+                // 1-based to match the batch path's "Speaker N" convention
+                // (SpeakerKit ids are 0-based; parseSpeakerId subtracts 1).
+                let clusterLabels = Set(result.segments.compactMap { $0.speaker.speakerId }.map { "Speaker \($0 + 1)" })
                 voiceMatches = await voiceService.matchProfiles(
                     clusters: Array(clusterLabels),
                     audioURL: audioURL,
@@ -3264,6 +3414,25 @@ final class AppState {
                 )
                 if !voiceMatches.isEmpty {
                     fileLog("Diarization: voice profiles pre-matched \(voiceMatches.count) cluster(s) for \(meetingId)")
+                }
+
+                // ATTENDANCE GATE (ADR-004): the pre-match relabels transcript
+                // rows directly below, so it must pass the same gate as the
+                // attribution-path voice match — a poisoned profile must not
+                // stamp a non-attendee's name into rows with no review signal.
+                let accepted = meeting?.acceptedParticipantList ?? []
+                if !accepted.isEmpty {
+                    let acceptedLower = accepted.map { $0.lowercased() }
+                    let userLower = NSFullUserName().lowercased()
+                    for (cluster, name) in voiceMatches {
+                        let lower = name.lowercased()
+                        let isUser = !userLower.isEmpty && (lower.contains(userLower) || userLower.contains(lower))
+                        let isAttendee = acceptedLower.contains { $0.contains(lower) || lower.contains($0) }
+                        if !isUser && !isAttendee {
+                            fileLog("Diarization: [AttendanceGate] dropping pre-match \(cluster) → \(name) — not an attendee")
+                            voiceMatches.removeValue(forKey: cluster)
+                        }
+                    }
                 }
 
                 labelMapping = service.alignToTranscripts(systemTranscripts, result: result)
@@ -3317,15 +3486,45 @@ final class AppState {
 
             // Now run LLM attribution for any remaining "Speaker N" clusters.
             if let m = meeting {
-                let relabelled = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
-                let (_, attributed) = await applySpeakerAttribution(
-                    transcripts: relabelled,
+                let freshRows = try await transcriptRepo.transcriptsForMeeting(meetingId, limit: Int.max)
+                let (attributedRows, attributed) = await applySpeakerAttribution(
+                    transcripts: freshRows,
                     meeting: m,
                     enrollmentMatches: enrollmentMatches
                 )
-                try? await database.writer.write { db in
-                    var updated = attributed
-                    try updated.update(db)
+
+                // Preserve manual renames across a re-analysis: diarization
+                // re-shuffles cluster ids, so the new map replaces anonymous
+                // entries — but confidence-1.0 entries (only manual renames
+                // write 1.0) always survive.
+                var mergedMap = attributed.speakerMapDictionary
+                var mergedConf = attributed.speakerConfidenceMapDictionary
+                let oldConf = m.speakerConfidenceMapDictionary
+                for (cluster, name) in m.speakerMapDictionary where (oldConf[cluster] ?? 0) >= 1.0 {
+                    mergedMap[cluster] = name
+                    mergedConf[cluster] = 1.0
+                }
+
+                // Persist the attribution's row relabels TOGETHER with the
+                // meeting maps — the old code persisted only the meeting (and
+                // with try?, silently), leaving rows stuck at "Speaker N"
+                // while the map claimed names: sparkles badge on an anonymous
+                // label, names never visible in transcript or exports.
+                let changedRows: [Transcript] = zip(freshRows, attributedRows).compactMap { old, new in
+                    guard old.speakerLabel != new.speakerLabel else { return nil }
+                    return new
+                }
+                var updated = attributed
+                updated.setSpeakerMap(mergedMap)
+                updated.setSpeakerConfidenceMap(mergedConf)
+                let toPersist = updated
+                try await database.writer.write { db in
+                    for row in changedRows {
+                        var copy = row
+                        try copy.update(db)
+                    }
+                    var meetingCopy = toPersist
+                    try meetingCopy.update(db)
                 }
 
                 // Phase 3 — save voice embeddings for newly-identified speakers
@@ -3395,6 +3594,10 @@ final class AppState {
         } catch {
             fileLog("Diarization: failed for \(meetingId): \(error.localizedDescription)")
             Logger.general.error("Diarization failed for \(meetingId): \(error.localizedDescription)")
+            // Rethrow — the task queue owns retry/failure bookkeeping. A
+            // swallowed error here reported "completed" for a run that did
+            // nothing, and the queue's retry machinery never engaged.
+            throw error
         }
     }
 

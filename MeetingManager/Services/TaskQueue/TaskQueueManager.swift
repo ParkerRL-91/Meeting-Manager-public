@@ -574,19 +574,32 @@ final class TaskQueueManager {
                         try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript WHERE meetingId = ?", arguments: [next.meetingId])
                     } ?? 0) ?? 0
                     if hasSegments > 0 {
-                        // Diarization runs before summary so speaker names are in the transcript
-                        // when the summarizer prompt is built.
-                        await enqueue(type: .diarization, meetingId: next.meetingId, priority: 4)
+                        // Queued diarization is for LEGACY rows only: the batch
+                        // transcription path diarizes inline and writes
+                        // "Speaker N" labels directly, so re-running the full
+                        // diarizer here would double minutes of work per
+                        // meeting for an identical result. Only pre-v4 rows
+                        // still carry the "system" bucket this task exists for.
+                        let hasLegacySystemRows = (try? await database.writer.read { db in
+                            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript WHERE meetingId = ? AND LOWER(speakerLabel) = 'system'", arguments: [next.meetingId])
+                        } ?? 0) ?? 0
+                        if hasLegacySystemRows > 0 {
+                            await enqueue(type: .diarization, meetingId: next.meetingId, priority: 4)
+                        }
                         // Only enqueue the AI summary when a backend is configured,
                         // so no-AI users don't get a failed task after every meeting.
                         if shouldEnqueueAIWork {
                             await enqueue(type: .summary, meetingId: next.meetingId, priority: 5)
                         }
-                        // Transcript cleanup runs after summary — by then speaker
-                        // names are mostly resolved, so the cleaned blob shows
-                        // real names instead of "Speaker 1". Lower priority so
-                        // it doesn't gate the user-facing summary.
-                        await enqueue(type: .transcriptCleanup, meetingId: next.meetingId, priority: 3)
+                        // Transcript cleanup runs after diarization and summary —
+                        // by then speaker names are mostly resolved, so the
+                        // cleaned blob shows real names instead of "Speaker 1",
+                        // and it doesn't gate the user-facing summary. The queue
+                        // pops LOWEST priority number first, so "after" means a
+                        // HIGHER number than summary (5) — the old priority 3
+                        // ran cleanup first, the exact gating this comment
+                        // promises to avoid.
+                        await enqueue(type: .transcriptCleanup, meetingId: next.meetingId, priority: 6)
                     } else {
                         Logger.general.info("TaskQueue: transcription produced 0 segments for \(next.meetingId) — skipping diarization + summary")
                     }

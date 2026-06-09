@@ -141,7 +141,15 @@ final class VoiceProfileRepository {
             if var row = existing {
                 let old = row.embedding
                 if old.count == newEmbedding.count {
-                    let merged = zip(old, newEmbedding).map { o, n in o * (1 - alpha) + n * alpha }
+                    // Re-normalize after the EMA: a lerp of two unit vectors is
+                    // shorter than unit length, so the matcher's dot-product-
+                    // as-cosine read systematically under-scores mature
+                    // profiles against the fixed 0.82/0.87 thresholds.
+                    var merged = zip(old, newEmbedding).map { o, n in o * (1 - alpha) + n * alpha }
+                    let norm = sqrt(merged.reduce(Float(0)) { $0 + $1 * $1 })
+                    if norm > 0 {
+                        merged = merged.map { $0 / norm }
+                    }
                     row.embedding = merged
                 } else {
                     row.embedding = newEmbedding

@@ -153,8 +153,11 @@ final class SpeakerDiarizationService {
         var mapping: [Int64: String] = [:]
 
         for transcript in transcripts {
+            // Legacy "system" bucket plus anonymous "Speaker N"/"Speaker" rows
+            // are re-alignable; resolved names and "mic" are never re-labelled.
+            let label = (transcript.speakerLabel ?? "").lowercased().trimmingCharacters(in: .whitespaces)
             guard let id = transcript.id,
-                  (transcript.speakerLabel ?? "").lowercased() == "system" else { continue }
+                  label == "system" || label == "speaker" || label.hasPrefix("speaker ") else { continue }
 
             let txStart = Float(transcript.startTime)
             let txEnd   = Float(transcript.endTime)
@@ -180,7 +183,10 @@ final class SpeakerDiarizationService {
                   bestOverlap / txLen >= 0.25,
                   let speakerId = seg.speaker.speakerId else { continue }
 
-            mapping[id] = "Speaker \(speakerId)"
+            // 1-based, matching the batch path's "Speaker N" convention —
+            // 0-based labels would collide with batch labels under one name
+            // and leak "Speaker 0" to the UI. parseSpeakerId subtracts 1.
+            mapping[id] = "Speaker \(speakerId + 1)"
         }
 
         return mapping
