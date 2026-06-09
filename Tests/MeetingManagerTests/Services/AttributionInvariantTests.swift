@@ -6,6 +6,9 @@ import XCTest
 /// vocative ambiguous-first-name dropping, candidate-pool dedupe semantics,
 /// elimination respecting already-consumed names, and voice-profile EMA
 /// re-normalization.
+/// @MainActor: SpeakerAttributionService (and its statics) are
+/// MainActor-isolated.
+@MainActor
 final class AttributionInvariantTests: XCTestCase {
 
     // MARK: - resolveAttendee grade order
