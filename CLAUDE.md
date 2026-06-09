@@ -67,7 +67,8 @@ MeetingManager/          Swift source
     Audio/               AudioCaptureService, MicrophoneCapture, SystemAudioTap,
                          AudioBufferManager, AudioSessionManager
     Calendar/            GoogleCalendarService, AppleCalendarService,
-                         CalendarSyncManager, GoogleAuthManager
+                         CalendarSyncManager, GoogleAuthManager,
+                         CalendarMeetingMatcher
     Context/             RelevantMeetingService (related-meeting retrieval)
     Export/              Markdown / PDF / share sheet
     Integrations/        RemindersService, ApolloService,
@@ -77,7 +78,8 @@ MeetingManager/          Swift source
     Notes/               NoteDraftStore (sidecar note-draft autosave)
     Notifications/       NotificationService, NotificationActions
     Onboarding/          OnboardingManager
-    Prep/                MeetingPrepService, DailyBriefService
+    Prep/                MeetingPrepService, DailyBriefService,
+                         DailyBriefAIService, DailyBriefCache
     ProcessMonitor/      CallDetectionService, BrowserCallDetector,
                          CallAppRegistry, MeetingStateMachine,
                          ParticipantDetectionService
@@ -90,7 +92,8 @@ MeetingManager/          Swift source
                          VocativeMiningService
     Updates/             UpdateService (Sparkle removed; manual updates only)
     CompanyGroupingService.swift, MeetingRollupService.swift,
-    ContactsImportService.swift (top-level files in Services/)
+    ContactsImportService.swift, AppFileLogger.swift
+    (top-level files in Services/)
   Views/                 SwiftUI views, organised by area (Sidebar, Home,
                          MeetingDetail, LiveMeeting, People, Settings, etc.)
   Resources/             Info.plist, entitlements, assets

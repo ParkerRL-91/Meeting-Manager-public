@@ -1,93 +1,67 @@
 # Distribution Guide
 
-How to build and publish a Meeting Manager release.
+How to build and publish a Meeting Manager release. Sparkle was removed in
+3.x (see `knowledge/decisions/ADR-006-self-signed-release.md`): updates ship
+as GitHub Releases that users download manually — there is no appcast and no
+in-app update check.
 
 ## Quick Release
 
 ```bash
-./Scripts/push-update.sh 1.6.0
+./Scripts/push-update.sh 4.2.0
 ```
 
 This single command:
-1. Bumps `CFBundleShortVersionString` in Info.plist
-2. Runs `swift build -c release`
-3. Assembles a signed `.app` bundle (binary + Sparkle.framework + resources)
-4. Creates a DMG
-5. Generates a signed Sparkle appcast.xml
-6. Commits and pushes appcast.xml to GitHub Pages (`docs/`)
-7. Creates a GitHub Release with the DMG attached
 
-Add `NOTARIZE=1` to also notarize with Apple:
-```bash
-NOTARIZE=1 ./Scripts/push-update.sh 1.6.0
-```
+1. Pre-flight checks: refuses to run on a dirty working tree; validates the
+   version argument; verifies notarization env vars when `NOTARIZE=1`.
+2. Bumps `CFBundleShortVersionString` in `MeetingManager/Resources/Info.plist`.
+3. Runs `swift build -c release`.
+4. Assembles the `.app` bundle (binary + Info.plist + entitlements + assets).
+5. Signs the bundle — by default with the local self-signed identity
+   (ADR-006); users see a Gatekeeper warning on first launch and bypass it
+   with right-click → Open.
+6. Creates a DMG and prints its SHA-256.
+7. Creates a GitHub Release with the DMG attached.
 
-Notarization requires a keychain profile named `MeetingManager-Notarize`:
-```bash
-xcrun notarytool store-credentials "MeetingManager-Notarize" \
-    --apple-id "your@email.com" \
-    --team-id "YOURTEAMID" \
-    --password "app-specific-password"
-```
-
----
-
-## Sparkle Update Infrastructure
-
-| Component | Location |
-|-----------|----------|
-| Appcast feed | `https://parkerrl-91.github.io/Meeting-Manager/appcast.xml` |
-| Appcast source | `docs/appcast.xml` (GitHub Pages, `main` branch `/docs` folder) |
-| EdDSA public key | `MeetingManager/Resources/Info.plist` → `SUPublicEDKey` |
-| EdDSA private key | macOS Keychain (stored by `generate_keys` at first setup) |
-| Sparkle tools | `.build/artifacts/sparkle/Sparkle/bin/` |
-
-### Enable GitHub Pages
-
-Go to repo **Settings → Pages → Source**: `main` branch, `/docs` folder. The appcast URL goes live immediately.
-
-### Regenerate Keys (if needed)
+Validate everything without building or publishing:
 
 ```bash
-.build/artifacts/sparkle/Sparkle/bin/generate_keys
+./Scripts/push-update.sh --dry-run 4.2.0
 ```
 
-Update `SUPublicEDKey` in Info.plist with the new public key. The private key is saved in Keychain automatically.
+## Notarized releases (optional)
 
----
-
-## Manual DMG Build
+With an Apple Developer account, set the signing environment and add
+`NOTARIZE=1`:
 
 ```bash
-# 1. Build release binary
-swift build -c release
-
-# 2. Assemble .app bundle
-mkdir -p build/app/Meeting\ Manager.app/Contents/{MacOS,Frameworks,Resources}
-cp .build/release/MeetingManager build/app/Meeting\ Manager.app/Contents/MacOS/
-cp MeetingManager/Resources/Info.plist build/app/Meeting\ Manager.app/Contents/
-rsync -a --exclude="Info.plist" MeetingManager/Resources/ \
-    build/app/Meeting\ Manager.app/Contents/Resources/
-SPARKLE=$(find .build/artifacts -name "Sparkle.framework" | head -1)
-cp -R "$SPARKLE" build/app/Meeting\ Manager.app/Contents/Frameworks/
-install_name_tool -add_rpath "@executable_path/../Frameworks" \
-    build/app/Meeting\ Manager.app/Contents/MacOS/MeetingManager
-codesign --force --deep --sign - build/app/Meeting\ Manager.app
-
-# 3. Create DMG
-mkdir -p build/dmg-staging
-cp -R build/app/Meeting\ Manager.app build/dmg-staging/
-ln -sf /Applications build/dmg-staging/Applications
-hdiutil create -volname "Meeting Manager" \
-    -srcfolder build/dmg-staging \
-    -ov -format UDZO \
-    build/Meeting-Manager-1.0.5.dmg
+TEAM_ID=XXXXXXXXXX APPLE_ID=you@example.com APP_SPECIFIC_PASSWORD=xxxx \
+NOTARIZE=1 ./Scripts/push-update.sh 4.2.0
 ```
 
----
+Notarization requires a notarytool keychain profile named
+`MeetingManager-Notarize`. Without `NOTARIZE=1` the script ships
+self-signed and reminds you about the Gatekeeper warning.
 
-## Version History
+## Guided release
 
-| Version | Date | Notes |
-|---------|------|-------|
-| 1.0.5 | 2026-03-29 | On-device AI (Ollama auto-install), sidebar redesign, Sparkle update pipeline |
+Use the `/git-update` Claude Code skill for an interactive release: it reads
+the current version, helps pick the next one, drafts the change summary,
+runs `--dry-run` first, and then calls `push-update.sh`.
+
+## Local install for testing
+
+```bash
+./Scripts/install-local.sh
+```
+
+Builds release and installs into `~/Applications` without publishing.
+
+## How users update
+
+Users download the new DMG from the GitHub Releases page and replace the app
+in `/Applications` (or `~/Applications`). The database, recordings, and
+Keychain entries live outside the bundle (`~/Library/Application
+Support/MeetingManager/` + Keychain), so replacing the app preserves all
+data.

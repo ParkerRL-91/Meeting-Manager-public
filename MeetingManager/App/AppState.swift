@@ -623,7 +623,36 @@ final class AppState {
                 }
             }
 
-            let (rawTranscripts, speakerLabels) = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
+            let batchResult = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
+            var rawTranscripts = batchResult.transcripts
+            let speakerLabels = batchResult.speakerLabels
+
+            // Append mode: the new session's diarization numbers clusters from
+            // "Speaker 1" again, colliding with session 1's label namespace —
+            // a later fill-only pass would then stamp session-2 names onto
+            // session-1's still-anonymous rows. Shift the new session's labels
+            // past the highest existing speaker number.
+            if timebaseOffset > 0 {
+                let existingLabels: [String] = (try? await self.database.writer.read { db in
+                    try String.fetchAll(db, sql: "SELECT DISTINCT speakerLabel FROM transcript WHERE meetingId = ? AND speakerLabel IS NOT NULL", arguments: [meetingId])
+                }) ?? []
+                let existingMapKeys: [String] = (try? await self.meetingRepository.find(id: meetingId))
+                    .map { Array($0.speakerMapDictionary.keys) } ?? []
+                func speakerNumber(_ label: String) -> Int? {
+                    guard label.hasPrefix("Speaker ") else { return nil }
+                    return Int(label.dropFirst("Speaker ".count))
+                }
+                let labelShift = (existingLabels + existingMapKeys).compactMap(speakerNumber).max() ?? 0
+                if labelShift > 0 {
+                    rawTranscripts = rawTranscripts.map { t in
+                        guard let label = t.speakerLabel, let n = speakerNumber(label) else { return t }
+                        var copy = t
+                        copy.speakerLabel = "Speaker \(n + labelShift)"
+                        return copy
+                    }
+                    self.fileLog("TaskQueue: append-mode labels shifted by +\(labelShift)")
+                }
+            }
 
             // Atomically commit transcripts + meeting-status update + speaker labels in one write.
             // Previously three separate writer.write calls; now a single transaction so a crash
@@ -649,12 +678,36 @@ final class AppState {
                     meeting.setAttributionFlags([])
                 }
 
+                // Append mode preserves session 1's maps: pass them as existing
+                // assignments (elimination must not re-mint their names) and
+                // merge the result instead of replacing.
+                let isAppend = timebaseOffset > 0
+                let priorMap = meeting.speakerMapDictionary
+                let priorConf = meeting.speakerConfidenceMapDictionary
+                let priorFlags = meeting.attributionFlagList
+
                 self.taskQueueManager.reportCurrentProgress(stage: "Attributing speakers")
                 let (transcripts, attributedMeeting) = await self.applySpeakerAttribution(
                     transcripts: rawTranscripts,
-                    meeting: meeting
+                    meeting: meeting,
+                    existingAssignments: isAppend ? priorMap : [:]
                 )
                 meeting = attributedMeeting
+
+                if isAppend {
+                    // Session-2 cluster ids are namespaced past session 1's, so
+                    // a plain union is collision-free; prior entries win on the
+                    // shared "mic" key (same value anyway).
+                    let newMap = meeting.speakerMapDictionary.merging(priorMap) { _, prior in prior }
+                    let newConf = meeting.speakerConfidenceMapDictionary.merging(priorConf) { _, prior in prior }
+                    var mergedFlags = priorFlags
+                    for f in meeting.attributionFlagList where !mergedFlags.contains(f) {
+                        mergedFlags.append(f)
+                    }
+                    meeting.setSpeakerMap(newMap)
+                    meeting.setSpeakerConfidenceMap(newConf)
+                    meeting.setAttributionFlags(mergedFlags)
+                }
 
                 let wasTranscribing = meeting.status == .transcribing
                 if wasTranscribing { meeting.status = .complete }
@@ -1429,6 +1482,10 @@ final class AppState {
         var updatedMeeting = meeting
         updatedMeeting.setSpeakerMap(mergedMap)
         updatedMeeting.setSpeakerConfidenceMap(mergedConf)
+        // Fresh flags were computed WITH existingAssignments merged in, so
+        // they describe the combined state — replacing the stale first-pass
+        // flags (which used to linger because re-runs never persisted theirs).
+        updatedMeeting.setAttributionFlags(attributed.attributionFlagList)
         let meetingToSave = updatedMeeting
 
         // Persist relabelled transcripts + speakerMap update atomically.
@@ -1582,25 +1639,42 @@ final class AppState {
                     var toTranscribe: [Meeting] = []
                     for var m in recordings {
                         m.endDate = m.endDate ?? Date()
-                        if let path = m.audioFilePaths.last,
-                           FileManager.default.fileExists(atPath: path),
-                           let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                           (attrs[.size] as? Int ?? 0) > 44 {
-                            // Has audio with real content — transition to transcribing
+                        // Usable = exists AND carries actual samples.
+                        // AVAudioFile's header scaffolding occupies the first
+                        // ~4 KB (data chunk at offset 4088) — a crash husk is
+                        // ~4 KB with zero samples, not 44 bytes.
+                        func isUsable(_ path: String) -> Bool {
+                            guard !path.isEmpty,
+                                  FileManager.default.fileExists(atPath: path),
+                                  let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                                  let size = attrs[.size] as? Int else { return false }
+                            return size > 4200
+                        }
+                        func deleteWithSibling(_ path: String) {
+                            try? FileManager.default.removeItem(atPath: path)
+                            try? FileManager.default.removeItem(
+                                at: AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: path)))
+                        }
+                        let usable = m.audioFilePaths.filter(isUsable)
+                        if !usable.isEmpty {
+                            // Keep the good sessions, drop only husk entries —
+                            // a multi-file meeting whose LAST session died must
+                            // not lose its earlier good audio.
+                            for path in m.audioFilePaths where !usable.contains(path) && !path.isEmpty {
+                                deleteWithSibling(path)
+                            }
+                            m.audioFilePaths = usable
                             m.status = .transcribing
                             try m.update(db)
                             toTranscribe.append(m)
                         } else {
-                            // No audio or only WAV header — reset to scheduled so
-                            // user can re-record. Delete the husk file(s) and clear
-                            // the paths: a dead 44-byte canonical left in
-                            // audioFilePaths becomes `.first` after the re-record
+                            // No usable audio anywhere — delete husks and reset
+                            // so the user can re-record. A dead husk left in
+                            // audioFilePaths becomes `.first` after a re-record
                             // appends a real session, and transcription would
                             // resolve the husk instead of the audio.
                             for path in m.audioFilePaths where !path.isEmpty {
-                                try? FileManager.default.removeItem(atPath: path)
-                                try? FileManager.default.removeItem(
-                                    at: AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: path)))
+                                deleteWithSibling(path)
                             }
                             m.audioFilePaths = []
                             m.status = .scheduled
@@ -2493,6 +2567,9 @@ final class AppState {
             // Step 3: hallucination filtering + speaker labelling + row
             // construction — pure CPU over the full sample buffers, so it
             // runs detached like the audio preparation above.
+            // Row timestamps = file-absolute (trim offset) + timebase offset
+            // (append mode shifts session 2 past session 1's timeline).
+            let totalOffset = trimOffsetSeconds + timebaseOffset
             let built = await Task.detached(priority: .userInitiated, operation: {
                 Self.buildTranscriptRows(
                     meetingId: meetingId,
@@ -2501,7 +2578,7 @@ final class AppState {
                     samples: samples,
                     diarizationSamples: diarizationSamples,
                     diarizationSource: diarizationSource,
-                    trimOffsetSeconds: trimOffsetSeconds
+                    trimOffsetSeconds: totalOffset
                 )
             }).value
             fileLog("Batch transcribe: prepared \(built.rows.count) segments, skipped \(built.skippedCount) hallucinations, \(built.userSegmentCount) labeled as user")
@@ -2847,9 +2924,13 @@ final class AppState {
         // The soft energy-anchor cluster is removed from BOTH sides: it must
         // not drive elimination (57% precision would cascade a second wrong
         // name), and it must not be treated as an open cluster either.
+        // First-token equality, not substring — a user named "Sam" must not
+        // remove attendee "Samantha Jones" from the elimination roster.
         let nonUserParticipants = participants.filter { name in
             guard let userFirst = userFirst else { return true }
-            return !name.lowercased().contains(userFirst.lowercased())
+            let firstToken = name.lowercased()
+                .components(separatedBy: .whitespacesAndNewlines).first ?? ""
+            return firstToken != userFirst.lowercased()
         }
         let eliminationClusters = allClusters.subtracting(energyAnchorCluster.map { [$0] } ?? [])
         let eliminated = SpeakerNamingEngine.eliminate(
@@ -2857,9 +2938,12 @@ final class AppState {
             candidates: nonUserParticipants,
             // Existing assignments (re-run paths) consume their names too —
             // a name used by an already-resolved cluster must not be minted
-            // again for the lone remaining anonymous cluster.
+            // again for the lone remaining anonymous cluster. EXISTING wins
+            // on a key collision: the persist step is fill-only, so on disk
+            // the existing entry survives — elimination must consume the name
+            // that will actually be persisted.
             assigned: mapping.filter { $0.key.hasPrefix("Speaker ") && $0.key != energyAnchorCluster }
-                .merging(existingAssignments) { current, _ in current }
+                .merging(existingAssignments) { _, existing in existing }
         )
         for (cluster, asg) in eliminated {
             mapping[cluster] = asg.name
@@ -2872,8 +2956,10 @@ final class AppState {
         // change the mapping — they record where a result needs human
         // confirmation.
         var namingFlags = SpeakerNamingEngine.flags(
+            // Existing wins on collision — mirrors the fill-only persist (see
+            // the elimination merge above).
             finalMapping: mapping.filter { $0.key.hasPrefix("Speaker ") }
-                .merging(existingAssignments) { current, _ in current },
+                .merging(existingAssignments) { _, existing in existing },
             allClusters: allClusters,
             acceptedCandidates: participants,
             userNames: [NSFullUserName(), userFirst ?? ""]
@@ -3110,6 +3196,9 @@ final class AppState {
         var updatedMeeting = meeting
         updatedMeeting.setSpeakerMap(mergedMap)
         updatedMeeting.setSpeakerConfidenceMap(mergedConf)
+        // Fresh flags were computed WITH existingAssignments merged in —
+        // replace the stale first-pass flags.
+        updatedMeeting.setAttributionFlags(attributed.attributionFlagList)
         let meetingToSave = updatedMeeting
 
         do {
@@ -3497,6 +3586,7 @@ final class AppState {
     private func runDiarization(meetingId: String, systemAudioURL: URL?) async throws {
         guard !diarizationInFlight.contains(meetingId) else {
             fileLog("Diarization: already running for \(meetingId) — skipping duplicate")
+            lastUserError = "Speaker analysis is already running for this meeting — give it a moment to finish."
             return
         }
         diarizationInFlight.insert(meetingId)
@@ -3740,7 +3830,11 @@ final class AppState {
                 let (attributedRows, attributed) = await applySpeakerAttribution(
                     transcripts: freshRows,
                     meeting: m,
-                    enrollmentMatches: enrollmentMatches
+                    enrollmentMatches: enrollmentMatches,
+                    // Names already resolved on rows (clusters this pass can't
+                    // see) must still consume elimination candidates and feed
+                    // the duplicate-name flag.
+                    existingAssignments: m.speakerMapDictionary
                 )
 
                 // Preserve manual renames across a re-analysis: diarization
@@ -3995,6 +4089,11 @@ final class AppState {
 
         fileLog("Processing \(pending.count) pending transcription(s)...")
 
+        // Entries whose prepare failed are written BACK for the next launch —
+        // the old wholesale removeObject at the end dropped them despite the
+        // "leave it for next launch" intent.
+        var remaining: [String: String] = [:]
+
         for (meetingId, path) in pending {
             let audioURL = URL(fileURLWithPath: path)
             guard FileManager.default.fileExists(atPath: path) else {
@@ -4008,8 +4107,9 @@ final class AppState {
                 (rawTranscripts, speakerLabels) = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
             } catch {
                 // Legacy UserDefaults drain path has no queue retry — log and
-                // leave the entry for the next launch.
+                // keep the entry for the next launch.
                 fileLog("Pending transcription: prepare failed for \(meetingId) — \(error.localizedDescription)")
+                remaining[meetingId] = path
                 continue
             }
             if var meeting = try? await meetingRepository.find(id: meetingId) {
@@ -4035,9 +4135,14 @@ final class AppState {
             }
         }
 
-        // Clear the queue
-        UserDefaults.standard.removeObject(forKey: Self.pendingTranscriptionKey)
-        fileLog("Pending transcription queue cleared")
+        // Clear processed entries; failed ones stay for the next launch.
+        if remaining.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.pendingTranscriptionKey)
+            fileLog("Pending transcription queue cleared")
+        } else {
+            UserDefaults.standard.set(remaining, forKey: Self.pendingTranscriptionKey)
+            fileLog("Pending transcription queue: \(remaining.count) failed entr(y/ies) kept for next launch")
+        }
     }
 
     // MARK: - Auto-title (P1-T06)

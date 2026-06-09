@@ -84,11 +84,17 @@ final class AppFileLogger {
             rotatedURL = logURL.deletingLastPathComponent()
                 .appendingPathComponent("app-\(activeDay)-\(Int(Date().timeIntervalSince1970)).log")
         }
-        try? fm.moveItem(at: logURL, to: rotatedURL)
+        let moved = (try? fm.moveItem(at: logURL, to: rotatedURL)) != nil
 
-        // Start a fresh log file
-        fm.createFile(atPath: logURL.path, contents: nil)
-        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
+        // Start a fresh log file — but ONLY when the move succeeded (or the
+        // live file is genuinely gone). createFile over an existing file
+        // truncates; if the move failed for any reason (e.g. disk full),
+        // keep appending past the rotation boundary rather than destroy the
+        // un-archived day.
+        if moved || !fm.fileExists(atPath: logURL.path) {
+            fm.createFile(atPath: logURL.path, contents: nil)
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
+        }
         activeDay = today
 
         pruneOldLogs(keepDays: 30)

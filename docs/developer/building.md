@@ -89,10 +89,10 @@ All managed by Swift Package Manager. No manual steps needed — SPM resolves on
 ## Environment Setup for Development
 
 ### Claude API Key
-Set in the app under **Settings → Claude → API Key**. Stored in macOS Keychain as `com.meetingmanager.app.claudeApiKey`. Never hardcode or log.
+Set in the app under **Settings → Claude → API Key**. Stored in the macOS Keychain (service `com.meetingmanager`, account `claude-api-key`). Never hardcode or log.
 
 ### Google Calendar
-OAuth credentials are baked into the bundle (Google OAuth client ID in Info.plist). The OAuth flow runs in-app.
+A built-in Google OAuth client ID ships in GoogleAuthManager (a Keychain entry can override it); Info.plist holds only the callback URL scheme. The OAuth flow runs in-app.
 
 ### Ollama (for on-device AI testing)
 ```bash
