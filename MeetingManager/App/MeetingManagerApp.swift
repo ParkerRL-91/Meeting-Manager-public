@@ -3,7 +3,7 @@ import SwiftUI
 @main
 struct MeetingManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var appState = AppState()
+    @State private var appState = AppState.sharedOrCreate()
     @State private var onboardingManager = OnboardingManager()
     @State private var permissionsReady = false
 

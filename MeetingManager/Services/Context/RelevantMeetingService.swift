@@ -29,15 +29,16 @@ final class RelevantMeetingService {
             try Meeting.fetchOne(db, key: meetingId)
         }) else { return }
 
-        // Skip if a brief is already cached. An old bare-array cache still
-        // counts as "needs upgrade" — re-run so the user gets a brief.
-        // ALSO skip if the cached brief is the placeholder text — caller
-        // can still force a re-attempt by passing a fresh briefSynthesizer
-        // and the placeholder will be replaced if real content is generated.
+        // Skip if a REAL brief is already cached (anything but the
+        // placeholder). A brief can legitimately exist with an empty
+        // relatedMeetings list — the KB-only path synthesizes from Knowledge
+        // Base excerpts alone — so the skip-gate must NOT require related
+        // meetings: that gap re-ran a full LLM synthesis for every KB-only
+        // brief on every 15-minute calendar sync, around the clock.
+        // The placeholder still counts as "retry later".
         let existing = Self.parseCachedContext(from: meeting.contextJSON)
         if existing.brief != nil,
-           existing.brief != Self.notEnoughInfoPlaceholder,
-           !existing.relatedMeetings.isEmpty { return }
+           existing.brief != Self.notEnoughInfoPlaceholder { return }
 
         let related = try await findRelated(for: meeting)
 

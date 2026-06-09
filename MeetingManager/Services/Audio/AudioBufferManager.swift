@@ -69,7 +69,11 @@ struct CircularBuffer<Element> {
 /// Concatenating would give WhisperKit alternating windows of each source, making
 /// it impossible to transcribe both speakers. Summing produces a single waveform
 /// where both voices are simultaneously audible -- the correct input for Whisper.
-final class AudioBufferManager {
+///
+/// @unchecked Sendable: every mutable property is guarded by `lock` /
+/// `fileWriteLock` / `converterLock` — the class is already accessed
+/// concurrently from the mic and system-audio callback threads by design.
+final class AudioBufferManager: @unchecked Sendable {
     private let lock = NSLock()
     /// Serializes the actual `AVAudioFile.write` calls. The mic callback thread
     /// and the system-audio callback thread both write the mixed `audioFile`,
@@ -169,14 +173,22 @@ final class AudioBufferManager {
 
     /// Maximum recording duration in seconds. Prevents unbounded memory growth
     /// from accidental multi-hour recordings. 2 hours = 7200s.
-    /// At 16kHz mono Float32, 2 hours ~ 460 MB per source buffer.
+    /// Duration cap, NOT a memory cap: capture memory is bounded by the fixed
+    /// 30 s ring buffers regardless of meeting length (audio streams to disk).
+    /// The cap exists so a forgotten recording auto-stops at 2 hours.
     let maxRecordingDurationSeconds: TimeInterval = 7200
 
     /// Maximum sample count per source buffer, derived from maxRecordingDurationSeconds.
     private var maxSampleCount: Int { Int(maxRecordingDurationSeconds * sampleRate) }
 
-    /// True when either buffer has hit the max duration limit.
-    private(set) var isAtCapacity = false
+    /// True when either buffer has hit the max duration limit. Backing store
+    /// is written under `lock` from the audio callback threads; the public
+    /// read takes the same lock (it's polled from the main thread).
+    private var _isAtCapacity = false
+    var isAtCapacity: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _isAtCapacity
+    }
 
     /// Duration of audio chunks provided to the transcriber (seconds).
     /// Whisper is designed for 30-second windows -- shorter chunks destroy context
@@ -325,7 +337,7 @@ final class AudioBufferManager {
         if totalMicSamplesAppended < maxSampleCount {
             micSamples.append(contentsOf: samples)
         } else {
-            isAtCapacity = true
+            _isAtCapacity = true
         }
         lock.unlock()
 
@@ -348,7 +360,7 @@ final class AudioBufferManager {
         if totalSystemSamplesAppended < maxSampleCount {
             systemSamples.append(contentsOf: samples)
         } else {
-            isAtCapacity = true
+            _isAtCapacity = true
         }
         lock.unlock()
 
@@ -434,7 +446,7 @@ final class AudioBufferManager {
         // Reset capacity flag — the same AudioBufferManager instance is reused
         // across recordings, so a stale `true` from a 2-hour-cap hit would
         // immediately auto-stop the next recording.
-        isAtCapacity = false
+        _isAtCapacity = false
         lock.unlock()
 
         memoryPressureSource?.cancel()

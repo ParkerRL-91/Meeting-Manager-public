@@ -202,8 +202,12 @@ final class MicrophoneCapture: @unchecked Sendable {
         lock.lock()
         guard isRunning else { lock.unlock(); return }
         isRunning = false
-        lock.unlock()
 
+        // Teardown stays INSIDE the lock: handleEngineConfigurationChange
+        // restarts the engine under this same lock (it runs on the
+        // notification-posting thread), so a handler interleaving with
+        // stop() can no longer install a tap + start the freshly-recreated
+        // engine — which left the mic held open after the meeting ended.
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
@@ -219,6 +223,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         // makes "stop → start" idempotent.
         engine = AVAudioEngine()
         lastStopAt = Date()
+        lock.unlock()
 
         Logger.audio.info("MicrophoneCapture stopped (engine recreated for next session)")
     }
@@ -504,17 +509,17 @@ final class MicrophoneCapture: @unchecked Sendable {
             onDeviceDisconnected?(error)
         } else {
             // Device changed but still valid — try to restart the engine.
-            // Re-check isRunning under lock first: stop() may have run between
-            // the notification firing and now, in which case restarting would
-            // resurrect a capture the caller just tore down.
+            // The re-check AND the restart run under the same lock stop()
+            // tears down under: a bare re-check left a window where stop()
+            // completed in between and the restart resurrected the capture
+            // (mic indicator on, device held, after the meeting ended).
+            onDiagnostic?("DIAG:mic_device config changed but format still valid (\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch), attempting restart")
             lock.lock()
-            let stillRunning = isRunning
-            lock.unlock()
-            guard stillRunning else {
+            guard isRunning else {
+                lock.unlock()
                 onDiagnostic?("DIAG:mic_device config changed after stop — not restarting")
                 return
             }
-            onDiagnostic?("DIAG:mic_device config changed but format still valid (\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch), attempting restart")
             // Re-pin the device we selected before restarting. A configuration
             // change (a device (dis)connect, a Continuity mic appearing) can
             // silently revert AVAudioEngine's input to the *system default* —
@@ -525,10 +530,15 @@ final class MicrophoneCapture: @unchecked Sendable {
                 _ = setInputDeviceByID(activeDeviceID)
             }
             installTapOnInputNode()
+            var restartError: Error? = nil
             do {
                 try engine.start()
-                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(activeDeviceID)))")
             } catch {
+                restartError = error
+            }
+            lock.unlock()
+
+            if let error = restartError {
                 Logger.audio.error("Failed to restart engine after config change: \(error.localizedDescription)")
                 onDiagnostic?("DIAG:mic_device engine restart FAILED: \(error.localizedDescription)")
                 stop()
@@ -536,6 +546,8 @@ final class MicrophoneCapture: @unchecked Sendable {
                     "Microphone configuration changed and engine could not restart: \(error.localizedDescription)"
                 )
                 onDeviceDisconnected?(disconnectError)
+            } else {
+                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(activeDeviceID)))")
             }
         }
     }

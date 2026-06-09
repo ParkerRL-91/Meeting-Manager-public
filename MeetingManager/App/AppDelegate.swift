@@ -500,15 +500,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // MARK: - Model Download Progress Polling
 
     /// Poll AppState.isLoadingModel so the menu bar shows download progress.
+    /// Invalidates on the loading true→false EDGE — the old condition also
+    /// required the status-bar title to literally contain "Downloading", which
+    /// is false whenever another state (e.g. "Recording") owns the title, so
+    /// the 1 Hz timer ran for the entire process lifetime.
     private func startModelProgressPolling() {
+        var sawLoading = false
+        var ticks = 0
         modelProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
                 guard let appState = self.findAppState() else { return }
+                ticks += 1
                 if appState.isLoadingModel {
+                    sawLoading = true
                     self.updateStatusBar()
-                } else if timer.isValid, !appState.isLoadingModel, self.statusItem?.button?.title.contains("Downloading") == true {
-                    // Download just finished — update status bar one last time
+                } else if sawLoading || appState.transcriptionService.isModelLoaded || ticks > 300 {
+                    // Load finished (or never started within 5 min — failed
+                    // or instant-cached) — update once and stop polling.
                     self.updateStatusBar()
                     timer.invalidate()
                     self.modelProgressTimer = nil

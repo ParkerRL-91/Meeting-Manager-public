@@ -19,7 +19,7 @@ final class MockAudioCapture: AudioCapturing {
         startCalled = true
     }
 
-    func stopCapture() -> URL? {
+    func stopCapture() async -> URL? {
         stopCalled = true
         return nil
     }

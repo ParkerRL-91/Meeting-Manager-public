@@ -101,12 +101,15 @@ final class FluidAudioDiarizationService: @unchecked Sendable {
         }
     }
 
+    /// Best-effort: skips when a diarization run holds the lock — `diarize`
+    /// holds it for the full multi-minute run, and the idle-unload caller is
+    /// on the MainActor, which must never block on it.
     func unloadModels() {
-        lock.withLock {
-            manager?.cleanup()
-            manager = nil
-            _modelState = .unloaded
-        }
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        manager?.cleanup()
+        manager = nil
+        _modelState = .unloaded
     }
 
     /// FluidAudio downloads pyannote_segmentation + wespeaker_v2 (~100 MB

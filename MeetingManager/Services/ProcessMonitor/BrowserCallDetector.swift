@@ -106,7 +106,17 @@ final class BrowserCallDetector {
         let method: String
     }
 
+    /// Polls since the last AppleScript probe — see the throttle below.
+    private var pollsSinceAppleScript = 0
+
     private func detectBrowserCall() -> DetectionResult {
+        // No browser running → nothing to detect. Skips every probe,
+        // including the CGWindowList walk that previously ran on each poll
+        // regardless.
+        guard anyBrowserRunning() else {
+            return DetectionResult(inCall: false, name: nil, method: "noBrowser")
+        }
+
         // Strategy 1: Check if a browser is using the microphone (cheapest, no
         // permissions needed). Suppressed while we're recording — our own
         // engine holds the input device, so the signal is always positive.
@@ -114,19 +124,47 @@ final class BrowserCallDetector {
             return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage")
         }
 
-        // Strategy 2: AppleScript (gives tab titles — only runs if Chrome is actually running)
-        let chromeRunning = NSWorkspace.shared.runningApplications
-            .contains { $0.bundleIdentifier == "com.google.Chrome" }
-        if chromeRunning, let match = checkChromeTabsViaAppleScript() {
-            return DetectionResult(inCall: true, name: match, method: "AppleScript")
-        }
-
-        // Strategy 3: CGWindowList (last resort — requires Screen Recording permission)
+        // Strategy 2: CGWindowList — milliseconds, no IPC. Catches the
+        // meeting when it's the active tab of any browser window.
         if let match = checkViaCGWindowList() {
             return DetectionResult(inCall: true, name: match, method: "CGWindowList")
         }
 
+        // Strategy 3: AppleScript tab enumeration — the expensive probe. It
+        // walks EVERY Chrome tab over synchronous Apple Events on the main
+        // thread (NSAppleScript is documented main-thread-only), tens of ms
+        // with a busy Chrome. It exists to catch meetings in BACKGROUND tabs
+        // that CGWindowList can't see, so while idle it runs every 3rd poll
+        // (~30 s detection latency for that one case); while a call is
+        // active it runs every poll so end-debounce isn't delayed.
+        let chromeRunning = NSWorkspace.shared.runningApplications
+            .contains { $0.bundleIdentifier == "com.google.Chrome" }
+        if chromeRunning {
+            pollsSinceAppleScript += 1
+            if isInBrowserCall || pollsSinceAppleScript >= 3 {
+                pollsSinceAppleScript = 0
+                if let match = checkChromeTabsViaAppleScript() {
+                    return DetectionResult(inCall: true, name: match, method: "AppleScript")
+                }
+            }
+        }
+
         return DetectionResult(inCall: false, name: nil, method: "none")
+    }
+
+    /// True when any known browser is running at all.
+    private func anyBrowserRunning() -> Bool {
+        let browserBundleIDs: Set<String> = [
+            "com.google.Chrome",
+            "com.apple.Safari",
+            "org.mozilla.firefox",
+            "com.microsoft.edgemac",
+            "com.brave.Browser",
+        ]
+        return NSWorkspace.shared.runningApplications.contains {
+            guard let bid = $0.bundleIdentifier else { return false }
+            return browserBundleIDs.contains(bid)
+        }
     }
 
     // MARK: - Strategy 1: AppleScript

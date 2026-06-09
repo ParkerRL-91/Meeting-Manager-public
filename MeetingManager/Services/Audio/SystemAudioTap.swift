@@ -22,6 +22,13 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     /// Diagnostic callback for logging (set by AudioCaptureService)
     var onDiagnostic: ((String) -> Void)?
 
+    /// Fired when the SCStream dies mid-capture (permission revoked, display
+    /// change, sleep/wake). Without this the owner never learns the remote
+    /// audio went silent: levels freeze at their last value — which can hold
+    /// the dual-silence auto-stop hostage forever — and the user records
+    /// mic-only with no warning. Invoked on the SCK delegate queue.
+    var onStreamStopped: ((Error) -> Void)?
+
     private var stream: SCStream?
     private var isRunning = false
     private var bufferCount: Int = 0
@@ -271,5 +278,6 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         lock.lock()
         isRunning = false
         lock.unlock()
+        onStreamStopped?(error)
     }
 }

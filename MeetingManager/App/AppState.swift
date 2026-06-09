@@ -16,6 +16,17 @@ final class AppState {
     /// compile-time-visible nil check rather than a runtime crash.
     static private(set) var shared: AppState?
 
+    /// Stable accessor for the App struct's `@State` initial value. SwiftUI
+    /// re-creates the App struct freely; constructing a fresh AppState there
+    /// forked state — the discarded copy overwrote `AppState.shared`, so the
+    /// HUD, notification actions, and menu bar read a frozen snapshot with no
+    /// observers for the rest of the run. Returning the live instance means a
+    /// re-creation never constructs a fork in the first place.
+    static func sharedOrCreate() -> AppState {
+        if let existing = shared, isInitialized { return existing }
+        return AppState()
+    }
+
     // MARK: - Sidebar Navigation
 
     /// Which top-level section is active in the sidebar/detail area.
@@ -285,7 +296,12 @@ final class AppState {
             self.pastMeetings = existing.pastMeetings
             self.settings = existing.settings
 
-            AppState.shared = self
+            // Deliberately NOT reassigning AppState.shared: SwiftUI discards
+            // this candidate in favour of the stored @State value, so `shared`
+            // must keep pointing at the live, fully-observed original — not at
+            // this observer-less copy. (This branch is now a last-resort
+            // defense; MeetingManagerApp uses sharedOrCreate(), which returns
+            // the existing instance without constructing a fork at all.)
             fileLog("AppState re-created by SwiftUI — reusing existing services (model loaded: \(transcriptionService.isModelLoaded))")
             return
         }
@@ -807,13 +823,20 @@ final class AppState {
         }
 
         // When the queue drains, retry any daily brief that was deferred due to
-        // backend contention (e.g. while a bulk re-transcription was running).
+        // backend contention (e.g. while a bulk re-transcription was running),
+        // and release the diarization models — Pyannote/wespeaker CoreML stays
+        // resident otherwise, permanent footprint in a days-long menu-bar app
+        // for work that runs ~a minute per meeting. Reload on next use is a
+        // cache-hit (no re-download).
         taskQueueManager.onQueueIdle = { [weak self] in
             guard let self else { return }
             if self.dailyBriefQueued {
                 self.fileLog("DailyBrief: queue idle — retrying deferred brief")
                 await self.maybeRegenerateDailyBrief(force: true)
             }
+            await SpeakerDiarizationService.shared.unloadModels()
+            FluidAudioDiarizationService.shared.unloadModels()
+            self.fileLog("TaskQueue: idle — diarization models unloaded")
         }
 
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
@@ -1991,6 +2014,297 @@ final class AppState {
     // generateSummaryForTask is idempotent in the sense that the regeneration UI uses
     // the same code path; the queue itself dedupes pending summary tasks per meeting.
 
+    /// Which hint family applies to the prepared diarization source. The hint
+    /// values themselves are computed on the MainActor (they need
+    /// googleAuthManager); the detached loader only reports which one to use.
+    private enum BatchHintKind: Sendable { case systemOnly, mixed }
+
+    /// Decoded + trimmed audio for one batch transcription run. Pure value
+    /// type so it crosses from the detached loader back to the MainActor.
+    private struct PreparedBatchAudio: Sendable {
+        let samples: [Float]              // trimmed mixed (WhisperKit input)
+        let diarizationSamples: [Float]   // trimmed system-only, or mixed fallback
+        let diarizationSource: String
+        let hintKind: BatchHintKind
+        let trimOffsetSeconds: Double
+        let rawSampleCount: Int
+        let rawSeconds: Double
+    }
+
+    /// Decode both WAVs, silence-trim, and select the diarization source —
+    /// the gigabyte-scale synchronous work of a batch run. nonisolated so it
+    /// runs in a detached task instead of stalling the MainActor; the interim
+    /// full-file copies also stay scoped to this frame instead of living
+    /// across the whole transcription.
+    ///
+    /// Returns nil for refuse-to-transcribe conditions (wrong sample rate,
+    /// unreadable buffer); throws only for AVAudioFile I/O errors so the
+    /// task-queue retry path can engage.
+    private nonisolated static func prepareBatchAudio(audioURL: URL) throws -> PreparedBatchAudio? {
+        func log(_ msg: String) { AppFileLogger.shared.log(msg) }
+
+        // Read the WAV file into Float32 samples
+        let audioFile = try AVAudioFile(forReading: audioURL)
+        let fileFormat = audioFile.processingFormat
+        let frameCount = AVAudioFrameCount(audioFile.length)
+
+        // WhisperKit expects 16 kHz mono Float32. AudioCaptureService is
+        // responsible for writing the WAV at that rate; if the upstream
+        // capture ever changes, the model would silently get the wrong
+        // audio (time-stretched transcripts, garbage segments). Bail out
+        // explicitly instead, so the failure is loud.
+        let expectedSampleRate: Double = 16_000
+        guard fileFormat.sampleRate == expectedSampleRate else {
+            log("Batch transcribe: unexpected sample rate \(fileFormat.sampleRate) Hz (expected \(expectedSampleRate)) — refusing to transcribe")
+            Logger.transcription.error("Batch transcribe sample-rate mismatch for \(audioURL.lastPathComponent): \(fileFormat.sampleRate) Hz")
+            return nil
+        }
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
+            log("Batch transcribe: failed to create buffer")
+            return nil
+        }
+        try audioFile.read(into: buffer)
+
+        guard let channelData = buffer.floatChannelData else {
+            log("Batch transcribe: no channel data")
+            return nil
+        }
+        let allSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
+        let rawSampleCount = allSamples.count
+        let rawSeconds = Double(rawSampleCount) / fileFormat.sampleRate
+
+        // Trim leading and trailing silence to improve transcription quality.
+        // WhisperKit hallucinates on long silent sections. Compute the
+        // bounds once so we can apply the same window to the system-only
+        // WAV below, keeping the diarization timeline aligned with the
+        // WhisperKit timeline.
+        let silenceThreshold: Float = 0.005
+        let windowSize = Int(fileFormat.sampleRate) // 1-second windows
+        let trimBounds = trimSilenceBounds(allSamples, threshold: silenceThreshold, windowSize: windowSize)
+        let samples = Array(allSamples[trimBounds.start..<trimBounds.end])
+        // Offset between the trimmed in-memory timeline (WhisperKit,
+        // diarization, RMS checks) and the on-disk file timeline. Added
+        // back when persisting transcript rows.
+        let trimOffsetSeconds = Double(trimBounds.start) / fileFormat.sampleRate
+
+        // Pick the diarization source. Prefer the system-only WAV (call
+        // participant voices, no local mic) when AudioBufferManager wrote
+        // one alongside the mixed WAV; fall back to the mixed buffer
+        // otherwise. Diarizing on system-only avoids the false splits at
+        // speaker overlaps that happen when the local user's mic is in the
+        // input. Both buffers share a sample clock, so applying the same
+        // `trimBounds` window keeps timestamps aligned with the WhisperKit
+        // segments. Clamp defensively in case the system file is shorter
+        // than the mixed (e.g. system tap failed partway through).
+        let systemURL = AudioBufferManager.systemAudioURL(for: audioURL)
+        guard FileManager.default.fileExists(atPath: systemURL.path),
+              let systemFile = try? AVAudioFile(forReading: systemURL),
+              systemFile.processingFormat.sampleRate == expectedSampleRate,
+              let systemBuffer = AVAudioPCMBuffer(
+                  pcmFormat: systemFile.processingFormat,
+                  frameCapacity: AVAudioFrameCount(systemFile.length)
+              ),
+              (try? systemFile.read(into: systemBuffer)) != nil,
+              let systemChannelData = systemBuffer.floatChannelData else {
+            return PreparedBatchAudio(
+                samples: samples, diarizationSamples: samples,
+                diarizationSource: "mixed (system WAV missing)", hintKind: .mixed,
+                trimOffsetSeconds: trimOffsetSeconds,
+                rawSampleCount: rawSampleCount, rawSeconds: rawSeconds
+            )
+        }
+        let allSystemSamples = Array(UnsafeBufferPointer(
+            start: systemChannelData[0],
+            count: Int(systemBuffer.frameLength)
+        ))
+        let sStart = min(trimBounds.start, allSystemSamples.count)
+        let sEnd = min(trimBounds.end, allSystemSamples.count)
+        guard sStart < sEnd else {
+            return PreparedBatchAudio(
+                samples: samples, diarizationSamples: samples,
+                diarizationSource: "mixed (system WAV too short)", hintKind: .mixed,
+                trimOffsetSeconds: trimOffsetSeconds,
+                rawSampleCount: rawSampleCount, rawSeconds: rawSeconds
+            )
+        }
+        let systemSamples = Array(allSystemSamples[sStart..<sEnd])
+
+        // The system track can EXIST yet be effectively silent — an
+        // in-person/hybrid meeting where no remote audio played through
+        // the speakers. Diarizing that silence collapses every voice
+        // (all captured on the mic, i.e. in the MIXED track) into one
+        // "Speaker" — the dominant cause of all-generic meetings. Detect
+        // a silent system track by its speech-window fraction and fall
+        // back to diarizing the MIXED audio so in-room speakers split.
+        let sysSpeechFloor: Float = 0.005
+        let win = Int(expectedSampleRate) // 1s windows
+        var activeWindows = 0, totalWindows = 0, w = 0
+        while w + win <= systemSamples.count {
+            var sum: Float = 0, i = w
+            while i < w + win { sum += systemSamples[i] * systemSamples[i]; i += 1 }
+            if sqrtf(sum / Float(win)) > sysSpeechFloor { activeWindows += 1 }
+            totalWindows += 1
+            w += win
+        }
+        let activeFraction = totalWindows > 0 ? Double(activeWindows) / Double(totalWindows) : 0
+        if activeFraction < 0.02 {
+            // Essentially silent system → in-person/hybrid. Diarize the
+            // mixed track; everyone (incl. the user) is an in-room
+            // speaker to be named by attribution.
+            log("Diarization: system track silent (\(String(format: "%.1f", activeFraction * 100))% active) — diarizing MIXED audio instead")
+            return PreparedBatchAudio(
+                samples: samples, diarizationSamples: samples,
+                diarizationSource: "mixed (system silent)", hintKind: .mixed,
+                trimOffsetSeconds: trimOffsetSeconds,
+                rawSampleCount: rawSampleCount, rawSeconds: rawSeconds
+            )
+        }
+
+        // System-only buffer: user's mic isn't in it. The hint is the
+        // remote-speaker count, computed identically to runDiarization.
+        return PreparedBatchAudio(
+            samples: samples, diarizationSamples: systemSamples,
+            diarizationSource: "system-only", hintKind: .systemOnly,
+            trimOffsetSeconds: trimOffsetSeconds,
+            rawSampleCount: rawSampleCount, rawSeconds: rawSeconds
+        )
+    }
+
+    /// Hallucination filtering, local-user labelling, and Transcript row
+    /// construction for one batch run. Pure function of its inputs —
+    /// nonisolated so the per-segment RMS scans over the full sample buffers
+    /// run off the MainActor.
+    ///
+    /// Local-user detection: diarization runs on the system-only audio
+    /// (remote voices), so the user (whose voice is only on the mic) never
+    /// forms a cluster. But the mic signal exists implicitly — it's whatever
+    /// is in the MIXED audio but not in the SYSTEM audio. A segment where the
+    /// mixed track is clearly louder than the system track is the user
+    /// talking over a quiet/silent system stream. Comparing levels (rather
+    /// than "system silent") also survives call apps that echo the mic
+    /// faintly into system output. Only meaningful when a real system-only
+    /// stream was diarized.
+    ///
+    /// Rows persist FILE-ABSOLUTE times (trim offset added back): all
+    /// in-memory work is trimmed-relative, but every later consumer of row
+    /// times reads the FULL on-disk WAV — voice profile match/learn, the
+    /// energy anchor. Trimmed-relative rows sliced audio shifted early by
+    /// the leading silence, folding the wrong speaker's audio into voice
+    /// fingerprints (a standing profile-poisoning vector).
+    private nonisolated static func buildTranscriptRows(
+        meetingId: String,
+        segments: [TranscriptSegment],
+        speakerMap: [Int: String],
+        samples: [Float],
+        diarizationSamples: [Float],
+        diarizationSource: String,
+        trimOffsetSeconds: Double
+    ) -> (rows: [Transcript], userSegmentCount: Int, skippedCount: Int) {
+        let userDisplayName: String = {
+            let n = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+            return n.isEmpty ? "Me" : n
+        }()
+        let canDetectUser = (diarizationSource == "system-only")
+        let userSpeechFloor: Float = 0.005   // mixed must carry real speech
+        let userDominanceRatio: Float = 0.5  // system < half of mixed ⇒ mic dominates
+        func windowRMS(_ buf: [Float], _ startSec: Double, _ endSec: Double) -> Float {
+            let sr = 16_000.0
+            let s = max(0, Int(startSec * sr))
+            let e = min(buf.count, Int(endSec * sr))
+            guard s < e else { return 0 }
+            var sum: Float = 0
+            var i = s
+            while i < e { sum += buf[i] * buf[i]; i += 1 }
+            return sqrtf(sum / Float(e - s))
+        }
+        var userSegmentCount = 0
+
+        // WhisperKit hallucinates on silent/noisy audio — common patterns:
+        // - Single word repeated across many segments ("you", "the", "I", "thank you")
+        // - Bracketed noise markers: [BLANK_AUDIO], [inaudible], (silence)
+        // - Very short segments with low confidence
+        // - Repetitive text within a single segment (same phrase 3+ times)
+        let hallucinationPhrases: Set<String> = [
+            "you", "the", "i", "a", "it", "so", "we", "he", "she", "they",
+            "thank you", "thanks", "bye", "okay", "ok", "um", "uh", "hmm",
+            "thank you for watching", "thanks for watching",
+            "subscribe", "like and subscribe",
+            "see you next time", "see you in the next video",
+            "please subscribe", "thanks for listening",
+        ]
+
+        // First pass: count how often each unique text appears across segments
+        var textCounts: [String: Int] = [:]
+        for seg in segments {
+            let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            textCounts[text, default: 0] += 1
+        }
+
+        // If a single phrase accounts for >40% of all segments, it's hallucination
+        let hallucinationThreshold = max(3, Int(Double(segments.count) * 0.4))
+
+        var toSave: [Transcript] = []
+        var skippedCount = 0
+        for seg in segments {
+            let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = text.lowercased()
+
+            // Skip empty or single-character
+            if text.isEmpty || text.count <= 1 {
+                skippedCount += 1; continue
+            }
+
+            // Skip bracketed/parenthesized noise markers
+            if text.hasPrefix("[") && text.hasSuffix("]") { skippedCount += 1; continue }
+            if text.hasPrefix("(") && text.hasSuffix(")") { skippedCount += 1; continue }
+
+            // Skip known hallucination phrases
+            if hallucinationPhrases.contains(lower) {
+                skippedCount += 1; continue
+            }
+
+            // Skip if this exact text repeats too many times (cross-segment hallucination)
+            if let count = textCounts[lower], count >= hallucinationThreshold {
+                skippedCount += 1; continue
+            }
+
+            // Skip intra-segment repetition (same phrase repeated within one segment)
+            if text.count > 50 {
+                let words = text.components(separatedBy: .whitespaces)
+                if words.count > 10 && Double(Set(words).count) / Double(words.count) < 0.2 {
+                    skippedCount += 1; continue
+                }
+            }
+
+            // Label the user's own turns first (mic-dominant windows), then
+            // fall back to the diarization cluster for remote speakers.
+            let speaker: String
+            if canDetectUser {
+                let mixedRMS = windowRMS(samples, seg.startTime, seg.endTime)
+                let systemRMS = windowRMS(diarizationSamples, seg.startTime, seg.endTime)
+                if mixedRMS > userSpeechFloor && systemRMS < mixedRMS * userDominanceRatio {
+                    speaker = userDisplayName
+                    userSegmentCount += 1
+                } else {
+                    speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+                }
+            } else {
+                speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+            }
+
+            toSave.append(Transcript(
+                meetingId: meetingId,
+                speakerLabel: speaker,
+                text: text,
+                startTime: seg.startTime + trimOffsetSeconds,
+                endTime: seg.endTime + trimOffsetSeconds,
+                confidence: seg.confidence
+            ))
+        }
+        return (toSave, userSegmentCount, skippedCount)
+    }
+
     /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
     /// Returns the filtered transcripts and diarisation speaker labels to the caller, which
     /// is responsible for the atomic DB write (see transcriptionHandler in setupTaskQueue).
@@ -2018,129 +2332,32 @@ final class AppState {
         fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
 
         do {
-            // Read the WAV file into Float32 samples
-            let audioFile = try AVAudioFile(forReading: audioURL)
-            let fileFormat = audioFile.processingFormat
-            let frameCount = AVAudioFrameCount(audioFile.length)
+            // The hint helpers are MainActor and cheap — resolve both up
+            // front so the heavy audio preparation can run detached.
+            let meeting = try? await self.meetingRepository.find(id: meetingId)
+            let remoteHint = remoteParticipantHint(for: meeting)
+            let mixedHint = mixedAudioHint(for: meeting)
 
-            // WhisperKit expects 16 kHz mono Float32. AudioCaptureService is
-            // responsible for writing the WAV at that rate; if the upstream
-            // capture ever changes, the model would silently get the wrong
-            // audio (time-stretched transcripts, garbage segments). Bail out
-            // explicitly instead, so the failure is loud and the existing
-            // task-queue retry path handles it.
-            let expectedSampleRate: Double = 16_000
-            guard fileFormat.sampleRate == expectedSampleRate else {
-                fileLog("Batch transcribe: unexpected sample rate \(fileFormat.sampleRate) Hz (expected \(expectedSampleRate)) — refusing to transcribe")
-                Logger.transcription.error("Batch transcribe sample-rate mismatch for \(audioURL.lastPathComponent): \(fileFormat.sampleRate) Hz")
+            // Decode both WAVs, silence-trim, and pick the diarization source
+            // OFF the main actor. A 2-hour meeting is ~460 MB per Float
+            // buffer; the synchronous read/copy/RMS work used to beachball
+            // the UI for seconds right after every meeting ended. Only
+            // Sendable value types cross back.
+            guard let prepared = try await Task.detached(priority: .userInitiated, operation: {
+                try Self.prepareBatchAudio(audioURL: audioURL)
+            }).value else {
                 return ([], nil)
             }
-
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
-                fileLog("Batch transcribe: failed to create buffer")
-                return ([], nil)
-            }
-            try audioFile.read(into: buffer)
-
-            guard let channelData = buffer.floatChannelData else {
-                fileLog("Batch transcribe: no channel data")
-                return ([], nil)
-            }
-            let allSamples = Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
-
-            let totalDuration = Double(allSamples.count) / Double(fileFormat.sampleRate)
-            fileLog("Batch transcribe: \(allSamples.count) samples (\(String(format: "%.0f", totalDuration))s raw)")
-
-            // Trim leading and trailing silence to improve transcription quality.
-            // WhisperKit hallucinates on long silent sections. Compute the
-            // bounds once so we can apply the same window to the system-only
-            // WAV below, keeping the diarization timeline aligned with the
-            // WhisperKit timeline.
-            let silenceThreshold: Float = 0.005
-            let windowSize = Int(fileFormat.sampleRate) // 1-second windows
-            let trimBounds = trimSilenceBounds(allSamples, threshold: silenceThreshold, windowSize: windowSize)
-            let samples = Array(allSamples[trimBounds.start..<trimBounds.end])
-            // Offset between the trimmed in-memory timeline (WhisperKit,
-            // diarization, RMS checks below) and the on-disk file timeline.
-            // Added back when persisting transcript rows.
-            let trimOffsetSeconds = Double(trimBounds.start) / fileFormat.sampleRate
-
-            let trimmedDuration = Double(samples.count) / Double(fileFormat.sampleRate)
-            fileLog("Batch transcribe: trimmed to \(samples.count) samples (\(String(format: "%.0f", trimmedDuration))s speech)")
+            let samples = prepared.samples
+            let diarizationSamples = prepared.diarizationSamples
+            let diarizationSource = prepared.diarizationSource
+            let trimOffsetSeconds = prepared.trimOffsetSeconds
+            let participantHint: Int? = prepared.hintKind == .systemOnly ? remoteHint : mixedHint
+            fileLog("Batch transcribe: \(prepared.rawSampleCount) samples (\(String(format: "%.0f", prepared.rawSeconds))s raw), trimmed to \(samples.count) (\(String(format: "%.0f", Double(samples.count) / 16_000))s speech)")
 
             // Step 1: Transcribe the trimmed audio with WhisperKit
             let segments = try await transcriptionService.transcribe(samples: samples)
             fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
-
-            // Step 2: Run speaker diarization. Prefer the system-only WAV
-            // (call participant voices, no local mic) when AudioBufferManager
-            // wrote one alongside the mixed WAV; fall back to the mixed
-            // buffer otherwise. Diarizing on system-only avoids the false
-            // splits at speaker overlaps that happen when the local user's
-            // mic is in the input.
-            //
-            // Both buffers share a sample clock (system file is opened at
-            // the same instant as the mixed file in AudioBufferManager), so
-            // applying the same `trimBounds` window keeps timestamps aligned
-            // with the WhisperKit segments. Clamp defensively in case the
-            // system file is shorter than the mixed (e.g. system tap failed
-            // partway through the meeting).
-            let meeting = try? await self.meetingRepository.find(id: meetingId)
-            let (diarizationSamples, diarizationSource, participantHint): ([Float], String, Int?) = {
-                let systemURL = AudioBufferManager.systemAudioURL(for: audioURL)
-                guard FileManager.default.fileExists(atPath: systemURL.path),
-                      let systemFile = try? AVAudioFile(forReading: systemURL),
-                      systemFile.processingFormat.sampleRate == expectedSampleRate,
-                      let systemBuffer = AVAudioPCMBuffer(
-                          pcmFormat: systemFile.processingFormat,
-                          frameCapacity: AVAudioFrameCount(systemFile.length)
-                      ),
-                      (try? systemFile.read(into: systemBuffer)) != nil,
-                      let systemChannelData = systemBuffer.floatChannelData else {
-                    // No system-only file (or unreadable) — fall back to mixed.
-                    return (samples, "mixed (system WAV missing)", mixedAudioHint(for: meeting))
-                }
-                let allSystemSamples = Array(UnsafeBufferPointer(
-                    start: systemChannelData[0],
-                    count: Int(systemBuffer.frameLength)
-                ))
-                let sStart = min(trimBounds.start, allSystemSamples.count)
-                let sEnd = min(trimBounds.end, allSystemSamples.count)
-                guard sStart < sEnd else {
-                    return (samples, "mixed (system WAV too short)", mixedAudioHint(for: meeting))
-                }
-                let systemSamples = Array(allSystemSamples[sStart..<sEnd])
-
-                // The system track can EXIST yet be effectively silent — an
-                // in-person/hybrid meeting where no remote audio played through
-                // the speakers. Diarizing that silence collapses every voice
-                // (all captured on the mic, i.e. in the MIXED track) into one
-                // "Speaker" — the dominant cause of all-generic meetings. Detect
-                // a silent system track by its speech-window fraction and fall
-                // back to diarizing the MIXED audio so in-room speakers split.
-                let sysSpeechFloor: Float = 0.005
-                let win = Int(expectedSampleRate) // 1s windows
-                var activeWindows = 0, totalWindows = 0, w = 0
-                while w + win <= systemSamples.count {
-                    var sum: Float = 0, i = w
-                    while i < w + win { sum += systemSamples[i] * systemSamples[i]; i += 1 }
-                    if sqrtf(sum / Float(win)) > sysSpeechFloor { activeWindows += 1 }
-                    totalWindows += 1
-                    w += win
-                }
-                let activeFraction = totalWindows > 0 ? Double(activeWindows) / Double(totalWindows) : 0
-                if activeFraction < 0.02 {
-                    // Essentially silent system → in-person/hybrid. Diarize the
-                    // mixed track; everyone (incl. the user) is an in-room
-                    // speaker to be named by attribution.
-                    fileLog("Diarization: system track silent (\(String(format: "%.1f", activeFraction * 100))% active) — diarizing MIXED audio instead")
-                    return (samples, "mixed (system silent)", mixedAudioHint(for: meeting))
-                }
-
-                // System-only buffer: user's mic isn't in it. The hint is the
-                // remote-speaker count, computed identically to runDiarization.
-                return (systemSamples, "system-only", remoteParticipantHint(for: meeting))
-            }()
 
             var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
             do {
@@ -2186,132 +2403,23 @@ final class AppState {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
             }
 
-            // Identify the LOCAL USER's own speech so it's always labeled as
-            // them — never a generic "Speaker". Diarization runs on the
-            // system-only audio (remote voices), so the user (whose voice is
-            // only on the mic) never forms a cluster. But we have the mic
-            // signal implicitly: it's whatever is in the MIXED audio but not in
-            // the SYSTEM audio. A segment where the mixed track is clearly
-            // louder than the system track is the user talking over a quiet/
-            // silent system stream. Comparing levels (rather than "system
-            // silent") also survives call apps that echo the mic faintly into
-            // system output — the direct mic is still much louder than its echo.
-            // Only meaningful when a real system-only stream was diarized.
-            let userDisplayName: String = {
-                let n = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
-                return n.isEmpty ? "Me" : n
-            }()
-            let canDetectUser = (diarizationSource == "system-only")
-            let userSpeechFloor: Float = 0.005   // mixed must carry real speech
-            let userDominanceRatio: Float = 0.5  // system < half of mixed ⇒ mic dominates
-            func windowRMS(_ buf: [Float], _ startSec: Double, _ endSec: Double) -> Float {
-                let sr = 16_000.0
-                let s = max(0, Int(startSec * sr))
-                let e = min(buf.count, Int(endSec * sr))
-                guard s < e else { return 0 }
-                var sum: Float = 0
-                var i = s
-                while i < e { sum += buf[i] * buf[i]; i += 1 }
-                return sqrtf(sum / Float(e - s))
-            }
-            var userSegmentCount = 0
-
-            // Step 3: Filter hallucinations and save transcripts with speaker labels
-            //
-            // WhisperKit hallucinates on silent/noisy audio — common patterns:
-            // - Single word repeated across many segments ("you", "the", "I", "thank you")
-            // - Bracketed noise markers: [BLANK_AUDIO], [inaudible], (silence)
-            // - Very short segments with low confidence
-            // - Repetitive text within a single segment (same phrase 3+ times)
-
-            // Known hallucination phrases WhisperKit produces on silence
-            let hallucinationPhrases: Set<String> = [
-                "you", "the", "i", "a", "it", "so", "we", "he", "she", "they",
-                "thank you", "thanks", "bye", "okay", "ok", "um", "uh", "hmm",
-                "thank you for watching", "thanks for watching",
-                "subscribe", "like and subscribe",
-                "see you next time", "see you in the next video",
-                "please subscribe", "thanks for listening",
-            ]
-
-            // First pass: count how often each unique text appears across segments
-            var textCounts: [String: Int] = [:]
-            for seg in segments {
-                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                textCounts[text, default: 0] += 1
-            }
-
-            // If a single phrase accounts for >40% of all segments, it's hallucination
-            let hallucinationThreshold = max(3, Int(Double(segments.count) * 0.4))
-
-            var toSave: [Transcript] = []
-            var skippedCount = 0
-            for seg in segments {
-                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                let lower = text.lowercased()
-
-                // Skip empty or single-character
-                if text.isEmpty || text.count <= 1 {
-                    skippedCount += 1; continue
-                }
-
-                // Skip bracketed/parenthesized noise markers
-                if text.hasPrefix("[") && text.hasSuffix("]") { skippedCount += 1; continue }
-                if text.hasPrefix("(") && text.hasSuffix(")") { skippedCount += 1; continue }
-
-                // Skip known hallucination phrases
-                if hallucinationPhrases.contains(lower) {
-                    skippedCount += 1; continue
-                }
-
-                // Skip if this exact text repeats too many times (cross-segment hallucination)
-                if let count = textCounts[lower], count >= hallucinationThreshold {
-                    skippedCount += 1; continue
-                }
-
-                // Skip intra-segment repetition (same phrase repeated within one segment)
-                if text.count > 50 {
-                    let words = text.components(separatedBy: .whitespaces)
-                    if words.count > 10 && Double(Set(words).count) / Double(words.count) < 0.2 {
-                        skippedCount += 1; continue
-                    }
-                }
-
-                // Label the user's own turns first (mic-dominant windows), then
-                // fall back to the diarization cluster for remote speakers.
-                let speaker: String
-                if canDetectUser {
-                    let mixedRMS = windowRMS(samples, seg.startTime, seg.endTime)
-                    let systemRMS = windowRMS(diarizationSamples, seg.startTime, seg.endTime)
-                    if mixedRMS > userSpeechFloor && systemRMS < mixedRMS * userDominanceRatio {
-                        speaker = userDisplayName
-                        userSegmentCount += 1
-                    } else {
-                        speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
-                    }
-                } else {
-                    speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
-                }
-
-                // Persist FILE-ABSOLUTE times (trim offset added back). All
-                // in-memory work above is trimmed-relative, but every later
-                // consumer of row times reads the FULL on-disk WAV — voice
-                // profile match/learn, the energy anchor. Trimmed-relative
-                // rows made those slice audio shifted early by the leading
-                // silence, folding the wrong speaker's audio into voice
-                // fingerprints (a standing profile-poisoning vector).
-                toSave.append(Transcript(
+            // Step 3: hallucination filtering + speaker labelling + row
+            // construction — pure CPU over the full sample buffers, so it
+            // runs detached like the audio preparation above.
+            let built = await Task.detached(priority: .userInitiated, operation: {
+                Self.buildTranscriptRows(
                     meetingId: meetingId,
-                    speakerLabel: speaker,
-                    text: text,
-                    startTime: seg.startTime + trimOffsetSeconds,
-                    endTime: seg.endTime + trimOffsetSeconds,
-                    confidence: seg.confidence
-                ))
-            }
-            fileLog("Batch transcribe: prepared \(toSave.count) segments, skipped \(skippedCount) hallucinations, \(userSegmentCount) labeled as user (\(userDisplayName))")
-            Logger.transcription.info("Batch transcription ready: \(toSave.count) segments for meeting \(meetingId)")
-            return (toSave, capturedSpeakerLabels)
+                    segments: segments,
+                    speakerMap: speakerMap,
+                    samples: samples,
+                    diarizationSamples: diarizationSamples,
+                    diarizationSource: diarizationSource,
+                    trimOffsetSeconds: trimOffsetSeconds
+                )
+            }).value
+            fileLog("Batch transcribe: prepared \(built.rows.count) segments, skipped \(built.skippedCount) hallucinations, \(built.userSegmentCount) labeled as user")
+            Logger.transcription.info("Batch transcription ready: \(built.rows.count) segments for meeting \(meetingId)")
+            return (built.rows, capturedSpeakerLabels)
 
         } catch {
             fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
@@ -4009,23 +4117,15 @@ final class AppState {
 
     // MARK: - Audio Processing
 
-    /// Trim leading and trailing silence from audio samples.
-    /// Uses 1-second windows and checks if the RMS energy exceeds the threshold.
-    private func trimSilence(_ samples: [Float], threshold: Float, windowSize: Int) -> [Float] {
-        let bounds = trimSilenceBounds(samples, threshold: threshold, windowSize: windowSize)
-        return Array(samples[bounds.start..<bounds.end])
-    }
-
     /// Find the head/tail sample indices that bound the non-silent region of
-    /// `samples`. Separated from `trimSilence` so the same bounds can be
-    /// applied to a parallel buffer (e.g. the system-only WAV) — keeping the
-    /// diarization timeline aligned with the WhisperKit timeline after both
-    /// are sliced to the same window.
+    /// `samples`. The same bounds are applied to a parallel buffer (the
+    /// system-only WAV) — keeping the diarization timeline aligned with the
+    /// WhisperKit timeline after both are sliced to the same window.
     ///
     /// Returns `(0, samples.count)` when the buffer is shorter than one window
     /// or when no non-silent region is found, so callers always get a valid
-    /// half-open range.
-    private func trimSilenceBounds(_ samples: [Float], threshold: Float, windowSize: Int) -> (start: Int, end: Int) {
+    /// half-open range. nonisolated: called from the detached audio loader.
+    private nonisolated static func trimSilenceBounds(_ samples: [Float], threshold: Float, windowSize: Int) -> (start: Int, end: Int) {
         guard samples.count > windowSize else { return (0, samples.count) }
 
         let windowCount = samples.count / windowSize
@@ -4132,10 +4232,22 @@ final class AppState {
             .store(in: &cancellables)
     }
 
+    /// Coalescing flag: the pre-compute pass fires from the 15-min timer AND
+    /// every calendar-sync completion. A slow pass (each KB-less brief is an
+    /// LLM call) can outlive the trigger interval — without this guard the
+    /// passes stack and double-fire the same syntheses.
+    private var isPreComputingPrepContext = false
+
     @MainActor
     private func preComputePrepContext() {
+        guard !isPreComputingPrepContext else {
+            Logger.ai.info("preComputePrepContext: pass already running — skipping trigger")
+            return
+        }
+        isPreComputingPrepContext = true
         Task { [weak self] in
             guard let self else { return }
+            defer { self.isPreComputingPrepContext = false }
             do {
                 // 48-hour window — broad enough that "tomorrow's meetings"
                 // get briefed today, narrow enough that a calendar with

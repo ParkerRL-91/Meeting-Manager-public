@@ -149,7 +149,7 @@ final class MeetingStateMachine {
         try validateTransition(from: meeting.status, to: .transcribing)
 
         // Stop audio capture and append the new file path to the array.
-        let audioURL = audioCaptureService.stopCapture()
+        let audioURL = await audioCaptureService.stopCapture()
         if let path = audioURL?.path, !meeting.audioFilePaths.contains(path) {
             meeting.audioFilePaths.append(path)
         }
@@ -226,7 +226,7 @@ final class MeetingStateMachine {
 
         // If this is the active recording, stop capture
         if currentMeeting?.id == meeting.id {
-            _ = audioCaptureService.stopCapture()
+            _ = await audioCaptureService.stopCapture()
             updated.endDate = Date()
             currentMeeting = nil
             currentState = .cancelled

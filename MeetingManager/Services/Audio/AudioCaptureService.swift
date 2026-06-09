@@ -13,7 +13,7 @@ protocol AudioCapturing: AnyObject {
     var currentAudioFileURL: URL? { get }
     var onSilenceDetected: (() -> Void)? { get set }
     func startCapture(meetingId: String) async throws
-    @discardableResult func stopCapture() -> URL?
+    @discardableResult func stopCapture() async -> URL?
 }
 
 // MARK: - AudioCaptureService
@@ -162,6 +162,14 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private let bufferManager = AudioBufferManager()
     private let sessionManager = AudioSessionManager()
 
+    /// One bounded system-tap restart per capture session (display change /
+    /// sleep-wake blips recover; permission revocation doesn't loop forever).
+    private var systemTapRestartAttempted = false
+
+    /// In-flight detached mic switch, if any — awaited by stopCapture so a
+    /// switch's stop→configure→start can't land after teardown.
+    private var activeMicSwitchTask: Task<String?, Never>?
+
     // MARK: - Dynamic mic switching
 
     /// Where the live mic audio comes from. `.engine` is the normal AVAudioEngine
@@ -302,6 +310,43 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 // Wire diagnostic logging for system audio tap
                 tap.onDiagnostic = { [weak self] msg in
                     self?.logToFile(msg)
+                }
+                // Mid-capture SCK stream death (permission revoked, display
+                // change, sleep/wake). Zero the levels so the dual-silence
+                // auto-stop isn't held hostage by a frozen last value, try ONE
+                // restart for transient causes, and tell the user when remote
+                // audio is genuinely gone. Without this the rest of the
+                // meeting recorded mic-only with no signal anywhere.
+                systemTapRestartAttempted = false
+                tap.onStreamStopped = { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isCapturing else { return }
+                        self._atomicSystemLevel.pointee = 0
+                        self.systemLevel = 0
+                        if self.micSource == .screenCaptureKit {
+                            // The SCK stream carried the mic too — both inputs
+                            // are dead. Zero the mic level so the silence
+                            // auto-stop ends the meeting with what we have.
+                            self._atomicMicLevel.pointee = 0
+                            self.micLevel = 0
+                        }
+                        self.logToFile("Audio: system tap DIED mid-capture — \(error.localizedDescription)")
+
+                        if self.micSource == .engine, !self.systemTapRestartAttempted,
+                           let tap = self.systemAudioTap {
+                            self.systemTapRestartAttempted = true
+                            try? await Task.sleep(for: .seconds(2))
+                            guard self.isCapturing else { return }
+                            do {
+                                try await tap.start()
+                                self.logToFile("Audio: system tap RESTARTED after mid-capture death")
+                                return
+                            } catch {
+                                self.logToFile("Audio: system tap restart FAILED — \(error.localizedDescription)")
+                            }
+                        }
+                        self.onSystemAudioUnavailable?("System audio capture stopped mid-meeting (\(error.localizedDescription)). Remote participants are no longer being recorded — only your microphone.")
+                    }
                 }
                 tap.onBuffer = { [weak self] buffer, time in
                     guard let self else { return }
@@ -527,7 +572,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     }
 
     /// Stop all audio capture
-    func stopCapture() -> URL? {
+    func stopCapture() async -> URL? {
         // Cancel any in-flight mic recovery / switching and tear down listeners
         // up front, so nothing tries to resume a recording we're ending.
         removeAudioDeviceListeners()
@@ -539,6 +584,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         pendingSwitchUID = nil
 
+        // Let an in-flight mic switch land before tearing down — its start()
+        // arriving after micCapture.stop() would resurrect the engine.
+        if let switchTask = activeMicSwitchTask {
+            _ = await switchTask.value
+            activeMicSwitchTask = nil
+        }
+
         silenceCheckTimer?.invalidate()
         silenceCheckTimer = nil
         consecutiveSilentSeconds = 0
@@ -548,7 +600,16 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         if #available(macOS 14.2, *) {
             systemAudioTap?.stop()
         }
-        bufferManager.finishRecording()
+
+        // finishRecording streams BOTH full WAVs to rebuild the mixed file
+        // (~1.4 GB of I/O for a 2-hour meeting). Run it detached and await:
+        // the MainActor is released for the duration instead of beachballing
+        // at the exact moment the user clicks Stop, and callers still get
+        // the merged file before transcription is enqueued.
+        let bm = bufferManager
+        await Task.detached(priority: .userInitiated) {
+            bm.finishRecording()
+        }.value
 
         isCapturing = false
         micLevel = 0
@@ -615,10 +676,16 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         // Engine path — run the (briefly blocking) switch off the main actor.
+        // The task is stored so stopCapture can await an in-flight switch:
+        // switchDevice is stop→configure→start, and a start() landing after
+        // the recording's teardown would leave the mic engine running.
         let targetUID = target.uniqueID
-        let failure: String? = await Task.detached(priority: .userInitiated) { [micCapture] in
+        let switchTask = Task.detached(priority: .userInitiated) { [micCapture] in
             micCapture.switchDevice(toUID: targetUID)?.localizedDescription
-        }.value
+        }
+        activeMicSwitchTask = switchTask
+        let failure: String? = await switchTask.value
+        activeMicSwitchTask = nil
 
         if let failure {
             logToFile("Audio: mic switch FAILED (\(target.localizedName)): \(failure) — entering recovery")

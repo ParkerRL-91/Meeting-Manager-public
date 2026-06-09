@@ -60,6 +60,20 @@ enum DailyBriefCache {
         guard let data = try? JSONEncoder.iso8601.encode(entry) else { return }
         try? data.write(to: url, options: .atomic)
         Logger.ai.info("DailyBriefCache: saved \(entry.date, privacy: .public) (\(entry.text.count) chars, model=\(entry.model, privacy: .public))")
+        pruneOldEntries(keepDays: 14)
+    }
+
+    /// A brief is only ever read for "today"; older entries are dead weight
+    /// that previously accumulated one file per active day, forever.
+    private static func pruneOldEntries(keepDays: Int) {
+        guard let contents = try? fm.contentsOfDirectory(at: cacheDir(), includingPropertiesForKeys: nil) else { return }
+        let cutoff = Calendar.current.date(byAdding: .day, value: -keepDays, to: Date()) ?? Date()
+        for url in contents where url.pathExtension == "json" {
+            let day = url.deletingPathExtension().lastPathComponent
+            if let date = dayFromString(day), date < cutoff {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 
     static func clear(date: Date) {
