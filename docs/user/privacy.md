@@ -68,17 +68,29 @@ Audio capture, screen window-title reading, and microphone are all macOS-mediate
 
 ---
 
+## What Goes to Apollo.io (Optional Enrichment)
+
+Off by default. Only when you paste an Apollo API key in Settings →
+Integrations **and** enable attendee profile prep does the app call
+Apollo's `people/match` endpoint (`api.apollo.io`).
+
+- **What's sent:** the attendee's email address, nothing else. Company
+  cards reuse the same lookup with a representative member's email.
+  Personal-email and phone reveal flags are explicitly set to false.
+- **What's NOT sent:** meeting content — no transcripts, no summaries, no
+  notes, no audio, ever.
+- Results are cached locally (7-day TTL); consumer email domains (gmail
+  etc.) are never looked up. Remove the key or turn the toggle off and no
+  Apollo calls are made.
+
+---
+
 ## Update Channel
 
-Sparkle (the auto-update framework) makes one outbound HTTPS call to:
-
-```
-https://parkerrl-91.github.io/Meeting-Manager/appcast.xml
-```
-
-This fetches the appcast XML to check for new versions. The request is anonymous — no telemetry, no identifying headers.
-
-When an update is available, Sparkle downloads the DMG from a GitHub releases URL. Same anonymity.
+There is no auto-update framework (Sparkle was removed). The app makes
+**no update-check network calls**. Updates are manual: Settings → About →
+"Open GitHub Releases" opens the releases page in your browser, and you
+download the new DMG yourself.
 
 ---
 
@@ -88,7 +100,7 @@ There is no telemetry. The app does not phone home. There's no analytics SDK, no
 
 - AI provider you configured (Claude or Ollama on localhost)
 - Calendar provider you configured (Google or Apple)
-- Sparkle update check (one URL, no payload)
+- Apollo.io attendee lookups, only if you configured an Apollo API key
 
 If you want to verify, run:
 
@@ -105,11 +117,10 @@ while the app is running. You'll see only the connections above.
 | Data | Path |
 |---|---|
 | Database (meetings, persons, profiles, settings) | `~/Library/Application Support/MeetingManager/db.sqlite` |
-| Audio recordings | `~/Library/Application Support/MeetingManager/recordings/` |
-| WhisperKit models | `~/Library/Application Support/MeetingManager/models/` |
-| API keys | macOS Keychain (separate from database) |
-| Sparkle EdDSA verification key | macOS Keychain |
-| Logs | `~/Library/Logs/MeetingManager/` |
+| Audio recordings | `~/Library/Application Support/MeetingManager/Audio/` |
+| WhisperKit models | `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/` |
+| API keys (Claude, Google OAuth, Apollo) | macOS Keychain (separate from database) |
+| Logs | `~/Library/Application Support/MeetingManager/app.log` (+ rotated `app-YYYY-MM-DD.log`) |
 
 ---
 
@@ -118,10 +129,9 @@ while the app is running. You'll see only the connections above.
 To fully remove Meeting Manager and all its data:
 
 1. Move the app to Trash from `/Applications`.
-2. Delete the data directory:
+2. Delete the data directory (logs live inside it):
    ```bash
    rm -rf ~/Library/Application\ Support/MeetingManager
-   rm -rf ~/Library/Logs/MeetingManager
    ```
 3. Open Keychain Access and delete entries containing "meetingmanager" or "Meeting Manager".
 4. Revoke Google Calendar access at [myaccount.google.com](https://myaccount.google.com/permissions).
@@ -133,7 +143,7 @@ Empty Trash to free disk space.
 
 ## Backups
 
-The single source of truth is the `db.sqlite` file plus the `recordings/` folder. Time Machine backs both up automatically if your `~/Library/Application Support` is included in your backup scope.
+The single source of truth is the `db.sqlite` file plus the `Audio/` folder. Time Machine backs both up automatically if your `~/Library/Application Support` is included in your backup scope.
 
 For a manual backup:
 

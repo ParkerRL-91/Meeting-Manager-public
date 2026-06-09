@@ -59,26 +59,38 @@ MeetingManager/          Swift source
   Models/                Codable + GRDB record structs (one per table)
   Database/              GRDB repositories (one per logical entity)
   Services/              All non-UI logic
-    AI/                  ClaudeService, OllamaService, SummaryGenerator,
-                         TranscriptCleanupService, ActionItemExtractor,
-                         RecipeEngine, MeetingChatService, etc.
-    Audio/               AudioCaptureService, MicrophoneCapture, SystemAudioTap
+    AI/                  ClaudeService, OllamaService, AIBackendChoice,
+                         SummaryGenerator, TranscriptCleanupService,
+                         ActionItemExtractor, RecipeEngine,
+                         MeetingChatService, etc.
+    Analytics/           ParticipantAnalyticsService
+    Audio/               AudioCaptureService, MicrophoneCapture, SystemAudioTap,
+                         AudioBufferManager, AudioSessionManager
     Calendar/            GoogleCalendarService, AppleCalendarService,
                          CalendarSyncManager, GoogleAuthManager
     Context/             RelevantMeetingService (related-meeting retrieval)
     Export/              Markdown / PDF / share sheet
-    Integrations/        RemindersService
+    Integrations/        RemindersService, ApolloService,
+                         ApolloEnrichmentCoordinator
     KnowledgeBase/       KnowledgeBaseService, KBWriteBackService
     Meeting/             MeetingSeriesService (recurring-meeting key)
+    Notes/               NoteDraftStore (sidecar note-draft autosave)
     Notifications/       NotificationService, NotificationActions
     Onboarding/          OnboardingManager
     Prep/                MeetingPrepService, DailyBriefService
-    ProcessMonitor/      CallDetectionService, ParticipantDetectionService
+    ProcessMonitor/      CallDetectionService, BrowserCallDetector,
+                         CallAppRegistry, MeetingStateMachine,
+                         ParticipantDetectionService
     TaskQueue/           TaskQueueManager — persistent async work
-    Transcription/       TranscriptionService, StreamingTranscriber,
-                         SpeakerDiarizationService, SpeakerAttributionService,
-                         VoiceProfileService, VocativeMiningService
+    Transcription/       TranscriptionService, AppleSpeechBatchTranscriber,
+                         AppleSpeechEngine, TranscriptionConfiguration,
+                         SpeakerDiarizationService, FluidAudioDiarizationService,
+                         SpeakerEnrollmentService, SpeakerAttributionService,
+                         SpeakerNamingEngine, VoiceProfileService,
+                         VocativeMiningService
     Updates/             UpdateService (Sparkle removed; manual updates only)
+    CompanyGroupingService.swift, MeetingRollupService.swift,
+    ContactsImportService.swift (top-level files in Services/)
   Views/                 SwiftUI views, organised by area (Sidebar, Home,
                          MeetingDetail, LiveMeeting, People, Settings, etc.)
   Resources/             Info.plist, entitlements, assets
@@ -234,6 +246,8 @@ Context reset protocol: `harness/context-management.md`
 - Swift 6, SwiftUI, macOS 14.4+
 - GRDB (SQLite, in-process)
 - WhisperKit + SpeakerKit (on-device transcription + diarization)
+- FluidAudio 0.14.7 (alternate diarization + speaker enrollment, behind
+  `useFluidAudioDiarization`; see ADR-011)
 - Claude API (summarization, attribution, chat) — optional
 - Ollama (local LLM) — optional
 - EventKit (Apple Calendar, Reminders, Contacts)

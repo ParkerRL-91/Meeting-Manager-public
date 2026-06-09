@@ -32,22 +32,28 @@ Build output lands in `.build/debug/` or `.build/release/`.
 
 ## Running the App
 
-The binary requires a proper `.app` bundle to launch (due to Sparkle and UserNotifications). You can't run `swift run` directly.
+The binary requires a proper `.app` bundle to launch (due to UserNotifications). You can't run `swift run` directly.
 
 **Option A: Install to ~/Applications (recommended for testing)**
+
+Use the install script — it builds, assembles the bundle, signs with the
+persistent `MeetingManager-Dev` cert (preserves TCC grants across
+rebuilds), and relaunches cleanly:
+
+```bash
+Scripts/install-local.sh
+```
+
+Or assemble manually:
 
 ```bash
 # Build release
 swift build -c release
 
 # Assemble and install
-mkdir -p ~/Applications/Meeting\ Manager.app/Contents/{MacOS,Frameworks,Resources}
+mkdir -p ~/Applications/Meeting\ Manager.app/Contents/{MacOS,Resources}
 cp .build/release/MeetingManager ~/Applications/Meeting\ Manager.app/Contents/MacOS/
 cp MeetingManager/Resources/Info.plist ~/Applications/Meeting\ Manager.app/Contents/
-SPARKLE=$(find .build/artifacts -name "Sparkle.framework" | head -1)
-cp -R "$SPARKLE" ~/Applications/Meeting\ Manager.app/Contents/Frameworks/
-install_name_tool -add_rpath "@executable_path/../Frameworks" \
-    ~/Applications/Meeting\ Manager.app/Contents/MacOS/MeetingManager
 codesign --force --deep --sign - ~/Applications/Meeting\ Manager.app
 open ~/Applications/Meeting\ Manager.app
 ```
@@ -71,11 +77,12 @@ All managed by Swift Package Manager. No manual steps needed — SPM resolves on
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| GRDB | 6.x | SQLite ORM |
-| WhisperKit | 0.9+ | On-device speech-to-text |
-| Sparkle | 2.6+ | Auto-updates |
+| argmax-oss-swift | 1.0.0 | WhisperKit (on-device speech-to-text) + SpeakerKit (diarization) |
+| FluidAudio | 0.14.7 (exact pin) | Alternate diarization + speaker enrollment (behind `useFluidAudioDiarization`) |
+| GRDB | 6.29.3 | SQLite ORM |
+| swift-argument-parser | 1.8.1 | Transitive (argmax-oss-swift) |
 
-**Important:** WhisperKit pins `swift-transformers` to `1.1.x`. Do not add any dependency that requires `swift-transformers >= 1.2.0` (e.g., mlx-swift-lm) — this creates an irreconcilable SPM conflict. See [ADR-001](../../knowledge/decisions/ADR-001-ollama-over-mlx-for-local-llm.md).
+**Note:** MLX and llama.cpp remain banned by policy ([ADR-001](../../knowledge/decisions/ADR-001-ollama-over-mlx-for-local-llm.md)) — local LLM goes through Ollama's HTTP API. The old `swift-transformers` pin that made the ban mechanical disappeared with the Argmax OSS 1.0.0 upgrade; see the 2026-05-29 update note in the ADR.
 
 ---
 
@@ -91,7 +98,7 @@ OAuth credentials are baked into the bundle (Google OAuth client ID in Info.plis
 ```bash
 brew install ollama
 ollama serve          # starts server at localhost:11434
-ollama pull llama3.2:3b
+ollama pull qwen3:4b  # small tier; qwen3:8b is the default tier
 ```
 
 Or enable **Settings → On-Device** in the app to auto-install.
@@ -114,13 +121,6 @@ For distribution, use a Developer ID Application certificate. See [DISTRIBUTION.
 
 **`bundleProxyForCurrentProcess is nil`**
 Running the binary directly from the command line (not from a `.app` bundle). Always use `open Meeting\ Manager.app` or the install script above.
-
-**Sparkle library not loaded**
-The release binary doesn't have the Frameworks rpath. Fix:
-```bash
-install_name_tool -add_rpath "@executable_path/../Frameworks" \
-    Meeting\ Manager.app/Contents/MacOS/MeetingManager
-```
 
 **SPM `disk I/O error` on build.db**
 Spurious warning from Swift build system — does not affect the build. Ignore it.

@@ -61,7 +61,7 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 - Always handle: rate limits, network errors, malformed responses
 
 ### Concurrency
-- `async/await` throughout — no completion handlers or Combine except where required (Sparkle)
+- `async/await` throughout — no completion handlers or Combine in new code
 - Audio capture bridges to async via `withCheckedContinuation`
 - Never block the main thread with semaphores or synchronous I/O
 

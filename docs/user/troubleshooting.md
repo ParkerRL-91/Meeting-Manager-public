@@ -8,7 +8,7 @@ The most common issues and their fixes, in roughly the order they tend to come u
 
 macOS's TCC (Transparency, Consent & Control) cache occasionally gets stuck — the system says you've granted permission but the app's TCC entry is missing or stale.
 
-**Fix:** Settings → **About** → **Reset App Permissions**.
+**Fix:** Settings → **General** → **Reset App Permissions**.
 
 This clears every TCC entry for Meeting Manager. macOS will re-prompt the next time you do something that requires the permission, and you can grant fresh.
 
@@ -42,11 +42,13 @@ Possible causes:
 - **Microphone disconnected** — AirPods went out of range, USB device unplugged. Check Settings → Audio → Microphone for the current input.
 - **Disk full** — recordings need ~10MB per minute of audio. Check available space.
 
-### Live transcript shows nothing during the call
+### No transcript appearing during the call
 
-- **WhisperKit model not loaded yet** — Settings → Transcription. Wait for the download to finish (progress shown in menu bar).
-- **CPU pinned by another app** — close heavy background apps and try again.
-- **Real-time transcription disabled** — Settings → Transcription → enable. (Post-meeting transcript will still complete even with real-time off.)
+That's expected — there is no live transcript. Transcription runs after
+you stop the recording. If the transcript doesn't appear after stopping:
+
+- **WhisperKit model not loaded yet** — Settings → Transcription. Wait for the download to finish (progress shown in menu bar). The transcription is queued and runs once the model loads.
+- **CPU pinned by another app** — close heavy background apps; the queued task retries.
 
 ### Can't reopen a completed meeting
 
@@ -125,16 +127,10 @@ If you'd rather have Claude do attribution: Settings → AI (Claude) → paste a
 
 ## Updates
 
-### Update prompt doesn't appear
-
-Check Settings → About → **Check for Updates**. If nothing happens:
-
-- Sparkle EdDSA signing key may be missing or rotated. The next release fixes this.
-- Network blocked from `parkerrl-91.github.io`. Whitelist or download manually from the GitHub releases page.
-
-### Update downloads but won't install
-
-Sparkle does an in-place replace. If macOS quarantine flags the new version, you'll see Gatekeeper warnings. Right-click the app → **Open** to bypass.
+Updates are manual — there is no auto-update prompt. Settings → About →
+**Open GitHub Releases** opens the releases page; download the new DMG and
+replace the app. If macOS quarantine flags the downloaded version, you'll
+see Gatekeeper warnings — right-click the app → **Open** to bypass.
 
 ---
 
@@ -152,18 +148,22 @@ Relaunch. The app rebuilds the database from scratch. **You will lose all meetin
 
 ### App is slow / unresponsive over time
 
-Likely the database is huge from years of meetings. Settings → About → **Compact Database** runs a `VACUUM` and rebuilds indexes. Takes a few minutes.
+Likely the database is huge from years of meetings. There is no in-app compaction button; with the app quit you can compact it manually:
+
+```bash
+sqlite3 ~/Library/Application\ Support/MeetingManager/db.sqlite 'VACUUM;'
+```
 
 ### Migrating to a new Mac
 
 Copy these to the same paths on the new Mac:
 
 - `~/Library/Application Support/MeetingManager/` — entire folder (database + audio files)
-- macOS Keychain entries for `meetingmanager.app` (Claude API key, Sparkle signing). Use Keychain Access → File → Export to back up.
+- macOS Keychain entries for `com.meetingmanager` (Claude API key, Google OAuth, Apollo key). Use Keychain Access → File → Export to back up.
 
 ---
 
 ## Still stuck?
 
-- File an issue at [github.com/ParkerRL-91/Meeting-Manager/issues](https://github.com/ParkerRL-91/Meeting-Manager/issues) with the diagnostic export from Settings → About.
-- The diagnostic export includes recent logs (no transcript content), DB schema version, and config hash. Strip anything sensitive before posting.
+- File an issue at [github.com/ParkerRL-91/Meeting-Manager/issues](https://github.com/ParkerRL-91/Meeting-Manager/issues), attaching the relevant log file from `~/Library/Application Support/MeetingManager/` (`app.log`, plus rotated `app-YYYY-MM-DD.log` files).
+- The logs don't include transcript text, though they may mention meeting titles and attendee names — strip anything sensitive before posting.

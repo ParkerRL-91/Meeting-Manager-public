@@ -20,8 +20,10 @@ Every settings tab and what it does. Open: `⌘,` or **Meeting Manager → Setti
 ## Transcription
 
 - **Whisper model** — `large-v3-turbo` (default), `large-v3`, `medium`, `small`. Switching downloads the new model on first use.
-- **Re-download model** — wipes and re-downloads.
-- **Real-time transcription** — show transcript live during recording.
+- **Language** — BCP-47 hint for transcription (default `en`).
+
+Transcription runs after the recording stops (batch); there is no live
+transcript during the meeting.
 
 ## Calendar
 
@@ -36,7 +38,7 @@ See [Calendar Integration](./calendar-integration.md).
 ## AI (Claude)
 
 - **API key** — paste from [console.anthropic.com](https://console.anthropic.com). Stored in Keychain.
-- **Default model** — `claude-sonnet-4-6` (default), `claude-haiku-4-5`, etc.
+- **Default model** — `claude-sonnet-4-20250514` (default); other Claude models selectable.
 - **Status** — green when valid, red on auth failure.
 
 ## AI (Local)
@@ -81,15 +83,26 @@ The People tab in the main app is a richer view — see [People Directory](./peo
 
 See [Knowledge Base](./knowledge-base.md).
 
+## Integrations
+
+- **Apollo.io API key** — paste to enable attendee profile prep (titles,
+  employer, LinkedIn) on meeting and people views. Stored in Keychain;
+  a Test button validates it. Off until you enable the toggle.
+
 ## About
 
+A static panel:
+
 - App version + build
-- Reset App Permissions — clears macOS TCC entries for Meeting Manager
-- View logs / Diagnostic export
-- Check for updates (Sparkle)
+- **Open GitHub Releases** — updates are manual: the button opens the
+  releases page in your browser and you download the new version yourself
+  (no auto-update; Sparkle was removed)
+
+**Reset App Permissions** (clears macOS TCC entries for Meeting Manager)
+lives in Settings → **General**.
 
 ---
 
 ## Settings Storage
 
-Settings live in `~/Library/Application Support/MeetingManager/db.sqlite` (single GRDB row). API keys are in macOS Keychain. To back up: copy the database file plus the `recordings/` folder. See [Privacy → Local Storage Locations](./privacy.md#local-storage-locations).
+Settings live in `~/Library/Application Support/MeetingManager/db.sqlite` (single GRDB row). API keys are in macOS Keychain. To back up: copy the database file plus the `Audio/` folder. See [Privacy → Local Storage Locations](./privacy.md#local-storage-locations).

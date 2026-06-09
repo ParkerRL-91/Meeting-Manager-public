@@ -15,7 +15,7 @@ Meeting Manager combines five independent signals to attribute clusters to real 
 | **Manual rename** | You renamed a speaker label | 1.00 |
 | **Voice fingerprint match** | Cosine similarity vs stored 40-dim mel-spectrum embedding | 0.82 – 0.99 |
 | **Vocative mining** | "Hey Alice" / "Thanks Bob" patterns near cluster transitions | 0.55 – 0.85 |
-| **Auto-2-person** | 1:1 meeting with one un-named cluster | 0.95 |
+| **Elimination** | The one remaining un-named voice matches the one remaining invitee | 0.80 |
 | **LLM attribution** | Cluster transcript + attendee list → Claude / Ollama | 0.62 – 0.78 |
 
 ## Two Important Gates
@@ -56,7 +56,7 @@ You won't see a dot for:
 - Manual renames (1.0)
 - Voice-matched clusters (≥ 0.82 by definition)
 - Claude-haiku LLM attributions (0.72) and escalated Sonnet (0.78)
-- 2-person auto-assigned clusters (0.95)
+- Elimination-assigned clusters (0.80)
 
 You **will** see a dot for:
 - Single-vote vocative matches (0.55)
@@ -67,15 +67,9 @@ You **will** see a dot for:
 
 ## Cluster Count Hint
 
-The diarizer (SpeakerKit / pyannote) does better work when it knows how many distinct voices to expect. Meeting Manager passes:
+The diarizer (SpeakerKit / pyannote) treats a speaker-count hint as an exact target, so Meeting Manager only passes one when it can compute it safely: it has to positively identify you in the accepted-attendee list (by your signed-in email or your Mac account name), subtract you for call audio, and expect at least 2 voices.
 
-```
-max(2, accepted attendee count + 1)
-```
-
-The `+1` is you on the microphone stream. Capping at a minimum of 2 covers solo / monologue meetings where the diarizer would otherwise refuse to split.
-
-If RSVP data is missing (some Outlook calendars), this falls back to nil — clustering heuristics only.
+In every other case — you're not identifiable in the invite, RSVP data is missing (some Outlook calendars), or only one other voice is expected — no hint is passed and the diarizer's own clustering decides.
 
 ---
 

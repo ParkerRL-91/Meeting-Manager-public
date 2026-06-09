@@ -6,6 +6,9 @@ Meeting Manager is a native macOS SwiftUI application built on Swift 5.9+ with a
 
 ## High-Level Data Flow
 
+Transcription is a post-stop batch pass — there is no live transcription
+during recording (the live view is chat + notes).
+
 ```
 User starts recording
         │
@@ -13,23 +16,33 @@ User starts recording
 AudioCaptureService         ← captures mic and/or system audio
         │
         ▼
-AudioBufferManager          ← buffers raw PCM, feeds chunks downstream
+AudioBufferManager          ← writes time-aligned WAVs to disk
+                              (<id>.wav mixed + <id>_system.wav)
+        │
+User stops recording
         │
         ▼
-StreamingTranscriber        ← WhisperKit inference, emits TranscriptSegment
+TaskQueueManager            ← `transcription` task enqueued (persistent,
+        │                     survives crashes/relaunches)
+        ▼
+AppState.batchTranscribe    ← WhisperKit batch inference over the WAV
+        ├─ diarization INLINE (SpeakerKit, or FluidAudio behind a flag)
+        └─ applySpeakerAttribution INLINE (voice + vocative + LLM)
         │
         ▼
-TranscriptRepository        ← writes segments to SQLite (off main thread)
+TranscriptRepository        ← rows + speakerMap committed atomically
         │
-        ▼
-SummaryGenerator            ← called after recording stops
+        ├─ `summary` task → SummaryGenerator
+        │       │
+        │   ┌───┴───┐
+        │   ▼       ▼
+        │ ClaudeService  OllamaService  ← selected via AIBackendChoice
+        │   │
+        │   ▼
+        │ SummaryRepository  ← stores MeetingSummary to SQLite
         │
-    ┌───┴───┐
-    ▼       ▼
-ClaudeService  OllamaService   ← selected by AppSettings.useLocalLLM
-    │
-    ▼
-SummaryRepository           ← stores MeetingSummary to SQLite
+        └─ `transcriptCleanup` task → TranscriptCleanupService
+                ← stitched + optional [TURN N] AI pass → cleanedTranscript
 ```
 
 ---
@@ -97,11 +110,14 @@ MeetingManager/
 │   ├── Calendar/
 │   │   ├── GoogleCalendarService.swift
 │   │   └── GoogleAuthManager.swift
+│   ├── TaskQueue/
+│   │   └── TaskQueueManager.swift      — persistent post-meeting work
 │   ├── Transcription/
-│   │   ├── StreamingTranscriber.swift  — WhisperKit wrapper
-│   │   └── AppleSpeechTranscriber.swift
+│   │   ├── TranscriptionService.swift  — WhisperKit wrapper (batch)
+│   │   ├── SpeakerDiarizationService.swift
+│   │   └── AppleSpeechEngine.swift     — Apple Speech fallback
 │   └── Updates/
-│       └── UpdateService.swift         — Sparkle wrapper + cache-clearing delegate
+│       └── UpdateService.swift         — stub; Sparkle removed, updates via GitHub Releases
 │
 └── Views/
     ├── Sidebar/
@@ -152,11 +168,11 @@ All repository queries use `LIMIT` clauses (50–200 depending on table) with of
 
 - `@MainActor` on `AppState`, `AudioCaptureService`, and UI-facing services — UI-touching state lives on the main actor
 - DB operations run on GRDB's internal dispatch queue
-- `WhisperEngine` is a Swift `actor` — eliminates data races on the internal WhisperKit instance without manual locking
+- `WhisperEngine` is an `@unchecked Sendable` class with NSLock-guarded access to the internal WhisperKit instance
 - `SystemAudioTap` and `MicrophoneCapture` use `NSLock` to protect shared state accessed from audio callbacks
 - Audio capture callbacks arrive on a dedicated audio thread; shared counters use lock-protected nonisolated methods
 - `Task { }` blocks in SwiftUI views are implicitly main-actor isolated and are cancelled in `.onDisappear`
-- `StreamingTranscriber` batches multiple property updates into a single `MainActor.run {}` block to reduce render cycles
+- The heavy batch-transcription stages (`prepareBatchAudio` WAV decode/trim, `buildTranscriptRows` RMS scans) are `nonisolated static` functions run in `Task.detached` so gigabyte-scale buffer work never stalls the MainActor
 
 ---
 
