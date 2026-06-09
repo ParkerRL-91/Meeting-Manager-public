@@ -21,6 +21,13 @@ final class BrowserCallDetector {
     private(set) var detectedMeetingName: String?
     private var pollCount = 0
 
+    /// When Meeting Manager itself is recording, our own capture engine keeps
+    /// the default input device active, so the mic-usage heuristic (strategy 1)
+    /// reads "in call" forever and call-end detection can never fire. The owner
+    /// wires this to AppState.isRecording; while true, strategy 1 is skipped
+    /// and detection falls through to tab/window-title checks.
+    var isRecordingProvider: (() -> Bool)?
+
     /// Number of consecutive "not in call" polls before we declare the call ended.
     /// At 5s intervals, 3 misses = 15 seconds of no-call before stop fires.
     /// This prevents false stops from transient detection glitches (tab switches,
@@ -100,8 +107,10 @@ final class BrowserCallDetector {
     }
 
     private func detectBrowserCall() -> DetectionResult {
-        // Strategy 1: Check if a browser is using the microphone (cheapest, no permissions needed)
-        if isBrowserUsingMicrophone() {
+        // Strategy 1: Check if a browser is using the microphone (cheapest, no
+        // permissions needed). Suppressed while we're recording — our own
+        // engine holds the input device, so the signal is always positive.
+        if isRecordingProvider?() != true, isBrowserUsingMicrophone() {
             return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage")
         }
 

@@ -216,9 +216,16 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             throw AudioCaptureError.microphonePermissionDenied
         }
 
-        // Set up audio file for recording
+        // Set up audio file for recording. First session uses the canonical
+        // <meetingId>.wav name; a reopen/resume session gets a unique suffix —
+        // AVAudioFile(forWriting:) truncates, so reusing the canonical name
+        // would destroy the prior session's audio.
         let audioDir = try audioDirectory()
-        let fileURL = audioDir.appendingPathComponent("\(meetingId).wav")
+        var fileURL = audioDir.appendingPathComponent("\(meetingId).wav")
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let stamp = Int(Date().timeIntervalSince1970)
+            fileURL = audioDir.appendingPathComponent("\(meetingId)-\(stamp).wav")
+        }
         currentAudioFileURL = fileURL
         micSource = .engine   // SCK-mic fallback (if any) flips this in startMicrophoneWithRetry
 

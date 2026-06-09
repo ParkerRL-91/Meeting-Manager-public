@@ -490,6 +490,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func startCallDetection() {
         callDetectionService = CallDetectionService()
+        // Suppress the browser mic-usage heuristic while we're recording —
+        // otherwise our own capture engine makes "in call" permanently true
+        // and browser call-end detection can never fire.
+        callDetectionService?.isRecordingProvider = { AppState.shared?.isRecording ?? false }
         callDetectionService?.startMonitoring()
     }
 

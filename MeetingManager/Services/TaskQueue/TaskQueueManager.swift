@@ -119,45 +119,46 @@ final class TaskQueueManager {
         guard fm.fileExists(atPath: audioDir.path) else { return }
         guard let entries = try? fm.contentsOfDirectory(at: audioDir, includingPropertiesForKeys: nil) else { return }
 
-        // Map: meetingId UUID → main wav URL (skip _system.wav siblings)
-        var byMeeting: [String: URL] = [:]
+        // Map: meetingId UUID → main wav URLs (skip _system.wav siblings).
+        // A meeting can have several main WAVs: the canonical <uuid>.wav plus
+        // <uuid>-<stamp>.wav files from reopen/resume sessions.
+        var byMeeting: [String: [URL]] = [:]
         for url in entries {
             let name = url.lastPathComponent
             guard name.hasSuffix(".wav"), !name.hasSuffix("_system.wav") else { continue }
-            let meetingId = url.deletingPathExtension().lastPathComponent
-            // Skip ones that don't look like a UUID
-            if meetingId.count != 36 { continue }
-            byMeeting[meetingId] = url
+            let base = url.deletingPathExtension().lastPathComponent
+            let meetingId = String(base.prefix(36))
+            guard UUID(uuidString: meetingId) != nil else { continue }
+            byMeeting[meetingId, default: []].append(url)
         }
         guard !byMeeting.isEmpty else { return }
 
         var repaired = 0
         var reattached = 0
-        for (meetingId, url) in byMeeting {
-            // Repair zero-data WAV header in place if needed.
-            if Self.repairWavHeaderIfNeeded(at: url) {
+        for (meetingId, urls) in byMeeting {
+            // Repair zero-data WAV headers in place if needed (main + system).
+            for url in urls where Self.repairWavHeaderIfNeeded(at: url) {
                 repaired += 1
-                let systemURL = url.deletingLastPathComponent().appendingPathComponent("\(meetingId)_system.wav")
-                _ = Self.repairWavHeaderIfNeeded(at: systemURL)
+                _ = Self.repairWavHeaderIfNeeded(at: AudioBufferManager.systemAudioURL(for: url))
             }
 
             // Re-attach when the meeting row exists but has no audio path.
+            // Writes the JSON `audioFilePaths` column via the model — the
+            // legacy `audioFilePath` column is computed-only and never read,
+            // so a raw UPDATE against it re-attaches nothing.
+            let attachURL = urls.first { $0.lastPathComponent == "\(meetingId).wav" } ?? urls.sorted { $0.lastPathComponent < $1.lastPathComponent }[0]
             do {
-                let needsAttach = try await database.writer.read { db -> Bool in
-                    guard let m = try Meeting.fetchOne(db, key: meetingId) else { return false }
-                    let hasPath = (m.audioFilePath ?? "").isEmpty == false
-                    return !hasPath
+                let didAttach = try await database.writer.write { db -> Bool in
+                    guard var m = try Meeting.fetchOne(db, key: meetingId) else { return false }
+                    guard m.audioFilePaths.isEmpty else { return false }
+                    m.audioFilePaths.append(attachURL.path)
+                    if m.status == .scheduled { m.status = .transcribing }
+                    try m.update(db)
+                    return true
                 }
-                guard needsAttach else { continue }
-
-                try await database.writer.write { db in
-                    try db.execute(
-                        sql: "UPDATE meeting SET audioFilePath = ?, status = CASE WHEN status = 'scheduled' THEN 'transcribing' ELSE status END WHERE id = ?",
-                        arguments: [url.path, meetingId]
-                    )
-                }
+                guard didAttach else { continue }
                 reattached += 1
-                Logger.general.info("TaskQueue: re-attached orphan audio \(url.lastPathComponent, privacy: .public) to meeting \(meetingId, privacy: .public)")
+                Logger.general.info("TaskQueue: re-attached orphan audio \(attachURL.lastPathComponent, privacy: .public) to meeting \(meetingId, privacy: .public)")
             } catch {
                 Logger.general.warning("TaskQueue: reattach failed for \(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -394,7 +395,8 @@ final class TaskQueueManager {
             //      which is exactly what causes the user-visible "the same
             //      tasks every launch" loop.
             var needTranscription: [Meeting] = []
-            for meeting in candidates {
+            for candidate in candidates {
+                let meeting = await promoteLegacyAudioPathIfNeeded(candidate)
                 if !meetingHasReachableAudio(meeting) {
                     Logger.general.info("TaskQueue: clearing audio paths for \(meeting.id, privacy: .public) (\(meeting.title, privacy: .public)) — files missing on disk")
                     try? await clearMissingAudioPaths(for: meeting)
@@ -420,13 +422,15 @@ final class TaskQueueManager {
                 """)
             }
 
+            var enqueuedSummaries = 0
             if shouldEnqueueAIWork {
-                for meeting in needSummary {
+                for meeting in needSummary where try await !meetingHasRecentSummaryAttempt(meeting) {
                     await enqueue(type: .summary, meetingId: meeting.id, priority: 6)
+                    enqueuedSummaries += 1
                 }
             }
 
-            let total = needTranscription.count + needSummary.count
+            let total = needTranscription.count + enqueuedSummaries
             if total > 0 {
                 Logger.general.info("TaskQueue: enqueued \(needTranscription.count) transcription + \(needSummary.count) summary orphaned tasks")
             }
@@ -445,11 +449,31 @@ final class TaskQueueManager {
         for path in meeting.audioFilePaths where !path.isEmpty {
             if fm.fileExists(atPath: path) { return true }
         }
-        // Legacy single-path column — last-resort check.
-        // (Meeting.audioFilePath is computed from audioFilePaths.first; this
-        // path covers rows where only the legacy column was populated and
-        // never migrated into the JSON array.)
         return false
+    }
+
+    /// Pre-JSON-array rows may carry their audio only in the legacy
+    /// `audioFilePath` DB column, which the model no longer decodes
+    /// (`Meeting.audioFilePath` is computed from `audioFilePaths.first`).
+    /// Promote a reachable legacy path into `audioFilePaths` so downstream
+    /// resolution (task execution, reachability checks) can see it — without
+    /// this, the orphan scan wipes the legacy row's only audio reference.
+    private func promoteLegacyAudioPathIfNeeded(_ meeting: Meeting) async -> Meeting {
+        guard meeting.audioFilePaths.isEmpty else { return meeting }
+        let legacy: String? = try? await database.writer.read { db in
+            try String.fetchOne(db, sql: "SELECT audioFilePath FROM meeting WHERE id = ?", arguments: [meeting.id])
+        }
+        guard let legacy, !legacy.isEmpty, FileManager.default.fileExists(atPath: legacy) else { return meeting }
+        var promoted = meeting
+        promoted.audioFilePaths = [legacy]
+        let updated = promoted
+        do {
+            try await database.writer.write { db in try updated.update(db) }
+            Logger.general.info("TaskQueue: promoted legacy audio path into audioFilePaths for \(meeting.id, privacy: .public)")
+        } catch {
+            Logger.general.warning("TaskQueue: legacy path promotion failed for \(meeting.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        return updated
     }
 
     /// True when this meeting has had a transcription task attempted
@@ -464,6 +488,23 @@ final class TaskQueueManager {
             let count = try TaskQueueItem
                 .filter(TaskQueueItem.Columns.meetingId == meeting.id)
                 .filter(TaskQueueItem.Columns.type == TaskQueueItem.TaskType.transcription.rawValue)
+                .fetchCount(db)
+            return count > 0
+        }
+    }
+
+    /// True when this meeting already has a summary task row in ANY state.
+    /// `enqueue` only dedups pending+running, so without this gate a meeting
+    /// whose summary permanently fails (Ollama stopped, model not pulled,
+    /// revoked key) is re-enqueued by the 15-minute poll forever — a fresh
+    /// task row plus two LLM attempts per cycle, around the clock. Same
+    /// pattern as `meetingHasRecentTranscriptionAttempt`; the user can still
+    /// regenerate manually.
+    private func meetingHasRecentSummaryAttempt(_ meeting: Meeting) async throws -> Bool {
+        try await database.writer.read { db in
+            let count = try TaskQueueItem
+                .filter(TaskQueueItem.Columns.meetingId == meeting.id)
+                .filter(TaskQueueItem.Columns.type == TaskQueueItem.TaskType.summary.rawValue)
                 .fetchCount(db)
             return count > 0
         }
@@ -768,13 +809,15 @@ final class TaskQueueManager {
                     LIMIT 10
                 """)
             }
+            var enqueued = 0
             if shouldEnqueueAIWork {
-                for meeting in needSummary {
+                for meeting in needSummary where try await !meetingHasRecentSummaryAttempt(meeting) {
                     await enqueue(type: .summary, meetingId: meeting.id, priority: 8)
+                    enqueued += 1
                 }
             }
-            if shouldEnqueueAIWork, !needSummary.isEmpty {
-                Logger.general.info("TaskQueue: poll found \(needSummary.count) meeting(s) needing summaries")
+            if enqueued > 0 {
+                Logger.general.info("TaskQueue: poll enqueued \(enqueued) meeting(s) needing summaries")
             }
         } catch {
             Logger.general.error("TaskQueue: poll failed: \(error.localizedDescription)")

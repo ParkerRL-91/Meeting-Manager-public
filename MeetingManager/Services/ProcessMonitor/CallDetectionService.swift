@@ -24,6 +24,13 @@ final class CallDetectionService {
     /// Detects browser-based meetings (Google Meet, etc.) via window title polling.
     nonisolated(unsafe) private var browserDetector: BrowserCallDetector?
 
+    /// Forwarded to BrowserCallDetector — suppresses the mic-usage heuristic
+    /// while Meeting Manager itself is recording (our capture engine keeps the
+    /// input device active, which would read as an always-on browser call).
+    var isRecordingProvider: (() -> Bool)? {
+        didSet { browserDetector?.isRecordingProvider = isRecordingProvider }
+    }
+
     /// Apps that were already running when we started monitoring.
     /// These are NOT treated as "call started" events because they may have been
     /// open before Meeting Manager launched (e.g., Teams auto-launches at login).
@@ -53,6 +60,7 @@ final class CallDetectionService {
 
         // Start browser-based meeting detection (Google Meet, etc.)
         browserDetector = BrowserCallDetector()
+        browserDetector?.isRecordingProvider = isRecordingProvider
         browserDetector?.start()
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter

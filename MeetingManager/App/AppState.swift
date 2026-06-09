@@ -1548,6 +1548,16 @@ final class AppState {
     /// because multiple async Tasks can read it as nil before any of them set it.
     private var isStartingMeeting = false
 
+    /// Mirror of `isStartingMeeting` for the stop side — user Stop, silence
+    /// auto-stop, and the ⌘-shortcut notification can race.
+    private var isStoppingMeeting = false
+
+    /// Bundle identifier of the call app that triggered the current
+    /// detector-started recording. The `.callAppTerminated` auto-stop only
+    /// fires when THIS app terminates — Teams self-updating in the background
+    /// must not kill a Zoom recording.
+    private var autoRecordTriggerBundleId: String?
+
     /// Create an ad-hoc meeting and start recording. Called from the sidebar "New Meeting"
     /// button, menu bar, Home view, and the `.createNewMeeting` notification observer.
     ///
@@ -1616,10 +1626,8 @@ final class AppState {
                     isAdHoc = true
                 }
 
-                self.activeMeeting = self.stateMachine.currentMeeting
-                self.isRecording = self.stateMachine.isRecording
+                await self.wireActiveRecordingSession()
                 self.selectedMeetingId = meeting.id
-                if self.isRecording { self.startAudioLevelPolling() }
                 self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
                 self.loadMeetings()
 
@@ -1682,11 +1690,8 @@ final class AppState {
             defer { self.isStartingMeeting = false }
             do {
                 try await stateMachine.startRecording(meeting: meeting)
-                self.activeMeeting = self.stateMachine.currentMeeting
-                self.isRecording = self.stateMachine.isRecording
-                self.selectedMeetingId = self.stateMachine.currentMeeting?.id
+                await self.wireActiveRecordingSession()
                 self.detectedCallApp = nil
-                self.startAudioLevelPolling()
 
                 // One last attempt to refresh the pre-meeting brief now
                 // that the meeting is actually starting. If the previous
@@ -1699,46 +1704,6 @@ final class AppState {
                     await self?.refreshContextForMeetingStart(meetingId: meeting.id)
                 }
 
-                // Surface audio write errors to the user (e.g. disk full)
-                self.audioCaptureService.onWriteError = { [weak self] error in
-                    Task { @MainActor [weak self] in
-                        self?.lastUserError = "Audio write error: \(error.localizedDescription). Recording may be incomplete."
-                    }
-                }
-
-                // Wire Apple Speech fallback if WhisperKit is unavailable.
-                // SFSpeechRecognizer produces nothing until the user grants
-                // Speech access, so request it before starting the recognizer.
-                if self.transcriptionService.transcriptionMode == .appleSpeech,
-                   let meetingId = self.stateMachine.currentMeeting?.id {
-                    if await AppleSpeechSupport.ensureAuthorized() {
-                        self.audioCaptureService.onRawMicBuffer = { [weak self] buffer in
-                            self?.appleSpeechTranscriber.appendBuffer(buffer)
-                        }
-                        self.appleSpeechTranscriber.start(meetingId: meetingId, repository: self.transcriptRepository)
-                        self.fileLog("Apple Speech fallback wired for meeting \(meetingId)")
-                    } else {
-                        self.lastUserError = "Speech Recognition access is off. Live transcription is unavailable until you enable it in System Settings → Privacy & Security → Speech Recognition."
-                        self.fileLog("Apple Speech fallback: Speech authorization denied")
-                    }
-                }
-
-                // Start participant detection if calendar didn't provide attendees.
-                // Calendar attendees are written to meeting.participants during sync;
-                // if still empty here, fall back to screen/window title detection.
-                if let meetingId = self.stateMachine.currentMeeting?.id {
-                    let currentParticipants = self.stateMachine.currentMeeting?.participantList ?? []
-                    let service = ParticipantDetectionService(
-                        meetingRepository: self.meetingRepository,
-                        database: self.database
-                    )
-                    self.participantDetectionService = service
-                    service.start(meetingId: meetingId, existingParticipants: currentParticipants)
-                }
-
-                // Resolve template: use meeting's own templateId, or inherit from series.
-                self.activeTemplate = await self.resolveTemplate(for: meeting)
-
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
@@ -1746,6 +1711,57 @@ final class AppState {
                 self.lastUserError = error.localizedDescription
             }
         }
+    }
+
+    /// Per-recording wiring shared by EVERY start path — manual, ad-hoc
+    /// (`startNewMeeting`), auto-record (`handleCallDetected`), reopen, and
+    /// the `.startRecording` notification. Historically only
+    /// `startRecording(for:)` did this, so auto-recorded meetings never got
+    /// write-error surfacing, the Apple Speech fallback, or screen-based
+    /// participant detection.
+    private func wireActiveRecordingSession() async {
+        guard let current = stateMachine.currentMeeting else { return }
+
+        self.activeMeeting = current
+        self.isRecording = stateMachine.isRecording
+        self.selectedMeetingId = current.id
+        if self.isRecording { self.startAudioLevelPolling() }
+
+        // Surface audio write errors to the user (e.g. disk full)
+        self.audioCaptureService.onWriteError = { [weak self] error in
+            Task { @MainActor [weak self] in
+                self?.lastUserError = "Audio write error: \(error.localizedDescription). Recording may be incomplete."
+            }
+        }
+
+        // Wire Apple Speech fallback if WhisperKit is unavailable.
+        // SFSpeechRecognizer produces nothing until the user grants
+        // Speech access, so request it before starting the recognizer.
+        if self.transcriptionService.transcriptionMode == .appleSpeech {
+            if await AppleSpeechSupport.ensureAuthorized() {
+                self.audioCaptureService.onRawMicBuffer = { [weak self] buffer in
+                    self?.appleSpeechTranscriber.appendBuffer(buffer)
+                }
+                self.appleSpeechTranscriber.start(meetingId: current.id, repository: self.transcriptRepository)
+                self.fileLog("Apple Speech fallback wired for meeting \(current.id)")
+            } else {
+                self.lastUserError = "Speech Recognition access is off. Live transcription is unavailable until you enable it in System Settings → Privacy & Security → Speech Recognition."
+                self.fileLog("Apple Speech fallback: Speech authorization denied")
+            }
+        }
+
+        // Start participant detection if calendar didn't provide attendees.
+        // Calendar attendees are written to meeting.participants during sync;
+        // if still empty here, fall back to screen/window title detection.
+        let service = ParticipantDetectionService(
+            meetingRepository: self.meetingRepository,
+            database: self.database
+        )
+        self.participantDetectionService = service
+        service.start(meetingId: current.id, existingParticipants: current.participantList)
+
+        // Resolve template: use meeting's own templateId, or inherit from series.
+        self.activeTemplate = await self.resolveTemplate(for: current)
     }
 
     /// Resolves the template for a meeting:
@@ -1787,11 +1803,8 @@ final class AppState {
             defer { self.isStartingMeeting = false }
             do {
                 try await stateMachine.reopenRecording(meeting: meeting)
-                self.activeMeeting = self.stateMachine.currentMeeting
-                self.isRecording = self.stateMachine.isRecording
+                await self.wireActiveRecordingSession()
                 self.isReopening = true
-                self.selectedMeetingId = self.stateMachine.currentMeeting?.id
-                self.startAudioLevelPolling()
                 loadMeetings()
                 fileLog("Reopen recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
             } catch {
@@ -1850,12 +1863,20 @@ final class AppState {
     /// menu bar reflect the correct state. Batch transcription runs in a separate
     /// detached task so it never interferes with a subsequent recording.
     func stopRecording() {
+        // Serialize: user Stop, silence auto-stop, capacity auto-stop, and the
+        // ⌘-shortcut notification can all fire near-simultaneously. A second
+        // stateMachine.stopRecording() throws noActiveMeeting, which used to
+        // surface as a spurious user-facing alert.
+        guard !isStoppingMeeting else { return }
+        isStoppingMeeting = true
+
         // Warn user if transcription model isn't ready yet
         if !transcriptionService.isModelLoaded {
             lastUserError = "The transcription model is still downloading. Your audio has been saved and will be transcribed once the download completes."
         }
 
         Task {
+            defer { self.isStoppingMeeting = false }
             do {
                 // Save references before stopRecording clears them
                 let stoppedMeeting = stateMachine.currentMeeting
@@ -1866,6 +1887,7 @@ final class AppState {
                 self.activeMeeting = self.stateMachine.currentMeeting
                 self.isRecording = self.stateMachine.isRecording
                 self.recordingStartedByDetector = false
+                self.autoRecordTriggerBundleId = nil
                 self.isReopening = false
                 self.stopAudioLevelPolling()
 
@@ -1898,8 +1920,13 @@ final class AppState {
                     )
                 }
             } catch {
-                Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
-                self.lastUserError = error.localizedDescription
+                if case MeetingStateMachineError.noActiveMeeting = error {
+                    // Benign: a concurrent stop already won. Nothing to surface.
+                    Logger.general.info("stopRecording: no active meeting — already stopped")
+                } else {
+                    Logger.general.error("Failed to stop recording: \(error.localizedDescription)")
+                    self.lastUserError = error.localizedDescription
+                }
             }
         }
     }
@@ -3611,7 +3638,7 @@ final class AppState {
     /// Called when a call app or browser meeting is detected.
     /// Respects `autoRecord` and `autoInvite` settings.
     @MainActor
-    private func handleCallDetected(appName: String) {
+    private func handleCallDetected(appName: String, bundleId: String? = nil) {
         guard !isRecording else {
             Logger.general.info("Call detected (\(appName)) but already recording — ignoring")
             return
@@ -3666,14 +3693,13 @@ final class AppState {
                         meeting = created
                     }
 
-                    self.activeMeeting = self.stateMachine.currentMeeting
-                    self.isRecording = self.stateMachine.isRecording
+                    await self.wireActiveRecordingSession()
                     self.selectedMeetingId = meeting.id
                     self.detectedCallApp = nil
                     self.recordingStartedByDetector = self.isRecording
-                    if self.isRecording { self.startAudioLevelPolling() }
+                    self.autoRecordTriggerBundleId = self.isRecording ? bundleId : nil
                     self.loadMeetings()
-                    self.fileLog("handleCallDetected: recording started for \(meeting.id) ('\(meeting.title)')")
+                    self.fileLog("handleCallDetected: recording started for \(meeting.id) ('\(meeting.title)') trigger=\(bundleId ?? "unknown")")
 
                     // Notify the user that auto-recording has started
                     self.sendAutoRecordStartedNotification(meetingTitle: meeting.title)
@@ -4343,26 +4369,75 @@ final class AppState {
             .sink { [weak self] notification in
                 guard let self else { return }
                 let appName = notification.userInfo?["appName"] as? String ?? "Meeting"
+                let bundleId = notification.userInfo?["bundleIdentifier"] as? String
                 Task { @MainActor in
-                    self.handleCallDetected(appName: appName)
+                    self.handleCallDetected(appName: appName, bundleId: bundleId)
                 }
             }
             .store(in: &cancellables)
 
-        // Call app closed — auto-stop recording only if it was detector-started.
+        // Call app closed — auto-stop recording only if it was detector-started
+        // AND the terminated app is the one that triggered the recording.
         // Manually-started recordings must never be stopped by the browser detector
-        // losing signal (e.g., when MicUsage is suppressed because we're recording).
+        // losing signal, and an unrelated call app quitting (Teams self-updating,
+        // Zoom's CptHost ending a screen share) must not kill the recording.
         NotificationCenter.default.publisher(for: .callAppTerminated)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                let terminatedBundleId = notification.userInfo?["bundleIdentifier"] as? String
+                Task { @MainActor in
+                    if self.isRecording && self.recordingStartedByDetector {
+                        if let trigger = self.autoRecordTriggerBundleId,
+                           let terminated = terminatedBundleId,
+                           trigger != terminated {
+                            Logger.general.info("Call app \(terminated) ended but recording was triggered by \(trigger) — keeping recording alive")
+                            return
+                        }
+                        self.detectedCallApp = nil
+                        Logger.general.info("Call ended — auto-stopping detector-started recording")
+                        self.stopRecording()
+                    } else {
+                        self.detectedCallApp = nil
+                        if self.isRecording {
+                            Logger.general.info("Call ended signal received — keeping recording alive (manually started)")
+                        }
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // External start/stop requests (⌘ shortcut, menu-bar item, notification
+        // actions, sidebar banner). Routed through AppState — NOT the state
+        // machine — so every entry point gets the full per-recording wiring
+        // (transcription enqueue on stop, level polling, participant detection).
+        NotificationCenter.default.publisher(for: .startRecording)
+            .sink { [weak self] notification in
+                guard let self else { return }
+                let meetingId = notification.userInfo?["meetingId"] as? String
+                Task { @MainActor in
+                    guard !self.isRecording else { return }
+                    if let meetingId {
+                        if let meeting = try? await self.meetingRepository.find(id: meetingId) {
+                            self.startOrReopenRecording(for: meeting)
+                        } else {
+                            Logger.notifications.warning("startRecording notification: meeting \(meetingId, privacy: .public) not found")
+                        }
+                    } else {
+                        self.startNewMeeting()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .stopRecording)
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
-                    self.detectedCallApp = nil
-                    if self.isRecording && self.recordingStartedByDetector {
-                        Logger.general.info("Call ended — auto-stopping detector-started recording")
-                        self.stopRecording()
-                    } else if self.isRecording {
-                        Logger.general.info("Call ended signal received — keeping recording alive (manually started)")
-                    }
+                    // AppState.stopRecording itself re-posts .stopRecording as a
+                    // "recording stopped" broadcast after isRecording is already
+                    // false — this guard is what breaks that cycle.
+                    guard self.isRecording else { return }
+                    self.stopRecording()
                 }
             }
             .store(in: &cancellables)

@@ -36,6 +36,12 @@ final class MeetingStateMachine {
     private(set) var currentState: MeetingStatus = .scheduled
     private(set) var isRecording: Bool = false
 
+    /// Set synchronously before the first await in startRecording/reopenRecording.
+    /// `currentMeeting == nil` alone is a TOCTOU hazard: it's only assigned after
+    /// persist + capture start (seconds of awaits), so two interleaved starts both
+    /// pass the nil check and the loser's audio lands on the winner's meeting.
+    private var isStarting = false
+
     // MARK: - Dependencies
 
     private let meetingRepository: MeetingRepository
@@ -79,9 +85,11 @@ final class MeetingStateMachine {
 
     /// Start recording for a meeting. Accepts scheduled or notified meetings.
     func startRecording(meeting: Meeting) async throws {
-        guard currentMeeting == nil else {
+        guard currentMeeting == nil, !isStarting else {
             throw MeetingStateMachineError.alreadyRecording
         }
+        isStarting = true
+        defer { isStarting = false }
         try validateTransition(from: meeting.status, to: .recording)
 
         var updated = meeting
@@ -107,11 +115,30 @@ final class MeetingStateMachine {
             throw error
         }
 
+        await persistAudioPathAtStart(&updated)
+
         currentMeeting = updated
         currentState = .recording
         isRecording = true
 
         postStateChanged(meeting: updated)
+    }
+
+    /// Persist the capture file path the moment recording starts, not only at
+    /// stop. If the app crashes mid-recording, the startup cleanup pass needs
+    /// the path on the meeting row to route the WAV into transcription instead
+    /// of resetting the meeting to `.scheduled` and orphaning the file.
+    private func persistAudioPathAtStart(_ meeting: inout Meeting) async {
+        guard let path = audioCaptureService.currentAudioFileURL?.path,
+              !meeting.audioFilePaths.contains(path) else { return }
+        meeting.audioFilePaths.append(path)
+        do {
+            try await persist(&meeting)
+        } catch {
+            // Recording is already running — don't fail the start over
+            // bookkeeping. stopRecording() appends the path again as backstop.
+            Logger.general.error("startRecording: failed to persist audio path at start: \(error.localizedDescription)")
+        }
     }
 
     /// Stop recording the current meeting and transition to transcribing.
@@ -142,9 +169,11 @@ final class MeetingStateMachine {
     /// Transitions: complete → recording. The new audio file is appended to
     /// `audioFilePaths` when `stopRecording()` is called.
     func reopenRecording(meeting: Meeting) async throws {
-        guard currentMeeting == nil else {
+        guard currentMeeting == nil, !isStarting else {
             throw MeetingStateMachineError.alreadyRecording
         }
+        isStarting = true
+        defer { isStarting = false }
         try validateTransition(from: meeting.status, to: .recording)
 
         var updated = meeting
@@ -160,6 +189,8 @@ final class MeetingStateMachine {
             try? await persist(&updated)
             throw error
         }
+
+        await persistAudioPathAtStart(&updated)
 
         currentMeeting = updated
         currentState = .recording
@@ -250,23 +281,11 @@ final class MeetingStateMachine {
         // NOT auto-stop here — doing so kills manually-started recordings
         // when the BrowserCallDetector's mic-usage heuristic loses signal.
 
-        // External start recording request (e.g., from notification action)
-        NotificationCenter.default.publisher(for: .startRecording)
-            .sink { [weak self] notification in
-                Task { [weak self] in
-                    await self?.handleStartRecordingNotification(notification)
-                }
-            }
-            .store(in: &cancellables)
-
-        // External stop recording request
-        NotificationCenter.default.publisher(for: .stopRecording)
-            .sink { [weak self] _ in
-                Task { [weak self] in
-                    try? await self?.stopRecording()
-                }
-            }
-            .store(in: &cancellables)
+        // NOTE: .startRecording / .stopRecording are observed by AppState, NOT
+        // here. Stopping via the state machine directly would skip everything
+        // that lives only in AppState.stopRecording — transcription enqueue,
+        // level-polling teardown, participant-detection stop — leaving the
+        // meeting stuck in `.transcribing` with no queued work.
     }
 
     private func handleCallAppLaunched(appName: String?) async {
@@ -292,32 +311,6 @@ final class MeetingStateMachine {
         }
     }
 
-
-    private func handleStartRecordingNotification(_ notification: Notification) async {
-        let meetingId = notification.userInfo?["meetingId"] as? String
-        Logger.notifications.info("[StateMachine.handleStartRecordingNotification] received for meetingId=\(meetingId ?? "nil(ad-hoc)", privacy: .public)")
-        // If a meeting ID is provided, look it up; otherwise create ad-hoc
-        if let meetingId {
-            do {
-                guard let meeting = try await meetingRepository.find(id: meetingId) else {
-                    Logger.notifications.warning("[StateMachine] meeting not found for id=\(meetingId, privacy: .public)")
-                    return
-                }
-                Logger.notifications.info("[StateMachine] starting recording for '\(meeting.title, privacy: .public)'")
-                try await startRecording(meeting: meeting)
-                Logger.notifications.info("[StateMachine] startRecording succeeded for id=\(meetingId, privacy: .public)")
-            } catch {
-                Logger.notifications.error("[StateMachine] startRecording threw for id=\(meetingId, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        } else {
-            do {
-                Logger.notifications.info("[StateMachine] creating ad-hoc meeting from notification")
-                _ = try await createAndStartMeeting(title: "New Meeting")
-            } catch {
-                Logger.notifications.error("[StateMachine] ad-hoc creation failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
 
     // MARK: - Private Helpers
 
