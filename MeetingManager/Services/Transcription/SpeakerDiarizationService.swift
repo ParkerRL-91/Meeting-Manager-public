@@ -35,17 +35,30 @@ final class SpeakerDiarizationService {
         case unloaded, downloading, loaded, failed
     }
 
+    /// In-flight load, shared by concurrent callers. Without it, a second
+    /// caller arriving while the state is `.downloading` started a parallel
+    /// download/compile — double bandwidth and model memory, last writer wins.
+    private var loadTask: Task<Void, Error>?
+
     /// Load (and download if needed) the SpeakerKit CoreML models.
-    /// Safe to call multiple times — no-ops if already loaded.
+    /// Safe to call multiple times — no-ops if already loaded; concurrent
+    /// callers await the same in-flight load.
     /// Wrapped in a 5-minute timeout race because the Pyannote model download
-    /// can hang indefinitely on a bad network or corrupt cache.
+    /// can hang indefinitely on a bad network or corrupt cache. (The timeout
+    /// is best-effort: the download phase cancels cleanly; a hang inside the
+    /// CoreML compile is not cancellation-responsive and outlives the timer.)
     func loadModels() async throws {
         guard modelState != .loaded else { return }
+
+        if let existing = loadTask {
+            try await existing.value
+            return
+        }
 
         modelState = .downloading
         logger.info("Loading SpeakerKit models...")
 
-        do {
+        let task = Task<Void, Error> {
             let config = PyannoteConfig(
                 download: true,
                 load: true,
@@ -63,9 +76,15 @@ final class SpeakerDiarizationService {
                 group.cancelAll()
                 return loaded
             }
-            speakerKit = kit
-            modelState = .loaded
-            logger.info("SpeakerKit models ready.")
+            self.speakerKit = kit
+            self.modelState = .loaded
+            self.logger.info("SpeakerKit models ready.")
+        }
+        loadTask = task
+        defer { loadTask = nil }
+
+        do {
+            try await task.value
         } catch {
             modelState = .failed
             logger.error("SpeakerKit model load failed: \(error.localizedDescription)")
@@ -195,24 +214,24 @@ final class SpeakerDiarizationService {
     // MARK: - Private
 
     /// Read a 16kHz mono Float32 WAV into a plain [Float] array.
+    /// Validates the format instead of "converting": `AVAudioFile.read(into:)`
+    /// performs NO sample-rate conversion (mismatched formats just error),
+    /// so a non-16k file must be rejected loudly — diarizing it would produce
+    /// time-warped garbage segments.
     private func loadAsSamples(url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )!
+        let fmt = file.processingFormat
+        guard fmt.sampleRate == 16000, fmt.channelCount == 1 else {
+            throw DiarizationError.unsupportedFormat(
+                sampleRate: fmt.sampleRate, channels: Int(fmt.channelCount))
+        }
 
         let frameCount = AVAudioFrameCount(file.length)
         guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+              let buffer = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frameCount) else {
             return []
         }
-
-        // Re-read with the explicit 16kHz mono format to handle any mismatch.
-        let readFile = try AVAudioFile(forReading: url)
-        try readFile.read(into: buffer)
+        try file.read(into: buffer)
 
         guard let channelData = buffer.floatChannelData else { return [] }
         return Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
@@ -227,6 +246,7 @@ enum DiarizationError: LocalizedError {
     case audioFileNotFound(String)
     case emptyAudio
     case insufficientDiskSpace(freeMB: Int64)
+    case unsupportedFormat(sampleRate: Double, channels: Int)
 
     var errorDescription: String? {
         switch self {
@@ -240,6 +260,8 @@ enum DiarizationError: LocalizedError {
             return "System audio file is empty — nothing to diarize."
         case .insufficientDiskSpace(let freeMB):
             return "Not enough disk space to download the speaker diarization models. Only \(freeMB) MB free — free up space and try again."
+        case .unsupportedFormat(let sampleRate, let channels):
+            return "Audio file is \(Int(sampleRate)) Hz / \(channels)ch — diarization requires 16 kHz mono."
         }
     }
 }

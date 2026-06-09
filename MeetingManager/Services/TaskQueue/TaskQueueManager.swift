@@ -540,13 +540,22 @@ final class TaskQueueManager {
     private func processLoop() async {
         while !Task.isCancelled {
             guard let next = await fetchNextPending() else {
-                // Queue is drained — fire the idle hook once per busy→idle edge.
+                // Queue is drained — fire the idle hook once per busy→idle
+                // edge, then PARK. enqueue()/retry() restart the processor
+                // via kickProcessor(); the old 5-second sleep-and-poll ran
+                // ~17K needless DB reads a day in an app meant to idle
+                // quietly for hours.
                 if !idleNotified {
                     idleNotified = true
                     if let onQueueIdle { await onQueueIdle() }
                 }
-                try? await Task.sleep(for: .seconds(5))
-                continue
+                processorTask = nil
+                // Lost-wakeup guard: an enqueue can land during the drain
+                // check above, see processorTask != nil, and skip the kick.
+                // One re-check after clearing the handle closes that window
+                // (everything here is MainActor-serialized).
+                if await fetchNextPending() != nil { kickProcessor() }
+                return
             }
             idleNotified = false
 

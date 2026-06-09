@@ -73,6 +73,11 @@ enum OllamaServiceError: LocalizedError {
     case emptyResponse
     case networkError(Error)
     case decodingError(Error)
+    /// Request hit its (generously sized) timeout. Terminal, NOT retried:
+    /// the budget can be up to 30 min for Qwen3 thinking on long inputs, so
+    /// 3 identical retries against a wedged server would stall the serial
+    /// task queue — and everything queued behind it — for over an hour.
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -88,6 +93,8 @@ enum OllamaServiceError: LocalizedError {
             return "Could not reach Ollama: \(error.localizedDescription)"
         case .decodingError(let error):
             return "Failed to parse Ollama response: \(error.localizedDescription)"
+        case .timedOut:
+            return "Ollama timed out before producing a response. The server may be wedged — try restarting Ollama, or switch to a smaller model."
         }
     }
 }
@@ -296,6 +303,9 @@ final class OllamaService {
                 (data, response) = try await URLSession.shared.data(for: request)
             } catch {
                 Logger.ai.error("Ollama network error: \(error.localizedDescription)")
+                if (error as? URLError)?.code == .timedOut {
+                    throw OllamaServiceError.timedOut
+                }
                 throw OllamaServiceError.networkError(error)
             }
 

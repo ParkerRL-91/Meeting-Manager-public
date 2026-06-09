@@ -256,24 +256,24 @@ final class FluidAudioDiarizationService: @unchecked Sendable {
     // MARK: - Private
 
     /// Read a 16kHz mono Float32 WAV into a plain [Float] array.
+    /// Validates the format: `performCompleteDiarization` assumes 16 kHz, so
+    /// a foreign-rate file would silently produce time-warped segments.
     private func loadAsSamples(url: URL) throws -> [Float] {
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )!
-
         let file = try AVAudioFile(forReading: url)
+        let fmt = file.processingFormat
+        guard fmt.sampleRate == 16000, fmt.channelCount == 1 else {
+            throw DiarizationError.unsupportedFormat(
+                sampleRate: fmt.sampleRate, channels: Int(fmt.channelCount))
+        }
+
         let frameCount = AVAudioFrameCount(file.length)
         guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
+              let buffer = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frameCount) else {
             return []
         }
         try file.read(into: buffer)
 
         guard let channelData = buffer.floatChannelData else { return [] }
-        _ = format
         return Array(UnsafeBufferPointer(start: channelData[0], count: Int(buffer.frameLength)))
     }
 }
