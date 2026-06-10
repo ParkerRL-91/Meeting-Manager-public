@@ -24,7 +24,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Select latest Xcode (Swift 6+ needed for the dependency graph)
         run: |
@@ -38,7 +38,7 @@ jobs:
       # them. Cache keyed on Package.resolved so a dependency change busts it
       # cleanly. Saves ~3–8 minutes per run on a warm cache hit.
       - name: Cache SPM dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/Library/Caches/org.swift.swiftpm
