@@ -36,11 +36,18 @@ private struct OllamaOptions: Encodable {
     let temperature: Double
     let num_predict: Int
     let num_ctx: Int?
+    // Sent only for qwen3 thinking-mode calls (official card: 0.95 / 20);
+    // nil leaves Ollama's defaults in place for every other model.
+    let top_p: Double?
+    let top_k: Int?
 
-    init(temperature: Double, num_predict: Int, num_ctx: Int? = nil) {
+    init(temperature: Double, num_predict: Int, num_ctx: Int? = nil,
+         top_p: Double? = nil, top_k: Int? = nil) {
         self.temperature = temperature
         self.num_predict = num_predict
         self.num_ctx = num_ctx
+        self.top_p = top_p
+        self.top_k = top_k
     }
 }
 
@@ -126,9 +133,14 @@ final class OllamaService {
     static let defaultModel = defaultTier
 
     /// Model tiers ranked by capability. The adaptive selector picks the best
-    /// installed model that can handle the input size. Top tier raised to
-    /// 131K because Qwen3 8B's native context goes to 128K — well above
-    /// Llama 3.1 8B's effective 65K limit.
+    /// installed model that can handle the input size. Window values must
+    /// stay within `modelContextLimit` for the tier's model — the top rung is
+    /// 40 960 because that is qwen3's TRAINED window (the "128K" headline
+    /// number is YaRN-extended, which Ollama's default tags don't enable;
+    /// requesting num_ctx past the trained window silently degrades
+    /// attention rather than erroring). At runtime every tier is further
+    /// clamped to `ramContextCap` — the table expresses model capability,
+    /// the cap expresses what this machine can hold (ADR-015).
     static let modelTiers: [(name: String, maxInputTokens: Int, contextWindow: Int)] = [
         // NOTE: explicit "qwen3:4b"/"qwen3:8b" rather than Self.smallTier — Swift
         // won't let a static stored property reference Self in its initializer.
@@ -137,8 +149,92 @@ final class OllamaService {
         ("qwen3:4b",  8000,  16384),   // Medium — standard meetings
         ("qwen3:4b", 14000,  32768),   // Large — extended meetings
         ("qwen3:8b", 22000,  32768),   // XL — long meetings, better reasoning
-        ("qwen3:8b", 60000, 131072),   // XXL — marathon sessions, native 128K context
+        ("qwen3:8b", 32000,  40960),   // XXL — marathon sessions, full trained window
     ]
+
+    /// Trained context window per model family. Ollama accepts any num_ctx
+    /// without complaint, but positions beyond the trained window get
+    /// effectively random attention — a silent quality collapse, not an
+    /// error. Qwen3 tags ship with max_position_embeddings 40960 (the 2507
+    /// 4b refresh goes higher, but the tag name can't tell us which build a
+    /// user pulled, so the safe floor applies to the whole family).
+    /// Llama 3.1/3.2 trained at 128K but degrade well before it at Q4 —
+    /// 65 536 matches the "effective 65K" treatment in the tier fallback.
+    static func modelContextLimit(for model: String) -> Int {
+        if model.contains("llama3.1") || model.contains("llama3.2") { return 65_536 }
+        if model.contains("qwen2.5") { return 32_768 }
+        if model.contains("qwen3") { return 40_960 }
+        return 32_768  // unknown models: conservative middle ground
+    }
+
+    // MARK: - RAM-Aware Context Sizing (ADR-015)
+
+    /// Extra `num_predict` headroom when `think` is sent: Ollama counts
+    /// thinking tokens against `num_predict`, so without a reserve, Qwen3 can
+    /// exhaust the whole budget mid-reasoning — the visible answer comes back
+    /// empty and the thinking-fallback path returns raw chain-of-thought.
+    static let thinkingAllowance = 4096
+
+    /// num_ctx ceiling for this machine's unified memory. Qwen3's KV cache
+    /// (4b and 8b share the geometry: 36 layers × 8 KV heads × 128 dims, f16)
+    /// costs ~144 KiB per context token: 16K ctx ≈ 2.3 GB, 64K ≈ 9.2 GB,
+    /// 128K ≈ 18.4 GB — on top of ~5.2 GB of qwen3:8b weights. Exceeding the
+    /// Metal working-set budget (~⅔ of RAM) doesn't fail cleanly: Ollama
+    /// spills to CPU/swap and a 2-minute summary takes an hour while the app,
+    /// WhisperKit, and macOS fight for the same unified memory. Bands keep
+    /// weights + KV under ~60% of physical RAM on the 16 GB M4 baseline.
+    static let ramContextCap = contextCap(forPhysicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+
+    /// Pure banding so the policy is unit-testable: <24 GiB → 16K,
+    /// <32 GiB → 32K, <48 GiB → 64K, otherwise the qwen3 native 128K max.
+    static func contextCap(forPhysicalMemoryBytes bytes: UInt64) -> Int {
+        let gib = Double(bytes) / 1_073_741_824
+        if gib >= 48 { return 131_072 }
+        if gib >= 32 { return 65_536 }
+        if gib >= 24 { return 32_768 }
+        return 16_384
+    }
+
+    /// Size the context window for a request and decide whether the input
+    /// must be truncated client-side. Buckets `input + output` up to the next
+    /// power-of-two rung (Ollama reallocates the KV cache per `num_ctx`, so
+    /// tight windows avoid multi-minute stalls), then clamps to the RAM cap.
+    /// When the capped window can't fit everything, output keeps at most half
+    /// the window and the returned `inputTokenBudget` is what remains for the
+    /// prompt — the caller truncates rather than letting Ollama silently drop
+    /// the start of the conversation server-side.
+    static func resolveSizing(
+        inputTokens: Int,
+        requestedPredict: Int,
+        cap: Int
+    ) -> (numCtx: Int, inputTokenBudget: Int?) {
+        let needed = inputTokens + requestedPredict
+        let bucket: Int
+        if needed <= 8192        { bucket = 8192 }
+        else if needed <= 16384  { bucket = 16384 }
+        else if needed <= 32768  { bucket = 32768 }
+        else if needed <= 65536  { bucket = 65536 }
+        else                     { bucket = 131_072 }
+        let numCtx = min(bucket, cap)
+        if needed <= numCtx { return (numCtx, nil) }
+        let predict = min(requestedPredict, numCtx / 2)
+        return (numCtx, numCtx - predict)
+    }
+
+    /// Head/tail truncation for prompts that exceed the context budget: keep
+    /// the first 10% (intro/agenda) and the last 90% of the allowance
+    /// (decisions and action items cluster late in a meeting), joined by an
+    /// explicit notice so the model knows material was cut. Returns the
+    /// prompt unchanged when it fits or when the budget is degenerate.
+    static func truncatedUserPrompt(_ userPrompt: String, maxUserChars: Int) -> String {
+        guard userPrompt.count > maxUserChars, maxUserChars > 0 else { return userPrompt }
+        let keepStart = maxUserChars / 10
+        let keepEnd = maxUserChars - keepStart - 100 // 100 chars for the truncation notice
+        guard keepEnd > 0 else { return userPrompt }
+        let start = String(userPrompt.prefix(keepStart))
+        let end = String(userPrompt.suffix(keepEnd))
+        return start + "\n\n[... transcript truncated for length ...]\n\n" + end
+    }
 
     // MARK: - Status
 
@@ -150,27 +246,32 @@ final class OllamaService {
 
     /// Selects the best model and context window for the given input.
     /// Returns (model, contextWindow, truncatedPrompt) — the prompt is
-    /// truncated only if no installed model can fit the full input.
+    /// truncated only if no installed model can fit the full input within
+    /// this machine's RAM-capped window. `outputReserve` is the caller's
+    /// real `num_predict` budget (including any thinking allowance) so the
+    /// fit check reserves what generation will actually consume.
     func adaptiveSelect(
         systemPrompt: String,
-        userPrompt: String
+        userPrompt: String,
+        outputReserve: Int = 2048
     ) -> (model: String, numCtx: Int, systemPrompt: String, userPrompt: String) {
         let totalChars = systemPrompt.count + userPrompt.count
         // Rough token estimate: ~4 chars per token for English
         let estimatedTokens = totalChars / 4
-        let outputReserve = 2048 // tokens reserved for the summary output
+        let cap = Self.ramContextCap
 
         let models = self.availableModels
-        Logger.ai.info("Adaptive select: ~\(estimatedTokens) input tokens, \(models.count) models available")
+        Logger.ai.info("Adaptive select: ~\(estimatedTokens) input tokens, \(models.count) models available, ctx cap \(cap)")
 
         // Walk tiers from smallest to largest, pick the first that fits AND is installed
         for tier in Self.modelTiers {
             guard models.contains(where: { $0.hasPrefix(tier.name.components(separatedBy: ":").first ?? tier.name) && $0.contains(tier.name.components(separatedBy: ":").last ?? "") }) || models.contains(tier.name) else {
                 continue
             }
-            if estimatedTokens + outputReserve <= tier.contextWindow {
-                Logger.ai.info("Adaptive: selected \(tier.name) ctx=\(tier.contextWindow) for ~\(estimatedTokens) tokens")
-                return (tier.name, tier.contextWindow, systemPrompt, userPrompt)
+            let tierCtx = min(tier.contextWindow, cap)
+            if estimatedTokens + outputReserve <= tierCtx {
+                Logger.ai.info("Adaptive: selected \(tier.name) ctx=\(tierCtx) for ~\(estimatedTokens) tokens")
+                return (tier.name, tierCtx, systemPrompt, userPrompt)
             }
         }
 
@@ -179,30 +280,23 @@ final class OllamaService {
         // Llama 3.1 8B for users who only ever pulled the old default and
         // haven't yet picked up the Qwen upgrade.
         let bestModel: String
-        let bestCtx: Int
         if models.contains(Self.defaultTier) {
             bestModel = Self.defaultTier
-            bestCtx = 131072
         } else if models.contains("llama3.1:8b") {
             bestModel = "llama3.1:8b"
-            bestCtx = 65536
         } else {
             bestModel = models.first ?? Self.defaultModel
-            bestCtx = 16384
         }
+        let bestCtx = min(Self.modelContextLimit(for: bestModel), cap)
 
-        // Truncate: keep system prompt + first 10% of user prompt (intro/agenda) + last 90% (decisions/actions)
-        let maxUserChars = (bestCtx - outputReserve) * 4 - systemPrompt.count
-        let truncatedUser: String
-        if userPrompt.count > maxUserChars && maxUserChars > 0 {
-            let keepStart = maxUserChars / 10
-            let keepEnd = maxUserChars - keepStart - 100 // 100 chars for the truncation notice
-            let start = String(userPrompt.prefix(keepStart))
-            let end = String(userPrompt.suffix(keepEnd))
-            truncatedUser = start + "\n\n[... transcript truncated for length ...]\n\n" + end
+        // Truncate: keep system prompt + first 10% of user prompt (intro/agenda)
+        // + last 90% (decisions/actions). Output keeps at most half the window
+        // so a large reserve can never squeeze the input budget to nothing.
+        let effectiveReserve = min(outputReserve, bestCtx / 2)
+        let maxUserChars = (bestCtx - effectiveReserve) * 4 - systemPrompt.count
+        let truncatedUser = Self.truncatedUserPrompt(userPrompt, maxUserChars: maxUserChars)
+        if truncatedUser.count < userPrompt.count {
             Logger.ai.info("Adaptive: truncated \(userPrompt.count) → \(truncatedUser.count) chars for \(bestModel) ctx=\(bestCtx)")
-        } else {
-            truncatedUser = userPrompt
         }
 
         Logger.ai.info("Adaptive: selected \(bestModel) ctx=\(bestCtx) (truncated) for ~\(estimatedTokens) tokens")
@@ -231,26 +325,53 @@ final class OllamaService {
         let finalSystem: String
         let finalUser: String
 
+        // num_predict counts thinking tokens too, so reserve headroom for the
+        // reasoning phase whenever `think` will be sent — otherwise Qwen3 can
+        // burn the whole budget mid-reasoning and return an empty answer.
+        // "auto" only ever resolves to qwen3 tiers, so `think` alone decides.
+        let thinkCapable = model == "auto" || model.contains("qwen3")
+        let requestedPredict = maxOutputTokens + ((think && thinkCapable) ? Self.thinkingAllowance : 0)
+
         if model == "auto" {
-            let selection = adaptiveSelect(systemPrompt: systemPrompt, userPrompt: userPrompt)
+            let selection = adaptiveSelect(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                outputReserve: requestedPredict
+            )
             selectedModel = selection.model
             numCtx = selection.numCtx
             finalSystem = selection.systemPrompt
             finalUser = selection.userPrompt
         } else {
             selectedModel = model
-            // Compute a tight context window even for explicit models —
-            // Ollama's default (131K) is too large and causes multi-minute stalls.
+            // Tight, RAM-capped window even for explicit models — Ollama's
+            // own default would allocate a KV cache this machine can't hold
+            // (ADR-015), and an oversized window stalls for minutes. Inputs
+            // the capped window can't fit are truncated client-side; relying
+            // on Ollama's silent server-side truncation drops the start of
+            // the prompt, system instructions included.
             let estimatedTokens = (systemPrompt.count + userPrompt.count) / 4
-            let needed = estimatedTokens + maxOutputTokens // input + output reserve
-            // Round up to nearest power-of-2 bucket: 8K, 16K, 32K, 64K
-            if needed <= 8192       { numCtx = 8192 }
-            else if needed <= 16384 { numCtx = 16384 }
-            else if needed <= 32768 { numCtx = 32768 }
-            else                    { numCtx = 65536 }
+            let sizing = Self.resolveSizing(
+                inputTokens: estimatedTokens,
+                requestedPredict: requestedPredict,
+                cap: min(Self.ramContextCap, Self.modelContextLimit(for: model))
+            )
+            numCtx = sizing.numCtx
             finalSystem = systemPrompt
-            finalUser = userPrompt
+            if let inputBudget = sizing.inputTokenBudget {
+                finalUser = Self.truncatedUserPrompt(
+                    userPrompt,
+                    maxUserChars: inputBudget * 4 - systemPrompt.count
+                )
+                Logger.ai.info("Ollama: ~\(estimatedTokens) input tokens exceed capped ctx \(numCtx) — truncated to ~\(finalUser.count / 4)")
+            } else {
+                finalUser = userPrompt
+            }
         }
+
+        // Final fit clamp: whichever path sized the window, generation must
+        // leave room for the (possibly truncated) input inside num_ctx.
+        let numPredict = min(requestedPredict, max(1024, numCtx - (finalSystem.count + finalUser.count) / 4))
 
         // Dynamic timeout: account for both input processing and output
         // generation. Qwen3's thinking mode can spend minutes reasoning
@@ -260,7 +381,7 @@ final class OllamaService {
         // tokens + ~1 min per 4K output tokens, minimum 120s, max 1800s.
         let inputChars = finalSystem.count + finalUser.count
         let inputTime = Double(inputChars / 4) / 2000.0 * 60.0
-        let outputTime = Double(maxOutputTokens) / 4000.0 * 60.0
+        let outputTime = Double(numPredict) / 4000.0 * 60.0
         let estimatedSeconds = max(120, min(1800, inputTime + outputTime))
 
         let url = Self.baseURL.appendingPathComponent("api/chat")
@@ -268,6 +389,13 @@ final class OllamaService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = estimatedSeconds
+
+        // Qwen3 thinking-mode sampling per the official model card:
+        // temperature 0.6, top_p 0.95, top_k 20. Near-greedy temperatures
+        // degrade hybrid-thinking models and can trigger endless repetition
+        // loops mid-reasoning. 0.3 (with Ollama's default top_p/top_k) stays
+        // for non-thinking models, where low-variance summarization is right.
+        let sendsThink = selectedModel.contains("qwen3") && think
 
         let body = OllamaChatRequest(
             model: selectedModel,
@@ -281,14 +409,16 @@ final class OllamaService {
             think: selectedModel.contains("qwen3") ? think : nil,
             format: jsonMode ? "json" : nil,
             options: OllamaOptions(
-                temperature: 0.3,
-                num_predict: maxOutputTokens,
-                num_ctx: numCtx > 0 ? numCtx : nil
+                temperature: sendsThink ? 0.6 : 0.3,
+                num_predict: numPredict,
+                num_ctx: numCtx > 0 ? numCtx : nil,
+                top_p: sendsThink ? 0.95 : nil,
+                top_k: sendsThink ? 20 : nil
             )
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"), maxOut: \(maxOutputTokens))")
+        Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"), maxOut: \(numPredict))")
 
         // Retry up to 3 times on transient failures — network errors and 5xx.
         // /api/chat is idempotent at the protocol level (the model is the only
@@ -390,23 +520,46 @@ final class OllamaService {
         let finalSystem: String
         let finalUser: String
 
+        // 8192 covers thinking (1–3K on a long transcript) plus the longest
+        // summary the app renders. num_predict counts thinking tokens, so
+        // this is a combined budget, and the ctx sizing must reserve all of
+        // it — the old +2048 reserve under-sized the window for long outputs.
+        let requestedPredict = 8192
+
         if model == "auto" {
-            let selection = adaptiveSelect(systemPrompt: systemPrompt, userPrompt: userPrompt)
+            let selection = adaptiveSelect(
+                systemPrompt: systemPrompt,
+                userPrompt: userPrompt,
+                outputReserve: requestedPredict
+            )
             selectedModel = selection.model
             numCtx = selection.numCtx
             finalSystem = selection.systemPrompt
             finalUser = selection.userPrompt
         } else {
             selectedModel = model
+            // Same RAM-capped sizing + client-side truncation as generate()
+            // (ADR-015) — see the comment there for why.
             let estimatedTokens = (systemPrompt.count + userPrompt.count) / 4
-            let needed = estimatedTokens + 2048
-            if needed <= 8192       { numCtx = 8192 }
-            else if needed <= 16384 { numCtx = 16384 }
-            else if needed <= 32768 { numCtx = 32768 }
-            else                    { numCtx = 65536 }
+            let sizing = Self.resolveSizing(
+                inputTokens: estimatedTokens,
+                requestedPredict: requestedPredict,
+                cap: min(Self.ramContextCap, Self.modelContextLimit(for: model))
+            )
+            numCtx = sizing.numCtx
             finalSystem = systemPrompt
-            finalUser = userPrompt
+            if let inputBudget = sizing.inputTokenBudget {
+                finalUser = Self.truncatedUserPrompt(
+                    userPrompt,
+                    maxUserChars: inputBudget * 4 - systemPrompt.count
+                )
+                Logger.ai.info("Ollama stream: ~\(estimatedTokens) input tokens exceed capped ctx \(numCtx) — truncated to ~\(finalUser.count / 4)")
+            } else {
+                finalUser = userPrompt
+            }
         }
+
+        let numPredict = min(requestedPredict, max(1024, numCtx - (finalSystem.count + finalUser.count) / 4))
 
         let url = Self.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url)
@@ -434,9 +587,13 @@ final class OllamaService {
             // which already learned this. Instruct models omit the field.
             think: selectedModel.contains("qwen3") ? true : nil,
             options: OllamaOptions(
-                temperature: 0.3,
-                num_predict: 8192,
-                num_ctx: numCtx > 0 ? numCtx : nil
+                // Streaming always sends think:true to qwen3 — use the
+                // official thinking-mode sampling (see generate()).
+                temperature: selectedModel.contains("qwen3") ? 0.6 : 0.3,
+                num_predict: numPredict,
+                num_ctx: numCtx > 0 ? numCtx : nil,
+                top_p: selectedModel.contains("qwen3") ? 0.95 : nil,
+                top_k: selectedModel.contains("qwen3") ? 20 : nil
             )
         )
         request.httpBody = try JSONEncoder().encode(body)

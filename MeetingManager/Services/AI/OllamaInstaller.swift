@@ -311,9 +311,21 @@ final class OllamaInstaller {
             process.executableURL = serverBinary
             process.arguments = ["serve"]
             process.qualityOfService = .userInitiated
+            // Flash attention + q8_0 KV cache halve per-token KV memory
+            // (~144 → ~72 KiB/token for qwen3) with negligible quality
+            // impact — on the 16 GB baseline that's the difference between
+            // the context window fitting alongside WhisperKit or spilling
+            // to swap. Only effective when WE launch the server; a
+            // user-launched instance keeps its own config, so the ADR-015
+            // RAM bands still assume the f16 worst case — this is pure
+            // headroom, never a dependency.
+            var env = ProcessInfo.processInfo.environment
+            env["OLLAMA_FLASH_ATTENTION"] = "1"
+            env["OLLAMA_KV_CACHE_TYPE"] = "q8_0"
+            process.environment = env
             do {
                 try process.run()
-                Logger.ai.info("Ollama: launched `ollama serve` at userInitiated QoS (\(serverBinary.path, privacy: .public))")
+                Logger.ai.info("Ollama: launched `ollama serve` at userInitiated QoS with q8_0 KV cache (\(serverBinary.path, privacy: .public))")
                 return
             } catch {
                 Logger.ai.warning("Ollama: direct server launch failed (\(error.localizedDescription, privacy: .public)) — falling back to opening the app")
