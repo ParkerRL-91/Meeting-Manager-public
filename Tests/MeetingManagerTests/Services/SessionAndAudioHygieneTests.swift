@@ -117,4 +117,42 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 48_000, channelCount: 0))
         XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 0, channelCount: 0))
     }
+    // MARK: - Failure honesty (TASK-031) + recordable-match filter (TASK-033)
+
+    func testHumanizedTaskErrorTranslatesCoreAudioCodes() {
+        let husk = NSError(domain: "com.apple.coreaudio.avfaudio", code: -50)
+        XCTAssertTrue(TaskQueueManager.humanizedTaskError(husk).contains("couldn't be read"))
+        XCTAssertTrue(TaskQueueManager.humanizedTaskError(husk).contains("-50"),
+                      "Numeric code stays for support")
+        let fmt = NSError(domain: NSOSStatusErrorDomain, code: -10868)
+        XCTAssertTrue(TaskQueueManager.humanizedTaskError(fmt).contains("format"))
+        let offline = URLError(.notConnectedToInternet)
+        XCTAssertTrue(TaskQueueManager.humanizedTaskError(offline).contains("internet"))
+    }
+
+    func testEmptyResultErrorReadsHuman() {
+        let err = AppState.TranscriptionEmptyResultError(rawSeconds: 420)
+        XCTAssertTrue(err.localizedDescription.contains("7 minute"))
+        XCTAssertTrue(err.localizedDescription.contains("Retry"))
+    }
+
+    func testRecordableMatchSkipsLocationBlocks() {
+        var home = SampleData.makeMeeting(title: "Home")
+        home.status = .scheduled
+        home.isAllDay = true
+        XCTAssertFalse(AppState.isRecordableCalendarMatch(home), "All-day blocks are never meetings")
+
+        var focus = SampleData.makeMeeting(title: "Untitled Event")
+        focus.status = .scheduled
+        focus.isAllDay = false
+        focus.participants = nil
+        focus.meetLink = nil
+        XCTAssertFalse(AppState.isRecordableCalendarMatch(focus), "No attendees + no link = not a meeting")
+
+        var real = SampleData.makeMeeting(title: "Connor / Parker - 1:1")
+        real.status = .notified
+        real.isAllDay = false
+        real.meetLink = "https://meet.google.com/abc-defg-hij"
+        XCTAssertTrue(AppState.isRecordableCalendarMatch(real))
+    }
 }

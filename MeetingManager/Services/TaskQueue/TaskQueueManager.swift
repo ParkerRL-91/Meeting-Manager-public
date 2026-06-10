@@ -615,7 +615,7 @@ final class TaskQueueManager {
                 }
             } catch {
                 let shouldRetry = next.retryCount + 1 < next.maxRetries
-                await markFailed(next, error: error.localizedDescription, willRetry: shouldRetry)
+                await markFailed(next, error: Self.humanizedTaskError(error), willRetry: shouldRetry)
                 Logger.general.error("TaskQueue: \(next.type.rawValue) failed: \(error.localizedDescription) (retry: \(shouldRetry))")
 
                 if shouldRetry {
@@ -628,6 +628,39 @@ final class TaskQueueManager {
             currentProgress = nil
             await refreshTaskList()
         }
+    }
+
+    /// The failed-task row is read by a person. Raw OS error strings —
+    /// "The operation couldn't be completed. (com.apple.coreaudio.avfaudio
+    /// error -50.)" — explain nothing and look like a crash (TASK-031).
+    /// Translate the codes we actually see; pass through messages that are
+    /// already human (LocalizedError descriptions from our own types). The
+    /// numeric code stays in parentheses for support/debugging.
+    nonisolated static func humanizedTaskError(_ error: Error) -> String {
+        let ns = error as NSError
+        if ns.domain == NSOSStatusErrorDomain
+            || ns.domain.lowercased().contains("coreaudio")
+            || ns.domain.lowercased().contains("avfaudio") {
+            switch ns.code {
+            case -50:
+                return "This recording's audio file couldn't be read — it may be incomplete or damaged. (CoreAudio -50)"
+            case -10868:
+                return "The audio device didn't accept the requested format. Retrying usually succeeds once the device settles. (CoreAudio -10868)"
+            default:
+                return "An audio system error interrupted this task. Retry usually succeeds. (CoreAudio \(ns.code))"
+            }
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "No internet connection — this task will succeed when you're back online."
+            case .timedOut:
+                return "The network request timed out. Retry when your connection is stable."
+            default:
+                break
+            }
+        }
+        return error.localizedDescription
     }
 
     // MARK: - Progress reporting

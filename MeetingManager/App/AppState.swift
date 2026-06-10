@@ -1643,8 +1643,44 @@ final class AppState {
 
     /// - Stuck recordings WITHOUT audio → cancel (nothing to transcribe)
     /// - Stuck transcribing → re-run batch transcription if audio exists, else complete
+    /// History hygiene (TASK-033): recordings that were attempted and
+    /// produced nothing — no transcripts, no summary, no user notes — are
+    /// debris: ambient captures attached to location calendar blocks, dead
+    /// husk meetings, abandoned ad-hoc rows. Archive them (3-day grace so a
+    /// fresh failure stays visible while the user might still retry it).
+    /// User content is the hard line: anything with a note or summary stays.
+    private func archiveEmptyDebrisMeetings() async {
+        do {
+            let archived = try await database.writer.write { db -> Int in
+                try db.execute(sql: """
+                    UPDATE meeting SET status = ?, updatedAt = ?
+                    WHERE status = ?
+                      AND transcriptionAttemptedAt IS NOT NULL
+                      AND startDate < ?
+                      AND id NOT IN (SELECT DISTINCT meetingId FROM transcript)
+                      AND id NOT IN (SELECT DISTINCT meetingId FROM meetingSummary)
+                      AND id NOT IN (SELECT DISTINCT meetingId FROM meetingNote
+                                     WHERE TRIM(COALESCE(content, '')) != '')
+                    """, arguments: [
+                        MeetingStatus.archived.rawValue,
+                        Date(),
+                        MeetingStatus.complete.rawValue,
+                        Date().addingTimeInterval(-3 * 86_400)
+                    ])
+                return db.changesCount
+            }
+            if archived > 0 {
+                fileLog("History hygiene: archived \(archived) empty attempted recording(s)")
+                loadMeetings()
+            }
+        } catch {
+            fileLog("History hygiene sweep failed: \(error.localizedDescription)")
+        }
+    }
+
     private func cleanupStuckMeetings() {
         Task {
+            await archiveEmptyDebrisMeetings()
             do {
                 // Gather stuck meetings inside a write transaction
                 // Returns the UPDATED meeting objects (with corrected statuses)
@@ -1816,8 +1852,25 @@ final class AppState {
         Task { @MainActor in
             defer { self.isStartingMeeting = false }
             do {
+                // A restart during a still-active meeting must re-attach to
+                // the meeting it belongs to — not to whatever calendar block
+                // happens to be "current" (TASK-032: a 1:1's real transcript
+                // landed on an untitled focus-time event because the 1:1 was
+                // already complete and its scheduled window had passed).
+                // Reopenable = complete + inside its scheduled window (+1 h
+                // grace), so this appends a session to the original meeting,
+                // keeping series history, prep, and the RSVP attendee gate.
+                if let reopenable = try await self.bestReopenableMeeting() {
+                    self.fileLog("startNewMeeting: re-attaching to reopenable '\(reopenable.title)' — appending a session")
+                    self.isStartingMeeting = false   // reopenRecording has its own debounce
+                    self.reopenRecording(for: reopenable)
+                    self.selectedMeetingId = reopenable.id
+                    self.loadMeetings()
+                    return
+                }
+
                 let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
-                let scheduledMatch = nearby.first(where: { $0.status == .scheduled || $0.status == .notified })
+                let scheduledMatch = nearby.first(where: { Self.isRecordableCalendarMatch($0) })
 
                 let meeting: Meeting
                 let isAdHoc: Bool
@@ -1846,6 +1899,34 @@ final class AppState {
                 self.lastUserError = "Couldn't start recording: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// A scheduled meeting that a fresh recording should attach to. Filters
+    /// out location/availability calendar blocks ("Home" work-location
+    /// events, untitled focus time): an event with no attendees AND no
+    /// meeting link isn't a meeting, and attaching ambient recordings to
+    /// them filled the history list with debris rows (TASK-033).
+    nonisolated static func isRecordableCalendarMatch(_ meeting: Meeting) -> Bool {
+        guard meeting.status == .scheduled || meeting.status == .notified else { return false }
+        guard !meeting.isAllDay else { return false }
+        let hasParticipants = !(meeting.participants ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        let hasLink = !(meeting.meetLink ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        return hasParticipants || hasLink
+    }
+
+    /// The most recently ended meeting that can still be reopened (complete,
+    /// inside its scheduled window + 1 h grace — see Meeting.isReopenable).
+    /// Used by the record-start choosers so a mid-meeting restart appends to
+    /// the original meeting instead of spawning a new row.
+    private func bestReopenableMeeting() async throws -> Meeting? {
+        let candidates = try await database.writer.read { db in
+            try Meeting
+                .filter(Meeting.Columns.status == MeetingStatus.complete.rawValue)
+                .order(Meeting.Columns.endDate.desc)
+                .limit(12)
+                .fetchAll(db)
+        }
+        return candidates.first(where: { $0.isReopenable && !$0.isAllDay })
     }
 
     func createMeeting(title: String, scheduledStart: Date? = nil, scheduledEnd: Date? = nil) async throws -> Meeting {
@@ -2189,6 +2270,19 @@ final class AppState {
     /// Returns nil for refuse-to-transcribe conditions (wrong sample rate,
     /// unreadable buffer); throws only for AVAudioFile I/O errors so the
     /// task-queue retry path can engage.
+    /// Meaningful audio in, zero transcript rows out. Thrown (rather than
+    /// returning []) so the failure is VISIBLE — a failed task with a Retry
+    /// button — instead of a meeting silently marked complete with an empty
+    /// page (TASK-031). The relaunch drain drops these instead of re-running
+    /// them forever: the result is deterministic until the user retries.
+    struct TranscriptionEmptyResultError: LocalizedError {
+        let rawSeconds: Double
+        var errorDescription: String? {
+            "Transcription produced no text from \(max(1, Int(rawSeconds / 60))) minute(s) of audio. "
+            + "The recording may be mostly silence or very quiet — Retry runs it again."
+        }
+    }
+
     private nonisolated static func prepareBatchAudio(audioURL: URL) throws -> PreparedBatchAudio? {
         func log(_ msg: String) { AppFileLogger.shared.log(msg) }
 
@@ -2196,6 +2290,17 @@ final class AppState {
         let audioFile = try AVAudioFile(forReading: audioURL)
         let fileFormat = audioFile.processingFormat
         let frameCount = AVAudioFrameCount(audioFile.length)
+
+        // A crash husk (header-only WAV) or a recording that died at spin-up
+        // has zero frames. Reading into a zero-capacity buffer throws the
+        // cryptic CoreAudio -50, the task retries forever, and every relaunch
+        // resurrects a FAILED badge (TASK-031). Refuse instead: nil completes
+        // without a retry storm and the pending-queue entry is dropped.
+        guard frameCount > 0 else {
+            log("Batch transcribe: \(audioURL.lastPathComponent) contains no audio frames (crash husk) — refusing to transcribe")
+            Logger.transcription.error("Batch transcribe: zero-frame audio file \(audioURL.lastPathComponent) — refusing")
+            return nil
+        }
 
         // WhisperKit expects 16 kHz mono Float32. AudioCaptureService is
         // responsible for writing the WAV at that rate; if the upstream
@@ -2635,12 +2740,39 @@ final class AppState {
             }).value
             fileLog("Batch transcribe: prepared \(built.rows.count) segments, skipped \(built.skippedCount) hallucinations, \(built.userSegmentCount) labeled as user")
             Logger.transcription.info("Batch transcription ready: \(built.rows.count) segments for meeting \(meetingId)")
+
+            // Honesty gate (TASK-031): meaningful audio that produced zero
+            // rows is a FAILURE the user must see — not a meeting silently
+            // marked complete with an empty page (the June 1 "Prospecting
+            // Review": 7 minutes of audio, zero rows, no error, no retry).
+            // Stamp transcriptionAttemptedAt first so the startup orphan
+            // scan doesn't re-enqueue forever — the visible failed task
+            // (with its Retry button) is the user-facing surface now.
+            // Re-transcriptions of meetings that already have rows are
+            // exempt: the existing transcript is preserved by the commit
+            // logic and an alarm would be noise.
+            if built.rows.isEmpty, prepared.rawSeconds >= 30 {
+                let existingRows = (try? await database.writer.read { db in
+                    try Transcript.filter(Transcript.Columns.meetingId == meetingId).fetchCount(db)
+                }) ?? 0
+                if existingRows == 0 {
+                    if var m = try? await meetingRepository.find(id: meetingId) {
+                        m.transcriptionAttemptedAt = Date()
+                        try? await meetingRepository.save(&m)
+                    }
+                    throw TranscriptionEmptyResultError(rawSeconds: prepared.rawSeconds)
+                }
+            }
             return built.rows
 
         } catch {
+            // Rethrow — the old `return []` here swallowed WhisperKit and
+            // diarization failures into a "successful" empty transcription,
+            // which the handler committed and marked complete. The task
+            // queue's retry + failed-task surface is the honest path.
             fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
             Logger.transcription.error("Batch transcription failed: \(error.localizedDescription)")
-            return []
+            throw error
         }
     }
 
@@ -4161,6 +4293,15 @@ final class AppState {
             do {
                 rawTranscripts = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
             } catch {
+                // Deterministic empty result: re-running next launch can't
+                // change it — drop the entry (attemptedAt was stamped before
+                // the throw, so the orphan scan won't resurrect it either)
+                // and tell the user once.
+                if error is TranscriptionEmptyResultError {
+                    fileLog("Pending transcription: \(meetingId) produced no text — dropping from the relaunch queue")
+                    lastUserError = error.localizedDescription
+                    continue
+                }
                 // Legacy UserDefaults drain path has no queue retry — log and
                 // keep the entry for the next launch.
                 fileLog("Pending transcription: prepare failed for \(meetingId) — \(error.localizedDescription)")
@@ -4310,9 +4451,23 @@ final class AppState {
             Task { @MainActor in
                 defer { self.isStartingMeeting = false }
                 do {
+                    // Re-attach first: if the meeting for this call already
+                    // recorded and is still inside its reopen window, append
+                    // a session instead of spawning a new row (TASK-032 —
+                    // same rule as startNewMeeting).
+                    if let reopenable = try await self.bestReopenableMeeting() {
+                        self.fileLog("handleCallDetected: re-attaching to reopenable '\(reopenable.title)' — appending a session")
+                        self.isStartingMeeting = false   // reopenRecording has its own debounce
+                        self.reopenRecording(for: reopenable)
+                        self.selectedMeetingId = reopenable.id
+                        self.detectedCallApp = nil
+                        self.loadMeetings()
+                        return
+                    }
+
                     // Look for a scheduled meeting within ±5 minutes
                     let nearbyMeetings = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
-                    let scheduledMatch = nearbyMeetings.first(where: { $0.status == .scheduled || $0.status == .notified })
+                    let scheduledMatch = nearbyMeetings.first(where: { Self.isRecordableCalendarMatch($0) })
 
                     let meeting: Meeting
                     if let scheduled = scheduledMatch {
