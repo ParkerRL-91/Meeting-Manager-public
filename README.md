@@ -21,15 +21,17 @@ You only do this once.
 
 ---
 
-## What's New in v4.1.1
+## What's New in v4.2.0
 
-**Recording no longer fails with a CoreAudio format error.** A leaked screen-capture audio stream could leave the input hardware in a state that rejected the next recording with error -10868, which then recurred across launches. Meeting Manager now tears that stream down whenever microphone capture fails to start, so the failure clears instead of compounding.
+**Stopping and resuming a recording no longer scrambles speaker identification.** When a meeting was recorded in more than one session, the second session's transcript rows could land on the first session's timeline, which let voice matching read the wrong audio and let a retry pass overwrite names you had already confirmed. Session timelines are now offset past the previous file's duration, anonymous speaker labels are namespaced per session, and re-runs fill empty slots without touching existing assignments.
 
-**Meeting Manager now runs cleanly on a fresh Mac.** Several assumptions that only held on the original development machine were removed, so a first launch on another Mac no longer trips over a malformed entitlement, a hardcoded locale, or a missing speech-recognition authorization. The app also tells you specifically which permission is missing — Screen Recording or Apple Events — instead of failing silently when meeting-join detection can't run.
+**Recorded audio is cleaner and stays aligned across the meeting.** System audio is written at the position its presentation timestamp dictates instead of its arrival time, which removes the drift between the microphone and system tracks on long calls. A low-pass filter now runs before the microphone's downsample to 16 kHz, so content above 8 kHz no longer folds into the speech band that WhisperKit transcribes.
 
-**Local AI summaries return reliably on smaller models.** The on-device summary path now uses Ollama's JSON-schema structured output instead of the unreliable `think:false` flag, which had been returning empty results on qwen3:4b. Each speaker card also shows talk time, share of meeting, and top topic keywords computed without any model, so the card is useful even when the language model is unavailable.
+**Memory headroom on a 16 GB Mac is managed instead of assumed.** The transcription model (~1.5 GB) and the diarization models unload when the work queue goes idle and no meeting is coming up, then reload automatically when recording starts. Crash leftovers from interrupted recordings are detected by content rather than guesswork, and good sessions are kept for transcription instead of being deleted with the husks.
 
-**A new speaker-identification engine is available as an opt-in preview.** A prior release diarized the system-audio buffer alone, which collapsed every in-person or hybrid meeting into a single speaker and left 62% of meetings labeled with generic placeholders. The new path diarizes the microphone-plus-system mix with FluidAudio, an on-device model that runs on the Apple Neural Engine, so people sharing a room are separated into distinct speakers. The engine proposes a name only when the attendee list, the speaker count, and the audio agree, and it flags the rest for review rather than guessing. This path is **off by default** while its local-user detection is validated and hardened; you can enable it under Settings → Transcription.
+**Local AI summaries no longer stall the queue or come back empty on long meetings.** The Ollama context window is now sized to the machine's physical RAM and to the model's actual trained window (40,960 tokens for Qwen3 — not the 128K headline figure, which requires an extension Ollama doesn't ship), so an hour-plus meeting no longer pushes the model into swap where a 2-minute summary takes an hour. Transcripts that exceed the window are trimmed at the middle with an explicit notice, keeping the agenda and the decisions. Qwen3's reasoning phase gets its own token reserve so thinking can no longer consume the entire output budget, and thinking calls use the sampling values Qwen publishes for the mode.
+
+**Claude models are current.** The default model is now Claude Sonnet 4.6, the Settings picker offers Haiku 4.5 / Sonnet 4.6 / Opus 4.8, and stored settings that referenced the retiring May-2025 snapshots are migrated automatically.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
