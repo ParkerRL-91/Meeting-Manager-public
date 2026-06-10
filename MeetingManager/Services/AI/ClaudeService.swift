@@ -137,7 +137,7 @@ final class ClaudeService {
     /// - Parameters:
     ///   - systemPrompt: The system-level instruction.
     ///   - userPrompt: The user message content.
-    ///   - model: The model identifier (e.g. "claude-sonnet-4-20250514").
+    ///   - model: The model identifier (e.g. "claude-sonnet-4-6").
     ///   - maxTokens: Output token cap. Defaults to 4096 — adequate for the
     ///     summary, follow-up email, action-item, and attribution paths.
     ///     The detailed-outline path passes 16384 because hour-long meetings

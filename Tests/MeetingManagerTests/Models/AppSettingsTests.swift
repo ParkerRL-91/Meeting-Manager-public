@@ -19,7 +19,7 @@ final class AppSettingsTests: XCTestCase {
     }
 
     func testDefaultClaudeModel() {
-        XCTAssertEqual(AppSettings.default.claudeModel, "claude-sonnet-4-20250514")
+        XCTAssertEqual(AppSettings.default.claudeModel, "claude-sonnet-4-6")
     }
 
     func testDefaultCalendarSyncInterval() {

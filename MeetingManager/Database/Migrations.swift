@@ -1011,5 +1011,29 @@ enum Migrations {
                 t.column("found", .boolean).notNull().defaults(to: true)
             }
         }
+
+        // v48: Claude model refresh (TASK-028). The launch-era models
+        // `claude-sonnet-4-20250514` / `claude-opus-4-20250514` are deprecated
+        // and retire on 2026-06-15 — every API call with them 404s after that.
+        // Changing the code default (AppSettings.default / Constants.Defaults)
+        // only covers fresh installs; rows that already persisted a deprecated
+        // ID must be rewritten here, each to its Anthropic-recommended
+        // replacement alias. Date-suffix-free aliases track Anthropic's
+        // current snapshot, so the stored value can't strand users this way
+        // again. `meetingSummary.modelUsed` is deliberately left alone — it
+        // records which model produced a past summary (provenance, not
+        // configuration).
+        migrator.registerMigration("v48-claude-model-refresh") { db in
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET claudeModel = 'claude-sonnet-4-6'
+                WHERE claudeModel = 'claude-sonnet-4-20250514'
+                """)
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET claudeModel = 'claude-opus-4-8'
+                WHERE claudeModel = 'claude-opus-4-20250514'
+                """)
+        }
     }
 }

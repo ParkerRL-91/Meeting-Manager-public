@@ -38,7 +38,7 @@ See [Calendar Integration](./calendar-integration.md).
 ## AI (Claude)
 
 - **API key** — paste from [console.anthropic.com](https://console.anthropic.com). Stored in Keychain.
-- **Default model** — `claude-sonnet-4-20250514` (default); other Claude models selectable.
+- **Default model** — `claude-sonnet-4-6` (default); Claude Haiku 4.5 (Fast) and Claude Opus 4.8 (Premium) are also selectable.
 - **Status** — green when valid, red on auth failure.
 
 ## AI (Local)

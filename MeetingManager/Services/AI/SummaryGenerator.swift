@@ -26,7 +26,7 @@ final class SummaryGenerator {
     ///   - noteRepo: Repository providing user notes.
     ///   - summaryRepo: Repository for persisting the generated summary.
     ///   - textGenerator: Async closure `(systemPrompt, userPrompt) -> responseText`. May be Claude or a local LLM.
-    ///   - modelUsed: Human-readable model identifier stored in the summary record (e.g. "claude-sonnet-4-20250514").
+    ///   - modelUsed: Human-readable model identifier stored in the summary record (e.g. "claude-sonnet-4-6").
     ///   - settings: The user's app settings.
     /// - Returns: The saved `MeetingSummary`.
     @discardableResult

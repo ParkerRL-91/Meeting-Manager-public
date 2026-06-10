@@ -86,7 +86,7 @@ enum SampleData {
         meetingId: String = "meeting-1",
         promptUsed: String = "Summarize this meeting",
         summaryText: String = "The team discussed sprint goals and assigned tasks.",
-        modelUsed: String? = "claude-sonnet-4-20250514",
+        modelUsed: String? = "claude-sonnet-4-6",
         generatedAt: Date = fixedDate,
         isEdited: Bool = false
     ) -> MeetingSummary {

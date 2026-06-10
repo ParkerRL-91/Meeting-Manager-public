@@ -39,7 +39,7 @@ enum Constants {
         static let recentMeetingsLimit = 20
 
         /// Default AI model used for summarisation.
-        static let aiModel = "claude-sonnet-4-20250514"
+        static let aiModel = "claude-sonnet-4-6"
 
         /// Maximum transcript tokens sent per summarisation request.
         static let maxTranscriptTokens = 100_000

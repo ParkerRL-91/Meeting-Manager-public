@@ -126,7 +126,7 @@ struct AppSettings: Codable, Equatable {
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
-        claudeModel: "claude-sonnet-4-20250514",
+        claudeModel: "claude-sonnet-4-6",
         calendarSyncIntervalMinutes: 15,
         notificationLeadTimeMinutes: 5,
         launchAtLogin: false,

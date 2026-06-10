@@ -88,6 +88,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v45-attribution-flags",
         "v46-enhanced-note",
         "v47-apollo-profile",
+        "v48-claude-model-refresh",
     ]
 
     override func setUpWithError() throws {

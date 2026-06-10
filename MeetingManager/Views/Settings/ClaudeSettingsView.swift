@@ -22,8 +22,9 @@ struct ClaudeSettingsView: View {
     // MARK: - Models
 
     private let availableModels: [(id: String, label: String)] = [
-        ("claude-sonnet-4-20250514", "Claude 4 (Balanced)"),
-        ("claude-opus-4-20250514", "Claude 4 (Premium)"),
+        ("claude-haiku-4-5", "Claude Haiku 4.5 (Fast)"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Balanced)"),
+        ("claude-opus-4-8", "Claude Opus 4.8 (Premium)"),
     ]
 
     enum ConnectionStatus: Equatable {
