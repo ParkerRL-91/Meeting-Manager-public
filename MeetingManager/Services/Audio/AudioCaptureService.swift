@@ -207,6 +207,20 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private var micRecoveryDeadlineTask: Task<Void, Never>?
     /// How long to wait for a replacement mic before ending the meeting.
     private let micRecoveryWindow: TimeInterval = 30
+    /// Why the current recovery started — failure semantics differ: a
+    /// start-time failure degrades to system-only on expiry (the call audio
+    /// is good; ending the meeting would throw it away), while a
+    /// mid-recording disconnect keeps the established end-recording behavior.
+    private var micRecoveryReason: MicRecoveryReason = .disconnected
+    /// Grace period before recovery surfaces anything to the user. A
+    /// Bluetooth mic finishing its A2DP→HFP switch resumes in 2–5 s and the
+    /// user should never see an error for that (TASK-029).
+    private let micRecoveryWarnGrace: TimeInterval = 8
+    private var micRecoveryWarnTask: Task<Void, Never>?
+    /// Set by startMicrophoneWithRetry when the mic couldn't start but system
+    /// audio is recording; consumed at the end of startCapture (recovery can
+    /// only begin once `isCapturing` is true and the device listeners exist).
+    private var micStartFailedPendingRecovery = false
 
     /// CoreAudio property listeners (default-input-changed for auto-follow,
     /// device-list-changed as the recovery retry signal). Stored so the exact same
@@ -312,6 +326,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // people on the call. Requires Screen Recording permission in System Settings.
         // Failure here is non-fatal — mic-only recording is still useful.
         resetBufferCounts()
+        micStartFailedPendingRecovery = false
         var systemTapStarted = false
         if #available(macOS 14.2, *) {
             if let tap = systemAudioTap {
@@ -477,6 +492,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // start-time device churn (aggregate creation, the tap dance) is done — so
         // they only fire on genuine mid-recording changes.
         installAudioDeviceListeners()
+
+        // Mic never started but the call audio is recording: begin bounded
+        // recovery now that isCapturing is true and the listeners are live.
+        if micStartFailedPendingRecovery {
+            micStartFailedPendingRecovery = false
+            beginMicRecovery(reason: .startFailed)
+        }
     }
 
     /// Start the mic engine resiliently against CoreAudio -10868
@@ -506,9 +528,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // Attempt 1: the preferred/auto-selected device.
         if attempt(useDefaultDevice: false) == nil { return }
 
-        // Attempts 2…4: let the contending app / HAL settle, recreate the engine,
-        // and fall back to the system default device.
-        let backoffsNs: [UInt64] = [400_000_000, 900_000_000, 1_800_000_000]  // 0.4s, 0.9s, 1.8s
+        // Attempts 2…5: let the contending app / HAL settle, recreate the engine,
+        // and fall back to the system default device. The final 3 s rung exists
+        // for Bluetooth headsets renegotiating A2DP→HFP when input opens — that
+        // takes 1–3+ s, longer when the call app is grabbing the same mic
+        // (TASK-029); system audio is already recording during these waits.
+        let backoffsNs: [UInt64] = [400_000_000, 900_000_000, 1_800_000_000, 3_000_000_000]
         var lastError: Error?
         for (i, delay) in backoffsNs.enumerated() {
             micCapture.stop()  // recreates the engine — makes the next start idempotent
@@ -563,11 +588,16 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         // Non-fatal degradation: if we have system audio, record SYSTEM-ONLY
-        // rather than failing the whole meeting. The user still gets the other
-        // participants and a transcript — never a blocking error mid-meeting.
+        // rather than failing the whole meeting — and instead of declaring
+        // defeat with an instant banner, arm bounded mic recovery: the most
+        // common cause (a Bluetooth mic mid profile-switch, or the call app
+        // briefly holding the device) clears within seconds, and the recovery
+        // loop picks the mic up with no user-visible error at all. The flag is
+        // consumed at the end of startCapture, after `isCapturing` is true and
+        // the device listeners are installed (beginMicRecovery requires both).
         if systemTapRunning {
-            logToFile("Audio: recording SYSTEM-ONLY this session — mic unavailable (held by another app)")
-            onSystemAudioUnavailable?("Your microphone is in use by another app, so this recording captures the other participants but not your own voice. Quit the app using the mic (a browser tab in a call, Zoom, Meet, or Teams) and start again to capture both sides.")
+            logToFile("Audio: mic unavailable at start — recording SYSTEM-ONLY for now; bounded recovery will keep trying")
+            micStartFailedPendingRecovery = true
             return
         }
 
@@ -588,6 +618,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         removeAudioDeviceListeners()
         micRecoveryDeadlineTask?.cancel()
         micRecoveryDeadlineTask = nil
+        micRecoveryWarnTask?.cancel()
+        micRecoveryWarnTask = nil
         if isMicRecovering {
             isMicRecovering = false
             onMicRecoveryStateChanged?(false)
@@ -630,7 +662,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     // MARK: - Dynamic mic switching
 
-    private enum MicRecoveryReason { case disconnected, switchFailed }
+    private enum MicRecoveryReason { case disconnected, switchFailed, startFailed }
 
     /// Switch the active microphone mid-recording WITHOUT ending the meeting.
     /// `uid` nil = resolve via override/auto. No-ops when not capturing, when the
@@ -667,9 +699,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             return
         }
 
-        // No-op if we're already on it.
+        // No-op only if we're already on it AND the engine is actually
+        // running. After a start-time failure the device is configured but
+        // the engine never started — treating that as "already on it" would
+        // block start-failed recovery from ever retrying (TASK-029).
         let targetID = sessionManager.deviceID(forUID: target.uniqueID)
-        if targetID != AudioDeviceID(kAudioObjectUnknown), targetID == micCapture.currentDeviceID {
+        if targetID != AudioDeviceID(kAudioObjectUnknown), targetID == micCapture.currentDeviceID,
+           micCapture.engine.isRunning {
             logToFile("Audio: mic switch no-op — already on \(target.localizedName)")
             return
         }
@@ -733,18 +769,50 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private func beginMicRecovery(reason: MicRecoveryReason) {
         guard isCapturing, !isStoppingCapture, !isMicRecovering else { return }
         isMicRecovering = true
+        micRecoveryReason = reason
         onMicRecoveryStateChanged?(true)
         micProblemWarned = true   // suppress the generic dead-mic warning; we have our own
         logToFile("Audio: mic recovery STARTED (\(reason)) — holding recording open; system audio continues")
-        onMicProblemDetected?(
-            "Your microphone disconnected. Meeting Manager is still recording the call — "
-            + "reconnect a microphone and your audio will resume automatically."
-        )
+
+        // Warn only if recovery hasn't succeeded within the grace period. The
+        // common causes (Bluetooth A2DP→HFP switch, the call app briefly
+        // holding the device, unplug-replug) resolve in seconds — surfacing an
+        // error banner before recovery has even tried is what made a working
+        // mic look broken (TASK-029). Quick resumes show nothing at all.
+        micRecoveryWarnTask?.cancel()
+        micRecoveryWarnTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.micRecoveryWarnGrace * 1_000_000_000))
+            guard !Task.isCancelled, self.isMicRecovering else { return }
+            self.onMicProblemDetected?(reason == .startFailed
+                ? "Your microphone hasn't become available yet, so the recording currently has the call audio only. "
+                  + "Meeting Manager keeps trying and will add your mic the moment it frees up."
+                : "Your microphone disconnected. Meeting Manager is still recording the call — "
+                  + "reconnect a microphone and your audio will resume automatically."
+            )
+        }
+
+        // Poll inside the window in addition to the device listeners: a
+        // Bluetooth profile switch changes an EXISTING device's format
+        // without necessarily firing the device-list listener, so
+        // event-driven resume alone can miss exactly the case that matters.
         micRecoveryDeadlineTask?.cancel()
         micRecoveryDeadlineTask = Task { [weak self] in
             guard let self else { return }
-            if await self.attemptMicResume() { return }   // a replacement may already be present
-            try? await Task.sleep(nanoseconds: UInt64(self.micRecoveryWindow * 1_000_000_000))
+            let pollOffsets: [TimeInterval] = [0, 2, 5, 10, 20]
+            var elapsed: TimeInterval = 0
+            for offset in pollOffsets {
+                if offset > elapsed {
+                    try? await Task.sleep(nanoseconds: UInt64((offset - elapsed) * 1_000_000_000))
+                    elapsed = offset
+                }
+                guard !Task.isCancelled, self.isMicRecovering else { return }
+                if await self.attemptMicResume() { return }
+            }
+            let remaining = self.micRecoveryWindow - elapsed
+            if remaining > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
             guard !Task.isCancelled else { return }
             self.failMicRecovery()
         }
@@ -773,6 +841,8 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         guard isMicRecovering else { return }
         micRecoveryDeadlineTask?.cancel()
         micRecoveryDeadlineTask = nil
+        micRecoveryWarnTask?.cancel()
+        micRecoveryWarnTask = nil
         isMicRecovering = false
         onMicRecoveryStateChanged?(false)
         consecutiveMicDeadSeconds = 0
@@ -786,6 +856,21 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         isMicRecovering = false
         onMicRecoveryStateChanged?(false)
         micRecoveryDeadlineTask = nil
+        micRecoveryWarnTask?.cancel()
+        micRecoveryWarnTask = nil
+
+        // Start-time failure: the mic never joined, but the call audio has
+        // been recording the whole time — ending the meeting would discard
+        // good audio. Stay system-only and tell the user once, definitively.
+        if micRecoveryReason == .startFailed {
+            logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired (startFailed) — continuing SYSTEM-ONLY")
+            onMicProblemDetected?(
+                "Your microphone couldn't be started, so this recording captures the other participants but not your own voice. "
+                + "Check which app is holding the mic (a browser tab in a call, Zoom, Meet, or Teams) or pick a different input in System Settings > Sound."
+            )
+            return
+        }
+
         logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired — no replacement; ending recording")
         onSilenceDetected?()   // reuse the established auto-stop → AppState.stopRecording
     }

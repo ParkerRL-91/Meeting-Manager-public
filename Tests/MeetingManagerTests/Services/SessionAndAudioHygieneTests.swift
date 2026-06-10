@@ -106,4 +106,15 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         filter.configure(sampleRate: 44_100)
         XCTAssertEqual(filter.configuredRate, 44_100)
     }
+    // MARK: - Mic input format guard (TASK-029)
+
+    func testUsableInputFormatRejectsMidTransitionFormats() {
+        // A Bluetooth device mid A2DP→HFP switch reports 0 Hz / 0 channels;
+        // tapping that raises an ObjC exception that no Swift catch sees.
+        XCTAssertTrue(MicrophoneCapture.isUsableInputFormat(sampleRate: 44_100, channelCount: 1))
+        XCTAssertTrue(MicrophoneCapture.isUsableInputFormat(sampleRate: 16_000, channelCount: 2))
+        XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 0, channelCount: 1))
+        XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 48_000, channelCount: 0))
+        XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 0, channelCount: 0))
+    }
 }

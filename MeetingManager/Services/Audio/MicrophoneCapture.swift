@@ -122,6 +122,27 @@ final class MicrophoneCapture: @unchecked Sendable {
         self.preferredInputDeviceID = inputDeviceID.isEmpty ? nil : inputDeviceID
     }
 
+    /// A device mid-transition (a Bluetooth headset switching A2DP→HFP the
+    /// moment input opens) can report a 0 Hz / 0-channel format. Installing a
+    /// tap with that format raises an ObjC exception inside AVFoundation — not
+    /// a Swift error — which killed the whole start sequence with no log line
+    /// and no recovery (TASK-029). Validate first and throw cleanly so the
+    /// caller's backoff/recovery machinery stays in charge.
+    static func isUsableInputFormat(sampleRate: Double, channelCount: UInt32) -> Bool {
+        sampleRate > 0 && channelCount > 0
+    }
+
+    private func validateInputFormat(stage: String) throws {
+        let f = engine.inputNode.outputFormat(forBus: 0)
+        guard Self.isUsableInputFormat(sampleRate: f.sampleRate, channelCount: f.channelCount) else {
+            onDiagnostic?("DIAG:mic_engine \(stage): input format not ready (\(f.sampleRate)Hz/\(f.channelCount)ch) — failing fast for retry")
+            Logger.audio.error("Mic input format not ready at \(stage): \(f.sampleRate)Hz/\(f.channelCount)ch")
+            throw AudioCaptureError.captureSetupFailed(
+                "No valid audio input format available yet. Please check System Settings > Sound > Input."
+            )
+        }
+    }
+
     func start() throws {
         lock.lock()
         guard !isRunning else { lock.unlock(); return }
@@ -159,6 +180,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         // Try to set the preferred device; fall back to system default on failure.
         configureInputDevice()
 
+        try validateInputFormat(stage: "initial")
         installTapOnInputNode()
 
         // Try to start the engine. If it fails (e.g., device error -10868),
@@ -181,10 +203,7 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
 
             // Re-check format after reset
-            let retryFormat = engine.inputNode.outputFormat(forBus: 0)
-            guard retryFormat.sampleRate > 0 else {
-                throw AudioCaptureError.captureSetupFailed("No valid audio input device available. Please check System Settings > Sound > Input.")
-            }
+            try validateInputFormat(stage: "fallback")
 
             // Re-install tap and retry
             installTapOnInputNode()
@@ -206,6 +225,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 engine = AVAudioEngine()
                 Thread.sleep(forTimeInterval: 0.3)
                 configureInputDevice()
+                try validateInputFormat(stage: "rebuilt")
                 installTapOnInputNode()
                 do {
                     try engine.start()
