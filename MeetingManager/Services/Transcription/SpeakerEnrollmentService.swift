@@ -139,13 +139,32 @@ final class SpeakerEnrollmentService {
         guard aggregate.count == Self.embeddingDimension else { return }
 
         guard let person = try? await personRepo.findOrCreate(for: personName) else { return }
+
+        // EMA-blend into the stored reference instead of wholesale replacing
+        // it (mirrors VoiceProfileRepository.merge): one borderline meeting
+        // must not overwrite a reference built from many confirmed segments.
+        // α 0.3 — recent audio refines, history dominates. Re-normalized so
+        // FluidAudio's cosine matching keeps unit-length semantics.
+        var blended = aggregate
+        if let existing = try? await referenceRepo.reference(forPersonId: person.id),
+           existing.embedding.count == aggregate.count {
+            let alpha: Float = 0.3
+            blended = zip(existing.embedding, aggregate).map { old, new in
+                old * (1 - alpha) + new * alpha
+            }
+        }
+        let norm = sqrt(blended.reduce(Float(0)) { $0 + $1 * $1 })
+        if norm > 0 {
+            blended = blended.map { $0 / norm }
+        }
+
         try? await referenceRepo.save(
             personId: person.id,
             personName: person.canonicalName,
-            embedding: aggregate,
+            embedding: blended,
             segmentCount: embeddings.count
         )
-        logger.info("Rebuilt voice reference for \(person.canonicalName, privacy: .public) from \(embeddings.count) segment(s)")
+        logger.info("Rebuilt voice reference for \(person.canonicalName, privacy: .public) from \(embeddings.count) segment(s) (EMA-blended)")
     }
 
     // MARK: - Private

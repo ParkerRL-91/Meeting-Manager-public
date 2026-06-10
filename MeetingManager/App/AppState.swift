@@ -610,7 +610,19 @@ final class AppState {
                 }) ?? 0
                 if existingMaxEnd > 0, let lastPath = meeting.audioFilePaths.last {
                     effectiveURL = URL(fileURLWithPath: lastPath)
-                    timebaseOffset = existingMaxEnd + 1.0
+                    // Offset floor = session 1's FILE duration, not just its
+                    // last transcript row: the voice-fingerprint slicers
+                    // resolve `audioFilePaths.first`, so an offset that lands
+                    // inside file 1's trailing-silence band would slice the
+                    // wrong session's audio into a person's voice profile.
+                    var offsetFloor = existingMaxEnd + 1.0
+                    if let firstPath = meeting.audioFilePaths.first,
+                       let firstFile = try? AVAudioFile(forReading: URL(fileURLWithPath: firstPath)),
+                       firstFile.processingFormat.sampleRate > 0 {
+                        let firstDuration = Double(firstFile.length) / firstFile.processingFormat.sampleRate
+                        offsetFloor = max(offsetFloor, firstDuration + 1.0)
+                    }
+                    timebaseOffset = offsetFloor
                     self.fileLog("TaskQueue: append-mode transcription — session file \(URL(fileURLWithPath: lastPath).lastPathComponent), offset \(Int(timebaseOffset))s")
                 } else if existingMaxEnd == 0 {
                     func fileSize(_ path: String) -> Int {
@@ -623,9 +635,7 @@ final class AppState {
                 }
             }
 
-            let batchResult = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
-            var rawTranscripts = batchResult.transcripts
-            let speakerLabels = batchResult.speakerLabels
+            var rawTranscripts = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
 
             // Append mode: the new session's diarization numbers clusters from
             // "Speaker 1" again, colliding with session 1's label namespace —
@@ -638,24 +648,15 @@ final class AppState {
                 }) ?? []
                 let existingMapKeys: [String] = (try? await self.meetingRepository.find(id: meetingId))
                     .map { Array($0.speakerMapDictionary.keys) } ?? []
-                func speakerNumber(_ label: String) -> Int? {
-                    guard label.hasPrefix("Speaker ") else { return nil }
-                    return Int(label.dropFirst("Speaker ".count))
-                }
-                let labelShift = (existingLabels + existingMapKeys).compactMap(speakerNumber).max() ?? 0
+                let labelShift = Self.maxSpeakerNumber(in: existingLabels + existingMapKeys)
                 if labelShift > 0 {
-                    rawTranscripts = rawTranscripts.map { t in
-                        guard let label = t.speakerLabel, let n = speakerNumber(label) else { return t }
-                        var copy = t
-                        copy.speakerLabel = "Speaker \(n + labelShift)"
-                        return copy
-                    }
+                    rawTranscripts = Self.shiftSessionSpeakerLabels(rawTranscripts, by: labelShift)
                     self.fileLog("TaskQueue: append-mode labels shifted by +\(labelShift)")
                 }
             }
 
-            // Atomically commit transcripts + meeting-status update + speaker labels in one write.
-            // Previously three separate writer.write calls; now a single transaction so a crash
+            // Atomically commit transcripts + meeting-status update in one write.
+            // Previously separate writer.write calls; a single transaction means a crash
             // between steps cannot leave transcripts saved but meeting still in .transcribing.
             if var meeting = try? await self.meetingRepository.find(id: meetingId) {
                 // Speaker labels (Speaker 1, Speaker 2, …) are intentionally NOT
@@ -933,6 +934,21 @@ final class AppState {
             await SpeakerDiarizationService.shared.unloadModels()
             FluidAudioDiarizationService.shared.unloadModels()
             self.fileLog("TaskQueue: idle — diarization models unloaded")
+
+            // WhisperKit (~1.5 GB) idle policy: release it when nothing can
+            // need it soon — not recording, and no meeting starting within
+            // the next hour (recordings cluster around meetings). On a 16 GB
+            // machine this is the difference between the local LLM fitting
+            // in RAM during summarization or swapping. Reload is kicked by
+            // recording start AND by batchTranscribe itself, and the
+            // transcription handler already waits up to 5 min for the load.
+            if self.transcriptionService.isModelLoaded, !self.isRecording {
+                let imminent = (try? await self.meetingRepository.meetingsStartingWithin(minutes: 60)) ?? []
+                if imminent.isEmpty {
+                    self.transcriptionService.unloadModel()
+                    self.fileLog("TaskQueue: idle — WhisperKit model unloaded (no meeting within 60 min)")
+                }
+            }
         }
 
         // Start the queue (recovers stuck tasks, enqueues orphans, begins processing)
@@ -1639,43 +1655,31 @@ final class AppState {
                     var toTranscribe: [Meeting] = []
                     for var m in recordings {
                         m.endDate = m.endDate ?? Date()
-                        // Usable = exists AND carries actual samples.
-                        // AVAudioFile's header scaffolding occupies the first
-                        // ~4 KB (data chunk at offset 4088) — a crash husk is
-                        // ~4 KB with zero samples, not 44 bytes.
-                        func isUsable(_ path: String) -> Bool {
-                            guard !path.isEmpty,
-                                  FileManager.default.fileExists(atPath: path),
-                                  let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                                  let size = attrs[.size] as? Int else { return false }
-                            return size > 4200
-                        }
                         func deleteWithSibling(_ path: String) {
                             try? FileManager.default.removeItem(atPath: path)
                             try? FileManager.default.removeItem(
                                 at: AudioBufferManager.systemAudioURL(for: URL(fileURLWithPath: path)))
                         }
-                        let usable = m.audioFilePaths.filter(isUsable)
+                        let (usable, husks) = Self.partitionUsableAudioPaths(m.audioFilePaths) { path in
+                            guard FileManager.default.fileExists(atPath: path),
+                                  let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+                            return attrs[.size] as? Int
+                        }
+                        for husk in husks { deleteWithSibling(husk) }
                         if !usable.isEmpty {
                             // Keep the good sessions, drop only husk entries —
                             // a multi-file meeting whose LAST session died must
                             // not lose its earlier good audio.
-                            for path in m.audioFilePaths where !usable.contains(path) && !path.isEmpty {
-                                deleteWithSibling(path)
-                            }
                             m.audioFilePaths = usable
                             m.status = .transcribing
                             try m.update(db)
                             toTranscribe.append(m)
                         } else {
-                            // No usable audio anywhere — delete husks and reset
-                            // so the user can re-record. A dead husk left in
-                            // audioFilePaths becomes `.first` after a re-record
-                            // appends a real session, and transcription would
-                            // resolve the husk instead of the audio.
-                            for path in m.audioFilePaths where !path.isEmpty {
-                                deleteWithSibling(path)
-                            }
+                            // No usable audio anywhere — reset so the user can
+                            // re-record. A dead husk left in audioFilePaths
+                            // becomes `.first` after a re-record appends a real
+                            // session, and transcription would resolve the husk
+                            // instead of the audio.
                             m.audioFilePaths = []
                             m.status = .scheduled
                             m.endDate = nil
@@ -1927,6 +1931,11 @@ final class AppState {
         self.isRecording = stateMachine.isRecording
         self.selectedMeetingId = current.id
         if self.isRecording { self.startAudioLevelPolling() }
+
+        // Warm the transcription model during the meeting so it's ready the
+        // moment recording stops (no-op when already loaded; the idle-unload
+        // policy makes "unloaded" a normal steady state).
+        autoLoadTranscriptionModel()
 
         // Surface audio write errors to the user (e.g. disk full)
         self.audioCaptureService.onWriteError = { [weak self] error in
@@ -2445,9 +2454,55 @@ final class AppState {
         return (toSave, userSegmentCount, skippedCount)
     }
 
-    /// Batch-transcribe a complete WAV file using WhisperKit's sequential long-form algorithm.
-    /// Returns the filtered transcripts and diarisation speaker labels to the caller, which
-    /// is responsible for the atomic DB write (see transcriptionHandler in setupTaskQueue).
+    /// Highest N across "Speaker N" labels in `labels` (0 when none).
+    /// Extracted for testability — append-mode session namespacing depends
+    /// on it.
+    nonisolated static func maxSpeakerNumber(in labels: [String]) -> Int {
+        labels.compactMap { label -> Int? in
+            guard label.hasPrefix("Speaker ") else { return nil }
+            return Int(label.dropFirst("Speaker ".count))
+        }.max() ?? 0
+    }
+
+    /// Shift every "Speaker N" label by `shift` (mic/resolved-name rows are
+    /// untouched). Append-mode namespacing: a reopened session's diarization
+    /// numbers clusters from "Speaker 1" again, colliding with session 1's
+    /// labels — and a later fill-only pass would stamp session-2 names onto
+    /// session-1's still-anonymous rows.
+    nonisolated static func shiftSessionSpeakerLabels(_ transcripts: [Transcript], by shift: Int) -> [Transcript] {
+        guard shift > 0 else { return transcripts }
+        return transcripts.map { t in
+            guard let label = t.speakerLabel, label.hasPrefix("Speaker "),
+                  let n = Int(label.dropFirst("Speaker ".count)) else { return t }
+            var copy = t
+            copy.speakerLabel = "Speaker \(n + shift)"
+            return copy
+        }
+    }
+
+    /// Partition audio paths into usable sessions vs husks. A crash husk is
+    /// AVAudioFile's header scaffolding (~4 KB, data chunk at offset 4088)
+    /// with zero samples — the old `> 44` check made the husk branch
+    /// near-dead. Missing files (nil size) count as husks.
+    nonisolated static func partitionUsableAudioPaths(
+        _ paths: [String],
+        sizeOf: (String) -> Int?
+    ) -> (usable: [String], husks: [String]) {
+        var usable: [String] = []
+        var husks: [String] = []
+        for path in paths where !path.isEmpty {
+            if let size = sizeOf(path), size > 4200 {
+                usable.append(path)
+            } else {
+                husks.append(path)
+            }
+        }
+        return (usable, husks)
+    }
+
+    /// Batch-transcribe a complete WAV file using WhisperKit's sequential
+    /// long-form algorithm. Returns the filtered transcript rows; the caller
+    /// (transcriptionHandler) is responsible for the atomic DB write.
     ///
     /// Throws ONLY for audio-preparation I/O failures (unreadable WAV) so the
     /// task queue's retry path engages — a crash-recovered file may not have
@@ -2459,14 +2514,17 @@ final class AppState {
     /// `timebaseOffset` shifts every persisted row's timestamps — used by
     /// append-mode (reopened meetings) so a second session's rows sort after
     /// the first session's timeline.
-    private func batchTranscribe(meetingId: String, audioURL: URL?, timebaseOffset: Double = 0) async throws -> (transcripts: [Transcript], speakerLabels: String?) {
+    private func batchTranscribe(meetingId: String, audioURL: URL?, timebaseOffset: Double = 0) async throws -> [Transcript] {
         guard let audioURL else {
             fileLog("Batch transcribe: no audio file URL")
-            return ([], nil)
+            return []
         }
 
         if !transcriptionService.isModelLoaded {
-            fileLog("Batch transcribe: model not loaded, waiting up to 5 min...")
+            // The idle-unload policy makes "not loaded" a normal steady state,
+            // not just a launch race — actively kick a load, don't only wait.
+            autoLoadTranscriptionModel()
+            fileLog("Batch transcribe: model not loaded — load kicked, waiting up to 5 min...")
             for _ in 0..<300 {
                 try? await Task.sleep(for: .seconds(1))
                 if transcriptionService.isModelLoaded { break }
@@ -2476,10 +2534,9 @@ final class AppState {
             fileLog("Batch transcribe: model not loaded after 5 min — queuing for later")
             addPendingTranscription(meetingId: meetingId, audioURL: audioURL)
             lastUserError = "Transcription queued — will process when model loads."
-            return ([], nil)
+            return []
         }
 
-        var capturedSpeakerLabels: String?
         fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
 
         // The hint helpers are MainActor and cheap — resolve both up
@@ -2505,7 +2562,7 @@ final class AppState {
             throw error
         }
         guard let prepared = maybePrepared else {
-            return ([], nil)
+            return []
         }
 
         do {
@@ -2555,11 +2612,6 @@ final class AppState {
 
                 let uniqueSpeakers = Set(segments.map { $0.sid })
                 fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
-
-                // Capture speaker labels — written atomically with transcripts in the caller
-                if uniqueSpeakers.count > 1 {
-                    capturedSpeakerLabels = uniqueSpeakers.sorted().map { "Speaker \($0)" }.joined(separator: ", ")
-                }
             } catch {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
             }
@@ -2583,12 +2635,12 @@ final class AppState {
             }).value
             fileLog("Batch transcribe: prepared \(built.rows.count) segments, skipped \(built.skippedCount) hallucinations, \(built.userSegmentCount) labeled as user")
             Logger.transcription.info("Batch transcription ready: \(built.rows.count) segments for meeting \(meetingId)")
-            return (built.rows, capturedSpeakerLabels)
+            return built.rows
 
         } catch {
             fileLog("Batch transcribe: ERROR — \(error.localizedDescription)")
             Logger.transcription.error("Batch transcription failed: \(error.localizedDescription)")
-            return ([], capturedSpeakerLabels)
+            return []
         }
     }
 
@@ -4004,6 +4056,10 @@ final class AppState {
                 modelLoadTotalAttempts += 1
                 do {
                     try await transcriptionService.loadModel(model)
+                    // The hard cap is a runaway-FAILURE backstop, not a
+                    // lifetime budget: the idle-unload policy makes reloads
+                    // routine, so a success must reset the counter.
+                    modelLoadTotalAttempts = 0
                     modelProgressCancellable = nil
                     modelDownloadProgress = 1.0
                     // Flip the "loading" flag immediately so the sidebar
@@ -4102,9 +4158,8 @@ final class AppState {
             }
             // Use same atomic-write pattern as transcriptionHandler
             let rawTranscripts: [Transcript]
-            let speakerLabels: String?
             do {
-                (rawTranscripts, speakerLabels) = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+                rawTranscripts = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
             } catch {
                 // Legacy UserDefaults drain path has no queue retry — log and
                 // keep the entry for the next launch.
@@ -4136,12 +4191,20 @@ final class AppState {
         }
 
         // Clear processed entries; failed ones stay for the next launch.
-        if remaining.isEmpty {
+        // Merge with anything added DURING the drain — batchTranscribe
+        // self-requeues via addPendingTranscription when the model unloads
+        // mid-run, and a plain set/remove here would clobber that entry.
+        var toKeep = remaining
+        let addedDuringDrain = (UserDefaults.standard.dictionary(forKey: Self.pendingTranscriptionKey) as? [String: String]) ?? [:]
+        for (meetingId, path) in addedDuringDrain where pending[meetingId] == nil {
+            toKeep[meetingId] = path
+        }
+        if toKeep.isEmpty {
             UserDefaults.standard.removeObject(forKey: Self.pendingTranscriptionKey)
             fileLog("Pending transcription queue cleared")
         } else {
-            UserDefaults.standard.set(remaining, forKey: Self.pendingTranscriptionKey)
-            fileLog("Pending transcription queue: \(remaining.count) failed entr(y/ies) kept for next launch")
+            UserDefaults.standard.set(toKeep, forKey: Self.pendingTranscriptionKey)
+            fileLog("Pending transcription queue: \(toKeep.count) entr(y/ies) kept for next launch")
         }
     }
 

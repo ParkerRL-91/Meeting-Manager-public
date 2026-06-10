@@ -40,14 +40,6 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     /// races between the audio callback queue and callers of start/stop.
     private let lock = NSLock()
 
-    /// Target output format: 16kHz mono Float32 (matches mic capture pipeline)
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: 16000,
-        channels: 1,
-        interleaved: false
-    )!
-
     /// Start capturing system audio via ScreenCaptureKit.
     /// This captures all system audio output except our own app's audio.
     /// - Parameters:
@@ -193,81 +185,40 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         // would trap converting Inf/NaN to Int.
         guard sampleRate > 0, channels > 0 else { return }
 
-        // Get the audio buffer list
-        do {
-            try sampleBuffer.withAudioBufferList { audioBufferList, blockBuffer in
-                let bufferListPtr = audioBufferList.unsafePointer
-                let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferListPtr))
-
-                guard let firstBuffer = abl.first,
-                      let data = firstBuffer.mData else { return }
-
-                let totalBytes = Int(firstBuffer.mDataByteSize)
-                let totalFloats = totalBytes / MemoryLayout<Float>.size
-                let frameCount = totalFloats / Int(channels)
-
-                let srcPtr = data.assumingMemoryBound(to: Float.self)
-
-                // Diagnostic: log periodically
-                if currentBufferCount <= 3 || currentBufferCount % 200 == 0 {
-                    var sum: Float = 0
-                    let checkN = min(100, totalFloats)
-                    for i in 0..<checkN {
-                        sum += srcPtr[i] * srcPtr[i]
-                    }
-                    let rawRMS = checkN > 0 ? sqrtf(sum / Float(checkN)) : 0
-                    let samples = (0..<min(5, totalFloats)).map { String(format: "%.6f", srcPtr[$0]) }.joined(separator: ",")
-                    onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) frames=\(frameCount) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", rawRMS)) samples=[\(samples)]")
-                }
-
-                // Mix to mono
-                var monoSamples = [Float](repeating: 0, count: frameCount)
-                if channels > 1 {
-                    for frame in 0..<frameCount {
-                        var sum: Float = 0
-                        for ch in 0..<Int(channels) {
-                            let idx = frame * Int(channels) + ch
-                            if idx < totalFloats {
-                                sum += srcPtr[idx]
-                            }
-                        }
-                        monoSamples[frame] = sum / Float(channels)
-                    }
-                } else {
-                    for i in 0..<frameCount {
-                        monoSamples[i] = srcPtr[i]
-                    }
-                }
-
-                // Downsample to 16kHz
-                let ratio = 16000.0 / sampleRate
-                let outputCount = Int(Double(frameCount) * ratio)
-                guard outputCount > 0 else { return }
-
-                guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AVAudioFrameCount(outputCount)) else { return }
-                pcmBuffer.frameLength = AVAudioFrameCount(outputCount)
-                guard let outPtr = pcmBuffer.floatChannelData?[0] else { return }
-
-                // Linear interpolation resampling
-                for i in 0..<outputCount {
-                    let srcPos = Double(i) / ratio
-                    let srcIdx = Int(srcPos)
-                    let frac = Float(srcPos - Double(srcIdx))
-                    if srcIdx + 1 < frameCount {
-                        outPtr[i] = monoSamples[srcIdx] * (1 - frac) + monoSamples[srcIdx + 1] * frac
-                    } else if srcIdx < frameCount {
-                        outPtr[i] = monoSamples[srcIdx]
-                    }
-                }
-
-                let time = AVAudioTime(hostTime: mach_absolute_time())
-                if isMic { onMicBuffer?(pcmBuffer, time) } else { onBuffer?(pcmBuffer, time) }
-            }
-        } catch {
+        // Wrap the native-format samples in an AVAudioPCMBuffer and deliver
+        // them AS-IS. AudioBufferManager.canonicalize converts to 16 kHz mono
+        // with a STATEFUL AVAudioConverter — properly anti-aliased resampling
+        // with phase continuity across buffers — which is strictly better
+        // than the hand-rolled linear-interpolation downsample this replaced
+        // (that aliased >8 kHz content straight into the speech band).
+        let nativeFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
+        let frames = AVAudioFrameCount(sampleBuffer.numSamples)
+        guard frames > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: nativeFormat, frameCapacity: frames) else { return }
+        pcmBuffer.frameLength = frames
+        let copyStatus = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frames), into: pcmBuffer.mutableAudioBufferList
+        )
+        guard copyStatus == noErr else {
             if currentBufferCount <= 3 {
-                onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) buffer extraction error: \(error.localizedDescription)")
+                onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) PCM copy failed: \(copyStatus)")
             }
+            return
         }
+
+        // Diagnostic: log periodically
+        if currentBufferCount <= 3 || currentBufferCount % 200 == 0 {
+            onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) frames=\(frames) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", pcmBuffer.rmsLevel))")
+        }
+
+        // Timestamp = the buffer's PRESENTATION time, not receipt time. The
+        // positioned file writer aligns the mixed/system tracks from these
+        // timestamps, and receipt-time jitter (queue scheduling) skewed the
+        // alignment the diarization energy anchor depends on.
+        let pts = sampleBuffer.presentationTimeStamp
+        let hostTime = pts.isValid ? CMClockConvertHostTimeToSystemUnits(pts) : mach_absolute_time()
+        let time = AVAudioTime(hostTime: hostTime)
+        if isMic { onMicBuffer?(pcmBuffer, time) } else { onBuffer?(pcmBuffer, time) }
     }
 
     // MARK: - SCStreamDelegate

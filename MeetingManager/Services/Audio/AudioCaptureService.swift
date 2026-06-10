@@ -628,11 +628,6 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         return currentAudioFileURL
     }
 
-    /// Get the buffer manager for the transcription service
-    var transcriptionBuffer: AudioBufferManager {
-        bufferManager
-    }
-
     // MARK: - Dynamic mic switching
 
     private enum MicRecoveryReason { case disconnected, switchFailed }

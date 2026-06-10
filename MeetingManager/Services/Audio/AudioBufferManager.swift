@@ -2,73 +2,20 @@ import AVFoundation
 import Dispatch
 import Foundation
 
-// MARK: - CircularBuffer
-
-/// A fixed-capacity ring buffer for Float samples.
-/// Uses contiguous storage for efficient bulk reads.
-struct CircularBuffer<Element> {
-    private var storage: [Element]
-    private var head: Int = 0  // next write position
-    private var _count: Int = 0
-    let capacity: Int
-
-    init(capacity: Int, defaultValue: Element) {
-        self.capacity = capacity
-        self.storage = [Element](repeating: defaultValue, count: capacity)
-    }
-
-    var count: Int { _count }
-
-    mutating func append(contentsOf elements: some Collection<Element>) {
-        for element in elements {
-            storage[head] = element
-            head = (head + 1) % capacity
-            if _count < capacity {
-                _count += 1
-            }
-        }
-    }
-
-    /// Read the first `n` elements (oldest) into a contiguous array.
-    func prefix(_ n: Int) -> [Element] {
-        let n = min(n, _count)
-        guard n > 0 else { return [] }
-        let start = (head - _count + capacity) % capacity
-        var result = [Element]()
-        result.reserveCapacity(n)
-        for i in 0..<n {
-            result.append(storage[(start + i) % capacity])
-        }
-        return result
-    }
-
-    /// Drop the oldest `n` elements.
-    mutating func removeFirst(_ n: Int) {
-        let n = min(n, _count)
-        _count -= n
-    }
-
-    mutating func removeAll() {
-        _count = 0
-        head = 0
-    }
-
-    /// Read element at logical index (0 = oldest).
-    subscript(index: Int) -> Element {
-        let start = (head - _count + capacity) % capacity
-        return storage[(start + index) % capacity]
-    }
-}
-
 // MARK: - AudioBufferManager
 
-/// Thread-safe ring buffer that bridges audio capture to transcription.
-/// Receives buffers from mic and system audio, provides chunks for WhisperKit.
+/// Thread-safe disk writer that bridges audio capture to post-meeting batch
+/// transcription. Receives buffers from mic and system audio, converts them
+/// to the canonical 16 kHz mono format, and writes them to per-source WAVs
+/// positioned at their true wall-clock offsets. (Live in-meeting chunking was
+/// removed with live transcription in v4.0 — transcription is batch-only,
+/// reading the finished files.)
 ///
-/// Audio mixing: mic and system audio are summed sample-by-sample (not concatenated).
-/// Concatenating would give WhisperKit alternating windows of each source, making
-/// it impossible to transcribe both speakers. Summing produces a single waveform
-/// where both voices are simultaneously audible -- the correct input for Whisper.
+/// Audio mixing: at stop, mic and system audio are summed sample-by-sample
+/// into the mixed file (not concatenated). Concatenating would give
+/// WhisperKit alternating windows of each source, making it impossible to
+/// transcribe both speakers. Summing produces a single waveform where both
+/// voices are simultaneously audible -- the correct input for Whisper.
 ///
 /// @unchecked Sendable: every mutable property is guarded by `lock` /
 /// `fileWriteLock` / `converterLock` — the class is already accessed
@@ -79,14 +26,17 @@ final class AudioBufferManager: @unchecked Sendable {
     /// and the system-audio callback thread both write the mixed `audioFile`,
     /// and `AVAudioFile.write` is not safe for concurrent writers — without this
     /// the WAV gets corrupted (and can crash inside CoreAudio). Kept separate
-    /// from `lock` (which guards the sample ring buffers) so disk I/O never
-    /// blocks the transcription chunker, and acquired only after `lock` is
-    /// released to avoid lock-ordering inversion.
+    /// from `lock` (which guards the capacity counters), and acquired only
+    /// after `lock` is released to avoid lock-ordering inversion.
     private let fileWriteLock = NSLock()
 
-    /// Circular buffers: 30 seconds at 16kHz = 480,000 samples capacity.
-    private var micSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
-    private var systemSamples = CircularBuffer<Float>(capacity: 480_000, defaultValue: 0)
+    /// All positioned file writes run here, not on the capture callback
+    /// threads — a long silence gap can require seconds of catch-up padding,
+    /// and stalling the SCK delegate queue (or the engine tap queue) on disk
+    /// I/O delays subsequent buffers. Serial, so write order is preserved.
+    /// `finishRecording` drains it synchronously before closing the files.
+    private let writeQueue = DispatchQueue(label: "com.meetingmanager.audiowrite", qos: .userInitiated)
+
     /// During capture this holds the MIC stream only (continuous → its own
     /// timeline is the recording wall-clock); `finishRecording` overwrites it
     /// with the true mic+system mix once both timelines are aligned. Writing
@@ -190,23 +140,6 @@ final class AudioBufferManager: @unchecked Sendable {
         return _isAtCapacity
     }
 
-    /// Duration of audio chunks provided to the transcriber (seconds).
-    /// Whisper is designed for 30-second windows -- shorter chunks destroy context
-    /// and produce [BLANK_AUDIO] / [inaudible] output.
-    let chunkDuration: TimeInterval = 30.0
-
-    /// Overlap between consecutive chunks (seconds).
-    /// 5s overlap ensures no speech is lost at chunk boundaries.
-    let chunkOverlap: TimeInterval = 5.0
-
-    private var chunkSampleCount: Int { Int(chunkDuration * sampleRate) }
-    private var overlapSampleCount: Int { Int(chunkOverlap * sampleRate) }
-
-    /// The longer of the two source buffers determines when a chunk is ready.
-    private var maxBufferCount: Int {
-        max(micSamples.count, systemSamples.count)
-    }
-
     // MARK: - Error Handling (Task 4)
 
     /// Called when a file write error occurs. Wire this to surface errors to the UI.
@@ -237,25 +170,12 @@ final class AudioBufferManager: @unchecked Sendable {
         )
         source.setEventHandler { [weak self] in
             guard let self else { return }
-            let event = source.data
-            if event.contains(.critical) {
-                // Critical: flush everything and notify caller to auto-stop
-                self.lock.lock()
-                self.micSamples.removeAll()
-                self.systemSamples.removeAll()
-                self.lock.unlock()
+            // Capture memory is bounded (audio streams straight to disk), so
+            // there is nothing to flush here — but CRITICAL pressure still
+            // means the machine is in trouble; let the owner auto-stop the
+            // recording cleanly while the files are intact.
+            if source.data.contains(.critical) {
                 self.onMemoryPressure?()
-            } else if event.contains(.warning) {
-                // Warning: flush older buffers (keep only overlap worth of samples)
-                self.lock.lock()
-                let keepCount = self.overlapSampleCount
-                if self.micSamples.count > keepCount {
-                    self.micSamples.removeFirst(self.micSamples.count - keepCount)
-                }
-                if self.systemSamples.count > keepCount {
-                    self.systemSamples.removeFirst(self.systemSamples.count - keepCount)
-                }
-                self.lock.unlock()
             }
         }
         source.resume()
@@ -326,98 +246,46 @@ final class AudioBufferManager: @unchecked Sendable {
         // Convert to 16 kHz mono Float32 first; skip the buffer if it can't be
         // converted (degenerate device format) rather than writing a mismatch.
         guard let buffer = canonicalize(rawBuffer) else { return }
-        guard let channelData = buffer.floatChannelData else { return }
-        let samples = Array(UnsafeBufferPointer(
-            start: channelData[0],
-            count: Int(buffer.frameLength)
-        ))
 
         lock.lock()
-        totalMicSamplesAppended += samples.count
-        if totalMicSamplesAppended < maxSampleCount {
-            micSamples.append(contentsOf: samples)
-        } else {
+        totalMicSamplesAppended += Int(buffer.frameLength)
+        if totalMicSamplesAppended >= maxSampleCount {
             _isAtCapacity = true
         }
         lock.unlock()
 
-        writePositioned(buffer, at: time, isMic: true)
+        writeQueue.async { [weak self] in
+            self?.writePositioned(buffer, at: time, isMic: true)
+        }
     }
 
     func appendSystemBuffer(_ rawBuffer: AVAudioPCMBuffer, at time: AVAudioTime) {
         // ScreenCaptureKit usually delivers 44.1/48 kHz; convert to the canonical
         // 16 kHz so it matches the file format AND the 16 kHz mic samples it gets
-        // mixed with for transcription. Skip if it can't be converted.
+        // summed with at stop. Skip if it can't be converted.
         guard let buffer = canonicalize(rawBuffer) else { return }
-        guard let channelData = buffer.floatChannelData else { return }
-        let samples = Array(UnsafeBufferPointer(
-            start: channelData[0],
-            count: Int(buffer.frameLength)
-        ))
 
         lock.lock()
-        totalSystemSamplesAppended += samples.count
-        if totalSystemSamplesAppended < maxSampleCount {
-            systemSamples.append(contentsOf: samples)
-        } else {
+        totalSystemSamplesAppended += Int(buffer.frameLength)
+        if totalSystemSamplesAppended >= maxSampleCount {
             _isAtCapacity = true
         }
         lock.unlock()
 
-        writePositioned(buffer, at: time, isMic: false)
-    }
-
-    /// Returns the next mixed audio chunk for transcription, or nil if not enough data.
-    ///
-    /// Mixing strategy: sum mic and system samples at each position, then scale by 0.5
-    /// to prevent clipping. If one source is shorter (still buffering), treat missing
-    /// samples as silence (zero). This means early chunks may be mic-only or system-only
-    /// until both streams are in sync -- that's correct behaviour.
-    func nextChunk() -> AudioChunk? {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard maxBufferCount >= chunkSampleCount else { return nil }
-
-        let count = chunkSampleCount
-        var mixed = [Float](repeating: 0, count: count)
-
-        // Sum mic samples (zero-padded if shorter than chunk)
-        for i in 0..<count {
-            let mic: Float = i < micSamples.count ? micSamples[i] : 0
-            let sys: Float = i < systemSamples.count ? systemSamples[i] : 0
-            // Scale by 0.5 to prevent clipping when both sources are loud
-            mixed[i] = (mic + sys) * 0.5
+        writeQueue.async { [weak self] in
+            self?.writePositioned(buffer, at: time, isMic: false)
         }
-
-        // Determine primary source for metadata
-        let hasMic = micSamples.count >= count
-        let hasSys = systemSamples.count >= count
-        let source: AudioSource = (hasMic && hasSys) ? .microphone : (hasMic ? .microphone : .system)
-
-        // Remove consumed samples from each buffer, keeping the overlap window
-        let removeCount = chunkSampleCount - overlapSampleCount
-        if micSamples.count >= removeCount { micSamples.removeFirst(removeCount) }
-        if systemSamples.count >= removeCount { systemSamples.removeFirst(removeCount) }
-
-        return AudioChunk(
-            samples: mixed,
-            source: source,
-            timestamp: Date()
-        )
-    }
-
-    /// Returns true if there's enough audio from either source for a transcription chunk.
-    var hasChunkReady: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return maxBufferCount >= chunkSampleCount
     }
 
     func finishRecording() {
         converterLock.lock()
         converters.removeAll()
         converterLock.unlock()
+
+        // Drain queued positioned writes BEFORE closing the files — callers
+        // stopped both capture streams already, so this barrier guarantees
+        // every delivered buffer reaches disk.
+        writeQueue.sync {}
 
         // Close the capture files first (releasing the AVAudioFile flushes it),
         // guarding against any in-flight positioned write, THEN merge mic+system
@@ -433,8 +301,6 @@ final class AudioBufferManager: @unchecked Sendable {
         mergeMixIntoFile()
 
         lock.lock()
-        micSamples.removeAll()
-        systemSamples.removeAll()
         totalMicSamplesAppended = 0
         totalSystemSamplesAppended = 0
         consecutiveWriteFailures = 0
@@ -485,9 +351,9 @@ final class AudioBufferManager: @unchecked Sendable {
 
         guard let file else { return }
 
-        // Bound the file writer by the same 2-hour cap as the ring buffers, so a
-        // long silence gap can't silence-pad the file unboundedly (the ring-buffer
-        // cap gates `micSamples`/`systemSamples`, not the file).
+        // Bound the file writer by the same 2-hour cap as the capacity
+        // counters, so a long silence gap can't silence-pad the file
+        // unboundedly.
         guard written < maxSampleCount else { return }
 
         // Target sample offset from t0 on the 16 kHz timeline. Before the first
@@ -645,15 +511,3 @@ final class AudioBufferManager: @unchecked Sendable {
     }
 }
 
-// MARK: - Supporting Types
-
-enum AudioSource {
-    case microphone
-    case system
-}
-
-struct AudioChunk {
-    let samples: [Float]
-    let source: AudioSource
-    let timestamp: Date
-}

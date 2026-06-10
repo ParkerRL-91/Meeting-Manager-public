@@ -20,13 +20,49 @@ enum MicrophoneCaptureError: LocalizedError {
     }
 }
 
+/// 2nd-order (RBJ) low-pass applied BEFORE linear-interpolation decimation.
+/// Without it, content above the 16 kHz target's 8 kHz Nyquist aliases into
+/// the speech band and degrades the transcription input. Stateful IIR —
+/// state carries across buffers and resets when the hardware rate changes.
+struct BiquadLowPass {
+    private var b0: Float = 1, b1: Float = 0, b2: Float = 0, a1: Float = 0, a2: Float = 0
+    private var x1: Float = 0, x2: Float = 0, y1: Float = 0, y2: Float = 0
+    private(set) var configuredRate: Double = 0
+
+    mutating func configure(sampleRate: Double, cutoff: Double = 7000, q: Double = 0.7071) {
+        configuredRate = sampleRate
+        x1 = 0; x2 = 0; y1 = 0; y2 = 0
+        let w0 = 2 * Double.pi * cutoff / sampleRate
+        let alpha = sin(w0) / (2 * q)
+        let cosw0 = cos(w0)
+        let a0 = 1 + alpha
+        b0 = Float(((1 - cosw0) / 2) / a0)
+        b1 = Float((1 - cosw0) / a0)
+        b2 = Float(((1 - cosw0) / 2) / a0)
+        a1 = Float((-2 * cosw0) / a0)
+        a2 = Float((1 - alpha) / a0)
+    }
+
+    mutating func process(_ samples: inout [Float]) {
+        for i in 0..<samples.count {
+            let x0 = samples[i]
+            let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2 = x1; x1 = x0
+            y2 = y1; y1 = y0
+            samples[i] = y0
+        }
+    }
+}
+
 /// Captures microphone input using AVAudioEngine.
 ///
 /// Feeds raw hardware-format audio to onRawBuffer (for SFSpeechRecognizer),
 /// and manually downsampled 16kHz mono Float32 to onBuffer (for WhisperKit + WAV recording).
 ///
 /// Uses simple linear interpolation for downsampling instead of AVAudioConverter,
-/// which produces near-silent output in real-time streaming scenarios.
+/// which produces near-silent output in real-time streaming scenarios. A
+/// stateful biquad low-pass runs before decimation so the interpolation
+/// doesn't alias high-frequency content into the speech band.
 ///
 /// `@unchecked Sendable`: every mutable field is either confined to the serialized
 /// start/stop/switch lifecycle or guarded by `lock` (`isRunning`, `rawBufferCount`,
@@ -48,6 +84,10 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// format. A fresh engine sidesteps the issue entirely.
     var engine = AVAudioEngine()
     private var isRunning = false
+    /// Anti-alias low-pass for the downsampler. Touched only on the engine's
+    /// tap callback queue (single thread per session); self-reconfigures when
+    /// the hardware rate changes.
+    private var antiAliasFilter = BiquadLowPass()
     /// Wall-clock time the last `stop()` returned. Used to throttle the next
     /// `start()` so the CoreAudio HAL has time to release the input device.
     private var lastStopAt: Date?
@@ -355,6 +395,16 @@ final class MicrophoneCapture: @unchecked Sendable {
             for i in 0..<frameCount {
                 monoSamples[i] *= scale
             }
+        }
+
+        // Low-pass below the 16 kHz target's Nyquist before decimating —
+        // only when genuinely downsampling. Reconfigure (and reset state)
+        // when the hardware rate changes (device switch).
+        if hwRate > 16000 {
+            if antiAliasFilter.configuredRate != hwRate {
+                antiAliasFilter.configure(sampleRate: hwRate)
+            }
+            antiAliasFilter.process(&monoSamples)
         }
 
         // Resample from hwRate to 16000 Hz

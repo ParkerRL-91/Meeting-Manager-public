@@ -412,8 +412,12 @@ final class OllamaService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // No overall timeout — streaming means we get chunks continuously
-        request.timeoutInterval = 3600
+        // `timeoutInterval` is an IDLE timeout — it resets on every received
+        // byte, so a healthy stream is never killed regardless of total
+        // duration (thinking tokens stream too). 5 minutes with NOTHING on
+        // the wire means a wedged server; the old 3600 s idle window could
+        // hold the serial task queue hostage for an hour.
+        request.timeoutInterval = 300
 
         let body = OllamaChatRequest(
             model: selectedModel,
@@ -439,7 +443,14 @@ final class OllamaService {
 
         Logger.ai.info("Streaming request to Ollama (model: \(selectedModel), ctx: \(numCtx))")
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch {
+            if (error as? URLError)?.code == .timedOut { throw OllamaServiceError.timedOut }
+            throw OllamaServiceError.networkError(error)
+        }
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
@@ -454,23 +465,30 @@ final class OllamaService {
         // fallback for the rare case where a model puts everything in reasoning.
         var fullText = ""
         var fullThinking = ""
-        for try await line in bytes.lines {
-            guard !line.isEmpty else { continue }
-            guard let data = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let message = json["message"] as? [String: Any] else {
-                continue
-            }
-            if let content = message["content"] as? String {
-                fullText += content
-            }
-            if let thinking = message["thinking"] as? String {
-                fullThinking += thinking
-            }
+        do {
+            for try await line in bytes.lines {
+                guard !line.isEmpty else { continue }
+                guard let data = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let message = json["message"] as? [String: Any] else {
+                    continue
+                }
+                if let content = message["content"] as? String {
+                    fullText += content
+                }
+                if let thinking = message["thinking"] as? String {
+                    fullThinking += thinking
+                }
 
-            if let done = json["done"] as? Bool, done {
-                break
+                if let done = json["done"] as? Bool, done {
+                    break
+                }
             }
+        } catch {
+            // Mid-stream idle timeout (5 min without a byte) — wedged server,
+            // terminal like the non-streaming path.
+            if (error as? URLError)?.code == .timedOut { throw OllamaServiceError.timedOut }
+            throw error
         }
 
         // Prefer content; fall back to thinking only if the model put its
