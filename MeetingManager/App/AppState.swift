@@ -5065,6 +5065,10 @@ final class AppState {
     private func startPrepContextTimer() {
         preComputePrepContext() // Run immediately on startup
         enqueueWeeklyDigestIfDue()
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
+            await self?.enqueueEmbeddingBackfillIfNeeded()
+        }
 
         // Hourly safety net — tighter than once-a-day so a missed sync hook
         // doesn't leave the user without a brief for their afternoon meeting.
@@ -5073,6 +5077,10 @@ final class AppState {
             .sink { [weak self] _ in
                 self?.preComputePrepContext()
                 self?.enqueueWeeklyDigestIfDue()
+                // Backfill re-check (TASK-045): the launch-time check can
+                // lose the race against Ollama's first model-list refresh —
+                // the hourly tick self-heals within the session.
+                Task { await self?.enqueueEmbeddingBackfillIfNeeded() }
             }
 
         // Run on every calendar sync completion. This is the primary trigger:
