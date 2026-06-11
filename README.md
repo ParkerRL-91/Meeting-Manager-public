@@ -21,19 +21,19 @@ You only do this once.
 
 ---
 
-## What's New in v4.3.0
+## What's New in v4.4.0
 
-**Recording a meeting now reliably captures your microphone.** Starting a recording at meeting join — or from the pre-meeting notification before the call even exists — used to race the audio stack and could record the whole meeting without your voice, or end the recording after thirty seconds. The app now validates every capture path against real signal, keeps quietly retrying for the entire recording, and picks your microphone up the moment it becomes available. Two live level meters on the recording bar show microphone and call audio at a glance, so a silent input is visible in one second.
+**Your meeting history is now searchable by meaning, not just words.** Every transcript, summary, and Knowledge Base note is indexed locally with an on-device embedding model (downloaded automatically, ~270 MB; nothing leaves your Mac). Asking about "pricing" finds the meeting that discussed "the \ tier," and the existing keyword search still works everywhere the index hasn't caught up.
 
-**A recording that produces nothing now says so.** Transcription failures used to mark the meeting complete with an empty page. Failures now surface with a plain-English explanation and a Retry button, meetings with audio but no transcript show a Transcribe Now action, and the Summary and Outline tabs report live queue progress instead of generic placeholders.
+**The chat answers from your actual meetings, with receipts.** The global chat retrieves the most relevant transcript and summary passages for each question, cites them as [1], [2] in its answer, and shows clickable source chips that open the meeting. When the sources don't contain the answer, it says what's missing instead of guessing.
 
-**Everything is searchable.** Press ⌘K to search across meeting titles, full transcript text, people, and open action items, and jump straight to the result.
+**Meetings now produce durable knowledge.** After each summary, the app extracts decisions, commitments, and open questions into dossiers on People and Company pages, and every recurring series maintains a running thread — where things stand, the decisions log, carried items — shown on its folder page and fed into the next session's prep brief. A weekly digest summarizes each completed week from this structured record and appears on the Home screen.
 
-**Action items come out of every meeting.** Items are extracted automatically after each summary, appear on the Home screen with completion toggles, roll up per recurring series on its folder page, and can be pushed to Apple Reminders from anywhere they appear.
+**The Knowledge Base sync goes both ways safely.** Exported notes carry front-matter your other tools can link against, externally edited notes are never overwritten (updates land as dated addendum files), and edits in the folder re-index incrementally instead of re-parsing everything.
 
-**Recurring meetings group correctly.** Series folders now consider your whole history instead of a recent window — the sidebar went from five folders to every active series — and folders can be pinned. Restarting a recording mid-call re-attaches to the original meeting instead of creating an "Untitled Event," and all-day or attendee-less calendar blocks no longer collect recordings or trigger notifications.
+**Capture more than meetings.** A Quick Memo button in the menu bar records a microphone-only voice note that flows through the full pipeline — transcript, summary, action items — without touching system audio or requiring Screen Recording permission. During a live recording, a "Catch me up" button transcribes and recaps the last three minutes on demand using only the models already in memory.
 
-**Smaller refinements.** Adding a participant suggests matching people from your directory as you type; a mis-attributed transcript segment can be reassigned from its context menu; local AI is tuned for 16 GB Apple Silicon (context windows sized to physical memory, official Qwen3 sampling); and Claude defaults moved to the current model generation.
+**Optional cloud privacy shield.** When Claude is configured, a new setting substitutes names, emails, and phone numbers with reversible placeholders before anything is sent, and restores them in the response — applied to summaries, notes, briefs, and chat, with an honest exemption for speaker identification, which needs real names to work.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
