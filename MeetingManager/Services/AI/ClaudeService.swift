@@ -148,8 +148,15 @@ final class ClaudeService {
         systemPrompt: String,
         userPrompt: String,
         model: String,
-        maxTokens: Int = 4096
+        maxTokens: Int = 4096,
+        redactor: PIIRedactor? = nil   // TASK-054: nil = exempt (attribution,
+                                       // title — closed-set matching needs
+                                       // real names). Callers with meeting
+                                       // context pass a built redactor when
+                                       // the privacy setting is on.
     ) async throws -> String {
+        let systemPrompt = redactor?.redact(systemPrompt) ?? systemPrompt
+        let userPrompt = redactor?.redact(userPrompt) ?? userPrompt
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -255,7 +262,7 @@ final class ClaudeService {
             throw error
         }
 
-        return text
+        return redactor?.restore(text) ?? text
     }
 
     // MARK: - Retry Helper

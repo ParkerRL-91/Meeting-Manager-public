@@ -227,4 +227,20 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertEqual(EmbeddingService.hash("hello"), EmbeddingService.hash("hello"))
         XCTAssertNotEqual(EmbeddingService.hash("hello"), EmbeddingService.hash("hello "))
     }
+    // MARK: - PII redaction (TASK-054)
+
+    func testRedactorRoundTripsNamesEmailsPhones() {
+        let text = "Dave Smith (dave@acme.com, 555-867-5309) will call Erica."
+        let r = PIIRedactor.build(knownNames: ["Dave Smith", "Erica"], texts: [text])
+        let redacted = r.redact(text)
+        XCTAssertFalse(redacted.contains("Dave Smith"))
+        XCTAssertFalse(redacted.contains("dave@acme.com"))
+        XCTAssertTrue(redacted.contains("Person A"))
+        XCTAssertEqual(r.restore(redacted), text, "Round trip restores the original")
+    }
+
+    func testRedactorEmptyWhenNothingToRedact() {
+        let r = PIIRedactor.build(knownNames: [], texts: ["the quarterly numbers look fine"])
+        XCTAssertTrue(r.isEmpty)
+    }
 }

@@ -15,6 +15,9 @@ struct LiveMeetingView: View {
     /// want a wider notes area, but the default is open.
     @State private var showChat = true
     @State private var showAttendeePopover = false
+    @State private var showCatchUp = false
+    @State private var catchUpText: String?
+    @State private var catchUpLoading = false
 
     @State private var showContextBrief = true
     @State private var carriedItems: [ActionItem] = []
@@ -188,6 +191,36 @@ struct LiveMeetingView: View {
                         }
 
                         Spacer()
+
+                        // Catch me up (TASK-053): transcribe the live ring's
+                        // last ~3 min + recap with the resident local model.
+                        // Hidden while WhisperKit isn't loaded or is busy.
+                        if appState.transcriptionService.isModelLoaded,
+                           !appState.transcriptionService.isTranscribing {
+                            Button {
+                                catchUpLoading = true
+                                Task {
+                                    catchUpText = await appState.catchMeUp()
+                                    catchUpLoading = false
+                                    if catchUpText != nil { showCatchUp = true }
+                                }
+                            } label: {
+                                if catchUpLoading {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    PillBadge(icon: "clock.arrow.circlepath", label: "Catch me up")
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(catchUpLoading)
+                            .popover(isPresented: $showCatchUp, arrowEdge: .bottom) {
+                                ScrollView {
+                                    MarkdownRenderer(text: catchUpText ?? "", baseFontSize: 13)
+                                        .padding(14)
+                                }
+                                .frame(width: 360, height: 240)
+                            }
+                        }
                     }
                     .padding(.horizontal, 28)
                     .padding(.bottom, 8)

@@ -1419,7 +1419,8 @@ final class AppState {
             summaryText = try await claude.sendMessage(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
-                model: model
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [systemPrompt, userPrompt])
             )
         case .none:
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
@@ -1526,7 +1527,8 @@ final class AppState {
             content = try await claude.sendMessage(
                 systemPrompt: prompts.system,
                 userPrompt: prompts.user,
-                model: model
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [prompts.system, prompts.user])
             )
         case .none:
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
@@ -2093,6 +2095,103 @@ final class AppState {
     }
 
     @MainActor
+    /// Quick voice memo (TASK-052): mic-only capture into a normal meeting
+    /// row (templateId "memo") that runs the FULL standard pipeline —
+    /// transcript, summary, action items, embedding (review M7: extraction
+    /// lives inside the summary handler, so skipping summaries would skip
+    /// items too). Never re-attaches to calendar meetings.
+    /// Catch-me-up (TASK-053): on-demand only. Transcribes the last ~3
+    /// minutes from the live ring with the already-loaded WhisperKit and
+    /// summarizes with the already-RESIDENT qwen3 (never force-loads a
+    /// second model mid-recording — review B2). Returns nil with a reason
+    /// in lastUserError when preconditions fail.
+    // EXEMPT: user-driven, modal-scoped result — not post-meeting pipeline work.
+    func catchMeUp() async -> String? {
+        guard isRecording else { return nil }
+        guard transcriptionService.isModelLoaded, !transcriptionService.isTranscribing else {
+            lastUserError = "Transcription is busy — try again in a moment."
+            return nil
+        }
+        guard !taskQueueManager.isProcessing else {
+            lastUserError = "AI is finishing the previous meeting — try again shortly."
+            return nil
+        }
+        let samples = audioCaptureService.catchUpSnapshot(seconds: 180)
+        guard samples.count > 16_000 * 10 else {
+            lastUserError = "Not enough audio yet — give it a minute."
+            return nil
+        }
+        do {
+            let segments = try await transcriptionService.transcribe(samples: samples)
+            let text = segments.map(\.text).joined(separator: " ")
+            guard text.count > 40 else { return "Mostly silence in the last few minutes." }
+            guard let model = await ollamaService.residentQwen3() else {
+                lastUserError = "No local model available for the recap."
+                return nil
+            }
+            let recap = try await ollamaService.generate(
+                systemPrompt: "Summarize the last few minutes of a live meeting in at most 5 short bullets. Plain language, names when stated, no preamble.",
+                userPrompt: text,
+                model: model,
+                maxOutputTokens: 400
+            )
+            // One semantic connection when the index has one (best-effort).
+            var connection = ""
+            if let hit = try? await embeddingService.topK(query: String(text.prefix(800)), k: 1,
+                                                          sourceTypes: ["summary"]).first,
+               let mid = hit.meetingId, hit.score > 0.55,
+               let related = try? await meetingRepository.find(id: mid), related.id != activeMeeting?.id {
+                connection = "\n\n_Relates to: \(related.title) (\(related.effectiveDate.formatted(date: .abbreviated, time: .omitted)))_"
+            }
+            return recap + connection
+        } catch {
+            lastUserError = "Catch-up failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// TASK-054: build a reversible PII redactor from the People directory
+    /// + a scan of the outgoing text, when the privacy toggle is on.
+    /// Attribution and title calls deliberately never use this.
+    func cloudRedactorIfEnabled(texts: [String]) async -> PIIRedactor? {
+        guard PIIRedactor.isEnabled else { return nil }
+        let persons = (try? await PersonRepository(database: AppDatabase.shared).allPersons()) ?? []
+        var known: [String] = []
+        for p in persons {
+            known.append(p.canonicalName)
+            known.append(contentsOf: p.aliases)
+        }
+        let redactor = PIIRedactor.build(knownNames: known, texts: texts)
+        return redactor.isEmpty ? nil : redactor
+    }
+
+    func startQuickMemo() {
+        guard !isRecording else {
+            lastUserError = "A recording is already running. Stop it before starting a memo."
+            return
+        }
+        guard !isStartingMeeting else { return }
+        isStartingMeeting = true
+        sidebarDestination = .meetings
+        fileLog("startQuickMemo invoked")
+        Task { @MainActor in
+            defer { self.isStartingMeeting = false }
+            do {
+                self.audioCaptureService.nextCaptureSkipsSystemAudio = true
+                let title = "Memo — \(Date().formatted(date: .abbreviated, time: .shortened))"
+                var meeting = try await self.stateMachine.createAndStartMeeting(title: title)
+                meeting.templateId = "memo"
+                try? await self.meetingRepository.save(&meeting)
+                await self.wireActiveRecordingSession()
+                self.selectedMeetingId = meeting.id
+                self.loadMeetings()
+            } catch {
+                self.audioCaptureService.nextCaptureSkipsSystemAudio = false
+                self.lastUserError = "Couldn't start the memo: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func startNewMeeting() {
         guard !isRecording else {
             lastUserError = "A meeting is already recording. Stop it before starting a new one."
@@ -5624,7 +5723,8 @@ final class AppState {
                     systemPrompt: sys,
                     userPrompt: usr,
                     model: claudeModel,
-                    maxTokens: claudeMaxTokens
+                    maxTokens: claudeMaxTokens,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [sys, usr])
                 )
             }
         case .none:

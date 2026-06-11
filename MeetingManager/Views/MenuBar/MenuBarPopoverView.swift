@@ -216,6 +216,11 @@ struct MenuBarPopoverView: View {
                     NotificationCenter.default.post(name: .createNewMeeting, object: nil)
                     dismissPopover()
                 }
+                // Quick memo (TASK-052): mic-only, full pipeline.
+                menuButton(title: "Quick Memo", icon: "mic.badge.plus", shortcut: nil) {
+                    appState.startQuickMemo()
+                    dismissPopover()
+                }
             }
 
             menuButton(title: "Open Meeting Manager", icon: "macwindow", shortcut: "O") {

@@ -37,6 +37,18 @@ final class AudioBufferManager: @unchecked Sendable {
     /// `finishRecording` drains it synchronously before closing the files.
     private let writeQueue = DispatchQueue(label: "com.meetingmanager.audiowrite", qos: .userInitiated)
 
+    // MARK: - Live catch-up ring (TASK-053)
+    //
+    // A 3-minute wall-clock-indexed SUMMING ring of the canonical 16 kHz
+    // mono stream: mic and system are separate sparse positioned streams,
+    // so each chunk adds into slot (absoluteSample % N) — naive appending
+    // would interleave them (review M1). All access is on `writeQueue`
+    // (single-writer), so no extra locking. ~11.5 MB while recording,
+    // freed on finish. Read via `liveRingSnapshot` (writeQueue.sync).
+    private let ringSeconds = 180
+    private var liveRing: [Float] = []
+    private var ringLatestAbs: Int = -1
+
     /// During capture this holds the MIC stream only (continuous → its own
     /// timeline is the recording wall-clock); `finishRecording` overwrites it
     /// with the true mic+system mix once both timelines are aligned. Writing
@@ -285,7 +297,11 @@ final class AudioBufferManager: @unchecked Sendable {
         // Drain queued positioned writes BEFORE closing the files — callers
         // stopped both capture streams already, so this barrier guarantees
         // every delivered buffer reaches disk.
-        writeQueue.sync {}
+        writeQueue.sync {
+            // Free the catch-up ring with the recording (TASK-053).
+            liveRing = []
+            ringLatestAbs = -1
+        }
 
         // Close the capture files first (releasing the AVAudioFile flushes it),
         // guarding against any in-flight positioned write, THEN merge mic+system
@@ -366,6 +382,8 @@ final class AudioBufferManager: @unchecked Sendable {
             target = written
         }
 
+        mixIntoRing(buffer, at: target)
+
         var writeError: Error?
         fileWriteLock.lock()
         do {
@@ -397,6 +415,55 @@ final class AudioBufferManager: @unchecked Sendable {
         if failures >= maxConsecutiveWriteFailures {
             lock.lock(); audioFile = nil; lock.unlock()
         }
+    }
+
+    /// Sum a canonical 16 kHz mono chunk into the catch-up ring at its
+    /// absolute timeline position. writeQueue-only.
+    private func mixIntoRing(_ buffer: AVAudioPCMBuffer, at startIndex: Int) {
+        guard let data = buffer.floatChannelData?[0] else { return }
+        let n = Int(buffer.frameLength)
+        guard n > 0 else { return }
+        let N = ringSeconds * Int(sampleRate)
+        if liveRing.count != N { liveRing = [Float](repeating: 0, count: N); ringLatestAbs = -1 }
+        let end = startIndex + n
+
+        // Advance the head: zero slots the new region laps over. A gap
+        // larger than the whole window just resets the ring.
+        if end > ringLatestAbs + 1 {
+            let gapStart = ringLatestAbs + 1
+            if ringLatestAbs < 0 || end - gapStart >= N {
+                for i in 0..<N { liveRing[i] = 0 }
+            } else {
+                var z = max(gapStart, end - N)
+                while z < end { liveRing[z % N] = 0; z += 1 }
+            }
+            ringLatestAbs = end - 1
+        }
+
+        // Sum, dropping anything older than the window (late system audio).
+        let minAbs = max(0, ringLatestAbs + 1 - N)
+        var i = max(startIndex, minAbs)
+        var src = i - startIndex
+        while i < end {
+            liveRing[i % N] += data[src]
+            i += 1; src += 1
+        }
+    }
+
+    /// Ordered copy of the last `lastSeconds` of the catch-up ring.
+    /// Synchronous hop onto writeQueue — bounded by one memcpy-scale loop.
+    func liveRingSnapshot(lastSeconds: Double) -> [Float] {
+        var out: [Float] = []
+        writeQueue.sync {
+            let N = liveRing.count
+            guard N > 0, ringLatestAbs >= 0 else { return }
+            let n = min(Int(lastSeconds * sampleRate), min(N, ringLatestAbs + 1))
+            guard n > 0 else { return }
+            out.reserveCapacity(n)
+            let start = ringLatestAbs + 1 - n
+            for i in start...ringLatestAbs { out.append(liveRing[i % N]) }
+        }
+        return out
     }
 
     /// Append `frames` of silence to an open file, in bounded chunks so a long

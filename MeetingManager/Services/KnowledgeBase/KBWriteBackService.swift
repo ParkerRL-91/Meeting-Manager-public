@@ -98,6 +98,12 @@ final class KBWriteBackService {
     // MARK: - Path
 
     func outputURL(for meeting: Meeting, root: URL) -> URL {
+        // Memos (TASK-052) live in their own folder, not under Meeting Notes.
+        if meeting.templateId == "memo" {
+            let dir = root.appendingPathComponent("Memos", isDirectory: true)
+            let safe = meeting.title.replacingOccurrences(of: "/", with: "-")
+            return dir.appendingPathComponent("\(safe).md")
+        }
         let date = meeting.startDate ?? meeting.scheduledStartDate ?? Date()
 
         let cal = Calendar.current

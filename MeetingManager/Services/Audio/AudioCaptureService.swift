@@ -222,6 +222,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// only begin once `isCapturing` is true and the device listeners exist).
     private var micStartFailedPendingRecovery = false
 
+    /// One-shot: the next startCapture records the microphone only
+    /// (quick memos — TASK-052).
+    var nextCaptureSkipsSystemAudio = false
+
     /// Last tick on which system audio cleared the active threshold. The
     /// dead-mic detector uses a 10 s recency window off this instead of a
     /// same-tick check — remote audio dips between sentences and a same-tick
@@ -333,8 +337,14 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // Failure here is non-fatal — mic-only recording is still useful.
         resetBufferCounts()
         micStartFailedPendingRecovery = false
+        // Quick memos (TASK-052): capture the mic only. Consumed per start —
+        // set by AppState.startQuickMemo immediately before the state machine
+        // starts capture. Skipping the tap also suppresses the
+        // "grant Screen Recording" toast a 20-second memo shouldn't trigger.
+        let skipSystemAudio = nextCaptureSkipsSystemAudio
+        nextCaptureSkipsSystemAudio = false
         var systemTapStarted = false
-        if #available(macOS 14.2, *) {
+        if #available(macOS 14.2, *), !skipSystemAudio {
             if let tap = systemAudioTap {
                 // Wire diagnostic logging for system audio tap
                 tap.onDiagnostic = { [weak self] msg in
@@ -631,6 +641,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             + (lastError != nil ? " (\(lastError!.localizedDescription))" : "")
             + ", and no system audio is available. Close any app using the mic, or grant Screen Recording permission, then start again. You don't need to restart Meeting Manager."
         )
+    }
+
+    /// Last-N-seconds mixed audio for catch-me-up (TASK-053). Empty when
+    /// not recording or the ring hasn't filled yet.
+    func catchUpSnapshot(seconds: Double) -> [Float] {
+        guard isCapturing else { return [] }
+        return bufferManager.liveRingSnapshot(lastSeconds: seconds)
     }
 
     /// Stop all audio capture

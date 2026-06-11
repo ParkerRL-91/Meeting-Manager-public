@@ -726,6 +726,23 @@ final class OllamaService {
         return cleaned
     }
 
+    /// The qwen3 model currently RESIDENT in Ollama's memory (/api/ps), or
+    /// any installed qwen3 as fallback. Catch-me-up (TASK-053) must reuse
+    /// what's already loaded — force-loading a second model alongside a
+    /// resident 8b+KV blows the 16 GB Metal budget mid-recording (review B2).
+    func residentQwen3() async -> String? {
+        struct PS: Decodable { struct M: Decodable { let name: String }; let models: [M] }
+        var request = URLRequest(url: Self.baseURL.appendingPathComponent("api/ps"))
+        request.timeoutInterval = 5
+        if let (data, response) = try? await URLSession.shared.data(for: request),
+           let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+           let ps = try? JSONDecoder().decode(PS.self, from: data),
+           let resident = ps.models.first(where: { $0.name.contains("qwen3") }) {
+            return resident.name
+        }
+        return availableModels.first(where: { $0.contains("qwen3") })
+    }
+
     // MARK: - Status Check
 
     /// Ping Ollama and refresh the list of available models.

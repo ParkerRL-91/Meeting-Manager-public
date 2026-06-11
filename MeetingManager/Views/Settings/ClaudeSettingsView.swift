@@ -16,6 +16,7 @@ struct ClaudeSettingsView: View {
     @State private var connectionStatus: ConnectionStatus = .unknown
     @State private var showAPIKey = false
     @State private var saveError: String?
+    @AppStorage(PIIRedactor.settingKey) private var redactCloudPII = false
 
     private let claudeService = ClaudeService()
 
@@ -49,6 +50,15 @@ struct ClaudeSettingsView: View {
             connectionSection
                 .disabled(!appState.settings.aiEnabled)
                 .opacity(appState.settings.aiEnabled ? 1 : 0.5)
+
+            Section {
+                Toggle("Redact names, emails, and phone numbers before sending to Claude", isOn: $redactCloudPII)
+                Text("A reversible, on-device substitution (\u{201C}Person A\u{201D}, \u{201C}person1@redacted.example\u{201D}) applied to summaries, notes, briefs, and chat. Speaker identification is exempt — matching speakers to attendees requires their real names. Heuristic protection, not a guarantee.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .disabled(!appState.settings.aiEnabled)
+            .opacity(appState.settings.aiEnabled ? 1 : 0.5)
         }
         .formStyle(.grouped)
         .onAppear(perform: loadSettings)
