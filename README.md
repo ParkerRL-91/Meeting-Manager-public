@@ -21,17 +21,19 @@ You only do this once.
 
 ---
 
-## What's New in v4.2.0
+## What's New in v4.3.0
 
-**Stopping and resuming a recording no longer scrambles speaker identification.** When a meeting was recorded in more than one session, the second session's transcript rows could land on the first session's timeline, which let voice matching read the wrong audio and let a retry pass overwrite names you had already confirmed. Session timelines are now offset past the previous file's duration, anonymous speaker labels are namespaced per session, and re-runs fill empty slots without touching existing assignments.
+**Recording a meeting now reliably captures your microphone.** Starting a recording at meeting join — or from the pre-meeting notification before the call even exists — used to race the audio stack and could record the whole meeting without your voice, or end the recording after thirty seconds. The app now validates every capture path against real signal, keeps quietly retrying for the entire recording, and picks your microphone up the moment it becomes available. Two live level meters on the recording bar show microphone and call audio at a glance, so a silent input is visible in one second.
 
-**Recorded audio is cleaner and stays aligned across the meeting.** System audio is written at the position its presentation timestamp dictates instead of its arrival time, which removes the drift between the microphone and system tracks on long calls. A low-pass filter now runs before the microphone's downsample to 16 kHz, so content above 8 kHz no longer folds into the speech band that WhisperKit transcribes.
+**A recording that produces nothing now says so.** Transcription failures used to mark the meeting complete with an empty page. Failures now surface with a plain-English explanation and a Retry button, meetings with audio but no transcript show a Transcribe Now action, and the Summary and Outline tabs report live queue progress instead of generic placeholders.
 
-**Memory headroom on a 16 GB Mac is managed instead of assumed.** The transcription model (~1.5 GB) and the diarization models unload when the work queue goes idle and no meeting is coming up, then reload automatically when recording starts. Crash leftovers from interrupted recordings are detected by content rather than guesswork, and good sessions are kept for transcription instead of being deleted with the husks.
+**Everything is searchable.** Press ⌘K to search across meeting titles, full transcript text, people, and open action items, and jump straight to the result.
 
-**Local AI summaries no longer stall the queue or come back empty on long meetings.** The Ollama context window is now sized to the machine's physical RAM and to the model's actual trained window (40,960 tokens for Qwen3 — not the 128K headline figure, which requires an extension Ollama doesn't ship), so an hour-plus meeting no longer pushes the model into swap where a 2-minute summary takes an hour. Transcripts that exceed the window are trimmed at the middle with an explicit notice, keeping the agenda and the decisions. Qwen3's reasoning phase gets its own token reserve so thinking can no longer consume the entire output budget, and thinking calls use the sampling values Qwen publishes for the mode.
+**Action items come out of every meeting.** Items are extracted automatically after each summary, appear on the Home screen with completion toggles, roll up per recurring series on its folder page, and can be pushed to Apple Reminders from anywhere they appear.
 
-**Claude models are current.** The default model is now Claude Sonnet 4.6, the Settings picker offers Haiku 4.5 / Sonnet 4.6 / Opus 4.8, and stored settings that referenced the retiring May-2025 snapshots are migrated automatically.
+**Recurring meetings group correctly.** Series folders now consider your whole history instead of a recent window — the sidebar went from five folders to every active series — and folders can be pinned. Restarting a recording mid-call re-attaches to the original meeting instead of creating an "Untitled Event," and all-day or attendee-less calendar blocks no longer collect recordings or trigger notifications.
+
+**Smaller refinements.** Adding a participant suggests matching people from your directory as you type; a mis-attributed transcript segment can be reassigned from its context menu; local AI is tuned for 16 GB Apple Silicon (context windows sized to physical memory, official Qwen3 sampling); and Claude defaults moved to the current model generation.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
