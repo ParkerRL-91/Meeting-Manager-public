@@ -1096,5 +1096,38 @@ enum Migrations {
                 t.column("createdAt", .datetime).notNull()
             }
         }
+
+        // PRJ-010 phases 0-2 (v51 carries phases 3-4 — split at the release
+        // boundary per the review's append-only ruling). runAfter powers the
+        // background-work governor; sourceStartTime is denormalized so a
+        // re-transcription (which rewrites transcript rowids) degrades fact
+        // anchors to stale-but-honest timestamps instead of dangling.
+        migrator.registerMigration("v50-governor-and-knowledge") { db in
+            try db.alter(table: "taskQueue") { t in
+                t.add(column: "runAfter", .datetime)
+            }
+            try db.alter(table: "entityFact") { t in
+                t.add(column: "hiddenAt", .datetime)
+                t.add(column: "sourceTranscriptId", .integer)
+                t.add(column: "sourceStartTime", .double)
+            }
+            try db.alter(table: "meetingSummary") { t in
+                t.add(column: "originalText", .text)
+            }
+            try db.create(table: "factLink") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.belongsTo("fromFact", inTable: "entityFact", onDelete: .cascade).notNull()
+                t.belongsTo("toFact", inTable: "entityFact", onDelete: .cascade).notNull()
+                t.column("relation", .text).notNull()   // duplicate|supersedes|contradicts
+                t.column("detectedAt", .datetime).notNull()
+            }
+            try db.create(table: "glossaryTerm") { t in
+                t.column("term", .text).primaryKey()
+                t.column("definition", .text).notNull()
+                t.column("exampleMeetingId", .text)
+                t.column("hiddenAt", .datetime)         // tombstone: miner respects deletes
+                t.column("updatedAt", .datetime).notNull()
+            }
+        }
     }
 }

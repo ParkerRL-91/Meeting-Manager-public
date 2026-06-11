@@ -243,4 +243,43 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         let r = PIIRedactor.build(knownNames: [], texts: ["the quarterly numbers look fine"])
         XCTAssertTrue(r.isEmpty)
     }
+    // MARK: - Background work governor (TASK-055)
+
+    private func inputs(recording: Bool = false, nextMeeting: Int? = nil,
+                        thermal: ProcessInfo.ThermalState = .nominal,
+                        battery: Bool = false, allowBattery: Bool = false,
+                        interactive: Bool = false, hour: Int = 14,
+                        deferredHours: Double = 0) -> BackgroundWorkPolicy.Inputs {
+        .init(isRecording: recording, minutesToNextMeeting: nextMeeting,
+              thermalState: thermal, onBattery: battery, allowOnBattery: allowBattery,
+              interactivePending: interactive, localHour: hour,
+              deferredSinceHours: deferredHours)
+    }
+
+    func testGovernorHardBlocks() {
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(recording: true)), .deferFor(minutes: 15))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(battery: true)), .deferFor(minutes: 30))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(interactive: true)), .deferFor(minutes: 2))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(battery: true, allowBattery: true)), .run,
+                       "Battery opt-in unblocks")
+    }
+
+    func testGovernorSoftPreferencesAndStarvationCap() {
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(nextMeeting: 10)), .deferFor(minutes: 15))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(thermal: .serious)), .deferFor(minutes: 20))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs()), .run)
+        // Starved work overrides soft preferences but not an imminent meeting.
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(nextMeeting: 10, deferredHours: 25)), .run)
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(nextMeeting: 3, deferredHours: 25)), .deferFor(minutes: 10))
+        // Hard blocks survive starvation.
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(recording: true, deferredHours: 25)), .deferFor(minutes: 15))
+    }
+
+    func testBackgroundClassificationIsPerItem() {
+        XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .embedIndex, meetingId: "__embed_backfill__"))
+        XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .embedIndex, meetingId: "real-meeting-id"),
+                       "A fresh meeting's embedding runs promptly (review M1)")
+        XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
+        XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
+    }
 }

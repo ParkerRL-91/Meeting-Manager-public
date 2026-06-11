@@ -1025,6 +1025,36 @@ final class AppState {
             try await self.generateWeeklyDigest()
         }
 
+        // Governor inputs (TASK-055): composed from signals AppState already
+        // tracks. deferredSinceHours uses the oldest pending background row's
+        // createdAt as the starvation clock.
+        taskQueueManager.backgroundPolicyInputs = { [weak self] in
+            guard let self else {
+                return BackgroundWorkPolicy.Inputs(
+                    isRecording: false, minutesToNextMeeting: nil,
+                    thermalState: .nominal, onBattery: false,
+                    allowOnBattery: false, interactivePending: false,
+                    localHour: 12, deferredSinceHours: 0)
+            }
+            let nextStart = self.upcomingMeetings
+                .compactMap(\.scheduledStartDate)
+                .filter { $0 > Date() }
+                .min()
+            let oldestBackground = self.taskQueueManager.allTasks
+                .filter { $0.status == .pending && TaskQueueItem.isBackgroundItem(type: $0.type, meetingId: $0.meetingId) }
+                .map(\.createdAt).min()
+            return BackgroundWorkPolicy.Inputs(
+                isRecording: self.isRecording,
+                minutesToNextMeeting: nextStart.map { Int($0.timeIntervalSinceNow / 60) },
+                thermalState: self.thermalState,
+                onBattery: BackgroundWorkPolicy.isOnBattery(),
+                allowOnBattery: UserDefaults.standard.bool(forKey: "backgroundAI.allowOnBattery"),
+                interactivePending: false,   // broker pressure lands with TASK-071
+                localHour: Calendar.current.component(.hour, from: Date()),
+                deferredSinceHours: oldestBackground.map { -$0.timeIntervalSinceNow / 3600 } ?? 0
+            )
+        }
+
         // Gate AI-dependent auto-enqueues (summary) on a configured backend so
         // users with no AI don't accumulate failed tasks after every meeting.
         taskQueueManager.isAIWorkConfigured = { [weak self] in self?.isAIWorkConfigured ?? false }
@@ -1173,6 +1203,16 @@ final class AppState {
             await SpeakerDiarizationService.shared.unloadModels()
             FluidAudioDiarizationService.shared.unloadModels()
             self.fileLog("TaskQueue: idle — diarization models unloaded")
+
+            // Free the local LLM early after batch work instead of waiting
+            // out keep_alive (TASK-055 §4). Guards: nothing in flight at the
+            // Ollama chokepoint (review M3 — an unload during a generation
+            // starves the next chained call), and /api/ps-checked inside so
+            // a non-resident model is never load-then-unloaded. TASK-071's
+            // broker drains BEFORE this closure reaches here.
+            if self.ollamaService.inFlightCount == 0 {
+                await self.ollamaService.unloadIfResident(EmbeddingService.embedModel)
+            }
 
             // WhisperKit (~1.5 GB) idle policy: release it when nothing can
             // need it soon — not recording, and no meeting starting within
@@ -2524,6 +2564,9 @@ final class AppState {
         // surface as a spurious user-facing alert.
         guard !isStoppingMeeting else { return }
         isStoppingMeeting = true
+        // Recording end is a governor re-evaluation point (TASK-055):
+        // background work deferred during capture can run again.
+        taskQueueManager.reevaluate()
 
         // Warn user if transcription model isn't ready yet
         if !transcriptionService.isModelLoaded {
@@ -5081,6 +5124,8 @@ final class AppState {
                 // lose the race against Ollama's first model-list refresh —
                 // the hourly tick self-heals within the session.
                 Task { await self?.enqueueEmbeddingBackfillIfNeeded() }
+                // Governor backstop (TASK-055): wake any due deferred work.
+                self?.taskQueueManager.reevaluate()
             }
 
         // Run on every calendar sync completion. This is the primary trigger:
@@ -5103,6 +5148,13 @@ final class AppState {
 
     @MainActor
     private func preComputePrepContext() {
+        // Governed caller (TASK-055 / review B2 note): this is batch LLM
+        // work outside the task queue. Never contend with a live recording —
+        // the recording-stop hook re-triggers via the next tick/sync.
+        guard !isRecording else {
+            Logger.ai.info("preComputePrepContext: recording in progress — deferred")
+            return
+        }
         guard !isPreComputingPrepContext else {
             Logger.ai.info("preComputePrepContext: pass already running — skipping trigger")
             return

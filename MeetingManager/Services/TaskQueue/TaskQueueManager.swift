@@ -556,6 +556,16 @@ final class TaskQueueManager {
                     idleNotified = true
                     if let onQueueIdle { await onQueueIdle() }
                 }
+                // Deferred work exists? Schedule a one-shot wake at the
+                // earliest runAfter (review M2 — parked processors never
+                // re-poll; the hourly tick is only the backstop).
+                if let wake = await earliestDeferredWake() {
+                    let delay = max(5, wake.timeIntervalSinceNow)
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(delay))
+                        await MainActor.run { self?.reevaluate() }
+                    }
+                }
                 processorTask = nil
                 // Lost-wakeup guard: an enqueue can land during the drain
                 // check above, see processorTask != nil, and skip the kick.
@@ -565,6 +575,20 @@ final class TaskQueueManager {
                 return
             }
             idleNotified = false
+
+            // Governor gate (TASK-055): background-class items consult the
+            // policy at pop time. Defer = one bulk UPDATE for all pending
+            // background rows, then continue with whatever's runnable.
+            // Pipeline tasks never pass through here, and a running task is
+            // never preempted.
+            if TaskQueueItem.isBackgroundItem(type: next.type, meetingId: next.meetingId),
+               let inputs = backgroundPolicyInputs?() {
+                if case .deferFor(let minutes) = BackgroundWorkPolicy.decision(inputs) {
+                    Logger.general.info("TaskQueue: deferring background work \(next.type.rawValue) for \(minutes)m (recording=\(inputs.isRecording), nextMeeting=\(inputs.minutesToNextMeeting.map(String.init) ?? "none")m, battery=\(inputs.onBattery))")
+                    await deferPendingBackgroundRows(minutes: minutes)
+                    continue
+                }
+            }
 
             await markRunning(next)
             currentTask = next
@@ -709,9 +733,46 @@ final class TaskQueueManager {
         try? await database.writer.read { db in
             try TaskQueueItem
                 .filter(TaskQueueItem.Columns.status == TaskQueueItem.TaskStatus.pending.rawValue)
+                .filter(sql: "runAfter IS NULL OR runAfter <= ?", arguments: [Date()])
                 .order(TaskQueueItem.Columns.priority.asc, TaskQueueItem.Columns.createdAt.asc)
                 .fetchOne(db)
         }
+    }
+
+    /// Earliest future runAfter among pending rows — the park-time wake
+    /// target (review M2: a parked processor never re-checks on its own).
+    private func earliestDeferredWake() async -> Date? {
+        try? await database.writer.read { db in
+            try Date.fetchOne(db, sql: """
+                SELECT MIN(runAfter) FROM taskQueue
+                WHERE status = 'pending' AND runAfter > ?
+                """, arguments: [Date()])
+        }
+    }
+
+    /// Governor inputs, injected by AppState (recording state, meeting
+    /// proximity, thermal, battery setting, broker pressure).
+    var backgroundPolicyInputs: (() -> BackgroundWorkPolicy.Inputs)?
+
+    /// Public poke: re-evaluate deferred work now (recording stopped,
+    /// hourly tick, Ollama became reachable). Safe to call any time.
+    func reevaluate() {
+        kickProcessor()
+    }
+
+    /// Defer ALL currently-pending background rows in one statement
+    /// (review M2: per-pop writes are O(n) churn for a fanned-out batch).
+    private func deferPendingBackgroundRows(minutes: Int) async {
+        let until = Date().addingTimeInterval(Double(minutes) * 60)
+        _ = try? await database.writer.write { db in
+            try db.execute(sql: """
+                UPDATE taskQueue SET runAfter = ?
+                WHERE status = 'pending'
+                  AND ((type = 'embedIndex' AND meetingId = '__embed_backfill__')
+                       OR type = 'weeklyDigest')
+                """, arguments: [until])
+        }
+        await refreshTaskList()
     }
 
     private func execute(_ task: TaskQueueItem) async throws {

@@ -31,6 +31,15 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Run background AI work on battery", isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "backgroundAI.allowOnBattery") },
+                    set: { UserDefaults.standard.set($0, forKey: "backgroundAI.allowOnBattery") }
+                ))
+                Text("History indexing, weekly digests, and other non-urgent AI batches normally wait for AC power and a quiet moment. They always wait while you're recording.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             appearanceSection
             startupSection
             notificationSection

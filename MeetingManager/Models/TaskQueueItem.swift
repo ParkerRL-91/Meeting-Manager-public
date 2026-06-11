@@ -16,6 +16,9 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
     var startedAt: Date?
     var completedAt: Date?
     var metadata: String?  // JSON blob for task-specific data
+    /// Governor (TASK-055): rows with a future runAfter are invisible to
+    /// the pop query — deferred until a quiet moment. NULL = run normally.
+    var runAfter: Date? = nil
 
     enum TaskType: String, Codable, CaseIterable {
         case transcription
@@ -72,6 +75,32 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .enhanceNotes:       return "Enhance Notes"
         case .embedIndex:         return "Index for Search"
         case .weeklyDigest:       return "Weekly Digest"
+        }
+    }
+
+    /// Background-class work is governed by BackgroundWorkPolicy
+    /// (deferrable to quiet gaps). Per-ITEM, not per-type (review M1): a
+    /// fresh meeting's embedIndex must run promptly; only the batch
+    /// sentinels are background.
+    static func isBackgroundItem(type: TaskType, meetingId: String) -> Bool {
+        switch type {
+        case .embedIndex:   return meetingId == "__embed_backfill__"
+        case .weeklyDigest: return true
+        default:            return false
+        }
+    }
+
+    /// Types whose handler makes local-LLM calls — the governor's
+    /// classification input (NOT the busy detector; that's the
+    /// OllamaService in-flight counter, review B2).
+    var isLLMClass: Bool {
+        switch type {
+        case .summary, .regeneration, .transcriptCleanup, .detailedOutline,
+             .enhanceNotes, .weeklyDigest, .retryAttribution, .contextEnrichment,
+             .enrichment:
+            return true
+        case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex:
+            return false
         }
     }
 

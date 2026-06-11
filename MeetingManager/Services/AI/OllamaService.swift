@@ -288,6 +288,23 @@ final class OllamaService {
 
     // MARK: - Status
 
+    /// In-flight local generations across ALL callers — queue handlers,
+    /// prep enrichment, chat, catch-me-up, embeddings (review B2: busy
+    /// detection lives at this chokepoint, never by enumerating task
+    /// types). Label = what the user-facing "busy with…" should say.
+    private(set) var inFlightCount = 0
+    private(set) var inFlightLabel: String?
+
+    func beginWork(label: String) {
+        inFlightCount += 1
+        inFlightLabel = label
+    }
+
+    func endWork() {
+        inFlightCount = max(0, inFlightCount - 1)
+        if inFlightCount == 0 { inFlightLabel = nil }
+    }
+
     private(set) var isReachable = false
     private(set) var availableModels: [String] = []
     private(set) var isCheckingStatus = false
@@ -483,6 +500,8 @@ final class OllamaService {
         // so re-sending the same prompt is safe. 4xx and decode errors are
         // terminal — they won't get better with another attempt. Match the
         // ClaudeService backoff: 2^attempt + random(0...1)s.
+        beginWork(label: "Generating (\(selectedModel))")
+        defer { endWork() }
         let decoded: OllamaChatResponse = try await Self.withRetry(maxAttempts: 3) {
             let data: Data
             let response: URLResponse
@@ -657,6 +676,8 @@ final class OllamaService {
 
         Logger.ai.info("Streaming request to Ollama (model: \(selectedModel), ctx: \(numCtx))")
 
+        beginWork(label: "Generating (\(selectedModel))")
+        defer { endWork() }
         let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
@@ -724,6 +745,27 @@ final class OllamaService {
 
         Logger.ai.info("Streaming response complete (\(cleaned.count) chars, model: \(selectedModel))")
         return cleaned
+    }
+
+    /// Free a model's memory now instead of waiting out keep_alive
+    /// (TASK-055 §4). Guarded by /api/ps — a keep_alive:0 generate against
+    /// a NON-resident model would load it first (review M3). Callers must
+    /// ensure no work is in flight (inFlightCount == 0).
+    func unloadIfResident(_ model: String) async {
+        struct PS: Decodable { struct M: Decodable { let name: String }; let models: [M] }
+        var psReq = URLRequest(url: Self.baseURL.appendingPathComponent("api/ps"))
+        psReq.timeoutInterval = 5
+        guard let (data, resp) = try? await URLSession.shared.data(for: psReq),
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let ps = try? JSONDecoder().decode(PS.self, from: data),
+              ps.models.contains(where: { $0.name == model || $0.name.hasPrefix(model) }) else { return }
+        var req = URLRequest(url: Self.baseURL.appendingPathComponent("api/generate"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "keep_alive": 0])
+        _ = try? await URLSession.shared.data(for: req)
+        Logger.ai.info("Ollama: requested unload of \(model)")
     }
 
     /// The qwen3 model currently RESIDENT in Ollama's memory (/api/ps), or

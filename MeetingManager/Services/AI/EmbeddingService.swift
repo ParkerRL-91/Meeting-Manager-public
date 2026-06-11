@@ -124,6 +124,8 @@ final class EmbeddingService {
 
     func embed(texts: [String]) async throws -> [[Float]] {
         guard !texts.isEmpty else { return [] }
+        ollama.beginWork(label: "Indexing for search")
+        defer { ollama.endWork() }
         var request = URLRequest(url: OllamaService.baseURL.appendingPathComponent("api/embed"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
