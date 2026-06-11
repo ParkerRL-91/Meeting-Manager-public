@@ -192,23 +192,24 @@ struct GlobalChatView: View {
         }
 
         do {
-            let (meetingContext, kbContext) = try await buildContext(query: query)
+            let (meetingContext, sources, kbContext) = await buildRetrievalContext(query: query)
 
             var systemPrompt = """
                 You are a helpful meeting assistant for \(getDisplayName()). \
-                You have access to notes and transcripts from their recent meetings \
-                and excerpts from their personal Knowledge Base.
+                The numbered SOURCES below were retrieved from their meeting \
+                history for this question.
 
                 **Formatting rules — always follow these:**
                 - Respond in Markdown.
                 - Use ## for section headings when the answer has multiple parts.
                 - Use bullet lists (- item) for lists of facts, people, or action items.
                 - Use **bold** for names, decisions, and key phrases.
-                - Never write walls of plain prose. Structure the answer so it can be skimmed.
+                - Cite sources inline as [1], [2] … wherever a claim comes from one.
                 - Keep answers concise — prefer 150–300 words unless depth is clearly needed.
 
-                Answer accurately based only on the context provided. \
-                If information isn't available, say so clearly rather than guessing.
+                Answer ONLY from the sources and excerpts provided. If they \
+                don't contain the answer, say exactly what's missing rather \
+                than guessing.
 
                 \(meetingContext)
                 """
@@ -223,50 +224,78 @@ struct GlobalChatView: View {
             }
 
             let response = try await textGen(systemPrompt, query)
-            let assistantMsg = GlobalChatMessage(role: .assistant, content: response)
+            let assistantMsg = GlobalChatMessage(role: .assistant, content: response, sources: sources)
             withAnimation { appState.globalChatMessages.append(assistantMsg) }
         } catch {
             self.error = error.localizedDescription
         }
     }
 
-    private func buildContext(query: String) async throws -> (meetings: String, kb: String) {
-        let transcriptRepo = appState.transcriptRepository
-        let summaryRepo = appState.summaryRepository
+    /// TASK-048: retrieval REPLACES the old recent-15-meetings dump.
+    /// Semantic top-k (when the embedding index exists) fused with FTS,
+    /// deduped to the best 2 chunks per meeting, capped at 8 numbered
+    /// sources. Falls back to FTS alone — and to the most recent summaries
+    /// when the query matches nothing — so the chat never goes blind.
+    private func buildRetrievalContext(query: String) async -> (context: String, sources: [GlobalChatMessage.SourceRef], kb: String) {
+        var ranked: [(meetingId: String, snippet: String, score: Float)] = []
 
-        // Meeting context — recent 15, summaries preferred
-        let recentMeetings = Array(appState.pastMeetings.prefix(15))
-        var contextParts: [String] = []
-
-        for meeting in recentMeetings {
-            var parts: [String] = []
-            parts.append("## \(meeting.title) — \(meeting.effectiveDate.formatted(date: .abbreviated, time: .shortened))")
-
-            if !meeting.participantList.isEmpty {
-                parts.append("Participants: \(meeting.participantList.joined(separator: ", "))")
+        let hits = (try? await appState.embeddingService.topK(
+            query: query, k: 12, sourceTypes: ["transcriptChunk", "summary", "kbDoc"])) ?? []
+        for h in hits where h.meetingId != nil {
+            ranked.append((h.meetingId!, h.text, h.score))
+        }
+        if let fts = try? await appState.transcriptRepository.searchAllMeetings(query: query, limit: 6) {
+            for (mid, snip) in fts where !snip.isEmpty {
+                ranked.append((mid, snip, 0.45))   // below strong semantic hits, above weak ones
             }
-
-            if let summary = try? await summaryRepo.latestSummary(meetingId: meeting.id),
-               !summary.summaryText.isEmpty {
-                parts.append("Notes: \(String(summary.summaryText.prefix(600)))")
-            } else {
-                let segments = try await transcriptRepo.transcriptsForMeeting(meeting.id)
-                if !segments.isEmpty {
-                    let text = segments.map { $0.text }.joined(separator: " ")
-                    parts.append("Transcript excerpt: \(String(text.prefix(500)))…")
-                }
-            }
-            contextParts.append(parts.joined(separator: "\n"))
         }
 
-        let meetingContext = contextParts.isEmpty
-            ? "Context: No recorded meetings available yet."
-            : "Meeting context (most recent first):\n\n" + contextParts.joined(separator: "\n\n---\n\n")
+        // Dedup: at most 2 chunks per meeting, 8 total, best first.
+        var perMeeting: [String: Int] = [:]
+        var picked: [(String, String)] = []
+        for item in ranked.sorted(by: { $0.score > $1.score }) {
+            guard perMeeting[item.meetingId, default: 0] < 2 else { continue }
+            perMeeting[item.meetingId, default: 0] += 1
+            picked.append((item.meetingId, item.snippet))
+            if picked.count >= 8 { break }
+        }
 
-        // KB context — retrieve using the user's query
+        let all = (try? await appState.meetingRepository.allActiveMeetings()) ?? []
+        let byId = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+
+        // Last resort: nothing matched — give the model the 5 most recent
+        // summaries so "what did I do this week" still works.
+        if picked.isEmpty {
+            for meeting in all.prefix(5) {
+                if let summary = try? await appState.summaryRepository.latestSummary(meetingId: meeting.id) {
+                    picked.append((meeting.id, String(summary.summaryText.prefix(600))))
+                }
+            }
+        }
+
+        var sources: [GlobalChatMessage.SourceRef] = []
+        var blocks: [String] = []
+        var indexForMeeting: [String: Int] = [:]
+        for (mid, snippet) in picked {
+            let meeting = byId[mid]
+            let title = meeting?.title ?? "Meeting"
+            let date = meeting?.effectiveDate.formatted(date: .abbreviated, time: .omitted) ?? ""
+            let n: Int
+            if let existing = indexForMeeting[mid] {
+                n = existing
+            } else {
+                sources.append(.init(meetingId: mid, title: title))
+                n = sources.count
+                indexForMeeting[mid] = n
+            }
+            blocks.append("[\(n)] \(title) — \(date)\n\(snippet)")
+        }
+
+        let context = blocks.isEmpty
+            ? "SOURCES: none found for this question."
+            : "SOURCES:\n\n" + blocks.joined(separator: "\n\n---\n\n")
         let kbContext = await KnowledgeBaseService.shared.retrieveContext(query: query)
-
-        return (meetingContext, kbContext)
+        return (context, sources, kbContext)
     }
 
     private func getDisplayName() -> String {
@@ -357,6 +386,7 @@ private struct GlobalChatEmptyState: View {
 
 struct GlobalChatBubble: View {
     let message: GlobalChatMessage
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -381,8 +411,32 @@ struct GlobalChatBubble: View {
                 }
                 .padding(.top, 4)
 
-                // Render Markdown so headings, bullets, bold etc. display properly
-                MarkdownRenderer(text: message.content, baseFontSize: 14)
+                // Render Markdown so headings, bullets, bold etc. display
+                // properly; citation chips (TASK-048) sit under the answer —
+                // [n] in the text maps to these in order, click opens the
+                // meeting.
+                VStack(alignment: .leading, spacing: 6) {
+                    MarkdownRenderer(text: message.content, baseFontSize: 14)
+                    if !message.sources.isEmpty {
+                        FlowLayout(spacing: 4) {
+                            ForEach(Array(message.sources.enumerated()), id: \.element.id) { idx, src in
+                                Button {
+                                    appState.sidebarDestination = .meetings
+                                    appState.selectedMeetingId = src.meetingId
+                                } label: {
+                                    Text("[\(idx + 1)] \(src.title)")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.appAccentSubtle)
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
                     .textSelection(.enabled)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -455,6 +509,15 @@ struct GlobalChatMessage: Identifiable {
     let role: Role
     let content: String
     let createdAt = Date()
+    /// Numbered retrieval sources behind an assistant answer (TASK-048).
+    /// Index order matches the [n] citations the prompt mandates.
+    var sources: [SourceRef] = []
 
     enum Role { case user, assistant }
+
+    struct SourceRef: Identifiable {
+        let meetingId: String
+        let title: String
+        var id: String { meetingId }
+    }
 }

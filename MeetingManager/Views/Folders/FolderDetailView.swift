@@ -6,9 +6,14 @@ struct FolderDetailView: View {
     let folder: MeetingFolder
     @Environment(AppState.self) private var appState
 
-    enum Tab { case notes, people, chat }
+    enum Tab { case notes, people, chat, thread }
     @State private var selectedTab: Tab = .notes
     @State private var openItems: [ActionItem] = []
+    @State private var thread: SeriesThread?
+
+    private func loadThread() async {
+        thread = try? await SeriesThreadRepository(database: AppDatabase.shared).thread(folderKey: folder.key)
+    }
 
     private func loadOpenItems() async {
         let repo = ActionItemRepository(database: AppDatabase.shared)
@@ -109,12 +114,13 @@ struct FolderDetailView: View {
                 TabButton(label: "Notes", icon: "doc.text", tab: .notes, selected: selectedTab) { selectedTab = .notes }
                 TabButton(label: "People", icon: "person.2", tab: .people, selected: selectedTab) { selectedTab = .people }
                 TabButton(label: "Ask AI", icon: "sparkles", tab: .chat, selected: selectedTab) { selectedTab = .chat }
+                TabButton(label: "Thread", icon: "text.line.first.and.arrowtriangle.forward", tab: .thread, selected: selectedTab) { selectedTab = .thread }
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 2)
 
             Divider().background(Color.appSeparator)
-                .task(id: folder.key) { await loadOpenItems() }
+                .task(id: folder.key) { await loadOpenItems(); await loadThread() }
 
             // MARK: - Tab Content
             switch selectedTab {
@@ -124,6 +130,24 @@ struct FolderDetailView: View {
                 FolderPeopleTab(folder: folder)
             case .chat:
                 FolderChatTab(folder: folder)
+            case .thread:
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let thread {
+                            MarkdownRenderer(text: thread.content, baseFontSize: 13)
+                            Text("Updated \(thread.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption2)
+                                .foregroundStyle(Color.appTextTertiary)
+                        } else {
+                            Text("The running thread builds itself after the next summarized session in this series.")
+                                .font(.subheadline)
+                                .foregroundStyle(Color.appTextTertiary)
+                                .padding(.top, 24)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+                }
             }
         }
         .background(Color.appBackground)

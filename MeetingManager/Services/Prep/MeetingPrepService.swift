@@ -62,6 +62,13 @@ final class MeetingPrepService {
 
         // 3. Latest summary excerpt from the most recent related meeting
         let lastExcerpt: String? = await {
+            // Series running thread (TASK-049) beats a single related-meeting
+            // excerpt — it already synthesizes the whole series' state.
+            let folderKey = MeetingFolder.normaliseTitle(meeting.title)
+            if let thread = try? await SeriesThreadRepository(database: AppDatabase.shared).thread(folderKey: folderKey),
+               !thread.content.isEmpty {
+                return String(thread.content.prefix(1200))
+            }
             guard let firstRelated = relatedMeetings.first else { return nil }
             let excerpt = firstRelated.summaryExcerpt
             return excerpt == "No summary available" ? nil : excerpt

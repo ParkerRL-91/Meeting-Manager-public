@@ -546,6 +546,73 @@ final class AppState {
         }
     }
 
+    /// TASK-047: one schema-constrained call turns the fresh summary into
+    /// entity facts (decisions/commitments/questions/status) fanned out to
+    /// person, company, and series dossiers. Replace-mode per meeting so
+    /// regeneration can't duplicate. Best-effort — never fails the task.
+    private func extractInsightsBestEffort(meetingId: String) async {
+        do {
+            guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
+            guard let summary = try await summaryRepository.latestSummary(meetingId: meetingId),
+                  !summary.summaryText.isEmpty else { return }
+            guard let textGen = await makeTextGenerator(
+                maxOutputTokens: 2048,
+                schemaJSON: InsightExtraction.schemaJSON
+            ) else { return }
+            let response = try await textGen(
+                InsightExtraction.systemPrompt,
+                "Meeting: \(meeting.title)\nParticipants: \(meeting.participantList.joined(separator: ", "))\n\nSummary:\n\(summary.summaryText)"
+            )
+            guard let payload = InsightExtraction.parse(response) else {
+                fileLog("Insights: unparseable extraction for \(meetingId) — skipping")
+                return
+            }
+            let personRepo = PersonRepository(database: AppDatabase.shared)
+            var domains: [String] = []
+            for name in meeting.participantList {
+                if let person = try? await personRepo.find(for: name), let d = person.domain {
+                    domains.append(d)
+                }
+            }
+            let facts = InsightExtraction.facts(from: payload, meeting: meeting, participantDomains: domains)
+            try await EntityFactRepository(database: database).replaceForMeeting(meetingId, with: facts)
+            fileLog("Insights: \(facts.count) fact(s) for \(meetingId)")
+        } catch {
+            fileLog("Insights: extraction failed (best-effort) — \(error.localizedDescription)")
+        }
+    }
+
+    /// TASK-049: merge the new session into the series' running thread.
+    /// Only runs for meetings that belong to a folder (2+ instances).
+    private func updateSeriesThreadBestEffort(meetingId: String) async {
+        do {
+            guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
+            let folderKey = MeetingFolder.normaliseTitle(meeting.title)
+            let siblings = try await meetingRepository.allActiveMeetings()
+                .filter { MeetingFolder.normaliseTitle($0.title) == folderKey }
+            guard siblings.count >= 2 else { return }
+            guard let summary = try await summaryRepository.latestSummary(meetingId: meetingId),
+                  !summary.summaryText.isEmpty else { return }
+
+            let repo = SeriesThreadRepository(database: database)
+            let prior = try await repo.thread(folderKey: folderKey)?.content ?? "(no prior thread — this is the first one)"
+            let facts = (try? await EntityFactRepository(database: database)
+                .facts(entityType: "series", entityKey: folderKey, limit: 20)) ?? []
+            let factsBlock = facts.map { "- [\($0.kind)] \($0.text)" }.joined(separator: "\n")
+
+            guard let textGen = await makeTextGenerator(maxOutputTokens: 1500) else { return }
+            let updated = try await textGen(
+                SeriesThreadPrompts.system,
+                "Previous thread:\n\(prior)\n\nNew session (\(meeting.effectiveDate.formatted(date: .abbreviated, time: .omitted))):\n\(summary.summaryText.prefix(4000))\n\nRecent facts:\n\(factsBlock)"
+            )
+            guard !updated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            try await repo.save(SeriesThread(folderKey: folderKey, content: updated, updatedAt: Date()))
+            fileLog("SeriesThread: updated '\(folderKey)'")
+        } catch {
+            fileLog("SeriesThread: update failed (best-effort) — \(error.localizedDescription)")
+        }
+    }
+
     static let embedBackfillSentinel = "__embed_backfill__"
 
     /// TASK-045: semantic-index one meeting, or — for the backfill
@@ -867,6 +934,8 @@ final class AppState {
             // failure never fails the summary task. Runs inside the queue's
             // summary handler, so the TaskQueue rule holds.
             await self.extractActionItemsBestEffort(meetingId: meetingId)
+            await self.extractInsightsBestEffort(meetingId: meetingId)
+            await self.updateSeriesThreadBestEffort(meetingId: meetingId)
             // Semantic index (TASK-045): priority 8 — after cleanup (6) and
             // the follow-up email (7), embedding is the least urgent step.
             await self.taskQueueManager.enqueue(type: .embedIndex, meetingId: meetingId, priority: 8)

@@ -452,6 +452,7 @@ private struct PersonDetailView: View {
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false
     @State private var personOpenItems: [ActionItem] = []
+    @State private var dossierFacts: [EntityFact] = []
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     private let rollups = MeetingRollupService()
 
@@ -562,6 +563,7 @@ private struct PersonDetailView: View {
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
 
                 if !personOpenItems.isEmpty { rollupActionItems }
+                if !dossierFacts.isEmpty { dossierSection }
                 if !recentSummaries.isEmpty { rollupSummaries }
 
                 // Meeting history
@@ -616,7 +618,51 @@ private struct PersonDetailView: View {
 
     private func loadRollups() async {
         personOpenItems = await rollups.openActionItems(forParticipants: [person.canonicalName] + person.aliases)
+        dossierFacts = (try? await EntityFactRepository(database: AppDatabase.shared)
+            .facts(entityType: "person",
+                   entityKey: VocativeMiningService.canonicalKey(for: person.canonicalName),
+                   limit: 12)) ?? []
         recentSummaries = await rollups.recentSummaries(forMeetings: meetings)
+    }
+
+    /// Auto-maintained dossier (TASK-047): the durable facts this person's
+    /// meetings produced — decisions, commitments, open questions — newest
+    /// first, each linked to its meeting.
+    private var dossierSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("DOSSIER")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.appTextMuted)
+                .tracking(0.4)
+            ForEach(dossierFacts) { fact in
+                Button {
+                    appState.sidebarDestination = .meetings
+                    appState.selectedMeetingId = fact.meetingId
+                } label: {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(fact.kind.capitalized)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.appAccent)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.appAccentSubtle)
+                            .clipShape(Capsule())
+                        Text(fact.text)
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(2)
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.appSurfaceSecondary.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private var rollupActionItems: some View {
