@@ -183,6 +183,7 @@ final class AppState {
     // Services
     let database: AppDatabase
     let ollamaService: OllamaService
+    let embeddingService: EmbeddingService
     let ollamaInstaller: OllamaInstaller
     let meetingRepository: MeetingRepository
     let transcriptRepository: TranscriptRepository
@@ -274,6 +275,7 @@ final class AppState {
         if let existing = AppState.shared, AppState.isInitialized {
             self.database = existing.database
             self.ollamaService = existing.ollamaService
+            self.embeddingService = existing.embeddingService
             self.ollamaInstaller = existing.ollamaInstaller
             self.meetingRepository = existing.meetingRepository
             self.transcriptRepository = existing.transcriptRepository
@@ -315,6 +317,7 @@ final class AppState {
             self.lastUserError = "The database could not be opened (\(dbError.localizedDescription)). Your meeting data is unavailable. Please restart the app or contact support."
         }
         self.ollamaService = OllamaService()
+        self.embeddingService = EmbeddingService(database: database, ollama: self.ollamaService)
         self.ollamaInstaller = OllamaInstaller()
         self.meetingRepository = MeetingRepository(database: database)
         self.transcriptRepository = TranscriptRepository(database: database)
@@ -543,6 +546,41 @@ final class AppState {
         }
     }
 
+    static let embedBackfillSentinel = "__embed_backfill__"
+
+    /// TASK-045: semantic-index one meeting, or — for the backfill
+    /// sentinel — every meeting that has transcripts but no embeddings.
+    /// One sentinel row drains the whole backlog through the serial queue
+    /// (cancellable, progress-reported) instead of polluting the Tasks UI
+    /// with hundreds of rows.
+    private func runEmbedIndex(meetingId: String) async throws {
+        guard embeddingService.isAvailable else {
+            fileLog("EmbedIndex: embedding model unavailable — skipping (degrades to FTS)")
+            return
+        }
+        if meetingId == Self.embedBackfillSentinel {
+            let all = try await meetingRepository.allActiveMeetings()
+            var done = 0
+            for meeting in all {
+                if Task.isCancelled { return }
+                let repo = EmbeddingRepository(database: database)
+                if (try? await repo.hasEmbeddings(meetingId: meeting.id)) == true { continue }
+                let rows = (try? await transcriptRepository.transcriptsForMeeting(meeting.id, limit: 5000)) ?? []
+                guard !rows.isEmpty else { continue }
+                let summary = try? await summaryRepository.latestSummary(meetingId: meeting.id)
+                try? await embeddingService.indexMeeting(meeting.id, transcripts: rows, summaryText: summary?.summaryText)
+                done += 1
+                taskQueueManager.reportCurrentProgress(stage: "Indexing history (\(done))")
+            }
+            fileLog("EmbedIndex backfill: indexed \(done) meeting(s)")
+            return
+        }
+        let rows = try await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)
+        guard !rows.isEmpty else { return }
+        let summary = try? await summaryRepository.latestSummary(meetingId: meetingId)
+        try await embeddingService.indexMeeting(meetingId, transcripts: rows, summaryText: summary?.summaryText)
+    }
+
     /// Post-summary action-item extraction (TASK-037). Skips meetings that
     /// already have items (regeneration must not duplicate them); the
     /// extractor persists what it finds.
@@ -552,7 +590,10 @@ final class AppState {
             let repo = ActionItemRepository(database: database)
             let existing = try await repo.itemsForMeeting(meetingId)
             guard existing.isEmpty else { return }
-            guard let textGen = await makeTextGenerator(maxOutputTokens: 2048) else { return }
+            guard let textGen = await makeTextGenerator(
+                maxOutputTokens: 2048,
+                schemaJSON: ActionItemExtractor.itemsSchemaJSON
+            ) else { return }
             let items = try await ActionItemExtractor().extractActionItems(
                 for: meeting,
                 transcriptRepo: transcriptRepository,
@@ -826,7 +867,15 @@ final class AppState {
             // failure never fails the summary task. Runs inside the queue's
             // summary handler, so the TaskQueue rule holds.
             await self.extractActionItemsBestEffort(meetingId: meetingId)
+            // Semantic index (TASK-045): priority 8 — after cleanup (6) and
+            // the follow-up email (7), embedding is the least urgent step.
+            await self.taskQueueManager.enqueue(type: .embedIndex, meetingId: meetingId, priority: 8)
             self.loadMeetings()
+        }
+
+        taskQueueManager.embedIndexHandler = { [weak self] meetingId in
+            guard let self else { return }
+            try await self.runEmbedIndex(meetingId: meetingId)
         }
 
         // Gate AI-dependent auto-enqueues (summary) on a configured backend so
@@ -1691,6 +1740,27 @@ final class AppState {
     /// husk meetings, abandoned ad-hoc rows. Archive them (3-day grace so a
     /// fresh failure stays visible while the user might still retry it).
     /// User content is the hard line: anything with a note or summary stays.
+    /// TASK-045: one sentinel task drains the un-embedded backlog through
+    /// the serial queue at the lowest priority. Skips when the model isn't
+    /// available, a backfill row is already queued, or nothing is missing.
+    private func enqueueEmbeddingBackfillIfNeeded() async {
+        guard embeddingService.isAvailable else { return }
+        let queued = taskQueueManager.allTasks.contains {
+            $0.type == .embedIndex && $0.meetingId == Self.embedBackfillSentinel && !$0.isTerminal
+        }
+        guard !queued else { return }
+        let missing = (try? await database.writer.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM meeting m
+                WHERE m.id IN (SELECT DISTINCT meetingId FROM transcript)
+                  AND m.id NOT IN (SELECT DISTINCT meetingId FROM embedding WHERE meetingId IS NOT NULL)
+                """) ?? 0
+        }) ?? 0
+        guard missing > 0 else { return }
+        fileLog("EmbedIndex: \(missing) meeting(s) need semantic indexing — enqueueing backfill")
+        await taskQueueManager.enqueue(type: .embedIndex, meetingId: Self.embedBackfillSentinel, priority: 9)
+    }
+
     private func archiveEmptyDebrisMeetings() async {
         do {
             let archived = try await database.writer.write { db -> Int in
@@ -1723,6 +1793,7 @@ final class AppState {
     private func cleanupStuckMeetings() {
         Task {
             await archiveEmptyDebrisMeetings()
+            await enqueueEmbeddingBackfillIfNeeded()
             do {
                 // Gather stuck meetings inside a write transaction
                 // Returns the UPDATED meeting objects (with corrected statuses)
@@ -5365,7 +5436,10 @@ final class AppState {
     func makeTextGenerator(
         maxOutputTokens: Int = 2048,
         think: Bool = true,
-        jsonMode: Bool = false
+        jsonMode: Bool = false,
+        schemaJSON: String? = nil   // Ollama grammar-constrained output
+                                    // (TASK-046); the Claude path ignores it
+                                    // — cloud callers keep prompt-only JSON.
     ) async -> ((String, String) async throws -> String)? {
         let backend = await resolveAIBackend(refreshOllama: true)
 
@@ -5389,7 +5463,8 @@ final class AppState {
                     model: ollamaModel,
                     maxOutputTokens: maxOutputTokens,
                     think: think,
-                    jsonMode: jsonMode
+                    jsonMode: jsonMode,
+                    schemaJSON: schemaJSON
                 )
             }
         case .claude(let claudeModel):

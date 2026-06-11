@@ -1035,5 +1035,66 @@ enum Migrations {
                 WHERE claudeModel = 'claude-opus-4-20250514'
                 """)
         }
+
+        // PRJ-009: knowledge-base & AI extension tables. One migration for
+        // all four waves — the release ships after wave 4, and empty tables
+        // are harmless in the interim. Vector BLOBs are 768xFloat32 LE
+        // (nomic-embed-text); kbExport tracks write-back state per meeting
+        // (content hash, NOT mtime — atomic renames make mtime unreliable);
+        // weeklyDigest persists digests so Home can render them without the
+        // KB write-back setting being on.
+        migrator.registerMigration("v49-knowledge-ai") { db in
+            try db.create(table: "embedding") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("sourceType", .text).notNull()   // transcriptChunk|summary|kbDoc
+                t.column("sourceId", .text).notNull()     // meetingId or filePath
+                t.column("meetingId", .text)
+                t.column("chunkIndex", .integer).notNull().defaults(to: 0)
+                t.column("contentHash", .text).notNull().defaults(to: "")
+                t.column("text", .text).notNull()
+                t.column("vector", .blob).notNull()
+                t.column("model", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_embedding_source", on: "embedding",
+                          columns: ["sourceType", "sourceId"])
+            try db.create(index: "idx_embedding_meeting", on: "embedding",
+                          columns: ["meetingId"])
+
+            try db.create(table: "entityFact") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("entityType", .text).notNull()   // person|company|series
+                t.column("entityKey", .text).notNull()
+                t.column("meetingId", .text).notNull()
+                t.column("kind", .text).notNull()         // decision|commitment|question|status
+                t.column("text", .text).notNull()
+                t.column("owner", .text)
+                t.column("dueDate", .datetime)
+                t.column("extractedAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_entityFact_entity", on: "entityFact",
+                          columns: ["entityType", "entityKey"])
+            try db.create(index: "idx_entityFact_meeting", on: "entityFact",
+                          columns: ["meetingId"])
+
+            try db.create(table: "seriesThread") { t in
+                t.column("folderKey", .text).primaryKey() // MeetingFolder.normaliseTitle key
+                t.column("content", .text).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            try db.create(table: "kbExport") { t in
+                t.column("meetingId", .text).primaryKey()
+                t.column("filePath", .text).notNull()
+                t.column("exportedAt", .datetime).notNull()
+                t.column("contentHash", .text).notNull()
+            }
+
+            try db.create(table: "weeklyDigest") { t in
+                t.column("isoWeek", .text).primaryKey()   // "2026-W24"
+                t.column("content", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+        }
     }
 }

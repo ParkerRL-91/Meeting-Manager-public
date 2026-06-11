@@ -160,6 +160,11 @@ final class OllamaInstaller {
     func verifyAndPullMissing() async {
         guard await isServerReachable() else { return }
         let available = await fetchAvailableModels()
+        // Embedding model (TASK-045): small (~274 MB), pulled quietly in the
+        // background. Semantic search degrades to FTS until it lands.
+        if !available.contains(where: { $0.hasPrefix(EmbeddingService.embedModel) }) {
+            Task { await self.backgroundPullModel(EmbeddingService.embedModel) }
+        }
         let missingSmall   = !available.contains(OllamaService.smallTier)
         let missingDefault = !available.contains(OllamaService.defaultTier)
         if !missingSmall && !missingDefault { return }

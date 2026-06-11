@@ -8,6 +8,56 @@ private struct OllamaMessage: Codable {
     let content: String
 }
 
+/// Minimal JSON tree so `format` can carry either the literal "json"
+/// string or a full JSON-schema object (Ollama grammar-constrains output
+/// to the schema — TASK-046). No external AnyCodable dependency.
+enum OllamaJSONValue: Encodable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+    case array([OllamaJSONValue])
+    case object([String: OllamaJSONValue])
+
+    init?(any value: Any) {
+        switch value {
+        case let s as String: self = .string(s)
+        case let b as Bool: self = .bool(b)
+        case let n as NSNumber: self = .number(n.doubleValue)
+        case let a as [Any]:
+            var items: [OllamaJSONValue] = []
+            for v in a { guard let j = OllamaJSONValue(any: v) else { return nil }; items.append(j) }
+            self = .array(items)
+        case let d as [String: Any]:
+            var obj: [String: OllamaJSONValue] = [:]
+            for (k, v) in d { guard let j = OllamaJSONValue(any: v) else { return nil }; obj[k] = j }
+            self = .object(obj)
+        case is NSNull: self = .null
+        default: return nil
+        }
+    }
+
+    /// Parse a JSON-schema string into the encodable tree. Returns nil on
+    /// malformed input so callers can degrade to plain "json" mode.
+    static func schema(fromJSON json: String) -> OllamaJSONValue? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return OllamaJSONValue(any: obj)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .string(let s): try c.encode(s)
+        case .number(let n): try c.encode(n)
+        case .bool(let b): try c.encode(b)
+        case .null: try c.encodeNil()
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
+    }
+}
+
 private struct OllamaChatRequest: Encodable {
     let model: String
     let messages: [OllamaMessage]
@@ -16,13 +66,13 @@ private struct OllamaChatRequest: Encodable {
     /// Setting false skips the chain-of-thought phase — much faster for
     /// simple tasks (classification, bounded summarization) that don't need it.
     let think: Bool?
-    /// Constrained output. "json" forces syntactically valid JSON, so the
-    /// model emits just the object instead of rambling reasoning into the
-    /// content (the failure mode when thinking is off but format is free).
-    let format: String?
+    /// Constrained output: .string("json") forces syntactically valid JSON;
+    /// a schema object grammar-constrains the output to that exact shape
+    /// (eliminates the parse-failure class on small models — TASK-046).
+    let format: OllamaJSONValue?
     let options: OllamaOptions?
     init(model: String, messages: [OllamaMessage], stream: Bool = false,
-         think: Bool? = nil, format: String? = nil, options: OllamaOptions?) {
+         think: Bool? = nil, format: OllamaJSONValue? = nil, options: OllamaOptions?) {
         self.model = model
         self.messages = messages
         self.stream = stream
@@ -318,7 +368,11 @@ final class OllamaService {
                                // chain-of-thought (and restated prompt text) into
                                // the content field; think:true keeps reasoning in
                                // the separate `thinking` field, then we strip it.
-        jsonMode: Bool = false
+        jsonMode: Bool = false,
+        // JSON-schema string for grammar-constrained output (TASK-046).
+        // Takes precedence over jsonMode; degrades to plain "json" when the
+        // schema doesn't parse or the server rejects it (older Ollama).
+        schemaJSON: String? = nil
     ) async throws -> String {
         let selectedModel: String
         let numCtx: Int
@@ -397,6 +451,9 @@ final class OllamaService {
         // for non-thinking models, where low-variance summarization is right.
         let sendsThink = selectedModel.contains("qwen3") && think
 
+        let schemaFormat = schemaJSON.flatMap { OllamaJSONValue.schema(fromJSON: $0) }
+        let format: OllamaJSONValue? = schemaFormat ?? (jsonMode || schemaJSON != nil ? .string("json") : nil)
+
         let body = OllamaChatRequest(
             model: selectedModel,
             messages: [
@@ -407,7 +464,7 @@ final class OllamaService {
             // deepseek-r1). Instruct models (qwen2.5, llama) don't support it and
             // can error/stall on it — omit so they just generate directly.
             think: selectedModel.contains("qwen3") ? think : nil,
-            format: jsonMode ? "json" : nil,
+            format: format,
             options: OllamaOptions(
                 temperature: sendsThink ? 0.6 : 0.3,
                 num_predict: numPredict,

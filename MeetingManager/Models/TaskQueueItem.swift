@@ -40,6 +40,10 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// (never auto-enqueued): the Notes tab and the live notepad button
         /// enqueue it. See `AppState.generateEnhancedNotesForTask`.
         case enhanceNotes
+        /// PRJ-009 TASK-045: embed a meeting's transcript + summary for
+        /// semantic retrieval. Sentinel meetingId "__embed_backfill__"
+        /// walks every un-embedded meeting (one queue row, cancellable).
+        case embedIndex
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -63,6 +67,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .retryAttribution:   return "Re-checking Speakers"
         case .detailedOutline:    return "Generating Outline"
         case .enhanceNotes:       return "Enhance Notes"
+        case .embedIndex:         return "Index for Search"
         }
     }
 

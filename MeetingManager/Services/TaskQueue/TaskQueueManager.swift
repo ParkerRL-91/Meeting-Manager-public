@@ -74,6 +74,10 @@ final class TaskQueueManager {
     /// it from the Notes tab or the live notepad button.
     var enhanceNotesHandler: ((String) async throws -> Void)?
 
+    /// PRJ-009 TASK-045: semantic-index a meeting (or run the backfill
+    /// sentinel). Wired by AppState like every other handler.
+    var embedIndexHandler: ((String) async throws -> Void)?
+
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
     /// when this is true, so a user with no AI configured doesn't get a failed
@@ -692,6 +696,7 @@ final class TaskQueueManager {
         case .retryAttribution:   stage = "Re-checking speakers"
         case .detailedOutline:    stage = "Generating outline"
         case .enhanceNotes:       stage = "Enhancing notes"
+        case .embedIndex:         stage = "Indexing for search"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -770,6 +775,12 @@ final class TaskQueueManager {
         case .transcriptCleanup:
             guard let handler = transcriptCleanupHandler else {
                 throw TaskQueueError.noHandler("transcriptCleanup")
+            }
+            try await handler(task.meetingId)
+
+        case .embedIndex:
+            guard let handler = embedIndexHandler else {
+                throw TaskQueueError.noHandler("embedIndex")
             }
             try await handler(task.meetingId)
 

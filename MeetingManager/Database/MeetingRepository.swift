@@ -25,6 +25,11 @@ final class MeetingRepository {
         let audioPaths = meeting.audioFilePaths
         try await database.writer.write { db in
             _ = try meeting.delete(db)
+            // PRJ-009 tables have no FK cascade (append-only migration on a
+            // live schema) — clean derived rows explicitly (review M9).
+            try db.execute(sql: "DELETE FROM embedding WHERE meetingId = ?", arguments: [meeting.id])
+            try db.execute(sql: "DELETE FROM entityFact WHERE meetingId = ?", arguments: [meeting.id])
+            try db.execute(sql: "DELETE FROM kbExport WHERE meetingId = ?", arguments: [meeting.id])
         }
         let fm = FileManager.default
         for path in audioPaths {

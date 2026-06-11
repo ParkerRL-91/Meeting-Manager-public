@@ -21,6 +21,13 @@ final class ActionItemExtractor {
     ///   - actionItemRepo: Repository for persisting extracted items.
     ///   - textGenerator: A closure that takes (systemPrompt, userPrompt) and returns generated text.
     /// - Returns: The extracted and saved action items.
+    /// JSON schema for the items array (TASK-046): grammar-constrains
+    /// Ollama output so small models can't emit malformed JSON. The Claude
+    /// path ignores it and relies on the prompt as before.
+    static let itemsSchemaJSON = """
+    {"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"assignee":{"type":["string","null"]},"dueDate":{"type":["string","null"]}},"required":["title"]}}
+    """
+
     @discardableResult
     func extractActionItems(
         for meeting: Meeting,

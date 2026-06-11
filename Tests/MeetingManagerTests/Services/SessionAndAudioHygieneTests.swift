@@ -203,4 +203,28 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(MeetingFolder.group(meetings).isEmpty,
                       "Cancelled (crash) rows don't count toward the threshold")
     }
+    // MARK: - Embedding helpers (TASK-045)
+
+    func testVectorPackUnpackRoundTrip() {
+        let v: [Float] = [0.25, -1.5, 3.14159, 0]
+        XCTAssertEqual(EmbeddingService.unpack(EmbeddingService.pack(v)), v)
+    }
+
+    func testTranscriptChunkingPrefixesSpeakersAndOverlaps() {
+        let rows = (0..<60).map { i in
+            SampleData.makeTranscript(meetingId: "m1", speakerLabel: "Alice",
+                                      text: String(repeating: "word ", count: 20) + "#\(i)",
+                                      startTime: Double(i), endTime: Double(i) + 1)
+        }
+        let chunks = EmbeddingService.chunkTranscript(rows, maxChars: 800, overlap: 100)
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertTrue(chunks[0].hasPrefix("Alice: "))
+        let tail = String(chunks[0].suffix(60))
+        XCTAssertTrue(chunks[1].contains(String(tail.suffix(30))), "Overlap carries boundary context")
+    }
+
+    func testContentHashStable() {
+        XCTAssertEqual(EmbeddingService.hash("hello"), EmbeddingService.hash("hello"))
+        XCTAssertNotEqual(EmbeddingService.hash("hello"), EmbeddingService.hash("hello "))
+    }
 }
