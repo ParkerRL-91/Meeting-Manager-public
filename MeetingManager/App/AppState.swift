@@ -184,6 +184,7 @@ final class AppState {
     let database: AppDatabase
     let ollamaService: OllamaService
     let embeddingService: EmbeddingService
+    let interactiveAIBroker: InteractiveAIBroker
     let ollamaInstaller: OllamaInstaller
     let meetingRepository: MeetingRepository
     let transcriptRepository: TranscriptRepository
@@ -276,6 +277,7 @@ final class AppState {
             self.database = existing.database
             self.ollamaService = existing.ollamaService
             self.embeddingService = existing.embeddingService
+            self.interactiveAIBroker = existing.interactiveAIBroker
             self.ollamaInstaller = existing.ollamaInstaller
             self.meetingRepository = existing.meetingRepository
             self.transcriptRepository = existing.transcriptRepository
@@ -318,6 +320,7 @@ final class AppState {
         }
         self.ollamaService = OllamaService()
         self.embeddingService = EmbeddingService(database: database, ollama: self.ollamaService)
+        self.interactiveAIBroker = InteractiveAIBroker(ollama: self.ollamaService)
         self.ollamaInstaller = OllamaInstaller()
         self.meetingRepository = MeetingRepository(database: database)
         self.transcriptRepository = TranscriptRepository(database: database)
@@ -1028,6 +1031,17 @@ final class AppState {
         // Governor inputs (TASK-055): composed from signals AppState already
         // tracks. deferredSinceHours uses the oldest pending background row's
         // createdAt as the starvation clock.
+        ollamaService.onAllWorkFinished = { [weak self] in
+            self?.interactiveAIBroker.drain()
+        }
+
+        interactiveAIBroker.onTimeout = { [weak self] id in
+            guard let self,
+                  let idx = self.globalChatMessages.firstIndex(where: { $0.id == id }) else { return }
+            self.globalChatMessages[idx].content = "Timed out waiting for the local model — ask again."
+            self.globalChatMessages[idx].isPending = false
+        }
+
         taskQueueManager.backgroundPolicyInputs = { [weak self] in
             guard let self else {
                 return BackgroundWorkPolicy.Inputs(
@@ -1049,7 +1063,7 @@ final class AppState {
                 thermalState: self.thermalState,
                 onBattery: BackgroundWorkPolicy.isOnBattery(),
                 allowOnBattery: UserDefaults.standard.bool(forKey: "backgroundAI.allowOnBattery"),
-                interactivePending: false,   // broker pressure lands with TASK-071
+                interactivePending: self.interactiveAIBroker.pendingCount > 0,
                 localHour: Calendar.current.component(.hour, from: Date()),
                 deferredSinceHours: oldestBackground.map { -$0.timeIntervalSinceNow / 3600 } ?? 0
             )
@@ -1196,10 +1210,9 @@ final class AppState {
         // cache-hit (no re-download).
         taskQueueManager.onQueueIdle = { [weak self] in
             guard let self else { return }
-            if self.dailyBriefQueued {
-                self.fileLog("DailyBrief: queue idle — retrying deferred brief")
-                await self.maybeRegenerateDailyBrief(force: true)
-            }
+            // Broker drains FIRST on the idle edge (review M3) — queued user
+            // questions must not race the model unload below.
+            self.interactiveAIBroker.drain()
             await SpeakerDiarizationService.shared.unloadModels()
             FluidAudioDiarizationService.shared.unloadModels()
             self.fileLog("TaskQueue: idle — diarization models unloaded")
@@ -5338,10 +5351,16 @@ final class AppState {
                     // but couldn't serve the brief in time. Present this as
                     // "queued" rather than a hard error — it will retry once the
                     // queue drains (see the transcription handler).
-                    if self.taskQueueManager.isProcessing || self.taskQueueManager.pendingCount > 0 {
+                    if self.taskQueueManager.isProcessing || self.taskQueueManager.pendingCount > 0
+                        || self.ollamaService.inFlightCount > 0 {
+                        // TASK-071: the broker owns deferred-brief retries now
+                        // (the old onQueueIdle retry was removed with it).
                         self.dailyBriefQueued = true
                         self.dailyBriefError = nil
-                        Logger.ai.info("DailyBrief: deferred — AI backend busy with \(self.taskQueueManager.pendingCount) queued task(s); will retry when idle")
+                        self.interactiveAIBroker.submit(label: "Daily brief") { [weak self] in
+                            await self?.maybeRegenerateDailyBrief(force: true)
+                        }
+                        Logger.ai.info("DailyBrief: deferred via broker — backend busy (\(self.ollamaService.inFlightLabel ?? "queued tasks"))")
                     } else {
                         self.dailyBriefQueued = false
                         self.dailyBriefError = error.localizedDescription

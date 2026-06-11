@@ -183,19 +183,53 @@ struct GlobalChatView: View {
         let userMsg = GlobalChatMessage(role: .user, content: query)
         withAnimation { appState.globalChatMessages.append(userMsg) }
 
-        isProcessing = true
-        defer { isProcessing = false }
-
         guard let textGen = await appState.makeTextGenerator() else {
             error = "No AI configured. Add a Claude API key or start Ollama in Settings."
             return
         }
 
+        // TASK-071: one pending assistant bubble per question; the broker
+        // fills it in place when the model is free. Queued turns survive
+        // navigation (messages live on AppState).
+        var pending = GlobalChatMessage(role: .assistant, content: "Thinking…", isPending: true)
+        if appState.interactiveAIBroker.isBlocked {
+            let blocker = appState.interactiveAIBroker.blockedLabel ?? "another task"
+            pending.content = "Waiting for the local model — busy with \(blocker). Your question is queued."
+        }
+        let pendingId = pending.id
+        withAnimation { appState.globalChatMessages.append(pending) }
+
+        let queued = appState.interactiveAIBroker.submit(id: pendingId, label: "Chat: \(String(query.prefix(40)))") { [weak appState] in
+            guard let appState else { return }
+            await GlobalChatView.runChatGeneration(
+                appState: appState, query: query, pendingId: pendingId, textGen: textGen)
+        }
+        if queued { return }
+        return
+    }
+
+    /// The actual retrieval + generation, broker-scheduled. Static so a
+    /// queued turn doesn't depend on the view instance staying alive.
+    @MainActor
+    static func runChatGeneration(
+        appState: AppState,
+        query: String,
+        pendingId: UUID,
+        textGen: @escaping (String, String) async throws -> String
+    ) async {
+        func complete(_ text: String, sources: [GlobalChatMessage.SourceRef] = []) {
+            guard let idx = appState.globalChatMessages.firstIndex(where: { $0.id == pendingId }) else { return }
+            withAnimation {
+                appState.globalChatMessages[idx].content = text
+                appState.globalChatMessages[idx].sources = sources
+                appState.globalChatMessages[idx].isPending = false
+            }
+        }
         do {
-            let (meetingContext, sources, kbContext) = await buildRetrievalContext(query: query)
+            let (meetingContext, sources, kbContext) = await Self.buildRetrievalContextStatic(appState: appState, query: query)
 
             var systemPrompt = """
-                You are a helpful meeting assistant for \(getDisplayName()). \
+                You are a helpful meeting assistant for \(ProcessInfo.processInfo.fullUserName). \
                 The numbered SOURCES below were retrieved from their meeting \
                 history for this question.
 
@@ -224,10 +258,9 @@ struct GlobalChatView: View {
             }
 
             let response = try await textGen(systemPrompt, query)
-            let assistantMsg = GlobalChatMessage(role: .assistant, content: response, sources: sources)
-            withAnimation { appState.globalChatMessages.append(assistantMsg) }
+            complete(response, sources: sources)
         } catch {
-            self.error = error.localizedDescription
+            complete("That didn't work: \(error.localizedDescription)")
         }
     }
 
@@ -236,7 +269,7 @@ struct GlobalChatView: View {
     /// deduped to the best 2 chunks per meeting, capped at 8 numbered
     /// sources. Falls back to FTS alone — and to the most recent summaries
     /// when the query matches nothing — so the chat never goes blind.
-    private func buildRetrievalContext(query: String) async -> (context: String, sources: [GlobalChatMessage.SourceRef], kb: String) {
+    private static func buildRetrievalContextStatic(appState: AppState, query: String) async -> (context: String, sources: [GlobalChatMessage.SourceRef], kb: String) {
         var ranked: [(meetingId: String, snippet: String, score: Float)] = []
 
         let hits = (try? await appState.embeddingService.topK(
@@ -416,7 +449,23 @@ struct GlobalChatBubble: View {
                 // [n] in the text maps to these in order, click opens the
                 // meeting.
                 VStack(alignment: .leading, spacing: 6) {
-                    MarkdownRenderer(text: message.content, baseFontSize: 14)
+                    if message.isPending {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(message.content)
+                                .font(.subheadline)
+                                .foregroundStyle(Color.appTextSecondary)
+                            Button("Cancel") {
+                                appState.interactiveAIBroker.cancel(id: message.id)
+                                appState.globalChatMessages.removeAll { $0.id == message.id }
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                        }
+                    } else {
+                        MarkdownRenderer(text: message.content, baseFontSize: 14)
+                    }
                     if !message.sources.isEmpty {
                         FlowLayout(spacing: 4) {
                             ForEach(Array(message.sources.enumerated()), id: \.element.id) { idx, src in
@@ -507,8 +556,12 @@ struct BubbleShape: Shape {
 struct GlobalChatMessage: Identifiable {
     let id = UUID()
     let role: Role
-    let content: String
+    var content: String
     let createdAt = Date()
+    /// True while this assistant turn is queued/generating (TASK-071) —
+    /// the bubble shows a spinner + Cancel, and the broker fills `content`
+    /// in place (id stable, scroll position holds).
+    var isPending = false
     /// Numbered retrieval sources behind an assistant answer (TASK-048).
     /// Index order matches the [n] citations the prompt mandates.
     var sources: [SourceRef] = []

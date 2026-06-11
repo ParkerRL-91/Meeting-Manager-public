@@ -300,9 +300,16 @@ final class OllamaService {
         inFlightLabel = label
     }
 
+    /// Fired each time inFlightCount returns to zero — the broker's drain
+    /// signal (TASK-071).
+    var onAllWorkFinished: (() -> Void)?
+
     func endWork() {
         inFlightCount = max(0, inFlightCount - 1)
-        if inFlightCount == 0 { inFlightLabel = nil }
+        if inFlightCount == 0 {
+            inFlightLabel = nil
+            onAllWorkFinished?()
+        }
     }
 
     private(set) var isReachable = false
