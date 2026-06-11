@@ -222,6 +222,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// only begin once `isCapturing` is true and the device listeners exist).
     private var micStartFailedPendingRecovery = false
 
+    /// Last tick on which system audio cleared the active threshold. The
+    /// dead-mic detector uses a 10 s recency window off this instead of a
+    /// same-tick check — remote audio dips between sentences and a same-tick
+    /// requirement reset the counter before it could ever warn (TASK-034).
+    private var lastSystemAudioActiveAt = Date.distantPast
+
     /// CoreAudio property listeners (default-input-changed for auto-follow,
     /// device-list-changed as the recovery retry signal). Stored so the exact same
     /// block reference can be removed. Callbacks fire on `listenerQueue`, then hop
@@ -432,12 +438,15 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         let engineRunning = micCapture.engine.isRunning
         let inputFormat = micCapture.engine.inputNode.outputFormat(forBus: 0)
-        logToFile("Audio: mic capture STARTED (device: \(resolveInputDevice()?.localizedName ?? "default"), engine.running=\(engineRunning), inputFormat=\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch)")
+        let micSourceLabel = micSource == .screenCaptureKit ? "ScreenCaptureKit"
+            : micStartFailedPendingRecovery ? "NONE (recovery pending)" : "engine"
+        logToFile("Audio: mic capture STARTED (device: \(resolveInputDevice()?.localizedName ?? "default"), source: \(micSourceLabel), engine.running=\(engineRunning), inputFormat=\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch)")
 
         // Start silence monitoring AFTER both captures are running
         consecutiveSilentSeconds = 0
         consecutiveMicDeadSeconds = 0
         micProblemWarned = false
+        lastSystemAudioActiveAt = .distantPast
         silenceCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
 
@@ -452,10 +461,19 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             // live. This is the "wrong input device" failure (e.g. an output-only
             // headphone dongle selected as the mic) — the call records remote audio
             // fine but the local mic is silent, so we warn the user without stopping.
+            // "System active" is a 10 s recency window, not a same-tick check:
+            // remote audio fluctuates around the threshold between sentences,
+            // and the old same-tick requirement reset the counter every quiet
+            // second — a stone-dead mic in a real call never reached the warn
+            // threshold (TASK-034).
+            if self.systemLevel >= self.systemActiveThreshold {
+                self.lastSystemAudioActiveAt = Date()
+            }
+            let systemRecentlyActive = Date().timeIntervalSince(self.lastSystemAudioActiveAt) < 10
             if !self.micProblemWarned
                 && !self.isMicRecovering
                 && self.micLevel < self.micDeadThreshold
-                && self.systemLevel >= self.systemActiveThreshold {
+                && systemRecentlyActive {
                 self.consecutiveMicDeadSeconds += 1
                 if self.consecutiveMicDeadSeconds >= self.micDeadWarnSeconds {
                     self.micProblemWarned = true
@@ -573,12 +591,18 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                     continue
                 }
                 try? await Task.sleep(nanoseconds: 1_500_000_000)  // let mic buffers arrive
-                if tap.micBufferCount > 0 {
-                    logToFile("Audio: mic now captured via ScreenCaptureKit (\(tap.micBufferCount) buffers, device=\(micUID ?? "default")) — full mic+system recording")
+                // Require SIGNAL, not just buffer presence: SCK can deliver
+                // perfectly-formed frames of pure silence when the device
+                // isn't actually capturing (the 2026-06-11 notification-start
+                // incident accepted a dead mic this way and closed every
+                // recovery path behind it — TASK-034). 2e-4 sits well below
+                // idle room noise on a live mic and well above true silence.
+                if tap.micBufferCount > 0, tap.micPeakRMS > 0.0002 {
+                    logToFile("Audio: mic now captured via ScreenCaptureKit (\(tap.micBufferCount) buffers, peak rms \(String(format: "%.6f", tap.micPeakRMS)), device=\(micUID ?? "default")) — full mic+system recording")
                     micSource = .screenCaptureKit
                     return
                 }
-                logToFile("Audio: SCK mic produced no buffers (device=\(micUID ?? "default"))")
+                logToFile("Audio: SCK mic produced \(tap.micBufferCount) buffer(s) with peak rms \(String(format: "%.6f", tap.micPeakRMS)) (device=\(micUID ?? "default")) — \(tap.micBufferCount == 0 ? "no buffers" : "silent, rejecting")")
             }
             // SCK mic didn't produce audio — drop it and keep system audio only.
             tap.onMicBuffer = nil
@@ -756,9 +780,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             return
         }
         try? await Task.sleep(nanoseconds: 1_000_000_000)  // let mic buffers arrive
-        logToFile(tap.micBufferCount > 0
+        logToFile(tap.micBufferCount > 0 && tap.micPeakRMS > 0.0002
             ? "Audio: SCK mic switch OK — now on \(label)"
-            : "Audio: SCK mic switch produced no buffers (\(label))")
+            : "Audio: SCK mic switch produced no usable signal (\(tap.micBufferCount) buffers, peak rms \(String(format: "%.6f", tap.micPeakRMS)), \(label))")
     }
 
     // MARK: - Mic recovery (disconnect)
@@ -853,24 +877,38 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
 
     private func failMicRecovery() {
         guard isMicRecovering, isCapturing else { return }
-        isMicRecovering = false
-        onMicRecoveryStateChanged?(false)
-        micRecoveryDeadlineTask = nil
         micRecoveryWarnTask?.cancel()
         micRecoveryWarnTask = nil
 
         // Start-time failure: the mic never joined, but the call audio has
         // been recording the whole time — ending the meeting would discard
-        // good audio. Stay system-only and tell the user once, definitively.
+        // good audio. Tell the user once, then keep recovery ALIVE at low
+        // frequency for the life of the recording: the notification-start
+        // flow begins with no call open at all, and the mic only becomes
+        // startable when the user joins the meeting minutes later — a dead
+        // 30 s window meant "never switches over" (TASK-034). The device
+        // listeners keep firing resume attempts too (they require
+        // isMicRecovering, which stays true here).
         if micRecoveryReason == .startFailed {
-            logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired (startFailed) — continuing SYSTEM-ONLY")
+            logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired (startFailed) — continuing SYSTEM-ONLY; still watching for a usable mic")
             onMicProblemDetected?(
-                "Your microphone couldn't be started, so this recording captures the other participants but not your own voice. "
-                + "Check which app is holding the mic (a browser tab in a call, Zoom, Meet, or Teams) or pick a different input in System Settings > Sound."
+                "Your microphone couldn't be started, so the recording currently has the call audio only. "
+                + "Meeting Manager keeps watching — joining the meeting or switching inputs usually frees the mic, and it will be added automatically."
             )
+            micRecoveryDeadlineTask = Task { [weak self] in
+                guard let self else { return }
+                while !Task.isCancelled, self.isMicRecovering, self.isCapturing {
+                    try? await Task.sleep(nanoseconds: 45_000_000_000)
+                    guard !Task.isCancelled, self.isMicRecovering, self.isCapturing else { return }
+                    if await self.attemptMicResume() { return }
+                }
+            }
             return
         }
 
+        isMicRecovering = false
+        onMicRecoveryStateChanged?(false)
+        micRecoveryDeadlineTask = nil
         logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired — no replacement; ending recording")
         onSilenceDetected?()   // reuse the established auto-stop → AppState.stopRecording
     }

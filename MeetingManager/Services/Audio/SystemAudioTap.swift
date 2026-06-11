@@ -36,6 +36,13 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     /// is actually producing audio, not just that the stream started).
     private(set) var micBufferCount: Int = 0
 
+    /// Loudest mic buffer seen since start. Buffer COUNT alone validated a
+    /// dead mic: SCK can deliver perfectly-formed frames of pure silence
+    /// (rms 0.000000 from frame #1 — the 2026-06-11 notification-start
+    /// incident), so the fallback probe must check signal, not presence
+    /// (TASK-034). Reset on every start.
+    private(set) var micPeakRMS: Float = 0
+
     /// Lock protecting `isRunning`, `stream`, and `bufferCount` against
     /// races between the audio callback queue and callers of start/stop.
     private let lock = NSLock()
@@ -50,6 +57,7 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         lock.lock()
         guard !isRunning else { lock.unlock(); return }
         micBufferCount = 0
+        micPeakRMS = 0
         lock.unlock()
 
         // Get available content for filtering
@@ -218,7 +226,15 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         let pts = sampleBuffer.presentationTimeStamp
         let hostTime = pts.isValid ? CMClockConvertHostTimeToSystemUnits(pts) : mach_absolute_time()
         let time = AVAudioTime(hostTime: hostTime)
-        if isMic { onMicBuffer?(pcmBuffer, time) } else { onBuffer?(pcmBuffer, time) }
+        if isMic {
+            let rms = pcmBuffer.rmsLevel
+            lock.lock()
+            if rms > micPeakRMS { micPeakRMS = rms }
+            lock.unlock()
+            onMicBuffer?(pcmBuffer, time)
+        } else {
+            onBuffer?(pcmBuffer, time)
+        }
     }
 
     // MARK: - SCStreamDelegate
