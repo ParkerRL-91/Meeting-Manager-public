@@ -141,11 +141,35 @@ struct SummaryView: View {
 
     // MARK: - No Summary Empty State
 
+    /// A summary/regeneration task currently queued, running, or failed for
+    /// this meeting — when present, the empty state shows the live queue
+    /// truth (stage / position / error + Retry) instead of the Generate
+    /// button (TASK-041).
+    private var activeSummaryTask: TaskQueueItem? {
+        appState.taskQueueManager.allTasks.last {
+            $0.meetingId == meetingId
+            && ($0.type == .summary || $0.type == .regeneration)
+            && $0.status != .completed
+        }
+    }
+
+    private var summaryQueueStatusView: some View {
+        MeetingPipelineStatusView(
+            meetingId: meetingId,
+            taskTypes: [.summary, .regeneration],
+            fallbackIcon: "doc.text",
+            fallbackTitle: "No Summary",
+            fallbackSubtitle: "Generate a summary from the transcript."
+        )
+    }
+
     @ViewBuilder
     private var noSummaryEmptyState: some View {
         VStack(spacing: 0) {
             Spacer()
-            if transcriptCount == 0 {
+            if activeSummaryTask != nil {
+                summaryQueueStatusView
+            } else if transcriptCount == 0 {
                 // No transcript — explain why generation isn't possible
                 VStack(spacing: 12) {
                     Image(systemName: "waveform.slash")

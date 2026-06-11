@@ -40,7 +40,17 @@ struct DetailedOutlineView: View {
             } else if transcriptCount == 0 {
                 noTranscriptState
             } else {
-                noOutlineState
+                if activeOutlineTask != nil {
+                    MeetingPipelineStatusView(
+                        meetingId: meetingId,
+                        taskTypes: [.detailedOutline],
+                        fallbackIcon: "list.bullet.rectangle",
+                        fallbackTitle: "No Outline",
+                        fallbackSubtitle: "Generate the outline from the transcript."
+                    )
+                } else {
+                    noOutlineState
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -120,6 +130,16 @@ struct DetailedOutlineView: View {
             Spacer()
         }
         .padding(.horizontal, 40)
+    }
+
+    /// Outline task queued/running/failed — show live queue truth instead
+    /// of the static empty state (TASK-041).
+    private var activeOutlineTask: TaskQueueItem? {
+        appState.taskQueueManager.allTasks.last {
+            $0.meetingId == meetingId
+            && $0.type == .detailedOutline
+            && $0.status != .completed
+        }
     }
 
     private var noOutlineState: some View {

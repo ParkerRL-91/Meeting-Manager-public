@@ -98,10 +98,25 @@ struct FullTranscriptView: View {
                 Spacer()
             } else if transcripts.isEmpty {
                 Spacer()
-                EmptyStateView(
-                    icon: "text.quote",
-                    title: "No Transcript",
-                    subtitle: "The transcript will appear here once the meeting recording is processed."
+                // Live queue truth instead of a generic placeholder: failed →
+                // error + Retry; running → stage; queued → position. When
+                // audio exists but nothing was ever queued (the silent-loss
+                // cohort TASK-031 surfaced), offer Transcribe Now directly.
+                MeetingPipelineStatusView(
+                    meetingId: meetingId,
+                    taskTypes: [.transcription, .diarization],
+                    fallbackIcon: "text.quote",
+                    fallbackTitle: "No Transcript",
+                    fallbackSubtitle: meeting?.audioFilePaths.isEmpty == false
+                        ? "This meeting has audio that hasn't been transcribed."
+                        : "The transcript will appear here once the meeting recording is processed.",
+                    fallbackActionLabel: meeting?.audioFilePaths.isEmpty == false ? "Transcribe Now" : nil,
+                    fallbackAction: meeting?.audioFilePaths.isEmpty == false ? {
+                        _ = await appState.taskQueueManager.enqueue(
+                            type: .transcription, meetingId: meetingId, priority: 0
+                        )
+                        await appState.taskQueueManager.refreshTaskList()
+                    } : nil
                 )
                 Spacer()
             } else if !showRaw, let cleaned = cleanedTranscript, searchQuery.isEmpty {

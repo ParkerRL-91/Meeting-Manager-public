@@ -6,6 +6,8 @@ struct AllActionItemsView: View {
     @State private var openItems: [ActionItem] = []
     @State private var meetings: [String: Meeting] = [:]
     @State private var isLoading = true
+    @State private var sentItemIds: Set<Int64> = []
+    @AppStorage("reminders.listIdentifier") private var remindersListIdentifier: String = ""
 
     private let actionItemRepo = ActionItemRepository()
 
@@ -139,8 +141,41 @@ struct AllActionItemsView: View {
             }
 
             Spacer()
+
+            // Same per-item Reminders push the meeting page has (TASK-037) —
+            // the global list previously had no way to act on an item.
+            Button {
+                sendToReminders(item)
+            } label: {
+                Image(systemName: item.id.map { sentItemIds.contains($0) } == true ? "checkmark" : "bell.badge")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+            .buttonStyle(.plain)
+            .help("Add to Apple Reminders")
         }
         .padding(.vertical, 4)
+    }
+
+    private func sendToReminders(_ item: ActionItem) {
+        Task {
+            let service = RemindersService.shared
+            if !service.isAuthorized {
+                guard await service.requestAccess() else { return }
+            }
+            do {
+                let list = service.list(withIdentifier: remindersListIdentifier.isEmpty ? nil : remindersListIdentifier)
+                try service.add(item, list: list)
+                if let id = item.id {
+                    withAnimation(.easeInOut(duration: 0.2)) { _ = sentItemIds.insert(id) }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    withAnimation(.easeInOut(duration: 0.2)) { _ = sentItemIds.remove(id) }
+                }
+            } catch {
+                // Best-effort: authorization or store errors just leave the
+                // bell un-checked; the meeting-page path surfaces errors.
+            }
+        }
     }
 
     // MARK: - Actions

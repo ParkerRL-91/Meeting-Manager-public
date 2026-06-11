@@ -167,7 +167,7 @@ struct SidebarView: View {
             // the model-download footer, still inside the pinned region so
             // a long folder list never hides the active-recording indicator.
             if appState.isRecording, let meeting = appState.activeMeeting {
-                SidebarRecordingBar(meeting: meeting)
+                SidebarRecordingBar(meeting: meeting, capture: appState.audioCaptureService)
                 Divider()
             } else if let callApp = appState.detectedCallApp {
                 DetectedCallBanner(appName: callApp)
@@ -352,9 +352,14 @@ private struct NavItem: View {
 /// Compact recording indicator shown in the sidebar when a meeting is being recorded.
 private struct SidebarRecordingBar: View {
     let meeting: Meeting
+    /// Observed directly so the level meters track the published mic/system
+    /// RMS in real time — a dead mic is visible within a second instead of
+    /// being discovered in the transcript hours later (TASK-038).
+    @ObservedObject var capture: AudioCaptureService
     @Environment(AppState.self) private var appState
     @State private var elapsedSeconds: Int = 0
     @State private var pulse = false
+    @State private var micStatus: String?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -365,13 +370,25 @@ private struct SidebarRecordingBar: View {
                 .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
                 .onAppear { pulse = true }
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text("Recording")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Color.appRecording)
-                Text(formattedElapsed)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(Color.appTextSecondary)
+                HStack(spacing: 6) {
+                    Text(formattedElapsed)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(Color.appTextSecondary)
+                    CaptureLevelMeter(icon: "mic.fill", level: capture.micLevel,
+                                      warn: micStatus != nil)
+                    CaptureLevelMeter(icon: "speaker.wave.2.fill", level: capture.systemLevel,
+                                      warn: false)
+                }
+                if let micStatus {
+                    Text(micStatus)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
@@ -417,6 +434,16 @@ private struct SidebarRecordingBar: View {
     private func stopTimer() {}
 
     private func updateElapsed() {
+        // Refresh the mic-source/recovery status on the same 1 s tick the
+        // elapsed clock uses (these aren't @Published).
+        if capture.isMicRecovering {
+            micStatus = "acquiring microphone…"
+        } else if capture.micSource == .screenCaptureKit {
+            micStatus = "mic via screen capture"
+        } else {
+            micStatus = nil
+        }
+
         guard let start = meeting.startDate else { elapsedSeconds = 0; return }
         elapsedSeconds = max(0, Int(Date().timeIntervalSince(start)))
     }
@@ -455,5 +482,33 @@ private struct DetectedCallBanner: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.appAccent.opacity(0.08))
+    }
+}
+
+/// Tiny live level meter (icon + 24×4 capsule). RMS is normalised against
+/// 0.15 — loud speech peaks the bar, silence empties it. `warn` tints the
+/// icon orange while the mic is missing/recovering (TASK-038).
+private struct CaptureLevelMeter: View {
+    let icon: String
+    let level: Float
+    let warn: Bool
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 8))
+                .foregroundStyle(warn ? AnyShapeStyle(.orange) : AnyShapeStyle(Color.appTextTertiary))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.appTextTertiary.opacity(0.25))
+                    Capsule()
+                        .fill(warn ? Color.orange : Color.appAccent)
+                        .frame(width: geo.size.width * CGFloat(min(1, level / 0.15)))
+                        .animation(.linear(duration: 0.2), value: level)
+                }
+            }
+            .frame(width: 24, height: 4)
+        }
+        .help(warn ? "Microphone not capturing — recovery is running" : "Live capture level")
     }
 }

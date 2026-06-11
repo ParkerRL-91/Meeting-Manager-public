@@ -540,6 +540,28 @@ final class AppState {
         }
     }
 
+    /// Post-summary action-item extraction (TASK-037). Skips meetings that
+    /// already have items (regeneration must not duplicate them); the
+    /// extractor persists what it finds.
+    private func extractActionItemsBestEffort(meetingId: String) async {
+        do {
+            guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
+            let repo = ActionItemRepository(database: database)
+            let existing = try await repo.itemsForMeeting(meetingId)
+            guard existing.isEmpty else { return }
+            guard let textGen = await makeTextGenerator(maxOutputTokens: 2048) else { return }
+            let items = try await ActionItemExtractor().extractActionItems(
+                for: meeting,
+                transcriptRepo: transcriptRepository,
+                actionItemRepo: repo,
+                textGenerator: textGen
+            )
+            fileLog("Action items: extracted \(items.count) for \(meetingId)")
+        } catch {
+            fileLog("Action items: extraction failed (best-effort) — \(error.localizedDescription)")
+        }
+    }
+
     func loadMeetings() {
         loadMeetingsTask?.cancel()
         loadMeetingsTask = Task {
@@ -795,6 +817,12 @@ final class AppState {
             guard let self else { return }
             self.fileLog("TaskQueue: running summary for \(meetingId)")
             try await self.generateSummaryForTask(meetingId: meetingId)
+            // Action items are a default output of every summarized meeting,
+            // not an opt-in recipe: 6 items had ever been extracted across
+            // 641 meetings before this (TASK-037). Best-effort — extraction
+            // failure never fails the summary task. Runs inside the queue's
+            // summary handler, so the TaskQueue rule holds.
+            await self.extractActionItemsBestEffort(meetingId: meetingId)
             self.loadMeetings()
         }
 
@@ -5037,6 +5065,13 @@ final class AppState {
 
         for meeting in upcomingMeetings {
             guard let startDate = meeting.scheduledStartDate else { continue }
+            // Same eligibility as recording attach (TASK-043): all-day blocks
+            // and events with no attendees AND no meeting link are calendar
+            // furniture (focus time, "Home" work-location rows, untitled
+            // placeholders) — if we wouldn't attach a recording to it, we
+            // don't nag about it either. "Untitled Event" got a pre-meeting
+            // notification on 2026-06-09; this is what stops that.
+            guard Self.isRecordableCalendarMatch(meeting) else { continue }
             let timeUntilStart = startDate.timeIntervalSince(now)
 
             // Meeting starting within the notification window — post only once per meeting
