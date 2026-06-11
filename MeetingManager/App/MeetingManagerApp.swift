@@ -41,6 +41,11 @@ struct MeetingManagerApp: App {
                     NotificationCenter.default.post(name: .createNewMeeting, object: nil)
                 }
                 .keyboardShortcut(KeyboardShortcuts.newMeeting)
+
+                Button("Search Everything…") {
+                    appState.showGlobalSearch = true
+                }
+                .keyboardShortcut("k", modifiers: .command)
             }
 
             CommandMenu("Meeting") {

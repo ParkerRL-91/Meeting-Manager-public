@@ -26,6 +26,10 @@ struct ContentView: View {
         )) {
             DraftRecoverySheet()
         }
+        .sheet(isPresented: $appState.showGlobalSearch) {
+            GlobalSearchView()
+                .environment(appState)
+        }
     }
 
     @ViewBuilder

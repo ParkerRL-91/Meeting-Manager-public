@@ -298,6 +298,19 @@ struct FullTranscriptView: View {
                         isAIAttributed: isAIAttributed(transcript),
                         attributionConfidence: confidenceFor(transcript)
                     )
+                    // Segment-level correction (TASK-044): cluster renames fix
+                    // every row at once, but a single mis-attributed segment
+                    // (diarization bleed at a speaker change) needs a one-row
+                    // fix that doesn't touch the rest of the cluster.
+                    .contextMenu {
+                        if let rowId = transcript.id, let participants = meeting?.participantList, !participants.isEmpty {
+                            Menu("Reassign This Segment To") {
+                                ForEach(participants, id: \.self) { name in
+                                    Button(name) { reassignSegment(rowId: rowId, to: name) }
+                                }
+                            }
+                        }
+                    }
 
                     if transcript.id != filteredTranscripts.last?.id {
                         Divider()
@@ -525,6 +538,16 @@ struct FullTranscriptView: View {
     }
 
     // MARK: - Data Loading
+
+    /// One-row speaker fix (TASK-044). Deliberately does NOT touch the
+    /// meeting's speakerMap or voice profiles — a single segment is not
+    /// evidence about the whole cluster.
+    private func reassignSegment(rowId: Int64, to name: String) {
+        Task {
+            try? await appState.transcriptRepository.updateSpeakerLabels([rowId: name])
+            await loadTranscripts()
+        }
+    }
 
     private func loadTranscripts() async {
         isLoading = true

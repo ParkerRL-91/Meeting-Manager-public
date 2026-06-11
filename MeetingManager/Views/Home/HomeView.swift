@@ -16,6 +16,8 @@ struct HomeView: View {
     @State private var prepBriefDebounce: DispatchWorkItem?
     @State private var authManager = GoogleAuthManager()
     @AppStorage("home.calendarBannerDismissed") private var calendarBannerDismissed: Bool = false
+    @State private var openActionItems: [ActionItem] = []
+    @State private var actionItemMeetingTitles: [String: String] = [:]
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -112,6 +114,49 @@ struct HomeView: View {
                         .padding(.bottom, 24)
                 }
 
+                // MARK: - Processing strip (TASK-042) — what the queue is
+                // doing right now, so "where's my summary" has an answer on
+                // the home screen.
+                if let running = appState.taskQueueManager.currentTask {
+                    let pendingCount = appState.taskQueueManager.allTasks.filter { $0.status == .pending }.count
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("\(running.displayName)\(appState.taskQueueManager.currentProgress.map { " — \($0.stage)" } ?? "")\(pendingCount > 0 ? "  ·  \(pendingCount) queued" : "")")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
+                }
+
+                // MARK: - Open Action Items (TASK-042) — yesterday's
+                // commitments are the first thing worth seeing in the morning.
+                if !openActionItems.isEmpty {
+                    SectionHeader(title: "Open Action Items")
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 10)
+                    VStack(spacing: 6) {
+                        ForEach(openActionItems.prefix(5)) { item in
+                            HomeActionItemRow(
+                                item: item,
+                                meetingTitle: actionItemMeetingTitles[item.meetingId],
+                                onToggle: {
+                                    guard let id = item.id else { return }
+                                    Task {
+                                        try? await ActionItemRepository(database: AppDatabase.shared).toggleComplete(id: id)
+                                        await loadOpenActionItems()
+                                    }
+                                },
+                                onOpenMeeting: { appState.selectedMeetingId = item.meetingId }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
+                }
+
                 // MARK: - Recent Meetings (exclude today — already shown above)
                 let allRecent = cachedRecentMeetings
                 let visibleRecent = showAllRecent ? allRecent : Array(allRecent.prefix(8))
@@ -152,6 +197,7 @@ struct HomeView: View {
             rebuildCache()
             loadPrepBriefs()
         }
+        .task { await loadOpenActionItems() }
         .onChange(of: appState.upcomingMeetings) { _, _ in
             rebuildCache()
             prepBriefDebounce?.cancel()
@@ -181,6 +227,17 @@ struct HomeView: View {
     }
 
     // MARK: - Cache
+
+    private func loadOpenActionItems() async {
+        let repo = ActionItemRepository(database: AppDatabase.shared)
+        let items = (try? await repo.allOpenItems(limit: 10)) ?? []
+        var titles: [String: String] = [:]
+        for id in Set(items.map(\.meetingId)) {
+            titles[id] = (try? await appState.meetingRepository.find(id: id))?.title
+        }
+        openActionItems = items
+        actionItemMeetingTitles = titles
+    }
 
     private func loadPrepBriefs() {
         Task {
@@ -419,3 +476,58 @@ private struct RecentMeetingRow: View {
 }
 
 // InitialsAvatar moved to Views/Components/InitialsAvatar.swift
+
+// MARK: - Home Action Item Row (TASK-042)
+
+private struct HomeActionItemRow: View {
+    let item: ActionItem
+    let meetingTitle: String?
+    let onToggle: () -> Void
+    let onOpenMeeting: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
+                Image(systemName: "circle")
+                    .font(.body)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+            .buttonStyle(.plain)
+            .help("Mark complete")
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.title)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let assignee = item.assignee, !assignee.isEmpty {
+                        Text(assignee)
+                            .font(.caption2)
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    if let meetingTitle {
+                        Text(meetingTitle)
+                            .font(.caption2)
+                            .foregroundStyle(Color.appTextTertiary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onOpenMeeting) {
+                Image(systemName: "arrow.right.circle")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Open meeting")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color.appSurfaceSecondary.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}

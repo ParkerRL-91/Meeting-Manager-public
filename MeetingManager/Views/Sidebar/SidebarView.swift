@@ -3,6 +3,7 @@ import SwiftUI
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
     @State private var showAllActionItems = false
+    @AppStorage("folders.pinnedKeys") private var pinnedFolderKeysCSV: String = ""
     @State private var errorMessage: String?
 
     // MARK: - Body
@@ -96,14 +97,25 @@ struct SidebarView: View {
                     }
 
                     // MARK: - Spaces (auto-grouped meeting folders)
+                    // Pinned folders sort first (stable — recency order kept
+                    // within each group); pin/unpin via row context menu
+                    // (TASK-040).
+                    let pinned = Set(pinnedFolderKeysCSV.split(separator: ",").map(String.init))
                     let folders = appState.meetingFolders()
+                        .sorted { (pinned.contains($0.key) ? 0 : 1) < (pinned.contains($1.key) ? 0 : 1) }
                     if !folders.isEmpty {
                         SpacesSidebarSection(
                             folders: folders,
+                            pinnedKeys: pinned,
                             currentDestination: appState.sidebarDestination,
                             onSelect: { folder in
                                 appState.sidebarDestination = .folder(folder.key)
                                 appState.selectedMeetingId = nil
+                            },
+                            onTogglePin: { folder in
+                                var keys = Set(pinnedFolderKeysCSV.split(separator: ",").map(String.init))
+                                if keys.contains(folder.key) { keys.remove(folder.key) } else { keys.insert(folder.key) }
+                                pinnedFolderKeysCSV = keys.sorted().joined(separator: ",")
                             }
                         )
                     }
@@ -200,8 +212,10 @@ struct SidebarView: View {
 
 private struct SpacesSidebarSection: View {
     let folders: [MeetingFolder]
+    let pinnedKeys: Set<String>
     let currentDestination: SidebarDestination
     let onSelect: (MeetingFolder) -> Void
+    let onTogglePin: (MeetingFolder) -> Void
 
     @State private var isExpanded = true
 
@@ -232,9 +246,15 @@ private struct SpacesSidebarSection: View {
                 ForEach(folders) { folder in
                     FolderNavItem(
                         folder: folder,
+                        isPinned: pinnedKeys.contains(folder.key),
                         current: currentDestination,
                         action: { onSelect(folder) }
                     )
+                    .contextMenu {
+                        Button(pinnedKeys.contains(folder.key) ? "Unpin" : "Pin") {
+                            onTogglePin(folder)
+                        }
+                    }
                 }
             }
         }
@@ -261,6 +281,7 @@ private struct SidebarSectionHeader: View {
 
 private struct FolderNavItem: View {
     let folder: MeetingFolder
+    let isPinned: Bool
     let current: SidebarDestination
     let action: () -> Void
 
@@ -270,7 +291,7 @@ private struct FolderNavItem: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 9) {
-                Image(systemName: "folder")
+                Image(systemName: isPinned ? "pin.fill" : "folder")
                     .font(.system(size: 13))
                     .foregroundStyle(isSelected ? Color.appAccentLight : Color.appTextMuted)
                     .frame(width: 16)

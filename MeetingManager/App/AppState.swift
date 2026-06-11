@@ -103,6 +103,9 @@ final class AppState {
     }
 
     /// Cached folder groupings — invalidated whenever meetings change.
+    /// Presents the global search sheet (⌘K — TASK-039).
+    var showGlobalSearch = false
+
     private var _cachedFolders: [MeetingFolder]?
     var navigationPath = NavigationPath()
 

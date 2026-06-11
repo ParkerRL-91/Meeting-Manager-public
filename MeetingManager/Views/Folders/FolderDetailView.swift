@@ -8,6 +8,14 @@ struct FolderDetailView: View {
 
     enum Tab { case notes, people, chat }
     @State private var selectedTab: Tab = .notes
+    @State private var openItems: [ActionItem] = []
+
+    private func loadOpenItems() async {
+        let repo = ActionItemRepository(database: AppDatabase.shared)
+        let ids = Set(folder.meetings.map(\.id))
+        let all = (try? await repo.allOpenItems(limit: 200)) ?? []
+        openItems = all.filter { ids.contains($0.meetingId) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,6 +74,36 @@ struct FolderDetailView: View {
             .padding(.top, 24)
             .padding(.bottom, 16)
 
+            // MARK: - Open action items across the series (TASK-040) —
+            // the running to-do list a recurring meeting accumulates.
+            if !openItems.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("OPEN ACTION ITEMS · \(openItems.count)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.appTextMuted)
+                        .tracking(0.4)
+                    ForEach(openItems.prefix(4)) { item in
+                        HStack(spacing: 8) {
+                            Image(systemName: "circle")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextTertiary)
+                            Text(item.title)
+                                .font(.subheadline)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .lineLimit(1)
+                            if let assignee = item.assignee, !assignee.isEmpty {
+                                Text(assignee)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appAccent)
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 14)
+            }
+
             // MARK: - Tab Bar
             HStack(spacing: 0) {
                 TabButton(label: "Notes", icon: "doc.text", tab: .notes, selected: selectedTab) { selectedTab = .notes }
@@ -76,6 +114,7 @@ struct FolderDetailView: View {
             .padding(.bottom, 2)
 
             Divider().background(Color.appSeparator)
+                .task(id: folder.key) { await loadOpenItems() }
 
             // MARK: - Tab Content
             switch selectedTab {

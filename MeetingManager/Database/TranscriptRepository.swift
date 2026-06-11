@@ -53,6 +53,27 @@ final class TranscriptRepository {
         }
     }
 
+    /// Cross-meeting full-text search for the global search sheet
+    /// (TASK-039). Returns at most one hit per meeting (the best-ranked
+    /// snippet) so one chatty meeting can't crowd out the rest.
+    func searchAllMeetings(query: String, limit: Int = 8) async throws -> [(meetingId: String, snippet: String)] {
+        try await database.writer.read { db in
+            let pattern = FTS5Pattern(matchingAllTokensIn: query)?.rawPattern ?? query
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT transcript.meetingId AS meetingId,
+                       snippet(transcript_fts, 0, '', '', '…', 12) AS snip,
+                       MIN(rank) AS best
+                FROM transcript
+                JOIN transcript_fts ON transcript.rowid = transcript_fts.rowid
+                WHERE transcript_fts MATCH ?
+                GROUP BY transcript.meetingId
+                ORDER BY best
+                LIMIT ?
+                """, arguments: [pattern, limit])
+            return rows.map { ($0["meetingId"] as String, $0["snip"] as String? ?? "") }
+        }
+    }
+
     func search(meetingId: String, query: String) async throws -> [Transcript] {
         try await database.writer.read { db in
             let sql = """
