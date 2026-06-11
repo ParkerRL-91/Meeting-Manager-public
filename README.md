@@ -23,7 +23,7 @@ You only do this once.
 
 ## What's New in v4.4.0
 
-**Your meeting history is now searchable by meaning, not just words.** Every transcript, summary, and Knowledge Base note is indexed locally with an on-device embedding model (downloaded automatically, ~270 MB; nothing leaves your Mac). Asking about "pricing" finds the meeting that discussed "the \ tier," and the existing keyword search still works everywhere the index hasn't caught up.
+**Your meeting history is now searchable by meaning, not just words.** Every transcript, summary, and Knowledge Base note is indexed locally with an on-device embedding model (downloaded automatically, ~270 MB; nothing leaves your Mac). Asking about "pricing" finds the meeting that discussed "the 99-dollar tier," and the existing keyword search still works everywhere the index hasn't caught up.
 
 **The chat answers from your actual meetings, with receipts.** The global chat retrieves the most relevant transcript and summary passages for each question, cites them as [1], [2] in its answer, and shows clickable source chips that open the meeting. When the sources don't contain the answer, it says what's missing instead of guessing.
 
