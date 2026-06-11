@@ -155,4 +155,29 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         real.meetLink = "https://meet.google.com/abc-defg-hij"
         XCTAssertTrue(AppState.isRecordableCalendarMatch(real))
     }
+    // MARK: - Participant typeahead ranking (TASK-035)
+
+    private func person(_ name: String, aliases: [String] = []) -> Person {
+        Person.make(canonicalName: name, aliases: aliases)
+    }
+
+    func testSuggestionRankingPrefersNamePrefixThenWordThenAlias() {
+        let people = [
+            person("Joel Parker"),
+            person("Parker Reid", aliases: ["parker@acme.com"]),
+            person("Erica Smith", aliases: ["erica.parker@corp.com"]),
+            person("Dave Brown"),
+        ]
+        let ranked = ParticipantBar.rankSuggestions(query: "par", people: people, excludedKeys: [])
+        XCTAssertEqual(ranked.map(\.canonicalName),
+                       ["Parker Reid", "Joel Parker", "Erica Smith"],
+                       "Full-name prefix, then word prefix, then alias match — Dave excluded")
+    }
+
+    func testSuggestionsExcludeExistingParticipantsAndEmptyQuery() {
+        let people = [person("Parker Reid")]
+        let excluded: Set<String> = [VocativeMiningService.canonicalKey(for: "Parker Reid")]
+        XCTAssertTrue(ParticipantBar.rankSuggestions(query: "par", people: people, excludedKeys: excluded).isEmpty)
+        XCTAssertTrue(ParticipantBar.rankSuggestions(query: "  ", people: people, excludedKeys: []).isEmpty)
+    }
 }

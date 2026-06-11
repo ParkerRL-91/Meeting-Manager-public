@@ -22,6 +22,45 @@ struct ParticipantBar: View {
     /// most window widths.
     private let collapsedLimit = 8
 
+    /// Pure ranking so the matching rules are unit-testable: full-name
+    /// prefix beats word prefix ("par" → "Parker Smith" over "Joel Parker")
+    /// beats name contains beats alias/email prefix beats alias contains.
+    /// Ties resolve alphabetically; people already on the meeting are out.
+    static func rankSuggestions(
+        query: String,
+        people: [Person],
+        excludedKeys: Set<String>,
+        limit: Int = 6
+    ) -> [Person] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return [] }
+        var scored: [(person: Person, rank: Int)] = []
+        for person in people {
+            guard !excludedKeys.contains(VocativeMiningService.canonicalKey(for: person.canonicalName)) else { continue }
+            let nameLower = person.canonicalName.lowercased()
+            let rank: Int
+            if nameLower.hasPrefix(q) {
+                rank = 0
+            } else if nameLower.split(separator: " ").contains(where: { $0.hasPrefix(q) }) {
+                rank = 1
+            } else if nameLower.contains(q) {
+                rank = 2
+            } else if person.aliases.contains(where: { $0.lowercased().hasPrefix(q) }) {
+                rank = 3
+            } else if person.aliases.contains(where: { $0.lowercased().contains(q) }) {
+                rank = 4
+            } else {
+                continue
+            }
+            scored.append((person, rank))
+        }
+        return scored
+            .sorted { ($0.rank, $0.person.canonicalName) < ($1.rank, $1.person.canonicalName) }
+            .prefix(limit)
+            .map(\.person)
+    }
+
+
     private var visibleParticipants: [String] {
         if showAll || participants.count <= collapsedLimit {
             return participants
@@ -88,7 +127,11 @@ struct ParticipantBar: View {
                     }
 
                     if onAddParticipant != nil {
-                        AddParticipantChip(isOpen: $showAddPopover, name: $newName) { trimmed in
+                        AddParticipantChip(
+                            isOpen: $showAddPopover,
+                            name: $newName,
+                            existingParticipants: participants
+                        ) { trimmed in
                             onAddParticipant?(trimmed)
                             newName = ""
                             showAddPopover = false
@@ -108,10 +151,28 @@ struct ParticipantBar: View {
 /// submission. The chip itself manages its own popover state but the
 /// text field is bound to a parent-owned `@State` so the parent can
 /// clear it after a successful add.
+///
+/// As the user types, matching people from the directory (calendar
+/// attendees, imported Contacts — the `person` table) appear below the
+/// field; clicking one submits it directly. People already on the meeting
+/// are excluded via the same canonical-key dedup the add path uses.
 private struct AddParticipantChip: View {
     @Binding var isOpen: Bool
     @Binding var name: String
+    let existingParticipants: [String]
     let onSubmit: (String) -> Void
+
+    /// Person directory, loaded once per popover open (the table is small —
+    /// hundreds of rows — so in-memory filtering per keystroke is instant).
+    @State private var directory: [Person] = []
+
+    private var suggestions: [Person] {
+        ParticipantBar.rankSuggestions(
+            query: name,
+            people: directory,
+            excludedKeys: Set(existingParticipants.map { VocativeMiningService.canonicalKey(for: $0) })
+        )
+    }
 
     var body: some View {
         Button { isOpen = true } label: {
@@ -141,6 +202,39 @@ private struct AddParticipantChip: View {
                         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty { onSubmit(trimmed) }
                     }
+
+                if !suggestions.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(suggestions) { person in
+                            Button {
+                                onSubmit(person.canonicalName)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    InitialsAvatar(name: person.canonicalName, size: 20)
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        Text(person.canonicalName)
+                                            .font(.subheadline)
+                                            .foregroundStyle(Color.appTextPrimary)
+                                            .lineLimit(1)
+                                        if let email = person.primaryEmail {
+                                            Text(email)
+                                                .font(.caption)
+                                                .foregroundStyle(Color.appTextTertiary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .frame(width: 240, alignment: .leading)
+                }
+
                 HStack {
                     Spacer()
                     Button("Cancel") { isOpen = false }
@@ -154,6 +248,9 @@ private struct AddParticipantChip: View {
                 }
             }
             .padding(14)
+            .task {
+                directory = (try? await PersonRepository(database: AppDatabase.shared).allPersons()) ?? []
+            }
         }
     }
 }
