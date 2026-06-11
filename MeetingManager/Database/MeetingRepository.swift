@@ -81,6 +81,24 @@ final class MeetingRepository {
         }
     }
 
+    /// Every meeting that should participate in sidebar folder grouping —
+    /// the WHOLE history, not a recency window. Folders need to see all
+    /// instances of a series to clear the 2-instance threshold: grouping
+    /// over the 50-row pastMeetings window surfaced 5 of the table's 44
+    /// recurring series (TASK-036). Archived debris and cancelled (crash)
+    /// rows are excluded — they aren't meetings the user browses.
+    func allActiveMeetings() async throws -> [Meeting] {
+        try await database.writer.read { db in
+            try Meeting
+                .filter(
+                    Meeting.Columns.status != MeetingStatus.archived.rawValue
+                    && Meeting.Columns.status != MeetingStatus.cancelled.rawValue
+                )
+                .order(sql: "COALESCE(endDate, startDate, scheduledStartDate) DESC")
+                .fetchAll(db)
+        }
+    }
+
     func pastMeetings(limit: Int = 50, offset: Int = 0) async throws -> [Meeting] {
         try await database.writer.read { db in
             try Meeting

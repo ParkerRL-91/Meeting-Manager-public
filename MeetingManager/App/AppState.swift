@@ -559,6 +559,17 @@ final class AppState {
                     self.pastMeetings = past
                     self.meetings = upcoming + past
                 }
+                // Rebuild folders from the WHOLE table (the lists above are a
+                // 50-row window; see meetingFolders). Runs after the lists
+                // land so their didSet cache invalidation precedes the
+                // refill, and on every reload — a new series instance joins
+                // its folder the moment the meeting lists refresh, which is
+                // what makes folder auto-add reliable.
+                let everything = try await meetingRepository.allActiveMeetings()
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self._cachedFolders = MeetingFolder.group(everything)
+                }
                 // System banner notifications are disabled in favour of the
                 // in-app HUD. Clear any reminders scheduled by older builds
                 // so they don't fire alongside it.
@@ -5362,25 +5373,14 @@ final class AppState {
     /// Result is cached and invalidated whenever `upcomingMeetings` or `pastMeetings` change.
     /// A folder is only created if 2+ meetings share the same base title.
     func meetingFolders() -> [MeetingFolder] {
+        // The cache is filled from the WHOLE meeting table by loadMeetings —
+        // grouping over the in-memory window (50 past meetings) hid 39 of
+        // the table's 44 recurring series because instances aged out before
+        // reaching the 2-instance threshold (TASK-036). The in-memory
+        // grouping below is only the first-render fallback before the full
+        // rebuild lands.
         if let cached = _cachedFolders { return cached }
-        var map: [String: [Meeting]] = [:]
-        let allMeetings = (upcomingMeetings + pastMeetings).filter { $0.status != .archived }
-        for meeting in allMeetings {
-            let key = MeetingFolder.normaliseTitle(meeting.title)
-            map[key, default: []].append(meeting)
-        }
-        let result = map
-            .filter { $0.value.count >= 2 }
-            .map { key, meetings in
-                MeetingFolder(
-                    key: key,
-                    displayName: meetings.first.map { MeetingFolder.displayName(for: $0.title) } ?? key,
-                    meetings: meetings.sorted { ($0.effectiveDate) > ($1.effectiveDate) }
-                )
-            }
-            .sorted { $0.meetings.first?.effectiveDate ?? .distantPast > $1.meetings.first?.effectiveDate ?? .distantPast }
-        _cachedFolders = result
-        return result
+        return MeetingFolder.group(upcomingMeetings + pastMeetings)
     }
 
     /// Aggregates all unique participants across all meetings, returning (name, [Meeting]) pairs.

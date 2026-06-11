@@ -28,6 +28,28 @@ struct MeetingFolder: Identifiable {
 
     /// Strips dates, numbers, and common suffixes so "Weekly Standup 1/15" and
     /// "Weekly Standup 1/22" both collapse to the key "weekly standup".
+    /// Pure grouping: bucket by normalised base title, keep buckets with
+    /// 2+ instances, newest-first within and across folders. Archived and
+    /// cancelled rows never participate. Extracted from AppState so the
+    /// rule is unit-testable and both the full-table rebuild and the
+    /// in-memory fallback share one implementation (TASK-036).
+    static func group(_ meetings: [Meeting]) -> [MeetingFolder] {
+        var map: [String: [Meeting]] = [:]
+        for meeting in meetings where meeting.status != .archived && meeting.status != .cancelled {
+            map[normaliseTitle(meeting.title), default: []].append(meeting)
+        }
+        return map
+            .filter { $0.value.count >= 2 }
+            .map { key, members in
+                MeetingFolder(
+                    key: key,
+                    displayName: members.first.map { displayName(for: $0.title) } ?? key,
+                    meetings: members.sorted { $0.effectiveDate > $1.effectiveDate }
+                )
+            }
+            .sorted { $0.meetings.first?.effectiveDate ?? .distantPast > $1.meetings.first?.effectiveDate ?? .distantPast }
+    }
+
     static func normaliseTitle(_ title: String) -> String {
         var s = title.lowercased()
         // Remove ISO dates: 2024-01-15

@@ -180,4 +180,27 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(ParticipantBar.rankSuggestions(query: "par", people: people, excludedKeys: excluded).isEmpty)
         XCTAssertTrue(ParticipantBar.rankSuggestions(query: "  ", people: people, excludedKeys: []).isEmpty)
     }
+    // MARK: - Folder grouping (TASK-036)
+
+    func testFolderGroupingMergesDatedVariantsAndExcludesDebris() {
+        let meetings = [
+            SampleData.makeMeeting(id: "a", title: "Sprint Review 6/10", status: .complete),
+            SampleData.makeMeeting(id: "b", title: "Sprint Review 6/17", status: .complete),
+            SampleData.makeMeeting(id: "c", title: "Sprint Review 6/24", status: .archived),
+            SampleData.makeMeeting(id: "d", title: "One-off chat", status: .complete),
+        ]
+        let folders = MeetingFolder.group(meetings)
+        XCTAssertEqual(folders.count, 1, "Dated variants form one folder; singles and archived don't")
+        XCTAssertEqual(folders.first?.meetings.count, 2, "Archived instance excluded")
+        XCTAssertEqual(folders.first?.displayName, "Sprint Review")
+    }
+
+    func testFolderGroupingThresholdNeedsTwoLiveInstances() {
+        let meetings = [
+            SampleData.makeMeeting(id: "a", title: "Weekly 1:1", status: .complete),
+            SampleData.makeMeeting(id: "b", title: "Weekly 1:1", status: .cancelled),
+        ]
+        XCTAssertTrue(MeetingFolder.group(meetings).isEmpty,
+                      "Cancelled (crash) rows don't count toward the threshold")
+    }
 }
