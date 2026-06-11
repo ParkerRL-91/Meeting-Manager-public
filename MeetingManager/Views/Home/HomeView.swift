@@ -17,6 +17,8 @@ struct HomeView: View {
     @State private var authManager = GoogleAuthManager()
     @AppStorage("home.calendarBannerDismissed") private var calendarBannerDismissed: Bool = false
     @State private var openActionItems: [ActionItem] = []
+    @State private var latestDigest: WeeklyDigestRecord?
+    @State private var digestExpanded = false
     @State private var actionItemMeetingTitles: [String: String] = [:]
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
@@ -157,6 +159,39 @@ struct HomeView: View {
                     .padding(.bottom, 24)
                 }
 
+                // MARK: - Weekly digest (TASK-051) — collapsed card for the
+                // most recent generated week.
+                if let digest = latestDigest {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { digestExpanded.toggle() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "calendar.badge.clock")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appAccent)
+                                Text("Weekly digest — \(digest.isoWeek)")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Color.appTextPrimary)
+                                Spacer()
+                                Image(systemName: digestExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appTextTertiary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if digestExpanded {
+                            MarkdownRenderer(text: digest.content, baseFontSize: 13)
+                        }
+                    }
+                    .padding(14)
+                    .background(Color.appSurfaceSecondary.opacity(0.4))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+                }
+
                 // MARK: - Recent Meetings (exclude today — already shown above)
                 let allRecent = cachedRecentMeetings
                 let visibleRecent = showAllRecent ? allRecent : Array(allRecent.prefix(8))
@@ -197,7 +232,10 @@ struct HomeView: View {
             rebuildCache()
             loadPrepBriefs()
         }
-        .task { await loadOpenActionItems() }
+        .task {
+            await loadOpenActionItems()
+            latestDigest = try? await WeeklyDigestRepository(database: AppDatabase.shared).latest()
+        }
         .onChange(of: appState.upcomingMeetings) { _, _ in
             rebuildCache()
             prepBriefDebounce?.cancel()

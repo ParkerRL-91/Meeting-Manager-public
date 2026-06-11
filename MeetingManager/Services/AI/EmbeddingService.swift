@@ -174,6 +174,31 @@ final class EmbeddingService {
         logger.info("Embedded \(records.count) chunk(s) for meeting \(meetingId)")
     }
 
+    /// Re-embed one KB file's chunks (TASK-050). Skips chunks whose
+    /// content hash is already stored — a one-heading edit re-embeds one
+    /// chunk, not the file.
+    func indexKBFile(filePath: String, chunkTexts: [String]) async throws {
+        guard isAvailable, !chunkTexts.isEmpty else { return }
+        let existing = (try? await repository.existingHashes(sourceType: "kbDoc", sourceId: filePath)) ?? []
+        let hashes = chunkTexts.map { Self.hash($0) }
+        guard Set(hashes) != existing else { return }   // identical content set
+
+        let vectors = try await embed(texts: chunkTexts)
+        guard vectors.count == chunkTexts.count else { return }
+        try await repository.deleteForSource(sourceType: "kbDoc", sourceId: filePath)
+        var records: [EmbeddingRecord] = []
+        for (i, text) in chunkTexts.enumerated() {
+            records.append(EmbeddingRecord(
+                id: nil, sourceType: "kbDoc", sourceId: filePath,
+                meetingId: nil, chunkIndex: i, contentHash: hashes[i],
+                text: String(text.prefix(2000)), vector: Self.pack(vectors[i]),
+                model: Self.embedModel, createdAt: Date()
+            ))
+        }
+        try await repository.saveBatch(records)
+        logger.info("Embedded \(records.count) KB chunk(s) for \(filePath)")
+    }
+
     // MARK: Retrieval
 
     struct Hit: Sendable {

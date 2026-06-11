@@ -78,6 +78,9 @@ final class TaskQueueManager {
     /// sentinel). Wired by AppState like every other handler.
     var embedIndexHandler: ((String) async throws -> Void)?
 
+    /// PRJ-009 TASK-051: weekly digest generation (sentinel meetingId).
+    var weeklyDigestHandler: (() async throws -> Void)?
+
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
     /// when this is true, so a user with no AI configured doesn't get a failed
@@ -697,6 +700,7 @@ final class TaskQueueManager {
         case .detailedOutline:    stage = "Generating outline"
         case .enhanceNotes:       stage = "Enhancing notes"
         case .embedIndex:         stage = "Indexing for search"
+        case .weeklyDigest:       stage = "Writing weekly digest"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -783,6 +787,12 @@ final class TaskQueueManager {
                 throw TaskQueueError.noHandler("embedIndex")
             }
             try await handler(task.meetingId)
+
+        case .weeklyDigest:
+            guard let handler = weeklyDigestHandler else {
+                throw TaskQueueError.noHandler("weeklyDigest")
+            }
+            try await handler()
 
         case .retryAttribution:
             guard let handler = retryAttributionHandler else {

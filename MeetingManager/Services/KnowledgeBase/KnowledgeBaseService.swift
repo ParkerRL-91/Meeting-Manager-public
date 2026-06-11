@@ -89,6 +89,16 @@ final class KnowledgeBaseService {
     /// Set by AppState after the queue is initialised.
     weak var taskQueue: TaskQueueManager?
 
+    /// Semantic indexer (TASK-050) — set by AppState. Changed files get
+    /// re-embedded alongside the FTS chunks; nil disables silently.
+    weak var embedder: EmbeddingService?
+
+    /// Per-file content hashes from this launch's indexing passes: a
+    /// watcher event or full reindex skips files whose bytes are unchanged
+    /// (review M4 — otherwise every save re-parsed the whole folder and
+    /// re-embedded everything).
+    private var indexedHashes: [String: String] = [:]
+
     /// Clear the configured KB and wipe the index.
     func clearRoot() async {
         UserDefaults.standard.removeObject(forKey: folderPathKey)
@@ -142,7 +152,12 @@ final class KnowledgeBaseService {
         let totalFiles = max(fileResults.count, 1)
         for (idx, (path, chunks)) in fileResults.enumerated() {
             do {
+                let joined = chunks.map(\.body).joined()
+                let hash = EmbeddingService.hash(joined)
+                if indexedHashes[path] == hash { indexedPaths.insert(path); continue }
+                indexedHashes[path] = hash
                 try await repo.replaceChunks(filePath: path, with: chunks)
+                await embedChangedFile(path: path, chunks: chunks)
                 indexedPaths.insert(path)
                 totalChunks += chunks.count
             } catch {
@@ -169,14 +184,34 @@ final class KnowledgeBaseService {
         guard supportedExtensions.contains(url.pathExtension.lowercased()) else { return }
         do {
             if FileManager.default.fileExists(atPath: url.path) {
+                if let raw = try? String(contentsOf: url, encoding: .utf8) {
+                    let hash = EmbeddingService.hash(raw)
+                    if indexedHashes[url.path] == hash { return }   // unchanged
+                    indexedHashes[url.path] = hash
+                }
                 let chunks = try await chunksForFile(url: url, rootURL: root)
                 try await repo.replaceChunks(filePath: url.path, with: chunks)
+                await embedChangedFile(path: url.path, chunks: chunks)
             } else {
+                indexedHashes[url.path] = nil
                 try await repo.replaceChunks(filePath: url.path, with: [])
+                try? await EmbeddingRepository(database: .shared)
+                    .deleteForSource(sourceType: "kbDoc", sourceId: url.path)
             }
         } catch {
             logger.error("KB single-file reindex failed for \(url.path, privacy: .public): \(error.localizedDescription)")
         }
+    }
+
+    /// Re-embed a changed KB file's chunks (TASK-050). Best-effort and
+    /// quiet — FTS already covers retrieval when embeddings are missing.
+    private func embedChangedFile(path: String, chunks: [KBDocument]) async {
+        guard let embedder, embedder.isAvailable else { return }
+        let texts = chunks.map { chunk -> String in
+            if let h = chunk.heading, !h.isEmpty { return h + "\n" + chunk.body }
+            return chunk.body
+        }
+        try? await embedder.indexKBFile(filePath: path, chunkTexts: texts)
     }
 
     // MARK: - File enumeration
@@ -259,6 +294,15 @@ final class KnowledgeBaseService {
         let relPath = relativePath(of: fileURL, root: rootURL)
         let fileName = fileURL.lastPathComponent
         let now = Date()
+
+        // Strip YAML front-matter (TASK-050): our own exports carry a
+        // meetingId/attendees block that would otherwise pollute FTS and
+        // embeddings as body text.
+        var text = text
+        if text.hasPrefix("---\n"),
+           let close = text.range(of: "\n---\n", range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex) {
+            text = String(text[close.upperBound...])
+        }
 
         var sections: [(heading: String?, body: String)] = []
         var currentHeading: String? = nil

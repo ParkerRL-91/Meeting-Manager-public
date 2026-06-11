@@ -44,6 +44,9 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// semantic retrieval. Sentinel meetingId "__embed_backfill__"
         /// walks every un-embedded meeting (one queue row, cancellable).
         case embedIndex
+        /// PRJ-009 TASK-051: generate the previous ISO week's digest.
+        /// Sentinel meetingId "__weekly_digest__" (no real meeting).
+        case weeklyDigest
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -68,6 +71,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .detailedOutline:    return "Generating Outline"
         case .enhanceNotes:       return "Enhance Notes"
         case .embedIndex:         return "Index for Search"
+        case .weeklyDigest:       return "Weekly Digest"
         }
     }
 

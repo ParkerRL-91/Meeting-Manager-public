@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import os
 
 /// Writes meeting summaries and transcripts back to the user's Knowledge Base
@@ -50,10 +51,32 @@ final class KBWriteBackService {
             )
 
             let content = buildMarkdown(meeting: meeting, summary: summary, cleanedText: cleanedText)
-            try content.write(to: fileURL, atomically: true, encoding: .utf8)
-            logger.info("KBWriteBack: wrote \(fileURL.path, privacy: .public)")
 
-            await KnowledgeBaseService.shared.reindexFile(url: fileURL)
+            // Never clobber a user-edited note (TASK-050): if the file on
+            // disk no longer matches what WE last wrote (content hash from
+            // kbExport), the user touched it — write a dated addendum file
+            // instead and leave their edits alone.
+            var targetURL = fileURL
+            let repo = KBExportRepository(database: AppDatabase.shared)
+            if let prior = try? await repo.record(meetingId: meeting.id),
+               FileManager.default.fileExists(atPath: prior.filePath),
+               let onDisk = try? String(contentsOfFile: prior.filePath, encoding: .utf8),
+               EmbeddingService.hash(onDisk) != prior.contentHash {
+                let stamp = Date().formatted(.iso8601.year().month().day())
+                let base = fileURL.deletingPathExtension().lastPathComponent
+                targetURL = fileURL.deletingLastPathComponent()
+                    .appendingPathComponent("\(base) (update \(stamp)).md")
+                logger.info("KBWriteBack: \(prior.filePath, privacy: .public) was edited externally — writing addendum instead")
+            }
+
+            try content.write(to: targetURL, atomically: true, encoding: .utf8)
+            try? await repo.upsert(KBExportRecord(
+                meetingId: meeting.id, filePath: targetURL.path,
+                exportedAt: Date(), contentHash: EmbeddingService.hash(content)
+            ))
+            logger.info("KBWriteBack: wrote \(targetURL.path, privacy: .public)")
+
+            await KnowledgeBaseService.shared.reindexFile(url: targetURL)
         } catch {
             logger.error("KBWriteBack: failed to write \(fileURL.path, privacy: .public): \(error.localizedDescription)")
         }
@@ -119,8 +142,23 @@ final class KBWriteBackService {
             ? "Not recorded"
             : meeting.participantList.joined(separator: ", ")
 
+        // YAML front-matter (TASK-050): stable identifiers so Obsidian-style
+        // tooling can link notes back to meetings, and the indexer/exporter
+        // can recognize our own files. Stripped from FTS/embedding chunks.
+        let iso = ISO8601DateFormatter()
+        let frontMatter = [
+            "---",
+            "meetingId: \(meeting.id)",
+            "date: \((meeting.startDate ?? meeting.scheduledStartDate).map { iso.string(from: $0) } ?? "")",
+            "attendees: \(meeting.participantList.joined(separator: ", "))",
+            "seriesKey: \(MeetingFolder.normaliseTitle(meeting.title))",
+            "source: Meeting Manager",
+            "---",
+            "",
+        ].joined(separator: "\n")
+
         var lines: [String] = [
-            "# \(meeting.title)",
+            frontMatter + "# \(meeting.title)",
             "",
             "**Date:** \(dateStr)  ",
             "**Duration:** \(meeting.formattedDuration)  ",
@@ -160,5 +198,34 @@ final class KBWriteBackService {
             .joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return safe.isEmpty ? "Meeting" : String(safe.prefix(80))
+    }
+}
+
+// MARK: - Export state (TASK-050, migration v49)
+
+/// What we last wrote for a meeting — the content hash is the conflict
+/// detector (mtime is unreliable across atomic renames; review B1).
+struct KBExportRecord: Codable, FetchableRecord, PersistableRecord {
+    static let databaseTableName = "kbExport"
+    var meetingId: String
+    var filePath: String
+    var exportedAt: Date
+    var contentHash: String
+}
+
+final class KBExportRepository {
+    private let database: AppDatabase
+    init(database: AppDatabase) { self.database = database }
+
+    func record(meetingId: String) async throws -> KBExportRecord? {
+        try await database.writer.read { db in
+            try KBExportRecord.fetchOne(db, key: meetingId)
+        }
+    }
+
+    func upsert(_ record: KBExportRecord) async throws {
+        try await database.writer.write { db in
+            try record.save(db)
+        }
     }
 }

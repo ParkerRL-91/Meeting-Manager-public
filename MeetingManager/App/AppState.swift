@@ -613,6 +613,79 @@ final class AppState {
         }
     }
 
+    static let weeklyDigestSentinel = "__weekly_digest__"
+
+    /// TASK-051: enqueue last week's digest once per ISO week. Launch +
+    /// hourly catch-up semantics — there is no fixed Monday scheduler, so
+    /// a Mac asleep over the weekend writes the digest on first wake.
+    private func enqueueWeeklyDigestIfDue() {
+        Task { [weak self] in
+            guard let self else { return }
+            let range = WeeklyDigest.previousWeekRange()
+            let repo = WeeklyDigestRepository(database: self.database)
+            if (try? await repo.digest(isoWeek: range.isoWeek)) != nil { return }
+            let queued = self.taskQueueManager.allTasks.contains {
+                $0.type == .weeklyDigest && !$0.isTerminal
+            }
+            guard !queued, self.isAIWorkConfigured else { return }
+            // Only digest weeks that had meetings.
+            let hadMeetings = ((try? await self.meetingRepository.allActiveMeetings()) ?? [])
+                .contains { $0.effectiveDate >= range.start && $0.effectiveDate < range.end }
+            guard hadMeetings else { return }
+            await self.taskQueueManager.enqueue(type: .weeklyDigest,
+                                                meetingId: Self.weeklyDigestSentinel, priority: 9)
+        }
+    }
+
+    /// Build the digest from STRUCTURED data (meetings, facts, open items)
+    /// — one LLM call over aggregates, never raw transcripts.
+    private func generateWeeklyDigest() async throws {
+        let range = WeeklyDigest.previousWeekRange()
+        let meetings = ((try? await meetingRepository.allActiveMeetings()) ?? [])
+            .filter { $0.effectiveDate >= range.start && $0.effectiveDate < range.end }
+        guard !meetings.isEmpty else { return }
+        let ids = meetings.map(\.id)
+        let facts = (try? await EntityFactRepository(database: database)
+            .factsForMeetings(ids)) ?? []
+        let openItems = (try? await ActionItemRepository(database: database).allOpenItems(limit: 50)) ?? []
+
+        var data: [String] = []
+        data.append("Meetings (\(meetings.count)):")
+        for m in meetings {
+            data.append("- \(m.title) — \(m.effectiveDate.formatted(date: .abbreviated, time: .omitted)) — \(m.participantList.joined(separator: ", "))")
+        }
+        let seriesFacts = facts.filter { $0.entityType == "series" }
+        if !seriesFacts.isEmpty {
+            data.append("\nFacts:")
+            for f in seriesFacts.prefix(40) {
+                data.append("- [\(f.kind)]\(f.owner.map { " (\($0))" } ?? "") \(f.text)")
+            }
+        }
+        if !openItems.isEmpty {
+            data.append("\nOpen action items:")
+            for i in openItems.prefix(25) {
+                data.append("- \(i.title)\(i.assignee.map { " — \($0)" } ?? "")\(i.dueDate.map { " (due \($0.formatted(date: .abbreviated, time: .omitted)))" } ?? "")")
+            }
+        }
+
+        guard let textGen = await makeTextGenerator(maxOutputTokens: 1200) else { return }
+        let content = try await textGen(WeeklyDigest.systemPrompt,
+                                        "Week \(range.isoWeek):\n\n" + data.joined(separator: "\n"))
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        try await WeeklyDigestRepository(database: database).save(
+            WeeklyDigestRecord(isoWeek: range.isoWeek, content: content, createdAt: Date()))
+        fileLog("WeeklyDigest: wrote \(range.isoWeek)")
+
+        // KB write-back when configured — same folder discipline as meetings.
+        if settings.kbWriteBack, let root = KnowledgeBaseService.shared.rootURL {
+            let dir = root.appendingPathComponent("Weekly Digests", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("\(range.isoWeek).md")
+            try? content.write(to: url, atomically: true, encoding: .utf8)
+            await KnowledgeBaseService.shared.reindexFile(url: url)
+        }
+    }
+
     static let embedBackfillSentinel = "__embed_backfill__"
 
     /// TASK-045: semantic-index one meeting, or — for the backfill
@@ -947,6 +1020,11 @@ final class AppState {
             try await self.runEmbedIndex(meetingId: meetingId)
         }
 
+        taskQueueManager.weeklyDigestHandler = { [weak self] in
+            guard let self else { return }
+            try await self.generateWeeklyDigest()
+        }
+
         // Gate AI-dependent auto-enqueues (summary) on a configured backend so
         // users with no AI don't accumulate failed tasks after every meeting.
         taskQueueManager.isAIWorkConfigured = { [weak self] in self?.isAIWorkConfigured ?? false }
@@ -1037,6 +1115,7 @@ final class AppState {
 
         // Wire the KB service back to the queue so enqueueReindex() routes through it.
         KnowledgeBaseService.shared.taskQueue = taskQueueManager
+        KnowledgeBaseService.shared.embedder = embeddingService
 
         // Transcript cleanup: stitch + best-effort AI pass.
         // Runs after batch transcription completes (enqueued from the
@@ -4886,6 +4965,7 @@ final class AppState {
     ///     (long sleep/wake, app suspended, etc.)
     private func startPrepContextTimer() {
         preComputePrepContext() // Run immediately on startup
+        enqueueWeeklyDigestIfDue()
 
         // Hourly safety net — tighter than once-a-day so a missed sync hook
         // doesn't leave the user without a brief for their afternoon meeting.
@@ -4893,6 +4973,7 @@ final class AppState {
             .autoconnect()
             .sink { [weak self] _ in
                 self?.preComputePrepContext()
+                self?.enqueueWeeklyDigestIfDue()
             }
 
         // Run on every calendar sync completion. This is the primary trigger:
