@@ -5,6 +5,7 @@ import AppKit
 
 struct FullTranscriptView: View {
     let meetingId: String
+    @State private var slides: [MeetingSlide] = []
 
     @Environment(AppState.self) private var appState
     @State private var transcripts: [Transcript] = []
@@ -143,6 +144,8 @@ struct FullTranscriptView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            slides = (try? await MeetingSlideRepository(database: AppDatabase.shared)
+                .slides(meetingId: meetingId)) ?? []
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadTranscripts()
             updateFilteredTranscripts()
@@ -283,10 +286,45 @@ struct FullTranscriptView: View {
         meeting = try? await appState.meetingRepository.find(id: meetingId)
     }
 
+    private func slideTimestamp(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        let h = total / 3600, m = (total % 3600) / 60, sec = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec)
+                     : String(format: "%d:%02d", m, sec)
+    }
+
     // MARK: - Transcript List
 
     private var transcriptList: some View {
         ScrollView {
+            // TASK-069: slides captured during this meeting, in order.
+            if !slides.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SLIDES CAPTURED · \(slides.count)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.appTextMuted)
+                        .tracking(0.4)
+                    ForEach(slides) { slide in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(slideTimestamp(slide.atSeconds))
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(Color.appAccent)
+                            Text(slide.text)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .lineLimit(3)
+                                .textSelection(.enabled)
+                            Spacer(minLength: 0)
+                        }
+                        .help(slide.text)
+                    }
+                }
+                .padding(12)
+                .background(Color.appSurfaceSecondary.opacity(0.35))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+            }
             LazyVStack(spacing: 0) {
                 ForEach(filteredTranscripts) { transcript in
                     TranscriptBubble(

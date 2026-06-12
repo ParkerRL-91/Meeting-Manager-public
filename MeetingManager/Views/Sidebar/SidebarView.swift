@@ -384,6 +384,8 @@ private struct SidebarRecordingBar: View {
     @State private var elapsedSeconds: Int = 0
     @State private var pulse = false
     @State private var micStatus: String?
+    @State private var slideCaptureBusy = false
+    @State private var slideCaptureStatus: String?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -413,9 +415,45 @@ private struct SidebarRecordingBar: View {
                         .foregroundStyle(.orange)
                         .lineLimit(1)
                 }
+                if let slideCaptureStatus {
+                    Text(slideCaptureStatus)
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.appTextTertiary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
+
+            // TASK-069: one-click slide capture — grabs the call window,
+            // OCRs on-device, saves the text searchably. Manual only.
+            Button {
+                guard !slideCaptureBusy else { return }
+                slideCaptureBusy = true
+                let meetingId = meeting.id
+                let start = meeting.startDate ?? Date()
+                Task {
+                    let outcome = await SlideCapture.capture(
+                        meetingId: meetingId,
+                        recordingStart: start,
+                        database: appState.database)
+                    slideCaptureStatus = outcome.message
+                    slideCaptureBusy = false
+                    try? await Task.sleep(for: .seconds(3))
+                    slideCaptureStatus = nil
+                }
+            } label: {
+                Image(systemName: "camera.on.rectangle")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                    .frame(width: 22, height: 22)
+                    .background(Color.appSurfaceSecondary.opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
+            .disabled(slideCaptureBusy)
+            .help("Capture slide — OCRs the call window's text on-device so you can search it later")
+            .accessibilityLabel("Capture slide")
 
             Button {
                 appState.stopRecording()

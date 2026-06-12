@@ -140,15 +140,22 @@ final class EmbeddingService {
 
     // MARK: Indexing
 
-    /// Embed one meeting's transcript chunks + summary. Replace-mode
-    /// (delete first) so re-transcription/regeneration can't duplicate.
+    /// Embed one meeting's transcript chunks + summary + captured slides.
+    /// Replace-mode (delete first) so re-transcription/regeneration can't
+    /// duplicate. Slides embed as sourceType "slide" (TASK-069) — included
+    /// in ⌘K semantic search, deliberately ABSENT from chat retrieval's
+    /// sourceTypes list (OCR fragments must not displace transcript chunks
+    /// in the local model's context).
     func indexMeeting(_ meetingId: String,
                       transcripts: [Transcript],
-                      summaryText: String?) async throws {
+                      summaryText: String?,
+                      slideTexts: [String] = []) async throws {
         guard isAvailable else { return }
         let chunks = Self.chunkTranscript(transcripts)
+        let slides = slideTexts.map { String($0.prefix(2000)) }.filter { !$0.isEmpty }
         var texts = chunks
         if let summaryText, !summaryText.isEmpty { texts.append(summaryText) }
+        texts.append(contentsOf: slides)
         guard !texts.isEmpty else { return }
 
         let vectors = try await embed(texts: texts)
@@ -164,12 +171,22 @@ final class EmbeddingService {
                 vector: Self.pack(vectors[i]), model: Self.embedModel, createdAt: Date()
             ))
         }
+        var cursor = chunks.count
         if let summaryText, !summaryText.isEmpty {
             records.append(EmbeddingRecord(
                 id: nil, sourceType: "summary", sourceId: meetingId,
                 meetingId: meetingId, chunkIndex: 0,
                 contentHash: Self.hash(summaryText), text: String(summaryText.prefix(4000)),
-                vector: Self.pack(vectors[texts.count - 1]), model: Self.embedModel, createdAt: Date()
+                vector: Self.pack(vectors[cursor]), model: Self.embedModel, createdAt: Date()
+            ))
+            cursor += 1
+        }
+        for (i, slide) in slides.enumerated() {
+            records.append(EmbeddingRecord(
+                id: nil, sourceType: "slide", sourceId: meetingId,
+                meetingId: meetingId, chunkIndex: i,
+                contentHash: Self.hash(slide), text: slide,
+                vector: Self.pack(vectors[cursor + i]), model: Self.embedModel, createdAt: Date()
             ))
         }
         try await repository.saveBatch(records)

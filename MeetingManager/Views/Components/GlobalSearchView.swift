@@ -15,6 +15,7 @@ struct GlobalSearchView: View {
     @State private var itemHits: [(item: ActionItem, meetingTitle: String?)] = []
     @State private var discussedBy: [PersonTopicAffinity.Ranked] = []
     @State private var glossaryHits: [GlossaryTerm] = []
+    @State private var slideHits: [(slide: MeetingSlide, meetingTitle: String?)] = []
     @State private var searchTask: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
 
@@ -52,7 +53,7 @@ struct GlobalSearchView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.appTextTertiary)
                 Spacer()
-            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty && glossaryHits.isEmpty {
+            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty && glossaryHits.isEmpty && slideHits.isEmpty {
                 Spacer()
                 Text("No matches for \"\(query)\".")
                     .font(.subheadline)
@@ -84,6 +85,19 @@ struct GlobalSearchView: View {
                                 resultRow(icon: "text.quote", title: hit.meeting.title,
                                           subtitle: hit.snippet) {
                                     open(meetingId: hit.meeting.id)
+                                }
+                            }
+                        }
+                    }
+                    if !slideHits.isEmpty {
+                        // TASK-069: "find the meeting where they showed
+                        // the pricing slide".
+                        Section("Slides") {
+                            ForEach(slideHits, id: \.slide.id) { hit in
+                                resultRow(icon: "camera.on.rectangle",
+                                          title: hit.meetingTitle ?? "Captured slide",
+                                          subtitle: String(hit.slide.text.prefix(120))) {
+                                    open(meetingId: hit.slide.meetingId)
                                 }
                             }
                         }
@@ -254,7 +268,7 @@ struct GlobalSearchView: View {
         var semantic: [(meetingId: String, text: String, score: Float)] = []
         if appState.ollamaService.inFlightCount == 0,
            let hits = try? await appState.embeddingService.topK(
-               query: topic, k: 30, sourceTypes: ["transcriptChunk", "summary"]) {
+               query: topic, k: 30, sourceTypes: ["transcriptChunk", "summary", "slide"]) {
             semantic = hits.compactMap { hit in hit.meetingId.map { ($0, hit.text, hit.score) } }
         }
         let fts = (try? await appState.transcriptRepository.searchAllMeetings(query: topic, limit: 20)) ?? []
@@ -357,6 +371,9 @@ struct GlobalSearchView: View {
         glossaryHits = ((try? await GlossaryRepository(database: AppDatabase.shared).visibleTerms()) ?? [])
             .filter { $0.term.lowercased().contains(lowered) || $0.definition.lowercased().contains(lowered) }
             .prefix(4).map { $0 }
+        slideHits = ((try? await MeetingSlideRepository(database: AppDatabase.shared)
+            .search(query: q)) ?? [])
+            .map { (slide: $0, meetingTitle: titlesById[$0.meetingId]) }
 
         // TASK-060: semantic person-affinity. Skipped when the local model
         // is mid-generation — a type-ahead must not queue behind a summary
@@ -365,7 +382,7 @@ struct GlobalSearchView: View {
         if q.count >= 3,
            appState.ollamaService.inFlightCount == 0,
            let semanticHits = try? await appState.embeddingService.topK(
-               query: q, k: 12, sourceTypes: ["transcriptChunk", "summary"]) {
+               query: q, k: 12, sourceTypes: ["transcriptChunk", "summary", "slide"]) {
             guard !Task.isCancelled else { return }
             discussedBy = PersonTopicAffinity.rank(
                 hits: semanticHits.compactMap { hit in hit.meetingId.map { ($0, hit.score) } },

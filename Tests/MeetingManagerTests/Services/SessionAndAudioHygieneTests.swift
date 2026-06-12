@@ -282,6 +282,42 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Slide capture (TASK-069)
+
+    func testSlideWindowPickFailsClosed() {
+        func cand(_ i: Int, _ bundle: String, _ title: String, _ area: Double) -> SlideCapture.WindowCandidate {
+            SlideCapture.WindowCandidate(index: i, bundleID: bundle, title: title, area: area)
+        }
+        let isCall: (String) -> Bool = { $0 == "us.zoom.xos" }
+        let isBrowser: (String) -> Bool = { $0 == "com.google.Chrome" }
+
+        // Call-app window wins by area, beating a call-titled browser tab.
+        XCTAssertEqual(SlideCapture.pickWindow([
+            cand(0, "us.zoom.xos", "Zoom Meeting", 800_000),
+            cand(1, "us.zoom.xos", "Zoom toolbar", 50_000 * 41),  // bigger area wins
+            cand(2, "com.google.Chrome", "Weekly Sync - Google Meet", 900_000),
+        ], isCallApp: isCall, isBrowser: isBrowser), 1)
+
+        // No call app: browser needs a call-ish TITLE.
+        XCTAssertEqual(SlideCapture.pickWindow([
+            cand(0, "com.google.Chrome", "Hacker News", 900_000),
+            cand(1, "com.google.Chrome", "Standup - Google Meet", 600_000),
+        ], isCallApp: isCall, isBrowser: isBrowser), 1)
+
+        // Nothing qualifies → nil, never a desktop fallback.
+        XCTAssertNil(SlideCapture.pickWindow([
+            cand(0, "com.apple.finder", "Desktop", 2_000_000),
+            cand(1, "com.google.Chrome", "Hacker News", 900_000),
+        ], isCallApp: isCall, isBrowser: isBrowser))
+    }
+
+    func testSlideDedupeNormalization() {
+        XCTAssertEqual(SlideCapture.normalized("  Pricing\n  TIERS  2026 "),
+                       SlideCapture.normalized("pricing tiers 2026"))
+        XCTAssertNotEqual(SlideCapture.normalized("pricing tiers 2026"),
+                          SlideCapture.normalized("pricing tiers 2027"))
+    }
+
     // MARK: - Speaking stats (TASK-059)
 
     private func seg(_ label: String, _ start: Double, _ end: Double, _ text: String) -> Transcript {

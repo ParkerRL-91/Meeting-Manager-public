@@ -1261,5 +1261,21 @@ enum Migrations {
                 t.column("computedAt", .datetime).notNull()
             }
         }
+
+        // TASK-069 (manual-capture shape): slide texts OCR'd on demand
+        // during recording. Search/browse surface only — deliberately
+        // excluded from chat retrieval (qwen-first decision, see ledger).
+        migrator.registerMigration("v55-meeting-slides") { db in
+            try db.create(table: "meetingSlide") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("atSeconds", .double).notNull()
+                t.column("text", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_meetingSlide_meeting", on: "meetingSlide",
+                          columns: ["meetingId", "atSeconds"])
+        }
     }
 }

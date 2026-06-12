@@ -1027,7 +1027,8 @@ final class AppState {
                 let rows = (try? await transcriptRepository.transcriptsForMeeting(meeting.id, limit: 5000)) ?? []
                 guard !rows.isEmpty else { continue }
                 let summary = try? await summaryRepository.latestSummary(meetingId: meeting.id)
-                try? await embeddingService.indexMeeting(meeting.id, transcripts: rows, summaryText: summary?.summaryText)
+                let slides = ((try? await MeetingSlideRepository(database: database).slides(meetingId: meeting.id)) ?? []).map(\.text)
+                try? await embeddingService.indexMeeting(meeting.id, transcripts: rows, summaryText: summary?.summaryText, slideTexts: slides)
                 done += 1
                 taskQueueManager.reportCurrentProgress(stage: "Indexing history (\(done))")
             }
@@ -1037,7 +1038,8 @@ final class AppState {
         let rows = try await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)
         guard !rows.isEmpty else { return }
         let summary = try? await summaryRepository.latestSummary(meetingId: meetingId)
-        try await embeddingService.indexMeeting(meetingId, transcripts: rows, summaryText: summary?.summaryText)
+        let slides = ((try? await MeetingSlideRepository(database: database).slides(meetingId: meetingId)) ?? []).map(\.text)
+        try await embeddingService.indexMeeting(meetingId, transcripts: rows, summaryText: summary?.summaryText, slideTexts: slides)
     }
 
     /// Post-summary action-item extraction (TASK-037). Skips meetings that
