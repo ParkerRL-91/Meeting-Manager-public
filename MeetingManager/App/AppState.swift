@@ -738,13 +738,14 @@ final class AppState {
         let dayStamp = Self.dayStamp(Date())
         guard UserDefaults.standard.string(forKey: "gardener.lastRunDay") != dayStamp else { return }
         let queued = taskQueueManager.allTasks.contains { $0.type == .gardener && !$0.isTerminal }
-        guard !queued, isAIWorkConfigured else { return }
+        guard !queued else { return }
         Task { [weak self] in
             guard let self else { return }
-            // Refresh before gating on availability — at launch this check
-            // races the first Ollama status probe and reads stale=false.
+            // Configuration checks go AFTER the refresh — at launch both
+            // isAIWorkConfigured and isAvailable read the stale pre-probe
+            // Ollama status and silently skipped until the hourly net.
             await self.ollamaService.refreshStatus()
-            guard self.embeddingService.isAvailable else { return }
+            guard self.isAIWorkConfigured, self.embeddingService.isAvailable else { return }
             await self.taskQueueManager.enqueue(type: .gardener,
                                                 meetingId: Self.gardenerSentinel, priority: 9)
         }
