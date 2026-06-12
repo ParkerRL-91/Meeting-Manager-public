@@ -54,6 +54,11 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// superseded/contradicted facts across meetings. Sentinel
         /// meetingId "__gardener__" (no real meeting); background-class.
         case gardener
+        /// PRJ-010 TASK-063: backfill insight extraction over historical
+        /// meetings that have a summary but no facts. Sentinel meetingId
+        /// "__fact_backfill__"; background-class; full extraction per
+        /// meeting (anchors included — review M7).
+        case factBackfill
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -80,6 +85,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .embedIndex:         return "Index for Search"
         case .weeklyDigest:       return "Weekly Digest"
         case .gardener:           return "Tidy Knowledge"
+        case .factBackfill:       return "Extract Insights (History)"
         }
     }
 
@@ -92,6 +98,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .embedIndex:   return meetingId == "__embed_backfill__"
         case .weeklyDigest: return true
         case .gardener:     return true
+        case .factBackfill: return true
         default:            return false
         }
     }
@@ -103,7 +110,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         switch type {
         case .summary, .regeneration, .transcriptCleanup, .detailedOutline,
              .enhanceNotes, .weeklyDigest, .retryAttribution, .contextEnrichment,
-             .enrichment, .gardener:
+             .enrichment, .gardener, .factBackfill:
             return true
         case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex:
             return false

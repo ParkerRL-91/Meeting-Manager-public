@@ -114,18 +114,22 @@ enum InsightExtraction {
       "decisions":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"owner":{"type":["string","null"]}},"required":["text"]}},
       "commitments":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"owner":{"type":["string","null"]},"due":{"type":["string","null"]}},"required":["text"]}},
       "questions":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},
+      "objections":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"owner":{"type":["string","null"]}},"required":["text"]}},
       "statusUpdates":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}
-    },"required":["decisions","commitments","questions","statusUpdates"]}
+    },"required":["decisions","commitments","questions","objections","statusUpdates"]}
     """
 
     static let systemPrompt = """
     You extract durable facts from a meeting summary. Return ONLY JSON \
     matching the requested shape. Rules: a decision is something the group \
     settled ("we will ship Friday"); a commitment is one named person \
-    agreeing to do something; a question is explicitly unresolved; a status \
-    update reports concrete progress or a change in state. Use only names \
-    that appear in the text. Empty arrays are correct when a category has \
-    nothing — never invent content. Dates in due fields use yyyy-MM-dd.
+    agreeing to do something; a question is explicitly unresolved; an \
+    objection is a concern, pushback, or blocker someone raised against a \
+    proposal, price, or plan (TASK-063 — name who raised it in owner when \
+    the text says); a status update reports concrete progress or a change \
+    in state. Use only names that appear in the text. Empty arrays are \
+    correct when a category has nothing — never invent content. Dates in \
+    due fields use yyyy-MM-dd.
     """
 
     struct Payload: Decodable {
@@ -134,6 +138,8 @@ enum InsightExtraction {
         let decisions: [Item]
         let commitments: [Item]
         let questions: [Plain]
+        /// TASK-063: optional so pre-existing prompt outputs still parse.
+        let objections: [Item]?
         let statusUpdates: [Plain]
     }
 
@@ -177,6 +183,7 @@ enum InsightExtraction {
         for d in payload.decisions { add(kind: "decision", text: d.text, owner: d.owner, due: nil) }
         for c in payload.commitments { add(kind: "commitment", text: c.text, owner: c.owner, due: c.due.flatMap { df.date(from: $0) }) }
         for q in payload.questions { add(kind: "question", text: q.text, owner: nil, due: nil) }
+        for o in payload.objections ?? [] { add(kind: "objection", text: o.text, owner: o.owner, due: nil) }
         for u in payload.statusUpdates { add(kind: "status", text: u.text, owner: nil, due: nil) }
         return out
     }

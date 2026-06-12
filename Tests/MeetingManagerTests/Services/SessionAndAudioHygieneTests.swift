@@ -282,6 +282,24 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - FAQ & objections (TASK-063)
+
+    func testObjectionsParseMapAndStayBackwardCompatible() throws {
+        // New shape: objections fan out like other facts, owner preserved.
+        let payload = try XCTUnwrap(InsightExtraction.parse(
+            #"{"decisions":[],"commitments":[],"questions":[],"objections":[{"text":"Price is too high for phase 1","owner":"Dave Brown"}],"statusUpdates":[]}"#))
+        var meeting = Meeting(title: "Acme Sync", startDate: Date(), endDate: nil, status: .complete)
+        meeting.participants = "Parker Reid, Dave Brown"
+        let facts = InsightExtraction.facts(from: payload, meeting: meeting, participantDomains: ["acme.com"])
+        let objections = facts.filter { $0.kind == "objection" }
+        XCTAssertTrue(objections.contains { $0.entityType == "company" && $0.entityKey == "acme.com" })
+        XCTAssertTrue(objections.allSatisfy { $0.owner == "Dave Brown" })
+
+        // Old shape (no objections key) still parses — optional field.
+        XCTAssertNotNil(InsightExtraction.parse(
+            #"{"decisions":[],"commitments":[],"questions":[],"statusUpdates":[]}"#))
+    }
+
     // MARK: - Topic trajectories (TASK-057)
 
     func testTrajectoryMergesPerMeetingChronologically() {

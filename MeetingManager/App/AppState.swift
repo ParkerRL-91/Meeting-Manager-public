@@ -598,7 +598,7 @@ final class AppState {
             // moment. One BM25 lookup per unique text; misses just ship
             // without a receipt.
             var anchors: [String: (transcriptId: Int64, startTime: Double)] = [:]
-            let anchorable = Set(facts.filter { $0.kind == "commitment" || $0.kind == "decision" }.map(\.text))
+            let anchorable = Set(facts.filter { ["commitment", "decision", "objection"].contains($0.kind) }.map(\.text))
             for text in anchorable {
                 if let hit = try? await transcriptRepository.bestAnchor(meetingId: meetingId, factText: text) {
                     anchors[text] = hit
@@ -1147,6 +1147,11 @@ final class AppState {
         taskQueueManager.gardenerHandler = { [weak self] in
             guard let self else { return }
             try await self.runGardener()
+        }
+
+        taskQueueManager.factBackfillHandler = { [weak self] in
+            guard let self else { return }
+            try await self.runFactBackfill()
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
@@ -2164,6 +2169,57 @@ final class AppState {
         guard missing > 0 else { return }
         fileLog("EmbedIndex: \(missing) meeting(s) need semantic indexing — enqueueing backfill")
         await taskQueueManager.enqueue(type: .embedIndex, meetingId: Self.embedBackfillSentinel, priority: 9)
+    }
+
+    static let factBackfillSentinel = "__fact_backfill__"
+    /// Meetings whose extraction legitimately produced zero facts — without
+    /// this stamp they'd re-run on every backfill pass (the "has summary
+    /// but no facts" filter can't tell empty from unprocessed).
+    static let factBackfillDoneKey = "factBackfill.processedMeetingIds"
+
+    /// TASK-063: one sentinel row extracts insights from every summarized
+    /// meeting that has no facts yet — full extraction per meeting, anchors
+    /// included (review M7), through `extractInsightsBestEffort`.
+    private func enqueueFactBackfillIfNeeded() async {
+        guard isAIWorkConfigured else { return }
+        let queued = taskQueueManager.allTasks.contains {
+            $0.type == .factBackfill && !$0.isTerminal
+        }
+        guard !queued else { return }
+        let candidates = await factBackfillCandidates()
+        guard !candidates.isEmpty else { return }
+        fileLog("FactBackfill: \(candidates.count) summarized meeting(s) lack insights — enqueueing")
+        await taskQueueManager.enqueue(type: .factBackfill, meetingId: Self.factBackfillSentinel, priority: 9)
+    }
+
+    private func factBackfillCandidates() async -> [String] {
+        let done = Set(UserDefaults.standard.stringArray(forKey: Self.factBackfillDoneKey) ?? [])
+        let ids = (try? await database.writer.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT DISTINCT s.meetingId FROM meetingSummary s
+                WHERE s.meetingId NOT IN (SELECT DISTINCT meetingId FROM entityFact)
+                """)
+        }) ?? []
+        return ids.filter { !done.contains($0) }
+    }
+
+    private func runFactBackfill() async throws {
+        let candidates = await factBackfillCandidates()
+        guard !candidates.isEmpty else { return }
+        var done = Set(UserDefaults.standard.stringArray(forKey: Self.factBackfillDoneKey) ?? [])
+        var processed = 0
+        for meetingId in candidates {
+            if Task.isCancelled { break }
+            await extractInsightsBestEffort(meetingId: meetingId)
+            // Stamp regardless of fact count — zero facts is a valid result,
+            // and a real failure logs and gets another chance only when the
+            // user regenerates the summary.
+            done.insert(meetingId)
+            processed += 1
+            UserDefaults.standard.set(Array(done), forKey: Self.factBackfillDoneKey)
+            taskQueueManager.reportCurrentProgress(stage: "Extracting insights (\(processed)/\(candidates.count))")
+        }
+        fileLog("FactBackfill: processed \(processed)/\(candidates.count) meeting(s)")
     }
 
     private func archiveEmptyDebrisMeetings() async {
@@ -5375,6 +5431,7 @@ final class AppState {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
             await self?.enqueueEmbeddingBackfillIfNeeded()
+            await self?.enqueueFactBackfillIfNeeded()
         }
 
         // Hourly safety net — tighter than once-a-day so a missed sync hook
@@ -5388,7 +5445,10 @@ final class AppState {
                 // Backfill re-check (TASK-045): the launch-time check can
                 // lose the race against Ollama's first model-list refresh —
                 // the hourly tick self-heals within the session.
-                Task { await self?.enqueueEmbeddingBackfillIfNeeded() }
+                Task {
+                    await self?.enqueueEmbeddingBackfillIfNeeded()
+                    await self?.enqueueFactBackfillIfNeeded()
+                }
                 // Governor backstop (TASK-055): wake any due deferred work.
                 self?.taskQueueManager.reevaluate()
             }

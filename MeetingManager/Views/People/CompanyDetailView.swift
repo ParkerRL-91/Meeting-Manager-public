@@ -17,6 +17,8 @@ struct CompanyDetailView: View {
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false
     @State private var healthSignals: [RelationshipHealth.Signal] = []
+    @State private var faqFacts: [EntityFact] = []
+    @State private var faqExported = false
 
     private let rollups = MeetingRollupService()
 
@@ -66,6 +68,7 @@ struct CompanyDetailView: View {
                 peopleSection
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
                 meetingsSection
+                if !faqFacts.isEmpty { faqSection }
                 if !openItems.isEmpty { rollupActionItems }
                 if !recentSummaries.isEmpty { rollupSummaries }
             }
@@ -158,6 +161,97 @@ struct CompanyDetailView: View {
         .padding(.bottom, 8)
     }
 
+    // MARK: - FAQ & Objections (TASK-063)
+
+    private var faqSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionHeader("FAQ & Objections")
+                Spacer()
+                Button {
+                    Task { await exportFAQDoc() }
+                } label: {
+                    Label(faqExported ? "Exported" : "Export as doc",
+                          systemImage: faqExported ? "checkmark" : "square.and.arrow.up")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.appAccent)
+                .disabled(KnowledgeBaseService.shared.rootURL == nil)
+                .help(KnowledgeBaseService.shared.rootURL == nil
+                      ? "Configure a Knowledge Base folder in Settings to export"
+                      : "Write this log to your Knowledge Base folder")
+            }
+            ForEach(faqFacts) { fact in
+                Button {
+                    appState.selectedMeetingId = fact.meetingId
+                    appState.sidebarDestination = .meetings
+                } label: {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(fact.kind == "objection" ? "Objection" : "Question")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(fact.kind == "objection" ? Color.orange : Color.appAccent)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background((fact.kind == "objection" ? Color.orange : Color.appAccent).opacity(0.13))
+                            .clipShape(Capsule())
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(fact.text)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(3)
+                            Text(faqMeetingLine(fact))
+                                .font(.caption2)
+                                .foregroundStyle(Color.appTextTertiary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 8)
+    }
+
+    private func faqMeetingLine(_ fact: EntityFact) -> String {
+        guard let meeting = companyMeetings.first(where: { $0.id == fact.meetingId }) else {
+            return fact.extractedAt.formatted(date: .abbreviated, time: .omitted)
+        }
+        let who = fact.owner.map { "\($0) — " } ?? ""
+        return "\(who)\(meeting.title) · \(meeting.effectiveDate.formatted(date: .abbreviated, time: .omitted))"
+    }
+
+    private func exportFAQDoc() async {
+        guard let root = KnowledgeBaseService.shared.rootURL else { return }
+        let dir = root.appendingPathComponent("Accounts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(company.displayName) — FAQ.md")
+
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        var lines = ["# \(company.displayName) — FAQ & Objections", "",
+                     "Generated \(df.string(from: Date())) from meeting records.", ""]
+        let questions = faqFacts.filter { $0.kind == "question" }
+        let objections = faqFacts.filter { $0.kind == "objection" }
+        if !questions.isEmpty {
+            lines.append("## Questions raised")
+            lines.append(contentsOf: questions.map { "- \($0.text) _(\(faqMeetingLine($0)))_" })
+            lines.append("")
+        }
+        if !objections.isEmpty {
+            lines.append("## Objections raised")
+            lines.append(contentsOf: objections.map { "- \($0.text) _(\(faqMeetingLine($0)))_" })
+            lines.append("")
+        }
+        try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        await KnowledgeBaseService.shared.reindexFile(url: url)
+        faqExported = true
+        try? await Task.sleep(for: .seconds(2))
+        faqExported = false
+    }
+
     // MARK: - Rollups
 
     private var rollupActionItems: some View {
@@ -215,6 +309,10 @@ struct CompanyDetailView: View {
         healthSignals = RelationshipHealth.signals(
             meetingDates: meetings.map(\.effectiveDate),
             openItems: openItems.flatMap(\.items).map { ($0.extractedAt, $0.dueDate) })
+        faqFacts = ((try? await EntityFactRepository(database: AppDatabase.shared)
+            .facts(entityType: "company", entityKey: company.domain, limit: 60)) ?? [])
+            .filter { $0.kind == "question" || $0.kind == "objection" }
+            .prefix(20).map { $0 }
     }
 
     private func loadApollo(force: Bool) async {
