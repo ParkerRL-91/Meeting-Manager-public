@@ -21,19 +21,25 @@ You only do this once.
 
 ---
 
-## What's New in v4.4.0
+## What's New in v4.5.0
 
-**Your meeting history is now searchable by meaning, not just words.** Every transcript, summary, and Knowledge Base note is indexed locally with an on-device embedding model (downloaded automatically, ~270 MB; nothing leaves your Mac). Asking about "pricing" finds the meeting that discussed "the 99-dollar tier," and the existing keyword search still works everywhere the index hasn't caught up.
+**Background AI now waits for the right moment.** History indexing, weekly digests, and the new nightly batches run through a governor that holds them while you're recording, when a meeting starts within 20 minutes, on battery (unless you opt in), and whenever you're waiting on an answer yourself — with a 24-hour cap so nothing starves. When the local model is busy, your questions and daily briefs queue visibly and deliver when it frees up instead of spinning forever, and every long-running AI activity — chat answers, briefs, embeddings, cloud calls — now appears in the Activities list so a slow moment always has an explanation.
 
-**The chat answers from your actual meetings, with receipts.** The global chat retrieves the most relevant transcript and summary passages for each question, cites them as [1], [2] in its answer, and shows clickable source chips that open the meeting. When the sources don't contain the answer, it says what's missing instead of guessing.
+**Back-to-back meetings stop bleeding into each other.** When the app you were meeting in quits while a recording is still running, Meeting Manager asks "still in this meeting?" and auto-ends the recording three minutes later if you don't answer — so the next call's audio doesn't pile into the previous meeting's record. It stays quiet when remote audio is still flowing.
 
-**Meetings now produce durable knowledge.** After each summary, the app extracts decisions, commitments, and open questions into dossiers on People and Company pages, and every recurring series maintains a running thread — where things stand, the decisions log, carried items — shown on its folder page and fed into the next session's prep brief. A weekly digest summarizes each completed week from this structured record and appears on the Home screen.
+**Prep cards know what happened since you last met.** Opening prep for a 1:1 shows what involves that person since your previous session: commitments they own, decisions and questions from their meetings, and mentions of them in meetings they didn't attend.
 
-**The Knowledge Base sync goes both ways safely.** Exported notes carry front-matter your other tools can link against, externally edited notes are never overwritten (updates land as dated addendum files), and edits in the folder re-index incrementally instead of re-parsing everything.
+**Summaries learn how you edit.** The first time you rewrite a summary, the app keeps the original alongside your version, and future summaries are shown your before/after pairs so they arrive closer to your preferred structure. A settings toggle controls it, and with the local model the examples only fit alongside shorter meetings.
 
-**Capture more than meetings.** A Quick Memo button in the menu bar records a microphone-only voice note that flows through the full pipeline — transcript, summary, action items — without touching system audio or requiring Screen Recording permission. During a live recording, a "Catch me up" button transcribes and recaps the last three minutes on demand using only the models already in memory.
+**Follow-up emails cite the recording.** Each commitment in the draft carries who made it and an approximate transcript moment ("Erica — near 14:32"), and questions left unanswered last session are re-raised automatically under "Still open from last time."
 
-**Optional cloud privacy shield.** When Claude is configured, a new setting substitutes names, emails, and phone numbers with reversible placeholders before anything is sent, and restores them in the response — applied to summaries, notes, briefs, and chat, with an honest exemption for speaker identification, which needs real names to work.
+**Dossiers stay truthful as facts change.** A nightly pass links facts across meetings: duplicates get hidden so dossiers stay readable, and when a later meeting reverses a decision, the old bullet renders struck through with the current state underneath — on person dossiers, on folder threads, and as a "Reversals & conflicts" section in the weekly digest that only reports what the record proves.
+
+**The directory flags relationships drifting off rhythm.** Person and Company pages show neutral signal chips when a relationship that usually meets weekly has gone quiet, when meeting cadence halves against its 90-day baseline, or when open action items age past due — with the numbers on hover. New contacts never flag; the math requires real history.
+
+**Search answers more than "where was that said."** ⌘K now lists the colleagues who've already discussed your topic, ranked by relevance and recency. A "View timeline" row turns any query into a chronological record — every meeting that touched the topic, oldest first, with short AI labels naming the position at each point so you can see when a stance changed. Glossary matches surface too: acronyms and project names used in three or more meetings get defined overnight from actual usage, and junk terms are one right-click from permanent removal.
+
+**Company pages keep an FAQ and objection log.** Questions and objections raised by an account are listed with who raised them, in which meeting, and when — exportable as a citable document into your Knowledge Base folder. A background pass backfills these insights from your entire summarized history.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager/releases).
 
