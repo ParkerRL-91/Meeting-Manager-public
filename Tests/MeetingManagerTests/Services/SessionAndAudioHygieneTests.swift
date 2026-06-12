@@ -282,6 +282,46 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Speaking stats (TASK-059)
+
+    private func seg(_ label: String, _ start: Double, _ end: Double, _ text: String) -> Transcript {
+        SampleData.makeTranscript(meetingId: "m1", speakerLabel: label, text: text,
+                                  startTime: start, endTime: end)
+    }
+
+    func testSpeechStatsMeasureUserOnly() {
+        let rows = [
+            seg("mic", 0, 30, "So um I think we should ship Friday. What do you think?"),
+            seg("Erica Smith", 30, 90, "I disagree because of the pricing."),
+            seg("mic", 85, 100, "Right, you know, fair point."),    // starts inside Erica's turn
+            seg("mic", 101, 130, "Let me walk through the plan."),  // 1s gap — same monologue run
+        ]
+        let stats = SpeechStatsBuilder.build(meetingId: "m1", transcripts: rows,
+                                             selfName: "Parker Reid",
+                                             now: Date(timeIntervalSince1970: 0))
+        let s = try! XCTUnwrap(stats)
+        XCTAssertEqual(s.talkShare, 74.0 / 134.0, accuracy: 0.001, "30+15+29 user / 134 total")
+        XCTAssertEqual(s.interruptions, 1, "one user turn starts inside another speaker's segment")
+        XCTAssertGreaterThan(s.fillerPer100, 0, "um + you know counted")
+        XCTAssertGreaterThan(s.questionRate, 0)
+        XCTAssertEqual(s.longestMonologueSec, 45, accuracy: 0.001, "85-130 merges across the 1s gap")
+    }
+
+    func testSpeechStatsNilWithoutBothSides() {
+        let solo = [seg("mic", 0, 60, "Just me talking into a memo.")]
+        XCTAssertNil(SpeechStatsBuilder.build(meetingId: "m1", transcripts: solo, selfName: "Parker Reid"),
+                     "a memo has no conversation to measure")
+        let absent = [seg("Erica Smith", 0, 60, "User never spoke.")]
+        XCTAssertNil(SpeechStatsBuilder.build(meetingId: "m1", transcripts: absent, selfName: "Parker Reid"))
+    }
+
+    func testSpeechUserLabelMatchesMicAndAttributedName() {
+        XCTAssertTrue(SpeechStatsBuilder.isUserLabel("mic", selfKey: VocativeMiningService.canonicalKey(for: "Parker Reid")))
+        XCTAssertTrue(SpeechStatsBuilder.isUserLabel("Parker Reid", selfKey: VocativeMiningService.canonicalKey(for: "Parker Reid")))
+        XCTAssertFalse(SpeechStatsBuilder.isUserLabel("Speaker 2", selfKey: VocativeMiningService.canonicalKey(for: "Parker Reid")))
+        XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
+    }
+
     // MARK: - KB email ingestion (TASK-068)
 
     func testParseEMLKeepsHeadersBodyAndDropsAttachments() {

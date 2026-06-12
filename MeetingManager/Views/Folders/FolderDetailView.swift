@@ -13,6 +13,8 @@ struct FolderDetailView: View {
     @State private var conflicts: [FactLinkDescriptor] = []
     @State private var roiStats: MeetingROI.FolderStats?
     @State private var showHandover = false
+    @State private var speakingTrend: (average: Double, points: [Double])?
+    @AppStorage("speaking.cardEnabled") private var speakingCardEnabled = false
 
     private func loadROI() async {
         let ids = folder.meetings.map(\.id)
@@ -23,6 +25,13 @@ struct FolderDetailView: View {
         roiStats = MeetingROI.folderStats(meetings: folder.meetings,
                                           decisionFacts: facts,
                                           intents: intents)
+        // TASK-059: your talk-share trend across this series (opt-in).
+        if speakingCardEnabled {
+            let ordered = folder.meetings.sorted { $0.effectiveDate < $1.effectiveDate }.map(\.id)
+            let stats = (try? await SpeechStatsRepository(database: AppDatabase.shared)
+                .stats(meetingIds: ordered)) ?? []
+            speakingTrend = SpeechStatsBuilder.trend(stats: stats, orderedMeetingIds: ordered)
+        }
     }
 
     private func loadThread() async {
@@ -91,7 +100,7 @@ struct FolderDetailView: View {
 
                 // TASK-065: does this series produce decisions, and do you get
                 // what you come for? Neutral stats — never blame framing.
-                if let roi = roiStats, roi.decisionsPerHour != nil || roi.hitRate != nil {
+                if let roi = roiStats, roi.decisionsPerHour != nil || roi.hitRate != nil || speakingTrend != nil {
                     HStack(spacing: 12) {
                         if let perHour = roi.decisionsPerHour {
                             Label(String(format: "%.1f decisions/hour", perHour),
@@ -108,6 +117,13 @@ struct FolderDetailView: View {
                                 .help(rate >= 0.5
                                       ? "You usually get what you come for in this series."
                                       : "You often leave this series without what you came for\(roi.intentsPartial > 0 ? " (\(roi.intentsPartial) partly met)" : "").")
+                        }
+                        if let trend = speakingTrend {
+                            Label("You spoke ~\(Int((trend.average * 100).rounded()))% (last \(trend.points.count))",
+                                  systemImage: "waveform")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .help("Average share of speaking time across this series' recent sessions. On-device; only you see this.")
                         }
                     }
                 }

@@ -63,6 +63,9 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// tokens (≥3 meetings) defined from usage with one schema call.
         /// Sentinel meetingId "__glossary__"; background-class.
         case glossary
+        /// PRJ-010 TASK-059: backfill speaking stats over history. Pure
+        /// math, no LLM. Sentinel meetingId "__speech_stats__".
+        case speechStats
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -91,6 +94,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .gardener:           return "Tidy Knowledge"
         case .factBackfill:       return "Extract Insights (History)"
         case .glossary:           return "Update Glossary"
+        case .speechStats:        return "Compute Speaking Stats"
         }
     }
 
@@ -105,6 +109,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .gardener:     return true
         case .factBackfill: return true
         case .glossary:     return true
+        case .speechStats:  return true
         default:            return false
         }
     }
@@ -118,7 +123,8 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
              .enhanceNotes, .weeklyDigest, .retryAttribution, .contextEnrichment,
              .enrichment, .gardener, .factBackfill, .glossary:
             return true
-        case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex:
+        case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex,
+             .speechStats:
             return false
         }
     }

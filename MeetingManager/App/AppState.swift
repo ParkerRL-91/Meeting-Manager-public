@@ -957,6 +957,54 @@ final class AppState {
         return Set(content.components(separatedBy: .newlines).map { $0.lowercased() })
     }
 
+    static let speechStatsSentinel = "__speech_stats__"
+    static let speechStatsDoneKey = "speechStats.processedMeetingIds"
+
+    /// TASK-059: per-meeting speaking metrics — pure math, no LLM. Runs
+    /// in the summary chain for new meetings; this is the history batch.
+    private func enqueueSpeechStatsBackfillIfNeeded() async {
+        let queued = taskQueueManager.allTasks.contains { $0.type == .speechStats && !$0.isTerminal }
+        guard !queued else { return }
+        let done = Set(UserDefaults.standard.stringArray(forKey: Self.speechStatsDoneKey) ?? [])
+        let pending = ((try? await SpeechStatsRepository(database: database).unprocessedMeetingIds()) ?? [])
+            .filter { !done.contains($0) }
+        guard !pending.isEmpty else { return }
+        fileLog("SpeechStats: \(pending.count) meeting(s) lack speaking stats — enqueueing backfill")
+        await taskQueueManager.enqueue(type: .speechStats, meetingId: Self.speechStatsSentinel, priority: 9)
+    }
+
+    private func runSpeechStatsBackfill() async {
+        let repo = SpeechStatsRepository(database: database)
+        var done = Set(UserDefaults.standard.stringArray(forKey: Self.speechStatsDoneKey) ?? [])
+        let pending = ((try? await repo.unprocessedMeetingIds()) ?? []).filter { !done.contains($0) }
+        guard !pending.isEmpty else { return }
+        let selfName = ProcessInfo.processInfo.fullUserName
+        var processed = 0
+        for meetingId in pending {
+            if Task.isCancelled { break }
+            let rows = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)) ?? []
+            if let stats = SpeechStatsBuilder.build(meetingId: meetingId, transcripts: rows, selfName: selfName) {
+                try? await repo.save(stats)
+            }
+            done.insert(meetingId)
+            processed += 1
+            if processed.isMultiple(of: 20) {
+                UserDefaults.standard.set(Array(done), forKey: Self.speechStatsDoneKey)
+                taskQueueManager.reportCurrentProgress(stage: "Computing speaking stats (\(processed)/\(pending.count))")
+            }
+        }
+        UserDefaults.standard.set(Array(done), forKey: Self.speechStatsDoneKey)
+        fileLog("SpeechStats: processed \(processed)/\(pending.count) meeting(s)")
+    }
+
+    private func computeSpeechStatsBestEffort(meetingId: String) async {
+        let rows = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)) ?? []
+        guard let stats = SpeechStatsBuilder.build(
+            meetingId: meetingId, transcripts: rows,
+            selfName: ProcessInfo.processInfo.fullUserName) else { return }
+        try? await SpeechStatsRepository(database: database).save(stats)
+    }
+
     static let embedBackfillSentinel = "__embed_backfill__"
 
     /// TASK-045: semantic-index one meeting, or — for the backfill
@@ -1280,6 +1328,7 @@ final class AppState {
             await self.extractActionItemsBestEffort(meetingId: meetingId)
             await self.extractInsightsBestEffort(meetingId: meetingId)
             await self.scoreIntentBestEffort(meetingId: meetingId)
+            await self.computeSpeechStatsBestEffort(meetingId: meetingId)
             await self.updateSeriesThreadBestEffort(meetingId: meetingId)
             // Semantic index (TASK-045): priority 8 — after cleanup (6) and
             // the follow-up email (7), embedding is the least urgent step.
@@ -1310,6 +1359,11 @@ final class AppState {
         taskQueueManager.glossaryHandler = { [weak self] in
             guard let self else { return }
             try await self.runGlossaryMiner()
+        }
+
+        taskQueueManager.speechStatsHandler = { [weak self] in
+            guard let self else { return }
+            await self.runSpeechStatsBackfill()
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
@@ -5591,6 +5645,7 @@ final class AppState {
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
             await self?.enqueueEmbeddingBackfillIfNeeded()
             await self?.enqueueFactBackfillIfNeeded()
+            await self?.enqueueSpeechStatsBackfillIfNeeded()
         }
 
         // Hourly safety net — tighter than once-a-day so a missed sync hook
@@ -5608,6 +5663,7 @@ final class AppState {
                 Task {
                     await self?.enqueueEmbeddingBackfillIfNeeded()
                     await self?.enqueueFactBackfillIfNeeded()
+                    await self?.enqueueSpeechStatsBackfillIfNeeded()
                 }
                 // Governor backstop (TASK-055): wake any due deferred work.
                 self?.taskQueueManager.reevaluate()

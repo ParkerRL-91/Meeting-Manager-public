@@ -1245,5 +1245,21 @@ enum Migrations {
             try db.create(index: "idx_generatedDoc_anchor", on: "generatedDoc",
                           columns: ["kind", "anchorKey"])
         }
+
+        // TASK-059: per-meeting speaking metrics (user only, on-device,
+        // no LLM). Derived data — recomputable from transcripts.
+        migrator.registerMigration("v54-speech-stats") { db in
+            try db.create(table: "speechStats") { t in
+                t.column("meetingId", .text).primaryKey()
+                    .references("meeting", onDelete: .cascade)
+                t.column("talkShare", .double).notNull()
+                t.column("interruptions", .integer).notNull()
+                t.column("fillerPer100", .double).notNull()
+                t.column("questionRate", .double).notNull()
+                t.column("longestMonologueSec", .double).notNull()
+                t.column("userWordCount", .integer).notNull()
+                t.column("computedAt", .datetime).notNull()
+            }
+        }
     }
 }

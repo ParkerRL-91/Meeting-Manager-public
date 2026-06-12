@@ -83,6 +83,7 @@ final class TaskQueueManager {
     var gardenerHandler: (() async throws -> Void)?
     var factBackfillHandler: (() async throws -> Void)?
     var glossaryHandler: (() async throws -> Void)?
+    var speechStatsHandler: (() async throws -> Void)?
 
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
@@ -737,6 +738,7 @@ final class TaskQueueManager {
         case .gardener:           stage = "Tidying knowledge"
         case .factBackfill:       stage = "Extracting insights from history"
         case .glossary:           stage = "Updating glossary"
+        case .speechStats:        stage = "Computing speaking stats"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -882,6 +884,12 @@ final class TaskQueueManager {
         case .glossary:
             guard let handler = glossaryHandler else {
                 throw TaskQueueError.noHandler("glossary")
+            }
+            try await handler()
+
+        case .speechStats:
+            guard let handler = speechStatsHandler else {
+                throw TaskQueueError.noHandler("speechStats")
             }
             try await handler()
 

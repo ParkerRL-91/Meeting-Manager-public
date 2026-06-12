@@ -456,6 +456,14 @@ private struct PersonDetailView: View {
     @State private var factConflicts: [FactLinkDescriptor] = []
     @State private var healthSignals: [RelationshipHealth.Signal] = []
     @State private var showPractice = false
+    @State private var speakingStats: [SpeechStats] = []
+    @AppStorage("speaking.cardEnabled") private var speakingCardEnabled = false
+
+    /// TASK-059: the Speaking card renders only on YOUR page.
+    private var isSelf: Bool {
+        VocativeMiningService.canonicalKey(for: person.canonicalName)
+            == VocativeMiningService.canonicalKey(for: ProcessInfo.processInfo.fullUserName)
+    }
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     private let rollups = MeetingRollupService()
 
@@ -587,6 +595,7 @@ private struct PersonDetailView: View {
                     .padding(.horizontal, 24)
                     .padding(.top, 10)
                 }
+                if isSelf, !speakingStats.isEmpty { speakingSection }
                 if !personOpenItems.isEmpty { rollupActionItems }
                 if !dossierFacts.isEmpty { dossierSection }
                 if !recentSummaries.isEmpty { rollupSummaries }
@@ -637,6 +646,66 @@ private struct PersonDetailView: View {
         }
     }
 
+    /// TASK-059: private speaking trends — opt-in, neutral numbers, one
+    /// click to hide. Data never leaves the machine (pure transcript math).
+    private var speakingSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("SPEAKING — LAST \(speakingStats.count) MEETING\(speakingStats.count == 1 ? "" : "S")")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.appTextMuted)
+                    .tracking(0.4)
+                Spacer()
+                if speakingCardEnabled {
+                    Button("Hide") { speakingCardEnabled = false }
+                        .font(.caption2)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+            }
+            if !speakingCardEnabled {
+                HStack(spacing: 8) {
+                    Text("Private speaking trends are available — talk share, questions, fillers. Computed on-device; only you see them.")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                    Button("Show") { speakingCardEnabled = true }
+                        .font(.caption)
+                }
+            } else {
+                let n = Double(speakingStats.count)
+                let talk = speakingStats.map(\.talkShare).reduce(0, +) / n
+                let questions = speakingStats.map(\.questionRate).reduce(0, +) / n
+                let fillers = speakingStats.map(\.fillerPer100).reduce(0, +) / n
+                let interruptions = Double(speakingStats.map(\.interruptions).reduce(0, +)) / n
+                let monologue = speakingStats.map(\.longestMonologueSec).max() ?? 0
+                HStack(spacing: 14) {
+                    statPill("\(Int((talk * 100).rounded()))%", "talk share")
+                    statPill(String(format: "%.0f%%", questions * 100), "questions")
+                    statPill(String(format: "%.1f", fillers), "fillers /100 words")
+                    statPill(String(format: "%.1f", interruptions), "overlaps /meeting")
+                    statPill("\(Int((monologue / 60).rounded())) min", "longest monologue")
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.appSurfaceSecondary.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 24)
+        .padding(.top, 10)
+    }
+
+    private func statPill(_ value: String, _ label: String) -> some View {
+        VStack(spacing: 1) {
+            Text(value)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Color.appTextPrimary)
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundStyle(Color.appTextTertiary)
+        }
+    }
+
     private func loadApollo(force: Bool) async {
         guard showApolloCard, let email = person.primaryEmail else { return }
         apolloLoading = true
@@ -663,6 +732,11 @@ private struct PersonDetailView: View {
         healthSignals = RelationshipHealth.signals(
             meetingDates: meetings.map(\.effectiveDate),
             openItems: personOpenItems.map { ($0.extractedAt, $0.dueDate) })
+        if isSelf {
+            let recent = meetings.sorted { $0.effectiveDate > $1.effectiveDate }.prefix(10).map(\.id)
+            speakingStats = (try? await SpeechStatsRepository(database: AppDatabase.shared)
+                .stats(meetingIds: Array(recent))) ?? []
+        }
     }
 
     /// The newer fact that superseded/contradicted this one, if any.
