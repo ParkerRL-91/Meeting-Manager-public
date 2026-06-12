@@ -13,6 +13,7 @@ struct GlobalSearchView: View {
     @State private var transcriptHits: [(meeting: Meeting, snippet: String)] = []
     @State private var peopleHits: [Person] = []
     @State private var itemHits: [(item: ActionItem, meetingTitle: String?)] = []
+    @State private var discussedBy: [PersonTopicAffinity.Ranked] = []
     @State private var searchTask: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
 
@@ -41,7 +42,7 @@ struct GlobalSearchView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.appTextTertiary)
                 Spacer()
-            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty {
+            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty {
                 Spacer()
                 Text("No matches for \"\(query)\".")
                     .font(.subheadline)
@@ -65,6 +66,19 @@ struct GlobalSearchView: View {
                                 resultRow(icon: "text.quote", title: hit.meeting.title,
                                           subtitle: hit.snippet) {
                                     open(meetingId: hit.meeting.id)
+                                }
+                            }
+                        }
+                    }
+                    if !discussedBy.isEmpty {
+                        // TASK-060: who already knows this topic.
+                        Section("People who've discussed this") {
+                            ForEach(discussedBy, id: \.name) { ranked in
+                                resultRow(icon: "person.2.wave.2",
+                                          title: ranked.name,
+                                          subtitle: "\(ranked.meetingCount) meeting\(ranked.meetingCount == 1 ? "" : "s") · last \(ranked.lastDiscussed.formatted(date: .abbreviated, time: .omitted))") {
+                                    appState.sidebarDestination = .people
+                                    dismiss()
                                 }
                             }
                         }
@@ -177,5 +191,20 @@ struct GlobalSearchView: View {
         transcriptHits = transcripts.map { (meeting: $0.0, snippet: $0.1) }
         peopleHits = Array(people)
         itemHits = openItems.map { (item: $0, meetingTitle: titlesById[$0.meetingId]) }
+
+        // TASK-060: semantic person-affinity. Skipped when the local model
+        // is mid-generation — a type-ahead must not queue behind a summary
+        // (the FTS sections above already rendered).
+        discussedBy = []
+        if q.count >= 3,
+           appState.ollamaService.inFlightCount == 0,
+           let semanticHits = try? await appState.embeddingService.topK(
+               query: q, k: 12, sourceTypes: ["transcriptChunk", "summary"]) {
+            guard !Task.isCancelled else { return }
+            discussedBy = PersonTopicAffinity.rank(
+                hits: semanticHits.compactMap { hit in hit.meetingId.map { ($0, hit.score) } },
+                meetings: all,
+                excludingSelf: ProcessInfo.processInfo.fullUserName)
+        }
     }
 }

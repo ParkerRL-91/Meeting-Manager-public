@@ -282,6 +282,35 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Who-knows-what (TASK-060)
+
+    func testAffinityRanksByScoreTimesRecencyAndExcludesSelf() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func meeting(_ id: String, daysAgo: Double, people: [String]) -> Meeting {
+            var m = Meeting(title: id, startDate: now.addingTimeInterval(-daysAgo * 86_400),
+                            endDate: nil, status: .complete)
+            m.id = id
+            m.participants = people.joined(separator: ", ")
+            return m
+        }
+        let meetings = [
+            meeting("recent", daysAgo: 5, people: ["Parker Reid", "Erica Smith"]),
+            meeting("old", daysAgo: 200, people: ["Parker Reid", "Dave Brown"]),
+            meeting("weak", daysAgo: 5, people: ["Parker Reid", "Zoe Quinn"]),
+        ]
+        let hits: [(meetingId: String, score: Float)] = [
+            ("recent", 0.8), ("recent", 0.6),   // dedupes to max 0.8
+            ("old", 0.8),                        // same score, decayed by age
+            ("weak", 0.3),                       // below minScore — dropped
+        ]
+        let ranked = PersonTopicAffinity.rank(hits: hits, meetings: meetings,
+                                              excludingSelf: "Parker Reid", now: now)
+        XCTAssertEqual(ranked.map(\.name), ["Erica Smith", "Dave Brown"],
+                       "recency beats equal raw score; sub-threshold hits and self never appear")
+        XCTAssertEqual(ranked[0].meetingCount, 1, "chunks from one meeting count once")
+        XCTAssertGreaterThan(ranked[0].score, ranked[1].score)
+    }
+
     // MARK: - Relationship health (TASK-061)
 
     private func daysAgo(_ d: Double, from now: Date) -> Date { now.addingTimeInterval(-d * 86_400) }
