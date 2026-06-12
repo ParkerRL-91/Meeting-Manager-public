@@ -282,6 +282,47 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Meeting intent & ROI (TASK-065)
+
+    func testIntentScoreParsingRejectsUnknownScores() {
+        XCTAssertEqual(IntentScoring.parse(#"{"score":"met","note":"Pilot date agreed."}"#)?.score, "met")
+        XCTAssertNil(IntentScoring.parse(#"{"score":"amazing","note":"x"}"#),
+                     "scores outside the enum are rejected, not stored")
+        XCTAssertNil(IntentScoring.parse("not json"))
+    }
+
+    func testFolderStatsDedupeFanOutAndGateThinData() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func meeting(_ id: String, hours: Double) -> Meeting {
+            var m = Meeting(title: id, startDate: now, endDate: now.addingTimeInterval(hours * 3600), status: .complete)
+            m.id = id
+            return m
+        }
+        let meetings = [meeting("m1", hours: 1.0), meeting("m2", hours: 1.0)]
+        let facts = [
+            receiptFact("decision", "Go with vendor B", type: "series"),
+            receiptFact("decision", "Go with vendor B", type: "person"),   // fan-out dupe
+            receiptFact("commitment", "Send deck"),                         // wrong kind
+        ].map { f -> EntityFact in var c = f; c.meetingId = "m1"; return c }
+        let intents = [
+            MeetingIntent(meetingId: "m1", intent: "agree vendor", outcomeScore: "met",
+                          outcomeNote: nil, createdAt: now, scoredAt: now),
+            MeetingIntent(meetingId: "m2", intent: "budget", outcomeScore: nil,
+                          outcomeNote: nil, createdAt: now, scoredAt: nil),  // unscored — excluded
+        ]
+        let stats = MeetingROI.folderStats(meetings: meetings, decisionFacts: facts, intents: intents)
+        XCTAssertEqual(stats.decisionCount, 1, "fan-out rows are one decision")
+        XCTAssertEqual(stats.decisionsPerHour, 0.5)
+        XCTAssertEqual(stats.intentsSet, 1, "unscored intents don't count yet")
+        XCTAssertEqual(stats.hitRate, 1.0)
+
+        let thin = MeetingROI.folderStats(
+            meetings: [meeting("m3", hours: 0.4)],
+            decisionFacts: [], intents: [])
+        XCTAssertNil(thin.decisionsPerHour, "under an hour of recorded time, the rate is noise")
+        XCTAssertNil(thin.hitRate)
+    }
+
     // MARK: - Glossary miner (TASK-064)
 
     func testJargonTokensMatchCapsAndCamelCase() {

@@ -52,6 +52,7 @@ struct SummaryView: View {
 
     // Empty state
     @State private var transcriptCount = 0
+    @State private var intentRecord: MeetingIntent?
     @State private var recipes: [Recipe] = []
     @State private var selectedRecipe: Recipe? = nil
     @State private var previousSessions: [Meeting] = []
@@ -111,6 +112,7 @@ struct SummaryView: View {
         }
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
+            intentRecord = try? await MeetingIntentRepository(database: appState.database).find(meetingId: meetingId)
             async let summaryLoad: () = loadSummary()
             async let metaLoad: () = loadEmptyStateMeta()
             await summaryLoad
@@ -295,6 +297,41 @@ struct SummaryView: View {
     @ViewBuilder
     private func summaryContent(_ summary: MeetingSummary) -> some View {
         VStack(spacing: 0) {
+            // TASK-065: what you needed from this meeting, and whether the
+            // record shows you got it.
+            if let intent = intentRecord, let score = intent.outcomeScore {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "target")
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(intent.intent)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Color.appTextSecondary)
+                                .lineLimit(1)
+                            Text(IntentScoring.label(for: score))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(score == "met" ? Color.appSuccess : Color.appTextSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background((score == "met" ? Color.appSuccess : Color.appTextTertiary).opacity(0.15))
+                                .clipShape(Capsule())
+                        }
+                        if let note = intent.outcomeNote, !note.isEmpty {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextTertiary)
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.appSurfaceSecondary.opacity(0.35))
+            }
             // Toolbar
             HStack(spacing: 12) {
                 if isEdited {

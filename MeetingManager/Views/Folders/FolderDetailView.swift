@@ -11,6 +11,18 @@ struct FolderDetailView: View {
     @State private var openItems: [ActionItem] = []
     @State private var thread: SeriesThread?
     @State private var conflicts: [FactLinkDescriptor] = []
+    @State private var roiStats: MeetingROI.FolderStats?
+
+    private func loadROI() async {
+        let ids = folder.meetings.map(\.id)
+        let facts = (try? await EntityFactRepository(database: AppDatabase.shared)
+            .factsForMeetings(ids, kinds: ["decision"])) ?? []
+        let intents = (try? await MeetingIntentRepository(database: AppDatabase.shared)
+            .intents(meetingIds: ids)) ?? []
+        roiStats = MeetingROI.folderStats(meetings: folder.meetings,
+                                          decisionFacts: facts,
+                                          intents: intents)
+    }
 
     private func loadThread() async {
         thread = try? await SeriesThreadRepository(database: AppDatabase.shared).thread(folderKey: folder.key)
@@ -63,6 +75,29 @@ struct FolderDetailView: View {
                     }
 
                     Spacer()
+                }
+
+                // TASK-065: does this series produce decisions, and do you get
+                // what you come for? Neutral stats — never blame framing.
+                if let roi = roiStats, roi.decisionsPerHour != nil || roi.hitRate != nil {
+                    HStack(spacing: 12) {
+                        if let perHour = roi.decisionsPerHour {
+                            Label(String(format: "%.1f decisions/hour", perHour),
+                                  systemImage: "checkmark.seal")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .help("\(roi.decisionCount) unique decisions across \(String(format: "%.1f", roi.totalHours)) recorded hours")
+                        }
+                        if let rate = roi.hitRate {
+                            Label("\(roi.intentsMet) of \(roi.intentsSet) intents met",
+                                  systemImage: "target")
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .help(rate >= 0.5
+                                      ? "You usually get what you come for in this series."
+                                      : "You often leave this series without what you came for\(roi.intentsPartial > 0 ? " (\(roi.intentsPartial) partly met)" : "").")
+                        }
+                    }
                 }
 
                 // Participant avatars
@@ -125,7 +160,7 @@ struct FolderDetailView: View {
             .padding(.bottom, 2)
 
             Divider().background(Color.appSeparator)
-                .task(id: folder.key) { await loadOpenItems(); await loadThread() }
+                .task(id: folder.key) { await loadOpenItems(); await loadThread(); await loadROI() }
 
             // MARK: - Tab Content
             switch selectedTab {

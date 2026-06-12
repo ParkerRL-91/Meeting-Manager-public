@@ -11,6 +11,12 @@ struct MeetingPrepCardView: View {
 
     @Environment(AppState.self) private var appState
 
+    // TASK-065: "what do you need from this meeting?" — one line, saved
+    // as the meeting's intent and scored against the summary afterward.
+    @State private var intentText = ""
+    @State private var intentLoaded = false
+    @State private var intentSaveTask: Task<Void, Never>?
+
     // MARK: - Computed
 
     private var scheduledDate: Date? {
@@ -99,10 +105,13 @@ struct MeetingPrepCardView: View {
             collapsedRow
 
             // Expanded content
-            if isExpanded, let brief = prepBrief, brief.hasContext {
+            if isExpanded {
                 Divider()
                     .padding(.horizontal, 16)
-                expandedContent(brief: brief)
+                intentField
+                if let brief = prepBrief, brief.hasContext {
+                    expandedContent(brief: brief)
+                }
             }
         }
         .background(Color.appSurface)
@@ -111,6 +120,55 @@ struct MeetingPrepCardView: View {
         .onTapGesture {
             appState.selectedMeetingId = meeting.id
         }
+        .task(id: meeting.id) {
+            if let existing = try? await MeetingIntentRepository(database: AppDatabase.shared)
+                .find(meetingId: meeting.id) {
+                intentText = existing.intent
+            }
+            intentLoaded = true
+        }
+    }
+
+    // MARK: - Intent (TASK-065)
+
+    private var intentField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "target")
+                .font(.caption2)
+                .foregroundStyle(Color.appAccent)
+            TextField("What do you need from this meeting?", text: $intentText)
+                .textFieldStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(Color.appTextSecondary)
+                .onChange(of: intentText) { _, _ in
+                    guard intentLoaded else { return }
+                    intentSaveTask?.cancel()
+                    intentSaveTask = Task {
+                        try? await Task.sleep(for: .milliseconds(800))
+                        guard !Task.isCancelled else { return }
+                        await saveIntent()
+                    }
+                }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private func saveIntent() async {
+        let repo = MeetingIntentRepository(database: AppDatabase.shared)
+        let trimmed = intentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try? await repo.delete(meetingId: meeting.id)
+            return
+        }
+        let existing = try? await repo.find(meetingId: meeting.id)
+        try? await repo.save(MeetingIntent(
+            meetingId: meeting.id,
+            intent: trimmed,
+            outcomeScore: existing?.outcomeScore,
+            outcomeNote: existing?.outcomeNote,
+            createdAt: existing?.createdAt ?? Date(),
+            scoredAt: existing?.scoredAt))
     }
 
     // MARK: - Collapsed Row

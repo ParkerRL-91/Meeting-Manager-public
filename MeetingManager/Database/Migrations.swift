@@ -1220,5 +1220,30 @@ enum Migrations {
                 ]
             )
         }
+
+        // PRJ-010 Phase 3 (TASK-065 + TASK-062). meetingIntent rows attach
+        // to real meetings only (FK CASCADE); generatedDoc anchors on a
+        // string key (folder key today) because folders are runtime-derived
+        // — no table to reference.
+        migrator.registerMigration("v53-intent-and-docs") { db in
+            try db.create(table: "meetingIntent") { t in
+                t.column("meetingId", .text).primaryKey()
+                    .references("meeting", onDelete: .cascade)
+                t.column("intent", .text).notNull()
+                t.column("outcomeScore", .text)     // met | partial | not | unclear
+                t.column("outcomeNote", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("scoredAt", .datetime)
+            }
+            try db.create(table: "generatedDoc") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()       // "handover"
+                t.column("anchorKey", .text).notNull()  // MeetingFolder key
+                t.column("content", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_generatedDoc_anchor", on: "generatedDoc",
+                          columns: ["kind", "anchorKey"])
+        }
     }
 }

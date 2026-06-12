@@ -612,6 +612,39 @@ final class AppState {
         }
     }
 
+    /// TASK-065: score the user's pre-meeting intent against the summary —
+    /// "did you get what you came for", one small schema call, neutral
+    /// note. Best-effort inside the summary handler; re-scores on
+    /// regeneration (the summary changed, the verdict may too).
+    private func scoreIntentBestEffort(meetingId: String) async {
+        do {
+            let repo = MeetingIntentRepository(database: database)
+            guard let intent = try await repo.find(meetingId: meetingId) else { return }
+            guard let summary = try await summaryRepository.latestSummary(meetingId: meetingId),
+                  !summary.summaryText.isEmpty else { return }
+            guard let textGen = await makeTextGenerator(
+                maxOutputTokens: 256,
+                schemaJSON: IntentScoring.schemaJSON,
+                activityLabel: "Scoring meeting intent"
+            ) else { return }
+            let response = try await textGen(
+                IntentScoring.systemPrompt,
+                IntentScoring.userPrompt(intent: intent.intent, summary: summary.summaryText))
+            guard let payload = IntentScoring.parse(response) else {
+                fileLog("Intent: unparseable score for \(meetingId) — skipping")
+                return
+            }
+            var updated = intent
+            updated.outcomeScore = payload.score
+            updated.outcomeNote = payload.note.trimmingCharacters(in: .whitespacesAndNewlines)
+            updated.scoredAt = Date()
+            try await repo.save(updated)
+            fileLog("Intent: \(meetingId) scored '\(payload.score)'")
+        } catch {
+            fileLog("Intent: scoring failed (best-effort) — \(error.localizedDescription)")
+        }
+    }
+
     /// TASK-049: merge the new session into the series' running thread.
     /// Only runs for meetings that belong to a folder (2+ instances).
     private func updateSeriesThreadBestEffort(meetingId: String) async {
@@ -734,6 +767,25 @@ final class AppState {
         }.sorted()
         if !signalLines.isEmpty {
             content += "\n\n## Relationship signals\n" + signalLines.prefix(4).joined(separator: "\n")
+        }
+
+        // TASK-065: deterministic meeting-ROI appendix — counts from rows,
+        // never the LLM. Neutral "did you get what you came for" framing.
+        let weekIds = meetings.map(\.id)
+        let weekIntents = (try? await MeetingIntentRepository(database: database)
+            .intents(meetingIds: weekIds)) ?? []
+        let weekDecisions = (try? await EntityFactRepository(database: database)
+            .factsForMeetings(weekIds, kinds: ["decision"])) ?? []
+        let roi = MeetingROI.folderStats(meetings: meetings, decisionFacts: weekDecisions, intents: weekIntents)
+        if roi.decisionCount > 0 || roi.intentsSet > 0 {
+            var roiLines: [String] = []
+            let perHour = roi.decisionsPerHour.map { String(format: " (%.1f/hour)", $0) } ?? ""
+            roiLines.append("- \(meetings.count) meetings, \(String(format: "%.1f", roi.totalHours)) recorded hours, \(roi.decisionCount) unique decision\(roi.decisionCount == 1 ? "" : "s")\(perHour).")
+            if roi.intentsSet > 0 {
+                let partly = roi.intentsPartial > 0 ? ", \(roi.intentsPartial) partly" : ""
+                roiLines.append("- You set an intent for \(roi.intentsSet) meeting\(roi.intentsSet == 1 ? "" : "s") and got what you came for in \(roi.intentsMet)\(partly).")
+            }
+            content += "\n\n## Meeting ROI\n" + roiLines.joined(separator: "\n")
         }
 
         try await WeeklyDigestRepository(database: database).save(
@@ -1227,6 +1279,7 @@ final class AppState {
             // summary handler, so the TaskQueue rule holds.
             await self.extractActionItemsBestEffort(meetingId: meetingId)
             await self.extractInsightsBestEffort(meetingId: meetingId)
+            await self.scoreIntentBestEffort(meetingId: meetingId)
             await self.updateSeriesThreadBestEffort(meetingId: meetingId)
             // Semantic index (TASK-045): priority 8 — after cleanup (6) and
             // the follow-up email (7), embedding is the least urgent step.
