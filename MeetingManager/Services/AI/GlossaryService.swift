@@ -62,8 +62,11 @@ enum GlossaryMiner {
     /// Frequency floor: a term must appear in at least this many
     /// DIFFERENT meetings (plan risk note: junk terms).
     static let meetingFloor = 3
-    /// Hard cap of new terms defined per nightly run (review M8).
-    static let termCapPerRun = 12
+    /// Hard cap of new terms defined per nightly run (review M8). 8, not
+    /// 12: the first live run timed out 3× — a 12-term grammar-constrained
+    /// prompt is too slow to first token on the 16 GB qwen3:8b baseline.
+    /// Remaining terms simply mine on a later night.
+    static let termCapPerRun = 8
     static let contextsPerTerm = 3
     static let contextClip = 160
 
