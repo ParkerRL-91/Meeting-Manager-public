@@ -14,6 +14,7 @@ struct GlobalSearchView: View {
     @State private var peopleHits: [Person] = []
     @State private var itemHits: [(item: ActionItem, meetingTitle: String?)] = []
     @State private var discussedBy: [PersonTopicAffinity.Ranked] = []
+    @State private var glossaryHits: [GlossaryTerm] = []
     @State private var searchTask: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
 
@@ -51,7 +52,7 @@ struct GlobalSearchView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.appTextTertiary)
                 Spacer()
-            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty {
+            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty && glossaryHits.isEmpty {
                 Spacer()
                 Text("No matches for \"\(query)\".")
                     .font(.subheadline)
@@ -83,6 +84,26 @@ struct GlobalSearchView: View {
                                 resultRow(icon: "text.quote", title: hit.meeting.title,
                                           subtitle: hit.snippet) {
                                     open(meetingId: hit.meeting.id)
+                                }
+                            }
+                        }
+                    }
+                    if !glossaryHits.isEmpty {
+                        // TASK-064: team vocabulary, defined from usage.
+                        Section("Glossary") {
+                            ForEach(glossaryHits) { term in
+                                resultRow(icon: "character.book.closed",
+                                          title: term.term,
+                                          subtitle: term.definition) {
+                                    if let meetingId = term.exampleMeetingId { open(meetingId: meetingId) }
+                                }
+                                .contextMenu {
+                                    Button("Remove from glossary", role: .destructive) {
+                                        Task {
+                                            try? await GlossaryRepository(database: AppDatabase.shared).hide(term: term.term)
+                                            glossaryHits.removeAll { $0.term == term.term }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -333,6 +354,9 @@ struct GlobalSearchView: View {
         transcriptHits = transcripts.map { (meeting: $0.0, snippet: $0.1) }
         peopleHits = Array(people)
         itemHits = openItems.map { (item: $0, meetingTitle: titlesById[$0.meetingId]) }
+        glossaryHits = ((try? await GlossaryRepository(database: AppDatabase.shared).visibleTerms()) ?? [])
+            .filter { $0.term.lowercased().contains(lowered) || $0.definition.lowercased().contains(lowered) }
+            .prefix(4).map { $0 }
 
         // TASK-060: semantic person-affinity. Skipped when the local model
         // is mid-generation — a type-ahead must not queue behind a summary

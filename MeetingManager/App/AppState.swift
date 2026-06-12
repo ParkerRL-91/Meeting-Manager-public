@@ -805,6 +805,106 @@ final class AppState {
         UserDefaults.standard.set(Self.dayStamp(Date()), forKey: "gardener.lastRunDay")
     }
 
+    static let glossarySentinel = "__glossary__"
+
+    /// TASK-064: enqueue the glossary miner once per calendar day, same
+    /// cadence and gates as the gardener.
+    private func enqueueGlossaryIfDue() {
+        let dayStamp = Self.dayStamp(Date())
+        guard UserDefaults.standard.string(forKey: "glossary.lastRunDay") != dayStamp else { return }
+        let queued = taskQueueManager.allTasks.contains { $0.type == .glossary && !$0.isTerminal }
+        guard !queued else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.ollamaService.refreshStatus()
+            guard self.isAIWorkConfigured else { return }
+            await self.taskQueueManager.enqueue(type: .glossary,
+                                                meetingId: Self.glossarySentinel, priority: 9)
+        }
+    }
+
+    private func runGlossaryMiner() async throws {
+        guard let textGen = await makeTextGenerator(
+            maxOutputTokens: 1024,
+            schemaJSON: GlossaryMiner.defineSchemaJSON
+        ) else {
+            fileLog("Glossary: no AI backend — skipping")
+            return
+        }
+        let repo = GlossaryRepository(database: database)
+        let excluded = (try? await repo.allTermStrings()) ?? []
+
+        // Recent-60-meeting window keeps the mine bounded; older meetings'
+        // jargon resurfaces as soon as it's used again.
+        let recent = ((try? await meetingRepository.allActiveMeetings()) ?? [])
+            .sorted { $0.effectiveDate > $1.effectiveDate }
+            .prefix(60)
+        var transcriptsByMeeting: [String: String] = [:]
+        for meeting in recent {
+            if Task.isCancelled { return }
+            if let text = try? await transcriptRepository.fullText(meetingId: meeting.id), !text.isEmpty {
+                transcriptsByMeeting[meeting.id] = text
+            }
+        }
+        guard transcriptsByMeeting.count >= GlossaryMiner.meetingFloor else {
+            fileLog("Glossary: only \(transcriptsByMeeting.count) transcript(s) — below the floor, skipping")
+            return
+        }
+
+        let dictionary = Self.systemDictionary()
+        let candidates = GlossaryMiner.candidates(
+            transcriptsByMeeting: transcriptsByMeeting,
+            dictionary: dictionary,
+            excluded: excluded)
+        guard !candidates.isEmpty else {
+            fileLog("Glossary: no new candidate terms tonight")
+            UserDefaults.standard.set(Self.dayStamp(Date()), forKey: "glossary.lastRunDay")
+            return
+        }
+
+        let response = try await textGen(
+            GlossaryMiner.defineSystemPrompt,
+            GlossaryMiner.defineUserPrompt(candidates: candidates))
+        guard let payload = GlossaryMiner.parseDefinitions(response) else {
+            fileLog("Glossary: unparseable definitions — aborting run")
+            return
+        }
+        let byTerm = Dictionary(uniqueKeysWithValues: candidates.map { ($0.term, $0) })
+        var saved = 0
+        for entry in payload.definitions {
+            let definition = entry.definition.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let candidate = byTerm[entry.term],
+                  !definition.isEmpty,
+                  definition.lowercased() != "unknown" else { continue }
+            try await repo.save(GlossaryTerm(
+                term: candidate.term,
+                definition: definition,
+                exampleMeetingId: candidate.exampleMeetingId,
+                hiddenAt: nil,
+                updatedAt: Date()))
+            saved += 1
+        }
+        fileLog("Glossary: \(candidates.count) candidate(s), \(saved) defined")
+
+        // KB write-back — same folder discipline as the weekly digest.
+        if settings.kbWriteBack, let root = KnowledgeBaseService.shared.rootURL,
+           let visible = try? await repo.visibleTerms(), !visible.isEmpty {
+            let url = root.appendingPathComponent("Glossary.md")
+            try? GlossaryMiner.markdown(terms: visible).write(to: url, atomically: true, encoding: .utf8)
+            await KnowledgeBaseService.shared.reindexFile(url: url)
+        }
+        UserDefaults.standard.set(Self.dayStamp(Date()), forKey: "glossary.lastRunDay")
+    }
+
+    /// Lowercased /usr/share/dict/words — the "not jargon" filter.
+    /// Loaded per run (the run is nightly; no point caching 2 MB).
+    nonisolated static func systemDictionary() -> Set<String> {
+        guard let content = try? String(contentsOfFile: "/usr/share/dict/words", encoding: .utf8) else {
+            return []
+        }
+        return Set(content.components(separatedBy: .newlines).map { $0.lowercased() })
+    }
+
     static let embedBackfillSentinel = "__embed_backfill__"
 
     /// TASK-045: semantic-index one meeting, or — for the backfill
@@ -1152,6 +1252,11 @@ final class AppState {
         taskQueueManager.factBackfillHandler = { [weak self] in
             guard let self else { return }
             try await self.runFactBackfill()
+        }
+
+        taskQueueManager.glossaryHandler = { [weak self] in
+            guard let self else { return }
+            try await self.runGlossaryMiner()
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
@@ -5428,6 +5533,7 @@ final class AppState {
         preComputePrepContext() // Run immediately on startup
         enqueueWeeklyDigestIfDue()
         enqueueGardenerIfDue()
+        enqueueGlossaryIfDue()
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
             await self?.enqueueEmbeddingBackfillIfNeeded()
@@ -5442,6 +5548,7 @@ final class AppState {
                 self?.preComputePrepContext()
                 self?.enqueueWeeklyDigestIfDue()
                 self?.enqueueGardenerIfDue()
+                self?.enqueueGlossaryIfDue()
                 // Backfill re-check (TASK-045): the launch-time check can
                 // lose the race against Ollama's first model-list refresh —
                 // the hourly tick self-heals within the session.

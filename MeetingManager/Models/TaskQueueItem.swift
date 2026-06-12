@@ -59,6 +59,10 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// "__fact_backfill__"; background-class; full extraction per
         /// meeting (anchors included — review M7).
         case factBackfill
+        /// PRJ-010 TASK-064: nightly glossary miner — recurring jargon
+        /// tokens (≥3 meetings) defined from usage with one schema call.
+        /// Sentinel meetingId "__glossary__"; background-class.
+        case glossary
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -86,6 +90,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .weeklyDigest:       return "Weekly Digest"
         case .gardener:           return "Tidy Knowledge"
         case .factBackfill:       return "Extract Insights (History)"
+        case .glossary:           return "Update Glossary"
         }
     }
 
@@ -99,6 +104,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .weeklyDigest: return true
         case .gardener:     return true
         case .factBackfill: return true
+        case .glossary:     return true
         default:            return false
         }
     }
@@ -110,7 +116,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         switch type {
         case .summary, .regeneration, .transcriptCleanup, .detailedOutline,
              .enhanceNotes, .weeklyDigest, .retryAttribution, .contextEnrichment,
-             .enrichment, .gardener, .factBackfill:
+             .enrichment, .gardener, .factBackfill, .glossary:
             return true
         case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex:
             return false

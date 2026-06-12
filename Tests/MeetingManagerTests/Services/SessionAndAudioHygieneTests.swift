@@ -282,6 +282,42 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Glossary miner (TASK-064)
+
+    func testJargonTokensMatchCapsAndCamelCase() {
+        let tokens = GlossaryMiner.jargonTokens(in: "The MTB reviewed Acme output via taskQueue, which was okay.")
+        XCTAssertTrue(tokens.contains("MTB"))
+        XCTAssertTrue(tokens.contains("Acme"))
+        XCTAssertTrue(tokens.contains("taskQueue"))
+        XCTAssertFalse(tokens.contains("okay"), "plain lowercase words never match")
+    }
+
+    func testGlossaryCandidatesRespectFloorDictionaryAndTombstones() {
+        let transcripts = [
+            "m1": "MTB met today. The MTB agreed.\nAPIs are fine.",
+            "m2": "MTB review went long.\nAPIs again.",
+            "m3": "Another MTB session.\nCEO joined.",
+        ]
+        let dictionary: Set<String> = ["api", "ceo"]   // stand-in for /usr/share/dict/words
+        let fresh = GlossaryMiner.candidates(
+            transcriptsByMeeting: transcripts, dictionary: dictionary, excluded: [])
+        XCTAssertEqual(fresh.map(\.term), ["MTB"],
+                       "APIs dies to the dictionary (plural stem), CEO to the dictionary, MTB passes the 3-meeting floor")
+        XCTAssertEqual(fresh[0].exampleMeetingId, "m1", "the meeting with the most usage lines is the example")
+        XCTAssertFalse(fresh[0].contexts.isEmpty)
+
+        let tombstoned = GlossaryMiner.candidates(
+            transcriptsByMeeting: transcripts, dictionary: dictionary, excluded: ["MTB"])
+        XCTAssertTrue(tombstoned.isEmpty, "hidden/stored terms never re-mine")
+    }
+
+    func testGlossaryDefinitionParsing() {
+        let payload = GlossaryMiner.parseDefinitions(
+            #"{"definitions":[{"term":"MTB","definition":"Molecular tumor board meeting"}]}"#)
+        XCTAssertEqual(payload?.definitions.first?.term, "MTB")
+        XCTAssertNil(GlossaryMiner.parseDefinitions("not json"))
+    }
+
     // MARK: - FAQ & objections (TASK-063)
 
     func testObjectionsParseMapAndStayBackwardCompatible() throws {
