@@ -672,12 +672,16 @@ struct SummaryView: View {
             }
 
             do {
+                let appState = self.appState
                 let result = try await emailRecipeEngine.execute(
                     recipe: recipe,
                     meeting: meeting,
                     transcriptRepo: appState.transcriptRepository,
                     noteRepo: appState.noteRepository,
                     resultRepo: RecipeResultRepository(database: appState.database),
+                    receiptsProvider: {
+                        await ReceiptsBuilder.build(for: meeting, allMeetings: appState.meetings, database: appState.database)
+                    },
                     textGenerator: textGenerator
                 )
                 await MainActor.run { emailDraftText = result }

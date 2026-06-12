@@ -20,6 +20,13 @@ struct EntityFact: Codable, FetchableRecord, MutablePersistableRecord, Identifia
     var owner: String?
     var dueDate: Date?
     var extractedAt: Date
+    /// TASK-066 receipt anchor: the best-matching transcript segment for
+    /// this fact (BM25 over transcript_fts, scoped to the meeting).
+    /// startTime is denormalized so a re-transcription degrades anchors to
+    /// stale-but-honest timestamps instead of dangling rowids. Phrasing is
+    /// always "near MM:SS" — the match is approximate by construction.
+    var sourceTranscriptId: Int64? = nil
+    var sourceStartTime: Double? = nil
 
     enum Columns {
         static let entityType = Column(CodingKeys.entityType)
@@ -149,6 +156,93 @@ enum InsightExtraction {
               let end = response.lastIndex(of: "}") else { return nil }
         let json = String(response[start...end])
         return try? JSONDecoder().decode(Payload.self, from: Data(json.utf8))
+    }
+
+    /// TASK-066: stamp transcript anchors onto facts. One anchor per unique
+    /// fact text — the same text fans out to series/person/company rows, and
+    /// all of them get the same receipt. Pure — unit-testable.
+    static func applyAnchors(_ facts: [EntityFact],
+                             anchors: [String: (transcriptId: Int64, startTime: Double)]) -> [EntityFact] {
+        facts.map { fact in
+            guard let anchor = anchors[fact.text] else { return fact }
+            var stamped = fact
+            stamped.sourceTranscriptId = anchor.transcriptId
+            stamped.sourceStartTime = anchor.startTime
+            return stamped
+        }
+    }
+}
+
+// MARK: - Receipts (TASK-066)
+
+/// Resolves the {{commitmentsWithReceipts}} and {{carriedQuestions}}
+/// follow-up template variables from stored facts. Block formatting is
+/// pure; `build` is the repo glue.
+enum ReceiptsBuilder {
+
+    /// "near MM:SS" / "near H:MM:SS" — the anchor phrasing. Approximate by
+    /// design (plan risk note): never claims exactness.
+    static func timestamp(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        let h = total / 3600, m = (total % 3600) / 60, sec = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec)
+                     : String(format: "%d:%02d", m, sec)
+    }
+
+    /// One bullet per unique commitment/decision, with who + anchor when
+    /// known: "- Ship the pilot Friday (Erica — near 14:32)". The owner is
+    /// the cited person; ownerless facts fall back to the anchor segment's
+    /// speaker (story: "timestamp + speaker so nobody disputes it").
+    static func commitmentsBlock(facts: [EntityFact], speakers: [Int64: String] = [:]) -> String {
+        var seen = Set<String>()
+        var lines: [String] = []
+        for f in facts where (f.kind == "commitment" || f.kind == "decision") && seen.insert(f.text).inserted {
+            var suffix: [String] = []
+            if let owner = f.owner, !owner.isEmpty {
+                suffix.append(owner)
+            } else if let tid = f.sourceTranscriptId, let speaker = speakers[tid], !speaker.isEmpty {
+                suffix.append("said by \(speaker)")
+            }
+            if let t = f.sourceStartTime { suffix.append("near \(timestamp(t))") }
+            lines.append(suffix.isEmpty ? "- \(f.text)" : "- \(f.text) (\(suffix.joined(separator: " — ")))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// One bullet per unique open question from the PRIOR series instance.
+    static func carriedQuestionsBlock(facts: [EntityFact]) -> String {
+        var seen = Set<String>()
+        var lines: [String] = []
+        for f in facts where f.kind == "question" && seen.insert(f.text).inserted {
+            lines.append("- \(f.text)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Fetch + format both blocks for a meeting. Empty strings when there is
+    /// nothing to cite — substitution falls back to honest "none" text.
+    static func build(for meeting: Meeting, allMeetings: [Meeting],
+                      database: AppDatabase) async -> (commitments: String, carried: String) {
+        let repo = EntityFactRepository(database: database)
+        // Series rows carry exactly one row per fact text for this meeting —
+        // person/company fan-out rows would only duplicate the bullets.
+        let own = ((try? await repo.factsForMeetings([meeting.id], kinds: ["commitment", "decision"])) ?? [])
+            .filter { $0.entityType == "series" }
+        let anchorIds = own.compactMap(\.sourceTranscriptId)
+        let speakers = (try? await TranscriptRepository(database: database).speakerLabels(for: anchorIds)) ?? [:]
+        let folderKey = MeetingFolder.normaliseTitle(meeting.title)
+        let anchor = meeting.effectiveDate
+        let prior = allMeetings
+            .filter { $0.id != meeting.id
+                && MeetingFolder.normaliseTitle($0.title) == folderKey
+                && $0.effectiveDate < anchor }
+            .max { $0.effectiveDate < $1.effectiveDate }
+        var carried: [EntityFact] = []
+        if let prior {
+            carried = ((try? await repo.factsForMeetings([prior.id], kinds: ["question"])) ?? [])
+                .filter { $0.entityType == "series" }
+        }
+        return (commitmentsBlock(facts: own, speakers: speakers), carriedQuestionsBlock(facts: carried))
     }
 }
 

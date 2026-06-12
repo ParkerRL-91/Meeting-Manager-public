@@ -222,12 +222,16 @@ struct RecipeResultView: View {
                 return
             }
 
+            let appState = self.appState
             let result = try await engine.execute(
                 recipe: recipe,
                 meeting: meeting,
                 transcriptRepo: transcriptRepo,
                 noteRepo: noteRepo,
                 resultRepo: resultRepo,
+                receiptsProvider: {
+                    await ReceiptsBuilder.build(for: meeting, allMeetings: appState.meetings, database: appState.database)
+                },
                 textGenerator: textGenerator
             )
             outputText = result

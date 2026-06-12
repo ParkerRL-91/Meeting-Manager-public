@@ -74,6 +74,45 @@ final class TranscriptRepository {
         }
     }
 
+    /// TASK-066: the best-matching segment for a fact's text within one
+    /// meeting — the "receipt" anchor. OR over the fact's tokens ranked by
+    /// BM25; nil when nothing matches (anchoring is best-effort, facts ship
+    /// without receipts rather than with wrong ones).
+    func bestAnchor(meetingId: String, factText: String) async throws -> (transcriptId: Int64, startTime: Double)? {
+        guard let pattern = FTS5Pattern(matchingAnyTokenIn: factText) else { return nil }
+        return try await database.writer.read { db in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT transcript.id AS tid, transcript.startTime AS st
+                FROM transcript
+                JOIN transcript_fts ON transcript.rowid = transcript_fts.rowid
+                WHERE transcript_fts MATCH ? AND transcript.meetingId = ?
+                ORDER BY rank
+                LIMIT 1
+                """, arguments: [pattern, meetingId])
+            guard let row, let tid = row["tid"] as Int64? else { return nil }
+            return (tid, row["st"] as Double? ?? 0)
+        }
+    }
+
+    /// TASK-066: speaker labels for a set of anchor segments, keyed by id.
+    func speakerLabels(for ids: [Int64]) async throws -> [Int64: String] {
+        guard !ids.isEmpty else { return [:] }
+        return try await database.writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, speakerLabel FROM transcript WHERE id IN (\(ids.map { _ in "?" }.joined(separator: ",")))",
+                arguments: StatementArguments(ids)
+            )
+            var out: [Int64: String] = [:]
+            for row in rows {
+                if let id = row["id"] as Int64?, let label = row["speakerLabel"] as String? {
+                    out[id] = label
+                }
+            }
+            return out
+        }
+    }
+
     func search(meetingId: String, query: String) async throws -> [Transcript] {
         try await database.writer.read { db in
             let sql = """

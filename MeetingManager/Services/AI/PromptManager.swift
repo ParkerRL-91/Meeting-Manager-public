@@ -17,6 +17,8 @@ final class PromptManager {
         ("{{knowledgeBase}}", "Relevant excerpts from your Knowledge Base folder (auto-populated)"),
         ("{{transcript}}", "Full meeting transcript"),
         ("{{notes}}", "User-created notes"),
+        ("{{commitmentsWithReceipts}}", "Commitments/decisions with owner and \"near MM:SS\" transcript anchors (auto-populated)"),
+        ("{{carriedQuestions}}", "Unanswered questions from the previous session in this series (auto-populated)"),
     ]
 
     // MARK: - Template Persistence
@@ -125,7 +127,9 @@ final class PromptManager {
         transcript: String,
         notes: String,
         priorContext: String = "",
-        knowledgeBase: String = ""
+        knowledgeBase: String = "",
+        commitmentsWithReceipts: String = "",
+        carriedQuestions: String = ""
     ) -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .long
@@ -160,6 +164,14 @@ final class PromptManager {
         result = result.replacingOccurrences(of: "{{knowledgeBase}}", with: knowledgeBaseString)
         result = result.replacingOccurrences(of: "{{transcript}}", with: transcript)
         result = result.replacingOccurrences(of: "{{notes}}", with: notes)
+        // TASK-066 receipts. Honest fallbacks: the model is told there is
+        // nothing to cite rather than left with dangling mustache tokens.
+        result = result.replacingOccurrences(
+            of: "{{commitmentsWithReceipts}}",
+            with: commitmentsWithReceipts.isEmpty ? "No tracked commitments for this meeting." : commitmentsWithReceipts)
+        result = result.replacingOccurrences(
+            of: "{{carriedQuestions}}",
+            with: carriedQuestions.isEmpty ? "None carried from the previous session." : carriedQuestions)
 
         return result
     }

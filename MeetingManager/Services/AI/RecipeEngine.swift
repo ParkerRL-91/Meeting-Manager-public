@@ -35,6 +35,7 @@ final class RecipeEngine {
         transcriptRepo: TranscriptRepository,
         noteRepo: NoteRepository,
         resultRepo: RecipeResultRepository,
+        receiptsProvider: (() async -> (commitments: String, carried: String))? = nil,
         textGenerator: (String, String) async throws -> String
     ) async throws -> String {
         isProcessing = true
@@ -48,12 +49,22 @@ final class RecipeEngine {
             let transcript = try await transcriptRepo.fullText(meetingId: meeting.id)
             let notes = try await noteRepo.combinedNotes(meetingId: meeting.id)
 
+            // TASK-066: resolve receipts only when the template asks for them.
+            var receipts: (commitments: String, carried: String) = ("", "")
+            if let receiptsProvider,
+               recipe.promptTemplate.contains("{{commitmentsWithReceipts}}")
+                || recipe.promptTemplate.contains("{{carriedQuestions}}") {
+                receipts = await receiptsProvider()
+            }
+
             // 2. Substitute template variables
             let userPrompt = promptManager.substituteVariables(
                 template: recipe.promptTemplate,
                 meeting: meeting,
                 transcript: transcript,
-                notes: notes
+                notes: notes,
+                commitmentsWithReceipts: receipts.commitments,
+                carriedQuestions: receipts.carried
             )
 
             let systemPrompt = "You are a professional meeting assistant. "

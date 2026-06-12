@@ -594,8 +594,19 @@ final class AppState {
                 }
             }
             let facts = InsightExtraction.facts(from: payload, meeting: meeting, participantDomains: domains)
-            try await EntityFactRepository(database: database).replaceForMeeting(meetingId, with: facts)
-            fileLog("Insights: \(facts.count) fact(s) for \(meetingId)")
+            // TASK-066: anchor commitments/decisions to their transcript
+            // moment. One BM25 lookup per unique text; misses just ship
+            // without a receipt.
+            var anchors: [String: (transcriptId: Int64, startTime: Double)] = [:]
+            let anchorable = Set(facts.filter { $0.kind == "commitment" || $0.kind == "decision" }.map(\.text))
+            for text in anchorable {
+                if let hit = try? await transcriptRepository.bestAnchor(meetingId: meetingId, factText: text) {
+                    anchors[text] = hit
+                }
+            }
+            let anchored = InsightExtraction.applyAnchors(facts, anchors: anchors)
+            try await EntityFactRepository(database: database).replaceForMeeting(meetingId, with: anchored)
+            fileLog("Insights: \(anchored.count) fact(s) for \(meetingId), \(anchors.count) anchored")
         } catch {
             fileLog("Insights: extraction failed (best-effort) — \(error.localizedDescription)")
         }
@@ -1372,6 +1383,15 @@ final class AppState {
         // Cross-meeting context lives in a separate, strictly-scoped "How this
         // connects to other work" section appended after the summary saves —
         // see appendConnectionsSection below.
+        // TASK-066: receipts variables. The auto follow-up email runs through
+        // this path (recipe template as system prompt); insight extraction is
+        // awaited inside the summary handler before the follow-up task pops,
+        // so anchored facts already exist by the time this resolves.
+        var receipts: (commitments: String, carried: String) = ("", "")
+        if rawTemplate.contains("{{commitmentsWithReceipts}}") || rawTemplate.contains("{{carriedQuestions}}") {
+            receipts = await ReceiptsBuilder.build(for: meeting, allMeetings: meetings, database: database)
+        }
+
         let baseSystemPrompt = rawTemplate
             .replacingOccurrences(of: "{{meetingTitle}}", with: meeting.title)
             .replacingOccurrences(of: "{{date}}", with: meeting.startDate?.formatted() ?? "Unknown")
@@ -1381,6 +1401,10 @@ final class AppState {
             .replacingOccurrences(of: "{{knowledgeBase}}", with: "")
             .replacingOccurrences(of: "{{transcript}}", with: "")
             .replacingOccurrences(of: "{{notes}}", with: "")
+            .replacingOccurrences(of: "{{commitmentsWithReceipts}}",
+                                  with: receipts.commitments.isEmpty ? "No tracked commitments for this meeting." : receipts.commitments)
+            .replacingOccurrences(of: "{{carriedQuestions}}",
+                                  with: receipts.carried.isEmpty ? "None carried from the previous session." : receipts.carried)
 
         // P2-T03: Notes-first summary. If the user captured notes during the meeting via
         // NotepadPaneView, treat those notes as the primary anchor and use the transcript to

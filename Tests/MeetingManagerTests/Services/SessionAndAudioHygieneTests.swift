@@ -282,6 +282,66 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Receipts follow-ups (TASK-066)
+
+    private func receiptFact(_ kind: String, _ text: String, owner: String? = nil,
+                             at startTime: Double? = nil, type: String = "series") -> EntityFact {
+        var f = EntityFact(id: nil, entityType: type, entityKey: "k", meetingId: "m",
+                           kind: kind, text: text, owner: owner, dueDate: nil,
+                           extractedAt: Date(timeIntervalSince1970: 0))
+        f.sourceStartTime = startTime
+        return f
+    }
+
+    func testReceiptTimestampFormatsMinutesAndHours() {
+        XCTAssertEqual(ReceiptsBuilder.timestamp(0), "0:00")
+        XCTAssertEqual(ReceiptsBuilder.timestamp(872), "14:32")
+        XCTAssertEqual(ReceiptsBuilder.timestamp(3729), "1:02:09")
+        XCTAssertEqual(ReceiptsBuilder.timestamp(-5), "0:00", "negative offsets clamp instead of crashing")
+    }
+
+    func testCommitmentsBlockDedupesFanOutAndPhrasesAnchors() {
+        let block = ReceiptsBuilder.commitmentsBlock(facts: [
+            receiptFact("commitment", "Ship the pilot Friday", owner: "Erica", at: 872),
+            receiptFact("commitment", "Ship the pilot Friday", owner: "Erica", at: 872),
+            receiptFact("decision", "Go with vendor B"),
+            receiptFact("question", "Budget for Q3?"),
+        ])
+        XCTAssertEqual(block, "- Ship the pilot Friday (Erica — near 14:32)\n- Go with vendor B",
+                       "dupes collapse, anchors read 'near MM:SS', questions excluded")
+    }
+
+    func testCommitmentsBlockFallsBackToAnchorSpeakerWhenOwnerless() {
+        var fact = receiptFact("decision", "Go with vendor B", at: 95)
+        fact.sourceTranscriptId = 7
+        let block = ReceiptsBuilder.commitmentsBlock(facts: [fact], speakers: [7: "Dave Brown"])
+        XCTAssertEqual(block, "- Go with vendor B (said by Dave Brown — near 1:35)")
+    }
+
+    func testCarriedQuestionsBlockOnlyCarriesQuestions() {
+        let block = ReceiptsBuilder.carriedQuestionsBlock(facts: [
+            receiptFact("question", "Who owns the rollout?"),
+            receiptFact("question", "Who owns the rollout?"),
+            receiptFact("commitment", "Send the deck"),
+        ])
+        XCTAssertEqual(block, "- Who owns the rollout?")
+    }
+
+    func testApplyAnchorsStampsEveryFanOutRowSharingText() {
+        let facts = [
+            receiptFact("commitment", "Send the contract", type: "series"),
+            receiptFact("commitment", "Send the contract", type: "person"),
+            receiptFact("decision", "Unanchored decision", type: "series"),
+        ]
+        let out = InsightExtraction.applyAnchors(facts, anchors: ["Send the contract": (42, 615.0)])
+        let stamped = out.filter { $0.text == "Send the contract" }
+        XCTAssertEqual(stamped.count, 2)
+        XCTAssertTrue(stamped.allSatisfy { $0.sourceTranscriptId == 42 && $0.sourceStartTime == 615.0 },
+                      "the same anchor lands on every fan-out row of the fact")
+        XCTAssertNil(out.first { $0.text == "Unanchored decision" }?.sourceTranscriptId,
+                     "facts without a match ship without a receipt")
+    }
+
     // MARK: - Style learning from edits (TASK-070)
 
     func testMeetingSummaryOriginalTextSurvivesCodableRoundTrip() throws {

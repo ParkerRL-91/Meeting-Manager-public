@@ -1175,5 +1175,50 @@ enum Migrations {
                 columns: ["meetingId"]
             )
         }
+
+        // TASK-066: receipts-grade follow-ups. The built-in follow-up email
+        // recipe gains the {{commitmentsWithReceipts}} and {{carriedQuestions}}
+        // variables (resolved from anchored entityFact rows + the prior
+        // series instance). Same unconditional-UPDATE pattern as v23.
+        migrator.registerMigration("v52-follow-up-receipts") { db in
+            let updatedPrompt = """
+            Write a concise follow-up email based on this meeting.
+
+            Format the response EXACTLY as:
+            Subject: <one-line subject>
+
+            <email body>
+
+            Body guidance: thank the attendees, recap the 3 most important decisions or discussion points, then list the confirmed commitments. For each commitment that has a "(… — near MM:SS)" reference below, keep that reference in the email so the recap is verifiable against the recording — always phrase it as approximate ("near 14:32"), never as an exact moment. If questions were carried over unanswered from the previous session, re-raise them in a short "Still open from last time" line or list. Close with next steps. Keep it under 250 words. Professional but warm tone. Never invent commitments, owners, or timestamps that are not listed below.
+
+            Meeting: {{meetingTitle}}
+            Date: {{date}}
+
+            ## Confirmed commitments (with transcript references):
+            {{commitmentsWithReceipts}}
+
+            ## Unanswered from the previous session:
+            {{carriedQuestions}}
+
+            ## Transcript:
+            {{transcript}}
+
+            ## Notes:
+            {{notes}}
+            """
+            try db.execute(
+                sql: """
+                    UPDATE recipe
+                    SET promptTemplate = ?,
+                        description = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    updatedPrompt,
+                    "Draft a follow-up email that cites the transcript moment for each commitment and re-raises last session's open questions",
+                    "builtin-follow-up-email"
+                ]
+            )
+        }
     }
 }
