@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import PDFKit
 import os
 
 /// Indexes a user-chosen folder (recursive, plain-text-ish formats only) into
@@ -7,9 +8,11 @@ import os
 /// retrieval API used by meeting prep + chat to inject relevant chunks into
 /// LLM context.
 ///
-/// Scope is intentionally narrow: `.md`, `.txt`, `.html`, `.docx`. Images,
-/// PDFs, archives, and binary formats are ignored on purpose — the user was
-/// explicit about wanting just text-like documents.
+/// Scope: `.md`, `.txt`, `.html`, `.docx`, plus — since PRJ-010 TASK-068 —
+/// `.pdf` (PDFKit text extraction, >20 MB skipped) and `.eml` (minimal
+/// RFC-822 parse). Images, archives, and other binary formats stay ignored.
+/// (The original text-only scope was the user's explicit ask; the PRJ-010
+/// plan they approved widened it to contracts and email threads.)
 @MainActor
 final class KnowledgeBaseService {
     static let shared = KnowledgeBaseService()
@@ -24,7 +27,7 @@ final class KnowledgeBaseService {
 
     /// File extensions we'll attempt to index. Anything else is silently
     /// skipped — this matches the user's explicit ask to ignore PDFs/images.
-    private let supportedExtensions: Set<String> = ["md", "markdown", "txt", "text", "html", "htm", "docx"]
+    private let supportedExtensions: Set<String> = ["md", "markdown", "txt", "text", "html", "htm", "docx", "pdf", "eml"]
 
     /// Soft chunk size — paragraphs longer than this get split. Markdown
     /// section chunks ignore this and stay whole regardless of length, since
@@ -282,9 +285,105 @@ final class KnowledgeBaseService {
             ]
             let attr = try NSAttributedString(data: data, options: opts, documentAttributes: nil)
             return chunkPlainText(text: attr.string, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
+        case "pdf":
+            // TASK-068: size guard — a 200 MB scan would stall the indexing
+            // pass; the plan caps at 20 MB (typical contracts are ≤2 MB).
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            guard size <= 20 * 1024 * 1024 else { return [] }
+            guard let doc = PDFDocument(url: url) else { return [] }
+            var pages: [String] = []
+            for i in 0..<doc.pageCount {
+                if let text = doc.page(at: i)?.string, !text.isEmpty { pages.append(text) }
+            }
+            let joined = pages.joined(separator: "\n\n")
+            guard !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+            return chunkPlainText(text: joined, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
+        case "eml":
+            let raw = (try? String(contentsOf: url, encoding: .utf8))
+                ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+                ?? ""
+            let text = Self.parseEML(raw)
+            guard !text.isEmpty else { return [] }
+            return chunkPlainText(text: text, fileURL: url, rootURL: rootURL, maxChunkChars: maxChunkChars)
         default:
             return []
         }
+    }
+
+    /// TASK-068: minimal RFC-822 parse — the headers people search by
+    /// (From/To/Subject/Date) plus the readable body. Multipart messages
+    /// keep text parts and drop base64 attachment blobs; quoted-printable
+    /// soft line breaks and =XX escapes are decoded. Deliberately not a
+    /// full MIME implementation.
+    nonisolated static func parseEML(_ raw: String) -> String {
+        guard !raw.isEmpty else { return "" }
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        let parts = normalized.components(separatedBy: "\n\n")
+        guard let headerBlock = parts.first else { return "" }
+        let body = parts.dropFirst().joined(separator: "\n\n")
+
+        // Unfold + pick the headers worth indexing.
+        var headers: [String] = []
+        var lastKept = false
+        for line in headerBlock.components(separatedBy: "\n") {
+            if line.hasPrefix(" ") || line.hasPrefix("\t") {
+                if lastKept, !headers.isEmpty {
+                    headers[headers.count - 1] += " " + line.trimmingCharacters(in: .whitespaces)
+                }
+                continue
+            }
+            let lower = line.lowercased()
+            lastKept = ["from:", "to:", "cc:", "subject:", "date:"].contains { lower.hasPrefix($0) }
+            if lastKept { headers.append(line) }
+        }
+
+        // Body: drop base64 attachment runs (≥3 consecutive long
+        // base64-looking lines) and MIME boundary/header noise.
+        var bodyLines: [String] = []
+        var base64Run = 0
+        for line in body.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let looksBase64 = trimmed.count >= 60
+                && trimmed.range(of: "^[A-Za-z0-9+/=]+$", options: .regularExpression) != nil
+            if looksBase64 {
+                base64Run += 1
+                if base64Run >= 3 {
+                    if base64Run == 3 { bodyLines.removeLast(2) }
+                    continue
+                }
+            } else {
+                base64Run = 0
+            }
+            if trimmed.hasPrefix("--") && trimmed.count > 10 { continue }   // MIME boundary
+            if trimmed.range(of: "^Content-(Type|Transfer-Encoding|Disposition):",
+                             options: [.regularExpression, .caseInsensitive]) != nil { continue }
+            bodyLines.append(line)
+        }
+        var bodyText = bodyLines.joined(separator: "\n")
+        // Quoted-printable: soft breaks then =XX hex escapes.
+        bodyText = bodyText.replacingOccurrences(of: "=\n", with: "")
+        if bodyText.contains("=") {
+            var decoded = ""
+            decoded.reserveCapacity(bodyText.count)
+            var i = bodyText.startIndex
+            while i < bodyText.endIndex {
+                let ch = bodyText[i]
+                if ch == "=", let hexEnd = bodyText.index(i, offsetBy: 3, limitedBy: bodyText.endIndex) {
+                    let hex = String(bodyText[bodyText.index(after: i)..<hexEnd])
+                    if hex.count == 2, let byte = UInt8(hex, radix: 16) {
+                        decoded.append(Character(UnicodeScalar(byte)))
+                        i = hexEnd
+                        continue
+                    }
+                }
+                decoded.append(ch)
+                i = bodyText.index(after: i)
+            }
+            bodyText = decoded
+        }
+        let combined = (headers.joined(separator: "\n") + "\n\n" + bodyText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return combined
     }
 
     /// Split Markdown on `# ` / `## ` / `### ` headings. Each section is one

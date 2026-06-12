@@ -96,6 +96,8 @@ struct KnowledgeBaseSettingsView: View {
                     Label("Plain text (.txt, .text)", systemImage: "doc.plaintext")
                     Label("HTML (.html, .htm)", systemImage: "doc.richtext")
                     Label("Word documents (.docx)", systemImage: "doc.append")
+                    Label("PDFs (.pdf) — text extracted on-device; files over 20 MB are skipped", systemImage: "doc.viewfinder")
+                    Label("Email files (.eml) — sender, subject, and body; attachments are not indexed", systemImage: "envelope")
                 }
                 .font(.callout)
                 .foregroundStyle(.primary)

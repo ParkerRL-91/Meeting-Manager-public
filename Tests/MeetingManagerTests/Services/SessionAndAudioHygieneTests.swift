@@ -282,6 +282,41 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - KB email ingestion (TASK-068)
+
+    func testParseEMLKeepsHeadersBodyAndDropsAttachments() {
+        let b64 = String(repeating: "JVBERi0xLjQKJcOkw7zDtsOfCjIgMCBvYmoKPDwvTGVuZ3RoIDMgMCBSL0ZpbHRlci9GbGF0ZURl\n", count: 4)
+        let eml = """
+        From: Erica Smith <erica@acme.com>
+        To: parker@acme.com
+        Subject: Pilot pricing
+        Message-ID: <noise@acme.com>
+        Date: Thu, 5 Jun 2026 09:00:00 -0500
+        Content-Type: multipart/mixed; boundary="XYZ"
+
+        --XYZ-boundary-line
+        Content-Type: text/plain
+
+        The pilot price needs sign-off by Friday.
+        Second =
+        line soft-wrapped.
+
+        --XYZ-boundary-line
+        Content-Type: application/pdf
+        Content-Transfer-Encoding: base64
+
+        """ + b64
+        let parsed = KnowledgeBaseService.parseEML(eml)
+        XCTAssertTrue(parsed.contains("Subject: Pilot pricing"))
+        XCTAssertTrue(parsed.contains("From: Erica Smith"))
+        XCTAssertFalse(parsed.contains("Message-ID"), "noise headers dropped")
+        XCTAssertTrue(parsed.contains("sign-off by Friday"))
+        XCTAssertTrue(parsed.contains("Second line soft-wrapped"), "quoted-printable soft break decoded")
+        XCTAssertFalse(parsed.contains("JVBERi0x"), "base64 attachment runs dropped")
+        XCTAssertFalse(parsed.contains("Content-Type"), "MIME noise dropped")
+        XCTAssertEqual(KnowledgeBaseService.parseEML(""), "")
+    }
+
     // MARK: - Practice mode (TASK-067)
 
     func testPracticeRecordPrioritizesObjectionsAndDedupes() {
