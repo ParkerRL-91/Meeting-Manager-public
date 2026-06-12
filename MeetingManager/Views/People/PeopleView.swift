@@ -453,6 +453,7 @@ private struct PersonDetailView: View {
     @State private var apolloLoading = false
     @State private var personOpenItems: [ActionItem] = []
     @State private var dossierFacts: [EntityFact] = []
+    @State private var factConflicts: [FactLinkDescriptor] = []
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     private let rollups = MeetingRollupService()
 
@@ -622,7 +623,16 @@ private struct PersonDetailView: View {
             .facts(entityType: "person",
                    entityKey: VocativeMiningService.canonicalKey(for: person.canonicalName),
                    limit: 12)) ?? []
+        // TASK-056: links are made on series rows; match this dossier's
+        // person rows by (meetingId, text).
+        factConflicts = ((try? await FactLinkRepository(database: AppDatabase.shared).allDescriptors()) ?? [])
+            .filter { $0.relation != "duplicate" }
         recentSummaries = await rollups.recentSummaries(forMeetings: meetings)
+    }
+
+    /// The newer fact that superseded/contradicted this one, if any.
+    private func conflict(for fact: EntityFact) -> FactLinkDescriptor? {
+        factConflicts.first { $0.toMeetingId == fact.meetingId && $0.toText == fact.text }
     }
 
     /// Auto-maintained dossier (TASK-047): the durable facts this person's
@@ -647,11 +657,38 @@ private struct PersonDetailView: View {
                             .padding(.vertical, 1)
                             .background(Color.appAccentSubtle)
                             .clipShape(Capsule())
-                        Text(fact.text)
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
-                            .multilineTextAlignment(.leading)
-                            .lineLimit(2)
+                        // TASK-056: a fact a later meeting replaced renders
+                        // struck through with the current state underneath.
+                        if let newer = conflict(for: fact) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(fact.text)
+                                        .font(.caption)
+                                        .strikethrough(newer.relation == "supersedes")
+                                        .foregroundStyle(Color.appTextTertiary)
+                                        .multilineTextAlignment(.leading)
+                                        .lineLimit(2)
+                                    Text(newer.relation == "supersedes" ? "Superseded" : "Contradicted")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.orange)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(.orange.opacity(0.15))
+                                        .clipShape(Capsule())
+                                }
+                                Text("Now: \(newer.fromText)")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appTextSecondary)
+                                    .multilineTextAlignment(.leading)
+                                    .lineLimit(2)
+                            }
+                        } else {
+                            Text(fact.text)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(2)
+                        }
                         Spacer(minLength: 0)
                     }
                     .contentShape(Rectangle())

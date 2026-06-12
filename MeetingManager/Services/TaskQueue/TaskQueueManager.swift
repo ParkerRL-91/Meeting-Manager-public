@@ -80,6 +80,7 @@ final class TaskQueueManager {
 
     /// PRJ-009 TASK-051: weekly digest generation (sentinel meetingId).
     var weeklyDigestHandler: (() async throws -> Void)?
+    var gardenerHandler: (() async throws -> Void)?
 
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
@@ -731,6 +732,7 @@ final class TaskQueueManager {
         case .enhanceNotes:       stage = "Enhancing notes"
         case .embedIndex:         stage = "Indexing for search"
         case .weeklyDigest:       stage = "Writing weekly digest"
+        case .gardener:           stage = "Tidying knowledge"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -858,6 +860,12 @@ final class TaskQueueManager {
         case .weeklyDigest:
             guard let handler = weeklyDigestHandler else {
                 throw TaskQueueError.noHandler("weeklyDigest")
+            }
+            try await handler()
+
+        case .gardener:
+            guard let handler = gardenerHandler else {
+                throw TaskQueueError.noHandler("gardener")
             }
             try await handler()
 

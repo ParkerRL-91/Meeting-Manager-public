@@ -50,6 +50,10 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// PRJ-009 TASK-051: generate the previous ISO week's digest.
         /// Sentinel meetingId "__weekly_digest__" (no real meeting).
         case weeklyDigest
+        /// PRJ-010 TASK-056: nightly knowledge gardener — links duplicate/
+        /// superseded/contradicted facts across meetings. Sentinel
+        /// meetingId "__gardener__" (no real meeting); background-class.
+        case gardener
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -75,6 +79,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .enhanceNotes:       return "Enhance Notes"
         case .embedIndex:         return "Index for Search"
         case .weeklyDigest:       return "Weekly Digest"
+        case .gardener:           return "Tidy Knowledge"
         }
     }
 
@@ -86,6 +91,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         switch type {
         case .embedIndex:   return meetingId == "__embed_backfill__"
         case .weeklyDigest: return true
+        case .gardener:     return true
         default:            return false
         }
     }
@@ -97,7 +103,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         switch type {
         case .summary, .regeneration, .transcriptCleanup, .detailedOutline,
              .enhanceNotes, .weeklyDigest, .retryAttribution, .contextEnrichment,
-             .enrichment:
+             .enrichment, .gardener:
             return true
         case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex:
             return false

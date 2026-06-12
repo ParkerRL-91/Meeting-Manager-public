@@ -282,6 +282,60 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Knowledge gardener (TASK-056)
+
+    private func gardenFact(_ id: Int64, key: String = "weekly sync", kind: String = "decision",
+                            meetingId: String, text: String, daysAgo: Double,
+                            hidden: Bool = false) -> EntityFact {
+        var f = EntityFact(id: id, entityType: "series", entityKey: key, meetingId: meetingId,
+                           kind: kind, text: text, owner: nil, dueDate: nil,
+                           extractedAt: Date(timeIntervalSince1970: 1_000_000 - daysAgo * 86_400))
+        if hidden { f.hiddenAt = Date(timeIntervalSince1970: 999_999) }
+        return f
+    }
+
+    func testGardenerCosine() {
+        XCTAssertEqual(GardenerService.cosine([1, 0], [0, 1]), 0)
+        XCTAssertEqual(GardenerService.cosine([1, 2], [1, 2]), 1, accuracy: 0.0001)
+        XCTAssertEqual(GardenerService.cosine([], []), 0, "empty vectors score 0, not NaN")
+    }
+
+    func testCandidatePairsRespectGatesAndOrdering() {
+        let a = gardenFact(1, meetingId: "m1", text: "Ship Friday", daysAgo: 10)
+        let b = gardenFact(2, meetingId: "m2", text: "Ship next Monday", daysAgo: 1)
+        let sameMeeting = gardenFact(3, meetingId: "m2", text: "Ship someday", daysAgo: 1)
+        let otherKind = gardenFact(4, kind: "question", meetingId: "m3", text: "Ship when?", daysAgo: 2)
+        let hidden = gardenFact(5, meetingId: "m4", text: "Ship eventually", daysAgo: 3, hidden: true)
+        let near: [Float] = [1, 0.1], far: [Float] = [0, 1]
+        let vectors: [String: [Float]] = [
+            "Ship Friday": near, "Ship next Monday": near, "Ship someday": near,
+            "Ship when?": near, "Ship eventually": near, "Unrelated topic": far,
+        ]
+        let pairs = GardenerService.candidatePairs(
+            facts: [a, b, sameMeeting, otherKind, hidden],
+            vectors: vectors)
+        XCTAssertEqual(pairs.count, 1, "same-meeting, cross-kind, and hidden facts never pair")
+        XCTAssertEqual(pairs.first?.older.id, 1, "older by extractedAt")
+        XCTAssertEqual(pairs.first?.newer.id, 2)
+
+        let excluded = GardenerService.candidatePairs(
+            facts: [a, b], vectors: vectors, excludedPairKeys: ["1-2"])
+        XCTAssertTrue(excluded.isEmpty, "already-classified pairs are skipped")
+
+        let dissimilar = GardenerService.candidatePairs(
+            facts: [a, gardenFact(6, meetingId: "m5", text: "Unrelated topic", daysAgo: 0)],
+            vectors: vectors)
+        XCTAssertTrue(dissimilar.isEmpty, "below-threshold similarity never reaches the LLM")
+    }
+
+    func testGardenerClassificationParses() {
+        let payload = GardenerService.parseClassification(
+            #"{"pairs":[{"index":0,"relation":"supersedes"},{"index":1,"relation":"unrelated"}]}"#)
+        XCTAssertEqual(payload?.pairs.count, 2)
+        XCTAssertEqual(payload?.pairs.first?.relation, "supersedes")
+        XCTAssertNil(GardenerService.parseClassification("no json here"))
+    }
+
     // MARK: - Receipts follow-ups (TASK-066)
 
     private func receiptFact(_ kind: String, _ text: String, owner: String? = nil,

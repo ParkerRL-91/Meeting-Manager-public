@@ -10,9 +10,14 @@ struct FolderDetailView: View {
     @State private var selectedTab: Tab = .notes
     @State private var openItems: [ActionItem] = []
     @State private var thread: SeriesThread?
+    @State private var conflicts: [FactLinkDescriptor] = []
 
     private func loadThread() async {
         thread = try? await SeriesThreadRepository(database: AppDatabase.shared).thread(folderKey: folder.key)
+        // TASK-056: gardener-detected reversals scoped to this series.
+        let ids = Set(folder.meetings.map(\.id))
+        conflicts = ((try? await FactLinkRepository(database: AppDatabase.shared).allDescriptors()) ?? [])
+            .filter { $0.relation != "duplicate" && ids.contains($0.fromMeetingId) }
     }
 
     private func loadOpenItems() async {
@@ -135,6 +140,37 @@ struct FolderDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         if let thread {
                             MarkdownRenderer(text: thread.content, baseFontSize: 13)
+                            if !conflicts.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("REVERSALS & CONFLICTS")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(Color.appTextMuted)
+                                        .tracking(0.4)
+                                    ForEach(Array(conflicts.prefix(6).enumerated()), id: \.offset) { _, c in
+                                        HStack(alignment: .top, spacing: 6) {
+                                            Text(c.relation == "supersedes" ? "Updated" : "Conflict")
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(.orange)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(.orange.opacity(0.15))
+                                                .clipShape(Capsule())
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text(c.toText)
+                                                    .font(.caption)
+                                                    .strikethrough(c.relation == "supersedes")
+                                                    .foregroundStyle(Color.appTextTertiary)
+                                                    .lineLimit(2)
+                                                Text(c.fromText)
+                                                    .font(.caption)
+                                                    .foregroundStyle(Color.appTextSecondary)
+                                                    .lineLimit(2)
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(.top, 12)
+                            }
                             Text("Updated \(thread.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.caption2)
                                 .foregroundStyle(Color.appTextTertiary)

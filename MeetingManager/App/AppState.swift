@@ -699,9 +699,21 @@ final class AppState {
         }
 
         guard let textGen = await makeTextGenerator(maxOutputTokens: 1200) else { return }
-        let content = try await textGen(WeeklyDigest.systemPrompt,
+        var content = try await textGen(WeeklyDigest.systemPrompt,
                                         "Week \(range.isoWeek):\n\n" + data.joined(separator: "\n"))
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // TASK-056: deterministic appendix — never LLM-generated, so a
+        // reversal is only reported when a factLink row actually exists.
+        let conflicts = (try? await FactLinkRepository(database: database)
+            .conflictDescriptors(from: range.start, to: range.end)) ?? []
+        if !conflicts.isEmpty {
+            let lines = conflicts.prefix(6).map { d in
+                "- \(d.relation == "supersedes" ? "Updated" : "Conflict"): \"\(d.toText)\" → \"\(d.fromText)\""
+            }
+            content += "\n\n## Reversals & conflicts\n" + lines.joined(separator: "\n")
+        }
+
         try await WeeklyDigestRepository(database: database).save(
             WeeklyDigestRecord(isoWeek: range.isoWeek, content: content, createdAt: Date()))
         fileLog("WeeklyDigest: wrote \(range.isoWeek)")
@@ -714,6 +726,55 @@ final class AppState {
             try? content.write(to: url, atomically: true, encoding: .utf8)
             await KnowledgeBaseService.shared.reindexFile(url: url)
         }
+    }
+
+    static let gardenerSentinel = "__gardener__"
+
+    /// TASK-056: enqueue the knowledge gardener once per calendar day.
+    /// "Nightly" in practice means "daily, when quiet" — the row is
+    /// background-class, so the governor holds it through recordings,
+    /// upcoming meetings, battery, and interactive AI waits.
+    private func enqueueGardenerIfDue() {
+        let dayStamp = Self.dayStamp(Date())
+        guard UserDefaults.standard.string(forKey: "gardener.lastRunDay") != dayStamp else { return }
+        let queued = taskQueueManager.allTasks.contains { $0.type == .gardener && !$0.isTerminal }
+        guard !queued, isAIWorkConfigured, embeddingService.isAvailable else { return }
+        Task { [weak self] in
+            await self?.taskQueueManager.enqueue(type: .gardener,
+                                                 meetingId: Self.gardenerSentinel, priority: 9)
+        }
+    }
+
+    static func dayStamp(_ date: Date) -> String {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.locale = Locale(identifier: "en_US_POSIX")
+        return df.string(from: date)
+    }
+
+    /// The gardener run: transient fact embeddings + one schema-constrained
+    /// classification call, then links + soft-hides (GardenerService).
+    private func runGardener() async throws {
+        guard embeddingService.isAvailable else {
+            fileLog("Gardener: embedding model unavailable — skipping")
+            return
+        }
+        guard let textGen = await makeTextGenerator(
+            maxOutputTokens: 1024,
+            schemaJSON: GardenerService.classifySchemaJSON
+        ) else {
+            fileLog("Gardener: no AI backend — skipping")
+            return
+        }
+        try await GardenerService.run(
+            database: database,
+            embed: { try await self.embeddingService.embed(texts: $0) },
+            textGenerator: textGen,
+            log: { self.fileLog($0) }
+        )
+        // Stamp only after a completed pass — a failed run retries via the
+        // queue and, past max retries, again on the next day's enqueue.
+        UserDefaults.standard.set(Self.dayStamp(Date()), forKey: "gardener.lastRunDay")
     }
 
     static let embedBackfillSentinel = "__embed_backfill__"
@@ -1053,6 +1114,11 @@ final class AppState {
         taskQueueManager.weeklyDigestHandler = { [weak self] in
             guard let self else { return }
             try await self.generateWeeklyDigest()
+        }
+
+        taskQueueManager.gardenerHandler = { [weak self] in
+            guard let self else { return }
+            try await self.runGardener()
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
@@ -5277,6 +5343,7 @@ final class AppState {
     private func startPrepContextTimer() {
         preComputePrepContext() // Run immediately on startup
         enqueueWeeklyDigestIfDue()
+        enqueueGardenerIfDue()
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
             await self?.enqueueEmbeddingBackfillIfNeeded()
@@ -5289,6 +5356,7 @@ final class AppState {
             .sink { [weak self] _ in
                 self?.preComputePrepContext()
                 self?.enqueueWeeklyDigestIfDue()
+                self?.enqueueGardenerIfDue()
                 // Backfill re-check (TASK-045): the launch-time check can
                 // lose the race against Ollama's first model-list refresh —
                 // the hourly tick self-heals within the session.

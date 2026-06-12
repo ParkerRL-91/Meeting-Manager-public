@@ -27,12 +27,17 @@ struct EntityFact: Codable, FetchableRecord, MutablePersistableRecord, Identifia
     /// always "near MM:SS" — the match is approximate by construction.
     var sourceTranscriptId: Int64? = nil
     var sourceStartTime: Double? = nil
+    /// TASK-056 gardener tombstone: set when a later meeting restated this
+    /// fact (relation "duplicate"). Hidden facts stay queryable for links
+    /// and audits but leave every dossier/receipt surface. Reversible.
+    var hiddenAt: Date? = nil
 
     enum Columns {
         static let entityType = Column(CodingKeys.entityType)
         static let entityKey = Column(CodingKeys.entityKey)
         static let meetingId = Column(CodingKeys.meetingId)
         static let extractedAt = Column(CodingKeys.extractedAt)
+        static let hiddenAt = Column(CodingKeys.hiddenAt)
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) { id = inserted.rowID }
@@ -54,6 +59,7 @@ final class EntityFactRepository {
             try EntityFact
                 .filter(EntityFact.Columns.entityType == entityType
                         && EntityFact.Columns.entityKey == entityKey)
+                .filter(EntityFact.Columns.hiddenAt == nil)
                 .order(EntityFact.Columns.extractedAt.desc)
                 .limit(limit)
                 .fetchAll(db)
@@ -62,9 +68,35 @@ final class EntityFactRepository {
 
     func factsForMeetings(_ meetingIds: [String], kinds: [String]? = nil) async throws -> [EntityFact] {
         try await database.writer.read { db in
-            var request = EntityFact.filter(meetingIds.contains(EntityFact.Columns.meetingId))
+            var request = EntityFact
+                .filter(meetingIds.contains(EntityFact.Columns.meetingId))
+                .filter(EntityFact.Columns.hiddenAt == nil)
             if let kinds { request = request.filter(kinds.contains(Column("kind"))) }
             return try request.order(EntityFact.Columns.extractedAt.desc).fetchAll(db)
+        }
+    }
+
+    /// TASK-056: the gardener's walk — visible series rows (the canonical
+    /// one-row-per-fact representation), newest first, capped.
+    func visibleSeriesFacts(limit: Int) async throws -> [EntityFact] {
+        try await database.writer.read { db in
+            try EntityFact
+                .filter(EntityFact.Columns.entityType == "series")
+                .filter(EntityFact.Columns.hiddenAt == nil)
+                .order(EntityFact.Columns.extractedAt.desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    /// TASK-056: soft-hide every fan-out row of one fact — the series row
+    /// the gardener compared plus its person/company siblings, matched by
+    /// (meetingId, kind, text).
+    func hideFacts(meetingId: String, kind: String, text: String) async throws {
+        try await database.writer.write { db in
+            try db.execute(
+                sql: "UPDATE entityFact SET hiddenAt = ? WHERE meetingId = ? AND kind = ? AND text = ? AND hiddenAt IS NULL",
+                arguments: [Date(), meetingId, kind, text])
         }
     }
 }
