@@ -282,6 +282,37 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Topic trajectories (TASK-057)
+
+    func testTrajectoryMergesPerMeetingChronologically() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func meeting(_ id: String, daysAgo: Double) -> Meeting {
+            var m = Meeting(title: "T-\(id)", startDate: now.addingTimeInterval(-daysAgo * 86_400),
+                            endDate: nil, status: .complete)
+            m.id = id
+            return m
+        }
+        let meetings = [meeting("a", daysAgo: 30), meeting("b", daysAgo: 10), meeting("c", daysAgo: 1)]
+        let points = TrajectoryBuilder.build(
+            semanticHits: [("b", "weak chunk", 0.5), ("b", "best chunk", 0.9), ("a", "old chunk", 0.6)],
+            ftsHits: [("b", "fts snippet ignored — semantic won"), ("c", "fts only meeting")],
+            meetings: meetings)
+        XCTAssertEqual(points.map(\.meetingId), ["a", "b", "c"], "oldest first")
+        XCTAssertEqual(points[1].excerpt, "best chunk", "highest-scoring chunk represents the meeting")
+        XCTAssertEqual(points[2].excerpt, "fts only meeting", "FTS fills semantic gaps")
+    }
+
+    func testStanceApplicationClampsToEightWordsAndBadIndexes() {
+        let base = [TrajectoryBuilder.Point(meetingId: "m", title: "t",
+                                            date: Date(timeIntervalSince1970: 0), excerpt: "e")]
+        let labeled = TrajectoryBuilder.applyStances(
+            #"{"labels":[{"index":0,"stance":"one two three four five six seven eight nine ten"},{"index":7,"stance":"out of range"}]}"#,
+            to: base)
+        XCTAssertEqual(labeled[0].stance, "one two three four five six seven eight")
+        XCTAssertEqual(TrajectoryBuilder.applyStances("garbage", to: base)[0].stance, nil,
+                       "unparseable responses leave the timeline unlabeled")
+    }
+
     // MARK: - Who-knows-what (TASK-060)
 
     func testAffinityRanksByScoreTimesRecencyAndExcludesSelf() {

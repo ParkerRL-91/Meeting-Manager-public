@@ -17,6 +17,13 @@ struct GlobalSearchView: View {
     @State private var searchTask: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
 
+    // TASK-057: timeline mode — "everything we said about X, in order".
+    @State private var showTimeline = false
+    @State private var timelinePoints: [TrajectoryBuilder.Point] = []
+    @State private var timelineTopic = ""
+    @State private var timelineLoading = false
+    @State private var stanceRequestId: UUID?
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -36,7 +43,9 @@ struct GlobalSearchView: View {
 
             Divider()
 
-            if query.trimmingCharacters(in: .whitespaces).count < 2 {
+            if showTimeline {
+                timelineView
+            } else if query.trimmingCharacters(in: .whitespaces).count < 2 {
                 Spacer()
                 Text("Type at least two characters to search.")
                     .font(.subheadline)
@@ -50,6 +59,14 @@ struct GlobalSearchView: View {
                 Spacer()
             } else {
                 List {
+                    if query.trimmingCharacters(in: .whitespaces).count >= 3 {
+                        // TASK-057: switch to the chronological topic view.
+                        resultRow(icon: "chart.xyaxis.line",
+                                  title: "View timeline for \"\(query.trimmingCharacters(in: .whitespaces))\"",
+                                  subtitle: "Every mention in order, oldest first") {
+                            Task { await buildTimeline() }
+                        }
+                    }
                     if !titleHits.isEmpty {
                         Section("Meetings") {
                             ForEach(titleHits) { meeting in
@@ -110,12 +127,137 @@ struct GlobalSearchView: View {
         }
         .frame(width: 560, height: 460)
         .onAppear { fieldFocused = true }
+        .onDisappear {
+            if let id = stanceRequestId { appState.interactiveAIBroker.cancel(id: id) }
+        }
         .onChange(of: query) { _, newValue in
             searchTask?.cancel()
             searchTask = Task {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
                 await runSearch(newValue)
+            }
+        }
+    }
+
+    // MARK: - Timeline mode (TASK-057)
+
+    @ViewBuilder
+    private var timelineView: some View {
+        HStack(spacing: 8) {
+            Button {
+                showTimeline = false
+                if let id = stanceRequestId { appState.interactiveAIBroker.cancel(id: id) }
+            } label: {
+                Label("Results", systemImage: "chevron.left")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.appAccent)
+            Text("Timeline · \(timelineTopic)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.appTextSecondary)
+                .lineLimit(1)
+            Spacer()
+            if timelineLoading { ProgressView().controlSize(.mini) }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+
+        if timelinePoints.isEmpty && !timelineLoading {
+            Spacer()
+            Text("No mentions of \"\(timelineTopic)\" found.")
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextTertiary)
+            Spacer()
+        } else {
+            List {
+                if !discussedBy.isEmpty {
+                    Section("People who've discussed this") {
+                        Text(discussedBy.map(\.name).joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                }
+                Section("Oldest first") {
+                    ForEach(timelinePoints) { point in
+                        Button {
+                            open(meetingId: point.meetingId)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(point.date.formatted(date: .abbreviated, time: .omitted))
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.appAccent)
+                                    Text(point.title)
+                                        .font(.caption)
+                                        .foregroundStyle(Color.appTextTertiary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    if let stance = point.stance {
+                                        Text(stance)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(Color.appTextSecondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1)
+                                            .background(Color.appSurfaceSecondary.opacity(0.7))
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                                Text(point.excerpt)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appTextSecondary)
+                                    .lineLimit(3)
+                                    .multilineTextAlignment(.leading)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .listStyle(.inset)
+        }
+    }
+
+    private func buildTimeline() async {
+        let topic = query.trimmingCharacters(in: .whitespaces)
+        guard topic.count >= 3 else { return }
+        if let id = stanceRequestId { appState.interactiveAIBroker.cancel(id: id) }
+        timelineTopic = topic
+        showTimeline = true
+        timelineLoading = true
+        defer { timelineLoading = false }
+
+        let all = (try? await appState.meetingRepository.allActiveMeetings()) ?? []
+        var semantic: [(meetingId: String, text: String, score: Float)] = []
+        if appState.ollamaService.inFlightCount == 0,
+           let hits = try? await appState.embeddingService.topK(
+               query: topic, k: 30, sourceTypes: ["transcriptChunk", "summary"]) {
+            semantic = hits.compactMap { hit in hit.meetingId.map { ($0, hit.text, hit.score) } }
+        }
+        let fts = (try? await appState.transcriptRepository.searchAllMeetings(query: topic, limit: 20)) ?? []
+        let points = TrajectoryBuilder.build(semanticHits: semantic, ftsHits: fts, meetings: all)
+        timelinePoints = points
+        guard !points.isEmpty else { return }
+
+        // Optional stance pass — interactive, so it routes through the
+        // broker (review m5) and the timeline renders unlabeled meanwhile.
+        guard let textGen = await appState.makeTextGenerator(
+            maxOutputTokens: 600,
+            schemaJSON: TrajectoryBuilder.stanceSchemaJSON,
+            activityLabel: "Labeling timeline stances"
+        ) else { return }
+        let requestId = UUID()
+        stanceRequestId = requestId
+        let topicCopy = topic
+        appState.interactiveAIBroker.submit(id: requestId, label: "Timeline: \(String(topic.prefix(40)))") {
+            let response = (try? await textGen(
+                TrajectoryBuilder.stanceSystemPrompt,
+                TrajectoryBuilder.stanceUserPrompt(topic: topicCopy, points: points))) ?? ""
+            await MainActor.run {
+                guard self.timelineTopic == topicCopy, self.showTimeline else { return }
+                self.timelinePoints = TrajectoryBuilder.applyStances(response, to: self.timelinePoints)
             }
         }
     }
