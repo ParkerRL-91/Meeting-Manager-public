@@ -118,7 +118,28 @@ final class GoogleAuthManager {
 
     init(session: URLSession = .shared) {
         self.session = session
-        restoreSession()
+        // Keychain reads block on securityd IPC — a wedged daemon or a
+        // pending (possibly invisible) access prompt froze the whole app at
+        // AppState.init for minutes on 2026-06-11 (sampled: main thread in
+        // SecItemCopyMatching). Restore OFF the init path: auth state
+        // populates moments later and calendar sync's next pass picks it up.
+        Task { [weak self] in
+            await self?.restoreSessionAsync()
+        }
+    }
+
+    private func restoreSessionAsync() async {
+        // The blocking Sec* call runs detached so even a hung securityd
+        // can't freeze the main actor; results apply back on main.
+        let loaded: OAuthTokens? = await Task.detached(priority: .userInitiated) {
+            try? KeychainHelper.load(forKey: Keys.oauthTokens)
+        }.value
+        if let tokens = loaded {
+            cachedTokens = tokens
+            isSignedIn = true
+            userEmail = tokens.email
+            Logger.calendar.info("Restored Google session for \(tokens.email ?? "unknown")")
+        }
     }
 
     // MARK: - Public API

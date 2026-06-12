@@ -30,6 +30,9 @@ final class MeetingRepository {
             try db.execute(sql: "DELETE FROM embedding WHERE meetingId = ?", arguments: [meeting.id])
             try db.execute(sql: "DELETE FROM entityFact WHERE meetingId = ?", arguments: [meeting.id])
             try db.execute(sql: "DELETE FROM kbExport WHERE meetingId = ?", arguments: [meeting.id])
+            // v51 removed taskQueue's FK CASCADE (sentinel rows needed it
+            // gone) — clean task rows explicitly instead.
+            try db.execute(sql: "DELETE FROM taskQueue WHERE meetingId = ?", arguments: [meeting.id])
         }
         let fm = FileManager.default
         for path in audioPaths {

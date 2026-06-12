@@ -235,6 +235,7 @@ final class TaskQueueManager {
 
     @discardableResult
     func enqueue(type: TaskQueueItem.TaskType, meetingId: String, priority: Int, metadata: String? = nil) async -> TaskQueueItem? {
+        AppFileLogger.shared.log("TaskQueue: enqueue requested — \(type.rawValue)/\(meetingId)")
         do {
             let exists = try await database.writer.read { db in
                 try TaskQueueItem
@@ -246,6 +247,7 @@ final class TaskQueueManager {
             }
             if exists {
                 Logger.general.info("TaskQueue: skipping duplicate \(type.rawValue) for \(meetingId)")
+                AppFileLogger.shared.log("TaskQueue: skipped duplicate \(type.rawValue)/\(meetingId)")
                 return nil
             }
         } catch {
@@ -265,6 +267,7 @@ final class TaskQueueManager {
                 try item.insert(db)
             }
             Logger.general.info("TaskQueue: enqueued \(type.rawValue) for meeting \(meetingId) (priority \(priority))")
+            AppFileLogger.shared.log("TaskQueue: enqueued \(type.rawValue)/\(meetingId) prio \(priority)")
             await refreshTaskList()
             kickProcessor()
             return item

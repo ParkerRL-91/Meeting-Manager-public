@@ -1129,5 +1129,51 @@ enum Migrations {
                 t.column("updatedAt", .datetime).notNull()
             }
         }
+
+        // taskQueue.meetingId carried an FK to meeting(id) with CASCADE.
+        // Sentinel rows ("__embed_backfill__", "__weekly_digest__",
+        // "__kb_index__") violate it, and every such enqueue failed
+        // SILENTLY (os_log only) — discovered 2026-06-11 when the embed
+        // backfill vanished without trace (TASK-073's enqueue logging
+        // caught it). Rebuild without the FK: handlers already tolerate
+        // missing meetings, and completed-row pruning handles hygiene.
+        // CASCADE cleanup for real meetings is replaced by an explicit
+        // delete in MeetingRepository.delete.
+        migrator.registerMigration("v51-taskqueue-sentinels") { db in
+            try db.create(table: "taskQueue_new") { t in
+                t.column("id", .text).primaryKey()
+                t.column("type", .text).notNull()
+                t.column("meetingId", .text).notNull()
+                t.column("status", .text).notNull().defaults(to: "pending")
+                t.column("priority", .integer).notNull().defaults(to: 5)
+                t.column("retryCount", .integer).notNull().defaults(to: 0)
+                t.column("maxRetries", .integer).notNull().defaults(to: 3)
+                t.column("error", .text)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("startedAt", .datetime)
+                t.column("completedAt", .datetime)
+                t.column("metadata", .text)
+                t.column("runAfter", .datetime)
+            }
+            try db.execute(sql: """
+                INSERT INTO taskQueue_new
+                SELECT id, type, meetingId, status, priority, retryCount,
+                       maxRetries, error, createdAt, startedAt, completedAt,
+                       metadata, runAfter
+                FROM taskQueue
+                """)
+            try db.drop(table: "taskQueue")
+            try db.rename(table: "taskQueue_new", to: "taskQueue")
+            try db.create(
+                index: "idx_taskQueue_status_priority",
+                on: "taskQueue",
+                columns: ["status", "priority", "createdAt"]
+            )
+            try db.create(
+                index: "idx_taskQueue_meetingId",
+                on: "taskQueue",
+                columns: ["meetingId"]
+            )
+        }
     }
 }
