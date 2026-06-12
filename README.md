@@ -21,6 +21,10 @@ You only do this once.
 
 ---
 
+## What's New in v4.6.1
+
+**Capture a slide while it's on screen, find it months later.** A camera button on the recording bar grabs the call window, extracts its text on-device with Apple's Vision OCR, and stores it searchably — nothing is photographed permanently and nothing leaves your Mac. Captured slides appear as a timestamped strip on the meeting's transcript tab and in ⌘K search, so "find the meeting where they showed the pricing slide" works by keyword or by meaning. Capture is strictly manual — one click per slide, no automatic screen monitoring — and the button fails closed: when it can't confidently identify the call window, it captures nothing rather than the wrong thing. Slide text is deliberately kept out of chat answers, where OCR fragments would crowd out transcript content on local models.
+
 ## What's New in v4.6.0
 
 **Tell the app what you need from a meeting, and it tells you whether you got it.** Expanding a meeting's prep card reveals a one-line intent field ("agreement on the pilot start date"). After the meeting is summarized, the app compares your intent against what actually happened and posts a neutral verdict at the top of the summary — Got it, Partly, Not this time, or Unclear — with one factual sentence. Folder pages show which recurring series produce decisions (decisions per recorded hour) and how often you leave with what you came for, and the weekly digest aggregates the same numbers.
