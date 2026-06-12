@@ -282,6 +282,60 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Relationship health (TASK-061)
+
+    private func daysAgo(_ d: Double, from now: Date) -> Date { now.addingTimeInterval(-d * 86_400) }
+
+    func testHealthySteadyCadenceProducesNoSignals() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let dates = stride(from: 7.0, through: 70, by: 7).map { daysAgo($0, from: now) }
+        XCTAssertTrue(RelationshipHealth.signals(meetingDates: dates, openItems: [], now: now).isEmpty,
+                      "weekly cadence with a 7-day-old last meeting is healthy")
+    }
+
+    func testStaleContactNeedsDoubleTypicalGapAndFloor() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        // Weekly for 8 weeks, then 30 days of silence: 30 ≥ max(21, 14).
+        let dates = stride(from: 30.0, through: 79, by: 7).map { daysAgo($0, from: now) }
+        let signals = RelationshipHealth.signals(meetingDates: dates, openItems: [], now: now)
+        XCTAssertEqual(signals.map(\.kind), [.staleContact])
+        XCTAssertTrue(signals[0].detail.contains("30 days ago"))
+
+        // Monthly cadence: a 30-day gap is NORMAL (2×30=60 not reached).
+        let monthly = stride(from: 30.0, through: 120, by: 30).map { daysAgo($0, from: now) }
+        XCTAssertTrue(RelationshipHealth.signals(meetingDates: monthly, openItems: [], now: now).isEmpty,
+                      "a monthly relationship is not stale after one month")
+    }
+
+    func testCadenceDropHalvedButNotSilent() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        // Baseline window (30-90d ago): 6 meetings (~3/month). Recent 30d:
+        // one meeting 5 days ago — not stale (gap small), but halved.
+        var dates = stride(from: 35.0, through: 85, by: 10).map { daysAgo($0, from: now) }
+        dates.append(daysAgo(5, from: now))
+        let signals = RelationshipHealth.signals(meetingDates: dates, openItems: [], now: now)
+        XCTAssertEqual(signals.map(\.kind), [.cadenceDrop])
+        XCTAssertFalse(signals[0].detail.isEmpty)
+    }
+
+    func testNewContactsAndAgingItemsGates() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        // Two meetings = below the cadence floor; no cadence signals ever.
+        let newbie = [daysAgo(50, from: now), daysAgo(2, from: now)]
+        // One overdue item + one fresh no-due item: only the overdue counts.
+        let items: [(extractedAt: Date, dueDate: Date?)] = [
+            (daysAgo(10, from: now), daysAgo(3, from: now)),   // past due
+            (daysAgo(5, from: now), nil),                       // fresh, no due date
+        ]
+        let signals = RelationshipHealth.signals(meetingDates: newbie, openItems: items, now: now)
+        XCTAssertEqual(signals.map(\.kind), [.agingItems])
+        XCTAssertTrue(signals[0].detail.hasPrefix("1 open item "))
+
+        XCTAssertTrue(RelationshipHealth.signals(meetingDates: [daysAgo(1, from: now)],
+                                                 openItems: items, now: now).isEmpty,
+                      "a single meeting isn't a relationship yet — no signals at all")
+    }
+
     // MARK: - Knowledge gardener (TASK-056)
 
     private func gardenFact(_ id: Int64, key: String = "weekly sync", kind: String = "decision",

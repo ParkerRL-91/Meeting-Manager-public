@@ -16,6 +16,7 @@ struct CompanyDetailView: View {
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false
+    @State private var healthSignals: [RelationshipHealth.Signal] = []
 
     private let rollups = MeetingRollupService()
 
@@ -57,6 +58,11 @@ struct CompanyDetailView: View {
                     .padding(.bottom, 8)
                 }
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
+                if !healthSignals.isEmpty {
+                    RelationshipSignalChips(signals: healthSignals)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 12)
+                }
                 peopleSection
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
                 meetingsSection
@@ -206,6 +212,9 @@ struct CompanyDetailView: View {
         let meetings = companyMeetings
         openItems = await rollups.openActionItems(forMeetings: meetings)
         recentSummaries = await rollups.recentSummaries(forMeetings: meetings)
+        healthSignals = RelationshipHealth.signals(
+            meetingDates: meetings.map(\.effectiveDate),
+            openItems: openItems.flatMap(\.items).map { ($0.extractedAt, $0.dueDate) })
     }
 
     private func loadApollo(force: Bool) async {

@@ -671,7 +671,8 @@ final class AppState {
     /// — one LLM call over aggregates, never raw transcripts.
     private func generateWeeklyDigest() async throws {
         let range = WeeklyDigest.previousWeekRange()
-        let meetings = ((try? await meetingRepository.allActiveMeetings()) ?? [])
+        let allHistory = (try? await meetingRepository.allActiveMeetings()) ?? []
+        let meetings = allHistory
             .filter { $0.effectiveDate >= range.start && $0.effectiveDate < range.end }
         guard !meetings.isEmpty else { return }
         let ids = meetings.map(\.id)
@@ -712,6 +713,27 @@ final class AppState {
                 "- \(d.relation == "supersedes" ? "Updated" : "Conflict"): \"\(d.toText)\" → \"\(d.fromText)\""
             }
             content += "\n\n## Reversals & conflicts\n" + lines.joined(separator: "\n")
+        }
+
+        // TASK-061: deterministic relationship signals. Quiet/cadence only —
+        // they need nothing but meeting dates; the person/company pages
+        // carry the full signal set including aging items.
+        var datesByKey: [String: (name: String, dates: [Date])] = [:]
+        for m in allHistory {
+            for p in m.participantList {
+                let key = VocativeMiningService.canonicalKey(for: p)
+                guard !key.isEmpty else { continue }
+                datesByKey[key, default: (p, [])].dates.append(m.effectiveDate)
+            }
+        }
+        let signalLines: [String] = datesByKey.values.compactMap { entry in
+            guard entry.dates.count >= RelationshipHealth.minMeetingsForCadence else { return nil }
+            let signal = RelationshipHealth.signals(meetingDates: entry.dates, openItems: [])
+                .first { $0.kind == .staleContact || $0.kind == .cadenceDrop }
+            return signal.map { "- \(entry.name): \($0.detail)" }
+        }.sorted()
+        if !signalLines.isEmpty {
+            content += "\n\n## Relationship signals\n" + signalLines.prefix(4).joined(separator: "\n")
         }
 
         try await WeeklyDigestRepository(database: database).save(

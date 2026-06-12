@@ -454,6 +454,7 @@ private struct PersonDetailView: View {
     @State private var personOpenItems: [ActionItem] = []
     @State private var dossierFacts: [EntityFact] = []
     @State private var factConflicts: [FactLinkDescriptor] = []
+    @State private var healthSignals: [RelationshipHealth.Signal] = []
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     private let rollups = MeetingRollupService()
 
@@ -563,6 +564,11 @@ private struct PersonDetailView: View {
 
                 Divider().background(Color.appSeparator).padding(.horizontal, 24)
 
+                if !healthSignals.isEmpty {
+                    RelationshipSignalChips(signals: healthSignals)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 12)
+                }
                 if !personOpenItems.isEmpty { rollupActionItems }
                 if !dossierFacts.isEmpty { dossierSection }
                 if !recentSummaries.isEmpty { rollupSummaries }
@@ -628,6 +634,9 @@ private struct PersonDetailView: View {
         factConflicts = ((try? await FactLinkRepository(database: AppDatabase.shared).allDescriptors()) ?? [])
             .filter { $0.relation != "duplicate" }
         recentSummaries = await rollups.recentSummaries(forMeetings: meetings)
+        healthSignals = RelationshipHealth.signals(
+            meetingDates: meetings.map(\.effectiveDate),
+            openItems: personOpenItems.map { ($0.extractedAt, $0.dueDate) })
     }
 
     /// The newer fact that superseded/contradicted this one, if any.
@@ -1026,5 +1035,34 @@ struct PersonMeetingRow: View {
         }
         .padding(.vertical, 8)
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Relationship signal chips (TASK-061)
+
+/// Neutral signal chips shared by the Person and Company pages. Hover
+/// (help) carries the specifics; the chip itself stays calm — these are
+/// observations, not alerts.
+struct RelationshipSignalChips: View {
+    let signals: [RelationshipHealth.Signal]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(signals) { signal in
+                HStack(spacing: 5) {
+                    Image(systemName: signal.icon)
+                        .font(.caption2)
+                    Text(signal.label)
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(Color.appTextSecondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.appSurfaceSecondary.opacity(0.6))
+                .clipShape(Capsule())
+                .help(signal.detail)
+            }
+            Spacer(minLength: 0)
+        }
     }
 }
