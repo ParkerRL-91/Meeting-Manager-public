@@ -247,10 +247,16 @@ struct GeneralSettingsView: View {
                     persistSetting { $0.autoFollowUpEmail = enabled }
                     appState.settings.autoFollowUpEmail = enabled
                 }
+
+            // TASK-070: default ON, so read via object(forKey:) with a true fallback.
+            Toggle("Learn my style from summary edits", isOn: Binding(
+                get: { UserDefaults.standard.object(forKey: "summary.learnFromEdits") as? Bool ?? true },
+                set: { UserDefaults.standard.set($0, forKey: "summary.learnFromEdits") }
+            ))
         } header: {
             Text("Summary Automation")
         } footer: {
-            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template. The follow-up email option additionally drafts a professional email recap using the built-in Follow-Up Email template.")
+            Text("When enabled, a summary is automatically generated 10 minutes after transcription completes using the selected prompt template. The follow-up email option additionally drafts a professional email recap using the built-in Follow-Up Email template. Style learning shows new summaries how you edited past ones, so they arrive closer to your preferred shape; with the local model this only fits alongside shorter meetings.")
         }
     }
 

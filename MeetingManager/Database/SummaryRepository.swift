@@ -38,6 +38,22 @@ final class SummaryRepository {
         }
     }
 
+    /// TASK-070: the most recent (AI original → user-edited) pairs across
+    /// all meetings, used as style few-shots in new summary prompts.
+    /// Excludes the meeting being summarized so a regeneration never sees
+    /// its own previous draft as an "example".
+    func recentEditedExamples(excluding meetingId: String, limit: Int = 2) async throws -> [MeetingSummary] {
+        try await database.writer.read { db in
+            try MeetingSummary
+                .filter(MeetingSummary.Columns.isEdited == true)
+                .filter(MeetingSummary.Columns.originalText != nil)
+                .filter(MeetingSummary.Columns.meetingId != meetingId)
+                .order(MeetingSummary.Columns.generatedAt.desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
     func update(_ summary: MeetingSummary) async throws {
         try await database.writer.write { db in
             try summary.update(db)

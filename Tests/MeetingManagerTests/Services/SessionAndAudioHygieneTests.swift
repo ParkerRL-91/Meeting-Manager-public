@@ -282,6 +282,24 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Style learning from edits (TASK-070)
+
+    func testMeetingSummaryOriginalTextSurvivesCodableRoundTrip() throws {
+        // GRDB persists through Codable. originalText relies on synthesized
+        // keys — if an explicit CodingKeys enum is ever added without it,
+        // the column silently stops persisting. This round-trip catches that.
+        var s = MeetingSummary(meetingId: "m1", promptUsed: "p", summaryText: "user-edited", isEdited: true)
+        s.originalText = "the AI draft before editing"
+        let back = try JSONDecoder().decode(MeetingSummary.self, from: JSONEncoder().encode(s))
+        XCTAssertEqual(back.originalText, "the AI draft before editing")
+        XCTAssertEqual(back.summaryText, "user-edited")
+        XCTAssertTrue(back.isEdited)
+
+        let fresh = MeetingSummary(meetingId: "m2", promptUsed: "p", summaryText: "new generation")
+        let freshBack = try JSONDecoder().decode(MeetingSummary.self, from: JSONEncoder().encode(fresh))
+        XCTAssertNil(freshBack.originalText, "new generations carry no style-example source")
+    }
+
     // MARK: - Since you last met (TASK-058)
 
     func testCounterpartDetectsOneOnOne() {

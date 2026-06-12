@@ -1474,12 +1474,20 @@ final class AppState {
         // Determine which AI backend to use (single source of truth).
         let backend = await resolveAIBackend(refreshOllama: true)
 
+        // TASK-070: few-shot style calibration from the user's own past edits.
+        let styleSection = await summaryStyleExamplesSection(
+            excluding: meetingId,
+            backend: backend,
+            userPromptChars: userPrompt.count
+        )
+        let finalSystemPrompt = systemPrompt + styleSection
+
         let summaryText: String
         switch backend {
         case .ollama(let model):
             // Use streaming for task queue — never times out, reads chunks incrementally
             summaryText = try await ollamaService.generateStreaming(
-                systemPrompt: systemPrompt,
+                systemPrompt: finalSystemPrompt,
                 userPrompt: userPrompt,
                 model: model,
                 activityLabel: "Summarizing meeting"
@@ -1487,10 +1495,10 @@ final class AppState {
         case .claude(let model):
             let claude = ClaudeService()
             summaryText = try await claude.sendMessage(
-                systemPrompt: systemPrompt,
+                systemPrompt: finalSystemPrompt,
                 userPrompt: userPrompt,
                 model: model,
-                redactor: await cloudRedactorIfEnabled(texts: [systemPrompt, userPrompt])
+                redactor: await cloudRedactorIfEnabled(texts: [finalSystemPrompt, userPrompt])
             )
         case .none:
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
@@ -1509,7 +1517,7 @@ final class AppState {
         // survives the user editing or deleting their notes afterwards.
         var summary = MeetingSummary(
             meetingId: meetingId,
-            promptUsed: systemPrompt,
+            promptUsed: finalSystemPrompt,
             summaryText: cleanSummary,
             modelUsed: backend.modelIdentifier,
             notesInformedSummary: !noteText.isEmpty
@@ -1938,6 +1946,64 @@ final class AppState {
         }
 
         return nil
+    }
+
+    /// TASK-070: a STYLE CALIBRATION appendix built from the user's own
+    /// summary edits — the 2 most recent (AI original → user-edited) pairs,
+    /// clipped to ~600 tokens per side. The model is told to copy the
+    /// user's STYLE (structure, ordering, tone), never their content.
+    ///
+    /// Budget honesty (ADR-015): on the 16 GB local baseline the examples
+    /// compete with the transcript for context, so the Ollama path only
+    /// injects when the user prompt is small (~6K tokens). Claude has a
+    /// 200K window — always fits.
+    private func summaryStyleExamplesSection(
+        excluding meetingId: String,
+        backend: AIBackendChoice,
+        userPromptChars: Int
+    ) async -> String {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: "summary.learnFromEdits") as? Bool ?? true
+        guard enabled else { return "" }
+        if case .ollama = backend, userPromptChars > 24_000 {
+            fileLog("TaskQueue: style examples skipped — prompt too large for local context (\(userPromptChars) chars)")
+            return ""
+        }
+        let examples = (try? await summaryRepository.recentEditedExamples(excluding: meetingId)) ?? []
+        guard !examples.isEmpty else { return "" }
+
+        // Plan cap: ≤600 tokens per example — ~1,200 chars per side.
+        func clip(_ s: String) -> String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.count <= 1_200 ? t : String(t.prefix(1_200)) + "\n[…]"
+        }
+        let blocks = examples.enumerated().compactMap { i, ex -> String? in
+            guard let original = ex.originalText, !original.isEmpty else { return nil }
+            return """
+            Example \(i + 1) — the model originally wrote:
+            <model_version>
+            \(clip(original))
+            </model_version>
+            The user rewrote it as:
+            <user_version>
+            \(clip(ex.summaryText))
+            </user_version>
+            """
+        }
+        guard !blocks.isEmpty else { return "" }
+        fileLog("TaskQueue: injecting \(blocks.count) style example(s) into summary prompt")
+        return """
+
+
+        STYLE CALIBRATION — this user edits summaries into a preferred shape. \
+        Below are real before/after pairs from their past edits. Write the NEW \
+        summary in the user's demonstrated style directly (structure, section \
+        ordering, tone, level of detail) so they don't have to re-edit. Copy \
+        ONLY the style — the content must come from this meeting's transcript \
+        and notes.
+
+        \(blocks.joined(separator: "\n\n"))
+        """
     }
 
     /// P5-T02: Loads open action items for a set of prior meetings, preserving order.

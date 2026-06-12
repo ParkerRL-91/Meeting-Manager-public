@@ -728,6 +728,10 @@ struct SummaryView: View {
         guard hasLoadedEditor, var updated = summary else { return }
         // No-op if user reverted to the persisted text.
         guard editableContent != updated.summaryText else { return }
+        // First edit captures the AI original (TASK-070 style examples).
+        if updated.originalText == nil, !updated.isEdited {
+            updated.originalText = updated.summaryText
+        }
         updated.summaryText = editableContent
         updated.isEdited = (editableContent != originalContent)
         do {
@@ -747,6 +751,9 @@ struct SummaryView: View {
         guard let latest = try? await appState.summaryRepository.latestSummary(meetingId: meetingId) else { return }
         guard text != latest.summaryText else { return }
         var updated = latest
+        if updated.originalText == nil, !updated.isEdited {
+            updated.originalText = updated.summaryText
+        }
         updated.summaryText = text
         updated.isEdited = true
         do {

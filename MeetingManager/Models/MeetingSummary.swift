@@ -6,6 +6,11 @@ struct MeetingSummary: Identifiable, Codable, Equatable, Hashable {
     var meetingId: String
     var promptUsed: String
     var summaryText: String
+    /// TASK-070: the AI's text as it was BEFORE the user's first edit —
+    /// (originalText → summaryText) pairs are the style examples injected
+    /// into future summary prompts. Set once on the first edit; new
+    /// generations start nil.
+    var originalText: String? = nil
     var modelUsed: String?
     var generatedAt: Date
     var isEdited: Bool
@@ -44,7 +49,7 @@ extension MeetingSummary: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "meetingSummary"
 
     enum Columns: String, ColumnExpression {
-        case id, meetingId, promptUsed, summaryText, modelUsed, generatedAt, isEdited
+        case id, meetingId, promptUsed, summaryText, modelUsed, generatedAt, isEdited, originalText
         case notesInformedSummary
     }
 
