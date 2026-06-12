@@ -455,6 +455,7 @@ private struct PersonDetailView: View {
     @State private var dossierFacts: [EntityFact] = []
     @State private var factConflicts: [FactLinkDescriptor] = []
     @State private var healthSignals: [RelationshipHealth.Signal] = []
+    @State private var showPractice = false
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     private let rollups = MeetingRollupService()
 
@@ -569,6 +570,23 @@ private struct PersonDetailView: View {
                         .padding(.horizontal, 24)
                         .padding(.top, 12)
                 }
+                if !dossierFacts.isEmpty {
+                    // TASK-067: rehearse against this person's recorded positions.
+                    HStack {
+                        Button {
+                            showPractice = true
+                        } label: {
+                            Label("Practice conversation", systemImage: "theatermasks")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.appAccent)
+                        .help("A simulation that argues only from positions recorded in your meetings")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 10)
+                }
                 if !personOpenItems.isEmpty { rollupActionItems }
                 if !dossierFacts.isEmpty { dossierSection }
                 if !recentSummaries.isEmpty { rollupSummaries }
@@ -608,6 +626,14 @@ private struct PersonDetailView: View {
         .task(id: person.id) {
             await loadRollups()
             await loadApollo(force: false)
+        }
+        .sheet(isPresented: $showPractice) {
+            PracticeModeView(
+                personaName: person.canonicalName,
+                entityType: "person",
+                entityKey: VocativeMiningService.canonicalKey(for: person.canonicalName)
+            )
+            .environment(appState)
         }
     }
 

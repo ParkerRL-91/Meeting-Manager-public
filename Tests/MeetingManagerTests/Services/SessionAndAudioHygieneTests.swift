@@ -282,6 +282,38 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Practice mode (TASK-067)
+
+    func testPracticeRecordPrioritizesObjectionsAndDedupes() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func fact(_ kind: String, _ text: String, daysAgo: Double = 0) -> EntityFact {
+            EntityFact(id: nil, entityType: "company", entityKey: "acme.com", meetingId: "m",
+                       kind: kind, text: text, owner: nil, dueDate: nil,
+                       extractedAt: now.addingTimeInterval(-daysAgo * 86_400))
+        }
+        let record = PracticeMode.numberedRecord(facts: [
+            fact("decision", "Go with vendor B"),
+            fact("objection", "Price too high", daysAgo: 5),
+            fact("objection", "Price too high", daysAgo: 5),   // dupe
+            fact("question", "Who owns rollout?"),
+        ])
+        XCTAssertEqual(record.map(\.fact.kind), ["objection", "question", "decision"],
+                       "objections lead, dupes collapse")
+        XCTAssertEqual(record.map(\.index), [1, 2, 3], "indexes are 1-based and contiguous")
+
+        let prompt = PracticeMode.systemPrompt(personaName: "Acme", record: record)
+        XCTAssertTrue(prompt.contains("[1]") && prompt.contains("Price too high"))
+        XCTAssertTrue(prompt.contains("ONLY positions"), "grounding rule present")
+    }
+
+    func testPracticeConversationPromptCapsTurns() {
+        let turns = (0..<20).map { (role: $0.isMultiple(of: 2) ? "user" : "persona", text: "turn \($0)") }
+        let prompt = PracticeMode.conversationPrompt(turns: turns, personaName: "Acme", maxTurns: 4)
+        XCTAssertFalse(prompt.contains("turn 15"), "old turns drop")
+        XCTAssertTrue(prompt.contains("turn 19"))
+        XCTAssertTrue(prompt.hasSuffix("Acme:"), "ends awaiting the persona's line")
+    }
+
     // MARK: - Handover docs (TASK-062)
 
     func testHandoverPromptAssemblesOnlyProvidedRecord() {

@@ -19,6 +19,7 @@ struct CompanyDetailView: View {
     @State private var healthSignals: [RelationshipHealth.Signal] = []
     @State private var faqFacts: [EntityFact] = []
     @State private var faqExported = false
+    @State private var showPractice = false
 
     private let rollups = MeetingRollupService()
 
@@ -77,6 +78,14 @@ struct CompanyDetailView: View {
         .task(id: company.id) {
             await loadRollups()
             await loadApollo(force: false)
+        }
+        .sheet(isPresented: $showPractice) {
+            PracticeModeView(
+                personaName: company.displayName,
+                entityType: "company",
+                entityKey: company.domain
+            )
+            .environment(appState)
         }
     }
 
@@ -168,6 +177,15 @@ struct CompanyDetailView: View {
             HStack {
                 sectionHeader("FAQ & Objections")
                 Spacer()
+                Button {
+                    showPractice = true
+                } label: {
+                    Label("Practice", systemImage: "theatermasks")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.appAccent)
+                .help("Rehearse against this account's recorded objections and questions")
                 Button {
                     Task { await exportFAQDoc() }
                 } label: {
