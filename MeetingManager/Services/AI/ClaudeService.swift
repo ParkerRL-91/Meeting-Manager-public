@@ -157,6 +157,9 @@ final class ClaudeService {
     ) async throws -> String {
         let systemPrompt = redactor?.redact(systemPrompt) ?? systemPrompt
         let userPrompt = redactor?.redact(userPrompt) ?? userPrompt
+        // Activities visibility (TASK-073): cloud calls show up too.
+        let activityToken = await AIActivityCenter.shared.begin("Asking Claude (\(model))")
+        defer { Task { @MainActor in AIActivityCenter.shared.end(activityToken) } }
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }

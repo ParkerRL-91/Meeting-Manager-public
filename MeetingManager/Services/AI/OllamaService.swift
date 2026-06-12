@@ -295,9 +295,12 @@ final class OllamaService {
     private(set) var inFlightCount = 0
     private(set) var inFlightLabel: String?
 
+    private var activityTokens: [UUID] = []
+
     func beginWork(label: String) {
         inFlightCount += 1
         inFlightLabel = label
+        activityTokens.append(AIActivityCenter.shared.begin(label))
     }
 
     /// Fired each time inFlightCount returns to zero — the broker's drain
@@ -306,6 +309,9 @@ final class OllamaService {
 
     func endWork() {
         inFlightCount = max(0, inFlightCount - 1)
+        if let token = activityTokens.popLast() {
+            AIActivityCenter.shared.end(token)
+        }
         if inFlightCount == 0 {
             inFlightLabel = nil
             onAllWorkFinished?()
@@ -396,7 +402,10 @@ final class OllamaService {
         // JSON-schema string for grammar-constrained output (TASK-046).
         // Takes precedence over jsonMode; degrades to plain "json" when the
         // schema doesn't parse or the server rejects it (older Ollama).
-        schemaJSON: String? = nil
+        schemaJSON: String? = nil,
+        // Human-readable activity label (TASK-073) — what the Activities
+        // list shows while this runs.
+        activityLabel: String? = nil
     ) async throws -> String {
         let selectedModel: String
         let numCtx: Int
@@ -507,7 +516,7 @@ final class OllamaService {
         // so re-sending the same prompt is safe. 4xx and decode errors are
         // terminal — they won't get better with another attempt. Match the
         // ClaudeService backoff: 2^attempt + random(0...1)s.
-        beginWork(label: "Generating (\(selectedModel))")
+        beginWork(label: activityLabel ?? "Generating (\(selectedModel))")
         defer { endWork() }
         let decoded: OllamaChatResponse = try await Self.withRetry(maxAttempts: 3) {
             let data: Data
@@ -597,7 +606,8 @@ final class OllamaService {
     /// Generate a response using streaming — reads chunks incrementally so there's no
     /// single timeout. Ideal for long meetings processed in the background via the task queue.
     /// Never times out as long as Ollama keeps sending chunks.
-    func generateStreaming(systemPrompt: String, userPrompt: String, model: String) async throws -> String {
+    func generateStreaming(systemPrompt: String, userPrompt: String, model: String,
+                           activityLabel: String? = nil) async throws -> String {
         let selectedModel: String
         let numCtx: Int
         let finalSystem: String
@@ -683,7 +693,7 @@ final class OllamaService {
 
         Logger.ai.info("Streaming request to Ollama (model: \(selectedModel), ctx: \(numCtx))")
 
-        beginWork(label: "Generating (\(selectedModel))")
+        beginWork(label: activityLabel ?? "Generating (\(selectedModel))")
         defer { endWork() }
         let bytes: URLSession.AsyncBytes
         let response: URLResponse

@@ -183,7 +183,7 @@ struct GlobalChatView: View {
         let userMsg = GlobalChatMessage(role: .user, content: query)
         withAnimation { appState.globalChatMessages.append(userMsg) }
 
-        guard let textGen = await appState.makeTextGenerator() else {
+        guard let textGen = await appState.makeTextGenerator(activityLabel: "Answering your question") else {
             error = "No AI configured. Add a Claude API key or start Ollama in Settings."
             return
         }

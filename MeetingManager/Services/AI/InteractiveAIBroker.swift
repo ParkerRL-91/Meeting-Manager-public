@@ -41,6 +41,8 @@ final class InteractiveAIBroker {
     }
 
     var pendingCount: Int { queue.count }
+    /// Labels of queued entries, for the Activities list (TASK-073).
+    var waitingLabels: [String] { queue.map(\.label) }
     var isBlocked: Bool { ollama.inFlightCount > 0 }
 
     /// What the user-facing "waiting" message should name as the blocker.

@@ -60,6 +60,22 @@ final class AppState {
     /// must not be stopped just because the browser-call heuristic loses signal.
     private var recordingStartedByDetector = false
 
+    /// Departure confirmation (TASK-072): the detected call ended while a
+    /// MANUALLY-started recording runs. Back-to-back meetings made this the
+    /// top messy-data source — forgetting to stop meeting A merges it with
+    /// meeting B. Silence-based auto-stop was tried and rejected (false
+    /// stops); call-presence + a confirmation window is the design: prompt,
+    /// then auto-end after the grace period unless the user objects.
+    struct DeparturePrompt: Equatable {
+        let meetingTitle: String
+        let firedAt: Date
+    }
+    var departurePrompt: DeparturePrompt?
+    private var departureAutoEndTask: Task<Void, Never>?
+    private var departureSuppressedUntil: Date?
+    /// Grace before auto-end once the prompt shows.
+    static let departureGraceSeconds: TimeInterval = 180
+
     /// True when the current recording is a reopen session appending to an existing meeting.
     private(set) var isReopening = false
 
@@ -1465,7 +1481,8 @@ final class AppState {
             summaryText = try await ollamaService.generateStreaming(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
-                model: model
+                model: model,
+                activityLabel: "Summarizing meeting"
             )
         case .claude(let model):
             let claude = ClaudeService()
@@ -1573,7 +1590,8 @@ final class AppState {
             content = try await ollamaService.generateStreaming(
                 systemPrompt: prompts.system,
                 userPrompt: prompts.user,
-                model: model
+                model: model,
+                activityLabel: "Enhancing notes"
             )
         case .claude(let model):
             let claude = ClaudeService()
@@ -2218,6 +2236,49 @@ final class AppState {
         return redactor.isEmpty ? nil : redactor
     }
 
+    /// TASK-072: show the "looks like you left" prompt and arm the
+    /// grace-period auto-end. No-ops while suppressed ("I'm still here"),
+    /// already prompting, or not recording.
+    private func beginDepartureConfirmation() {
+        guard isRecording, departurePrompt == nil else { return }
+        if let until = departureSuppressedUntil, until > Date() { return }
+        let title = activeMeeting?.title ?? "this meeting"
+        departurePrompt = DeparturePrompt(meetingTitle: title, firedAt: Date())
+        fileLog("Departure: call ended while manually recording '\(title)' — confirming (auto-end in \(Int(Self.departureGraceSeconds))s)")
+        departureAutoEndTask?.cancel()
+        departureAutoEndTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.departureGraceSeconds))
+            guard !Task.isCancelled, let self, self.isRecording, self.departurePrompt != nil else { return }
+            self.fileLog("Departure: grace expired — auto-ending recording")
+            self.departurePrompt = nil
+            self.stopRecording()
+        }
+    }
+
+    /// User confirmed they're still in the meeting — clear the prompt and
+    /// suppress re-prompts for 10 minutes (detector flaps shouldn't nag).
+    func dismissDeparturePrompt(stillHere: Bool) {
+        departureAutoEndTask?.cancel()
+        departureAutoEndTask = nil
+        departurePrompt = nil
+        if stillHere {
+            departureSuppressedUntil = Date().addingTimeInterval(600)
+            fileLog("Departure: user is still in the meeting — suppressing prompts for 10 min")
+        } else {
+            fileLog("Departure: user confirmed end")
+            stopRecording()
+        }
+    }
+
+    /// A call is live again — cancel any pending departure prompt.
+    func cancelDeparturePromptOnCallActivity() {
+        guard departurePrompt != nil else { return }
+        departureAutoEndTask?.cancel()
+        departureAutoEndTask = nil
+        departurePrompt = nil
+        fileLog("Departure: call activity resumed — prompt cancelled")
+    }
+
     func startQuickMemo() {
         guard !isRecording else {
             lastUserError = "A recording is already running. Stop it before starting a memo."
@@ -2580,6 +2641,10 @@ final class AppState {
         // Recording end is a governor re-evaluation point (TASK-055):
         // background work deferred during capture can run again.
         taskQueueManager.reevaluate()
+        departureAutoEndTask?.cancel()
+        departureAutoEndTask = nil
+        departurePrompt = nil
+        departureSuppressedUntil = nil
 
         // Warn user if transcription model isn't ready yet
         if !transcriptionService.isModelLoaded {
@@ -4855,6 +4920,7 @@ final class AppState {
             return
         }
         lastCallDetectionTime = Date()
+        cancelDeparturePromptOnCallActivity()
 
         // Show the in-app indicator whenever a call is detected but we haven't started recording.
         detectedCallApp = appName
@@ -5671,7 +5737,17 @@ final class AppState {
                     } else {
                         self.detectedCallApp = nil
                         if self.isRecording {
-                            Logger.general.info("Call ended signal received — keeping recording alive (manually started)")
+                            // TASK-072: don't silently keep rolling — the call
+                            // this recording was covering looks over. Same
+                            // remote-audio guard as the detector path: title
+                            // probes go blind on minimized tabs, but a live
+                            // call keeps producing system audio.
+                            if let lastActive = self.lastActiveSystemAudioAt,
+                               Date().timeIntervalSince(lastActive) < 45 {
+                                Logger.general.info("Call 'ended' (manual recording) but remote audio active recently — ignoring")
+                            } else {
+                                self.beginDepartureConfirmation()
+                            }
                         }
                     }
                 }
@@ -5765,9 +5841,10 @@ final class AppState {
         maxOutputTokens: Int = 2048,
         think: Bool = true,
         jsonMode: Bool = false,
-        schemaJSON: String? = nil   // Ollama grammar-constrained output
+        schemaJSON: String? = nil,  // Ollama grammar-constrained output
                                     // (TASK-046); the Claude path ignores it
                                     // — cloud callers keep prompt-only JSON.
+        activityLabel: String? = nil // Activities-list label (TASK-073)
     ) async -> ((String, String) async throws -> String)? {
         let backend = await resolveAIBackend(refreshOllama: true)
 
@@ -5792,7 +5869,8 @@ final class AppState {
                     maxOutputTokens: maxOutputTokens,
                     think: think,
                     jsonMode: jsonMode,
-                    schemaJSON: schemaJSON
+                    schemaJSON: schemaJSON,
+                    activityLabel: activityLabel
                 )
             }
         case .claude(let claudeModel):

@@ -180,6 +180,9 @@ struct SidebarView: View {
             // a long folder list never hides the active-recording indicator.
             if appState.isRecording, let meeting = appState.activeMeeting {
                 SidebarRecordingBar(meeting: meeting, capture: appState.audioCaptureService)
+                if let prompt = appState.departurePrompt {
+                    DepartureConfirmBar(prompt: prompt)
+                }
                 Divider()
             } else if let callApp = appState.detectedCallApp {
                 DetectedCallBanner(appName: callApp)
@@ -531,5 +534,43 @@ private struct CaptureLevelMeter: View {
             .frame(width: 24, height: 4)
         }
         .help(warn ? "Microphone not capturing — recovery is running" : "Live capture level")
+    }
+}
+
+// MARK: - Departure Confirmation (TASK-072)
+
+/// "Looks like you left the call" bar under the recording indicator.
+/// Auto-ends after the grace period unless the user objects — the
+/// back-to-back-meetings fix: forgetting to stop meeting A no longer
+/// merges it into meeting B.
+private struct DepartureConfirmBar: View {
+    let prompt: AppState.DeparturePrompt
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Looks like the call ended — still recording \u{201C}\(prompt.meetingTitle)\u{201D}. Ends automatically in ~\(Int(AppState.departureGraceSeconds / 60)) min.")
+                .font(.caption)
+                .foregroundStyle(Color.appTextPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("End Now") {
+                    appState.dismissDeparturePrompt(stillHere: false)
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button("I'm Still Here") {
+                    appState.dismissDeparturePrompt(stillHere: true)
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12))
     }
 }

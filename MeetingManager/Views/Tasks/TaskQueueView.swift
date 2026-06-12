@@ -60,6 +60,57 @@ struct TaskQueueView: View {
                 .padding(.top, 28)
                 .padding(.bottom, 20)
 
+                // MARK: Live AI activity (TASK-073) — everything currently
+                // generating, queue-managed or not: chat answers, daily
+                // briefs, prep enrichment, embeddings, cloud calls. Entries
+                // remove themselves on completion, so a long chat session
+                // leaves nothing behind here.
+                let live = AIActivityCenter.shared.activities
+                let waiting = appState.interactiveAIBroker.waitingLabels
+                if !live.isEmpty || !waiting.isEmpty {
+                    activitySectionLabel("Live", color: Color.appAccentLight)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 8)
+                    VStack(spacing: 4) {
+                        ForEach(live) { activity in
+                            HStack(spacing: 10) {
+                                ProgressView().controlSize(.small)
+                                Text(activity.label)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.appTextPrimary)
+                                Spacer()
+                                Text(activity.startedAt, style: .relative)
+                                    .font(.system(size: 11).monospacedDigit())
+                                    .foregroundStyle(Color.appTextTertiary)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.appSurfaceSecondary.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        ForEach(waiting, id: \.self) { label in
+                            HStack(spacing: 10) {
+                                Image(systemName: "clock")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appTextTertiary)
+                                Text(label)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.appTextSecondary)
+                                Spacer()
+                                Text("waiting for the model")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.appTextTertiary)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.appSurfaceSecondary.opacity(0.3))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
+                }
+
                 // MARK: Running / Pending
                 if !running.isEmpty || !pending.isEmpty {
                     activitySectionLabel("In Progress", color: Color.appAccentLight)

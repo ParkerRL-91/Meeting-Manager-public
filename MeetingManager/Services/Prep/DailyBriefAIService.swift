@@ -92,7 +92,8 @@ struct DailyBriefAIService {
                 userPrompt: prepared.userPrompt,
                 model: ollamaModel,
                 think: true,
-                jsonMode: false
+                jsonMode: false,
+                activityLabel: "Creating daily brief"
             )
             return Result(text: Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations), model: ollamaModel)
         }

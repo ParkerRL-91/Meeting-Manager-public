@@ -270,6 +270,9 @@ final class TaskQueueManager {
             return item
         } catch {
             Logger.general.error("TaskQueue: failed to enqueue: \(error.localizedDescription)")
+            // TASK-073: enqueue failures were invisible (os_log only) — the
+            // 2026-06-11 embed-backfill vanishing act proved that's a trap.
+            AppFileLogger.shared.log("TaskQueue: ENQUEUE FAILED for \(type.rawValue)/\(meetingId): \(error.localizedDescription)")
             return nil
         }
     }
