@@ -108,6 +108,28 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     }
     // MARK: - Mic input format guard (TASK-029)
 
+    func testEngineFormatAgreementCatchesThePhantomDefault() {
+        // The 2026-06-12 incident: engine reported its factory 44.1k/1ch
+        // while the HAL said 48k — every start() died with -10868. This
+        // rule is what now blocks the start until the views agree.
+        XCTAssertFalse(MicrophoneCapture.engineFormatAgreesWithHAL(
+            auRate: 44_100, auChannels: 1, halRate: 48_000, halChannels: 1))
+        XCTAssertTrue(MicrophoneCapture.engineFormatAgreesWithHAL(
+            auRate: 48_000, auChannels: 1, halRate: 48_000, halChannels: 2),
+            "the AU presenting a mono view of a stereo device is normal")
+        XCTAssertFalse(MicrophoneCapture.engineFormatAgreesWithHAL(
+            auRate: 48_000, auChannels: 2, halRate: 48_000, halChannels: 1),
+            "more AU channels than the device has is a stale binding")
+        XCTAssertFalse(MicrophoneCapture.engineFormatAgreesWithHAL(
+            auRate: 0, auChannels: 0, halRate: 48_000, halChannels: 1))
+        XCTAssertFalse(MicrophoneCapture.engineFormatAgreesWithHAL(
+            auRate: 48_000, auChannels: 1, halRate: 0, halChannels: 0),
+            "an unreadable HAL is a failure, not a pass")
+        XCTAssertTrue(MicrophoneCapture.engineFormatAgreesWithHAL(
+            auRate: 44_100, auChannels: 1, halRate: 44_100.4, halChannels: 1),
+            "sub-Hz clock drift tolerated")
+    }
+
     func testUsableInputFormatRejectsMidTransitionFormats() {
         // A Bluetooth device mid A2DP→HFP switch reports 0 Hz / 0 channels;
         // tapping that raises an ObjC exception that no Swift catch sees.

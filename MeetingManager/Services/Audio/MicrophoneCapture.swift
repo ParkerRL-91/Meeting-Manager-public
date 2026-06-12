@@ -181,6 +181,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         configureInputDevice()
 
         try validateInputFormat(stage: "initial")
+        try syncEngineFormatToDevice(stage: "initial")
         installTapOnInputNode()
 
         // Try to start the engine. If it fails (e.g., device error -10868),
@@ -202,8 +203,11 @@ final class MicrophoneCapture: @unchecked Sendable {
                 onDiagnostic?("DIAG:mic_device fallback to default deviceID=\(defaultID) name=\(getDeviceName(defaultID))")
             }
 
-            // Re-check format after reset
+            // Re-check format after reset — including AU-vs-HAL agreement;
+            // a reused engine keeps the PREVIOUS device's format cached,
+            // which is exactly what sank the 2026-06-12 recording.
             try validateInputFormat(stage: "fallback")
+            try syncEngineFormatToDevice(stage: "fallback")
 
             // Re-install tap and retry
             installTapOnInputNode()
@@ -224,8 +228,20 @@ final class MicrophoneCapture: @unchecked Sendable {
                 engine.stop()
                 engine = AVAudioEngine()
                 Thread.sleep(forTimeInterval: 0.3)
-                configureInputDevice()
+                // Last resort uses the SYSTEM DEFAULT, not the preferred
+                // device — the old code re-selected the preferred device
+                // here, so when that device was the contested one (a call
+                // app holding the webcam mic), rung 3 just repeated rung 1.
+                let lastResortID = getDefaultInputDeviceID()
+                if lastResortID != kAudioObjectUnknown {
+                    activeDeviceID = lastResortID
+                    _ = setInputDeviceByID(lastResortID)
+                    onDiagnostic?("DIAG:mic_device last resort: system default deviceID=\(lastResortID) name=\(getDeviceName(lastResortID))")
+                } else {
+                    configureInputDevice()
+                }
                 try validateInputFormat(stage: "rebuilt")
+                try syncEngineFormatToDevice(stage: "rebuilt")
                 installTapOnInputNode()
                 do {
                     try engine.start()
@@ -500,6 +516,87 @@ final class MicrophoneCapture: @unchecked Sendable {
         return true
     }
 
+    /// The device's ACTUAL nominal sample rate, straight from the HAL.
+    /// The engine's inputNode can report a stale or factory-default format
+    /// (44100/1ch) after a device swap — comparing against this is what
+    /// catches it before start() fails with -10868.
+    private func getDeviceNominalSampleRate(_ deviceID: AudioDeviceID) -> Double {
+        var rate: Double = 0
+        var size = UInt32(MemoryLayout<Double>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
+        return rate
+    }
+
+    /// Total input channels the HAL reports for the device.
+    private func getDeviceInputChannelCount(_ deviceID: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
+              size > 0 else { return 0 }
+        let bufferList = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
+                                                          alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { bufferList.deallocate() }
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufferList) == noErr else { return 0 }
+        let list = bufferList.assumingMemoryBound(to: AudioBufferList.self)
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        return buffers.reduce(0) { $0 + $1.mNumberChannels }
+    }
+
+    /// Does the engine's view of the input agree with the HAL's truth?
+    /// Rate must match (the -10868 driver); the AU presenting FEWER
+    /// channels than the device is normal (mono view of a stereo device).
+    static func engineFormatAgreesWithHAL(auRate: Double, auChannels: UInt32,
+                                          halRate: Double, halChannels: UInt32) -> Bool {
+        guard auRate > 0, auChannels > 0, halRate > 0, halChannels > 0 else { return false }
+        return abs(auRate - halRate) < 1.0 && auChannels <= halChannels
+    }
+
+    /// Post-device-swap format sync (the 2026-06-12 -10868 incident): after
+    /// kAudioOutputUnitProperty_CurrentDevice changes, the inputNode keeps
+    /// its previous (or factory 44.1k/1ch) stream format. Starting the
+    /// engine in that state ALWAYS fails -10868, and a tap installed with
+    /// `format: nil` inherits the phantom. This loop compares the engine's
+    /// view against the HAL's nominal format and rebinds (fresh engine +
+    /// re-set device) until they agree or attempts run out.
+    private func syncEngineFormatToDevice(stage: String, attempts: Int = 5) throws {
+        for attempt in 1...attempts {
+            let au = engine.inputNode.inputFormat(forBus: 0)
+            let halRate = getDeviceNominalSampleRate(activeDeviceID)
+            let halChannels = getDeviceInputChannelCount(activeDeviceID)
+            if Self.engineFormatAgreesWithHAL(auRate: au.sampleRate, auChannels: au.channelCount,
+                                              halRate: halRate, halChannels: halChannels) {
+                if attempt > 1 {
+                    onDiagnostic?("DIAG:mic_format \(stage): resync succeeded on attempt \(attempt) (AU=\(au.sampleRate)/\(au.channelCount)ch HAL=\(halRate)/\(halChannels)ch)")
+                }
+                return
+            }
+            onDiagnostic?("DIAG:mic_format \(stage): AU=\(au.sampleRate)Hz/\(au.channelCount)ch HAL=\(halRate)Hz/\(halChannels)ch MISMATCH — resync \(attempt)/\(attempts)")
+            Logger.audio.warning("Mic format mismatch at \(stage): AU \(au.sampleRate)/\(au.channelCount) vs HAL \(halRate)/\(halChannels) — rebinding")
+            guard attempt < attempts else { break }
+            // Rebind: a fresh engine re-derives formats when its inputNode
+            // is touched AFTER the device assignment; the sleep lets
+            // coreaudiod finish whatever reconfiguration raced us.
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            engine = AVAudioEngine()
+            Thread.sleep(forTimeInterval: 0.12 * Double(attempt))
+            _ = setInputDeviceByID(activeDeviceID)
+        }
+        throw AudioCaptureError.captureSetupFailed(
+            "Microphone format never settled: the audio engine reports a different format than the device. "
+            + "Another app may be reconfiguring the microphone — recovery will retry shortly."
+        )
+    }
+
     /// Get the system default input device ID.
     private func getDefaultInputDeviceID() -> AudioDeviceID {
         var deviceID: AudioDeviceID = kAudioObjectUnknown
@@ -599,9 +696,12 @@ final class MicrophoneCapture: @unchecked Sendable {
             if activeDeviceID != kAudioObjectUnknown && activeDeviceID != 0 {
                 _ = setInputDeviceByID(activeDeviceID)
             }
-            installTapOnInputNode()
+            // Same AU-vs-HAL agreement gate as start(): a config change is
+            // exactly when the engine's cached format goes stale.
             var restartError: Error? = nil
             do {
+                try syncEngineFormatToDevice(stage: "configChange")
+                installTapOnInputNode()
                 try engine.start()
             } catch {
                 restartError = error
@@ -617,6 +717,19 @@ final class MicrophoneCapture: @unchecked Sendable {
                 )
                 onDeviceDisconnected?(disconnectError)
             } else {
+                // The format resync may have rebuilt the engine — re-point
+                // the configuration-change observer at the live instance,
+                // or the NEXT device change goes unnoticed.
+                if let observer = configChangeObserver {
+                    NotificationCenter.default.removeObserver(observer)
+                }
+                configChangeObserver = NotificationCenter.default.addObserver(
+                    forName: .AVAudioEngineConfigurationChange,
+                    object: engine,
+                    queue: nil
+                ) { [weak self] _ in
+                    self?.handleEngineConfigurationChange()
+                }
                 onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(activeDeviceID)))")
             }
         }
