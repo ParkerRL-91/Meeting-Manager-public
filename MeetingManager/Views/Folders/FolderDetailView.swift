@@ -12,6 +12,7 @@ struct FolderDetailView: View {
     @State private var thread: SeriesThread?
     @State private var conflicts: [FactLinkDescriptor] = []
     @State private var roiStats: MeetingROI.FolderStats?
+    @State private var showHandover = false
 
     private func loadROI() async {
         let ids = folder.meetings.map(\.id)
@@ -75,6 +76,17 @@ struct FolderDetailView: View {
                     }
 
                     Spacer()
+
+                    // TASK-062: generate/view the series handover brief.
+                    Button {
+                        showHandover = true
+                    } label: {
+                        Label("Handover", systemImage: "doc.badge.arrow.up")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.appAccent)
+                    .help("A brief for someone taking over this series — history, state, decisions, open items, who's who")
                 }
 
                 // TASK-065: does this series produce decisions, and do you get
@@ -222,6 +234,157 @@ struct FolderDetailView: View {
             }
         }
         .background(Color.appBackground)
+        .sheet(isPresented: $showHandover) {
+            HandoverDocSheet(folder: folder)
+                .environment(appState)
+        }
+    }
+}
+
+// MARK: - Handover doc sheet (TASK-062)
+
+private struct HandoverDocSheet: View {
+    let folder: MeetingFolder
+    @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var doc: GeneratedDoc?
+    @State private var isGenerating = false
+    @State private var statusText: String?
+    @State private var requestId: UUID?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.badge.arrow.up")
+                    .foregroundStyle(Color.appAccent)
+                Text("Handover — \(folder.displayName)")
+                    .font(.headline)
+                    .foregroundStyle(Color.appTextPrimary)
+                    .lineLimit(1)
+                Spacer()
+                if isGenerating {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(statusText ?? "Writing…")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
+                } else {
+                    Button(doc == nil ? "Generate" : "Regenerate") {
+                        Task { await generate() }
+                    }
+                    .font(.caption)
+                }
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .font(.caption)
+            }
+            .padding(14)
+            Divider()
+
+            if let doc {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        MarkdownRenderer(text: doc.content, baseFontSize: 13)
+                        Text("Generated \(doc.createdAt.formatted(date: .abbreviated, time: .shortened)). Built only from this series' recorded threads, facts, and summaries.")
+                            .font(.caption2)
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                }
+            } else if !isGenerating {
+                Spacer()
+                VStack(spacing: 8) {
+                    Text("No handover brief yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.appTextSecondary)
+                    Text("Generate one from this series' running thread, extracted facts, and recent summaries.")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+                Spacer()
+            } else {
+                Spacer()
+            }
+        }
+        .frame(width: 620, height: 540)
+        .task {
+            doc = try? await GeneratedDocRepository(database: AppDatabase.shared)
+                .latest(kind: "handover", anchorKey: folder.key)
+        }
+        .onDisappear {
+            if let id = requestId { appState.interactiveAIBroker.cancel(id: id) }
+        }
+    }
+
+    private func generate() async {
+        isGenerating = true
+        statusText = "Gathering the record…"
+
+        let ids = folder.meetings.map(\.id)
+        let thread = try? await SeriesThreadRepository(database: AppDatabase.shared).thread(folderKey: folder.key)
+        let facts = ((try? await EntityFactRepository(database: AppDatabase.shared)
+            .factsForMeetings(ids)) ?? [])
+            .filter { $0.entityType == "series" }
+        var summaries: [(title: String, date: Date, excerpt: String)] = []
+        for meeting in folder.meetings.sorted(by: { $0.effectiveDate > $1.effectiveDate }).prefix(3) {
+            if let s = try? await appState.summaryRepository.latestSummary(meetingId: meeting.id),
+               !s.summaryText.isEmpty {
+                summaries.append((meeting.title, meeting.effectiveDate, s.summaryText))
+            }
+        }
+        guard thread != nil || !facts.isEmpty || !summaries.isEmpty else {
+            statusText = nil
+            isGenerating = false
+            doc = GeneratedDoc(id: nil, kind: "handover", anchorKey: folder.key,
+                               content: "Nothing recorded for this series yet — record and summarize a session first.",
+                               createdAt: Date())
+            return
+        }
+        guard let textGen = await appState.makeTextGenerator(
+            maxOutputTokens: 1800,
+            activityLabel: "Writing handover brief"
+        ) else {
+            statusText = nil
+            isGenerating = false
+            return
+        }
+
+        let userPrompt = HandoverDoc.userPrompt(
+            folderName: folder.displayName,
+            participants: folder.participants,
+            threadContent: thread?.content,
+            facts: facts,
+            summaries: summaries)
+        let folderKey = folder.key
+        let folderName = folder.displayName
+        let id = UUID()
+        requestId = id
+        statusText = appState.interactiveAIBroker.isBlocked
+            ? "Waiting for the model…" : "Writing…"
+        appState.interactiveAIBroker.submit(id: id, label: "Handover: \(folderName)") {
+            let content = (try? await textGen(HandoverDoc.systemPrompt, userPrompt)) ?? ""
+            await MainActor.run {
+                defer { isGenerating = false; statusText = nil }
+                guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                let newDoc = GeneratedDoc(id: nil, kind: "handover", anchorKey: folderKey,
+                                          content: content, createdAt: Date())
+                doc = newDoc
+                Task {
+                    try? await GeneratedDocRepository(database: AppDatabase.shared).save(newDoc)
+                    if appState.settings.kbWriteBack,
+                       let root = KnowledgeBaseService.shared.rootURL {
+                        let dir = root.appendingPathComponent("Handovers", isDirectory: true)
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        let url = dir.appendingPathComponent("\(folderName) Handover.md")
+                        try? content.write(to: url, atomically: true, encoding: .utf8)
+                        await KnowledgeBaseService.shared.reindexFile(url: url)
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -282,6 +282,29 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Handover docs (TASK-062)
+
+    func testHandoverPromptAssemblesOnlyProvidedRecord() {
+        let prompt = HandoverDoc.userPrompt(
+            folderName: "Acme Weekly",
+            participants: ["Parker", "Erica"],
+            threadContent: "Where things stand: pilot scoped.",
+            facts: [
+                EntityFact(id: 1, entityType: "series", entityKey: "acme weekly", meetingId: "m1",
+                           kind: "decision", text: "Go with vendor B", owner: "Erica",
+                           dueDate: nil, extractedAt: Date(timeIntervalSince1970: 1_700_000_000)),
+            ],
+            summaries: [("Acme Weekly", Date(timeIntervalSince1970: 1_700_000_000), "Summary text here")])
+        XCTAssertTrue(prompt.contains("Series: Acme Weekly"))
+        XCTAssertTrue(prompt.contains("Running thread:"))
+        XCTAssertTrue(prompt.contains("[decision]") && prompt.contains("(Erica): Go with vendor B"))
+        XCTAssertTrue(prompt.contains("Summary text here"))
+
+        let empty = HandoverDoc.userPrompt(folderName: "X", participants: [],
+                                           threadContent: nil, facts: [], summaries: [])
+        XCTAssertEqual(empty, "Series: X", "absent record parts add no empty sections")
+    }
+
     // MARK: - Meeting intent & ROI (TASK-065)
 
     func testIntentScoreParsingRejectsUnknownScores() {
