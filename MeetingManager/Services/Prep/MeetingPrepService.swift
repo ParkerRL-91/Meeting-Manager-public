@@ -17,8 +17,103 @@ struct MeetingPrepBrief: Sendable {
     /// Used to render the "Last time:" line on prep cards.
     let previousSession: PreviousSessionInfo?
 
+    /// TASK-058: what happened involving the 1:1 counterpart since the
+    /// last session with them. nil for multi-person meetings.
+    let sinceLastMet: SinceLastMet?
+
     /// True when there is any prior context worth showing to the user.
-    var hasContext: Bool { !relatedMeetings.isEmpty || !openActionItems.isEmpty || previousSession != nil }
+    var hasContext: Bool { !relatedMeetings.isEmpty || !openActionItems.isEmpty || previousSession != nil || sinceLastMet != nil }
+}
+
+/// "Since you last met" diff for a 1:1 counterpart (TASK-058). Pure data;
+/// built by SinceLastMetBuilder from rows the app already stores — no LLM.
+struct SinceLastMet: Sendable {
+    struct Item: Sendable, Identifiable {
+        let id = UUID()
+        let kind: String       // "commitment" | "decision" | "question" | "status" | "mention" | "actionItem"
+        let text: String
+        let meetingId: String?
+        let meetingTitle: String?
+    }
+    let personName: String
+    let lastMetDate: Date
+    let items: [Item]
+}
+
+enum SinceLastMetBuilder {
+    /// The single OTHER participant of a 1:1-shaped meeting (≤3 names,
+    /// exactly one that isn't the local user). nil = not a 1:1.
+    static func counterpart(participants: [String], selfName: String) -> String? {
+        guard participants.count <= 3 else { return nil }
+        let selfKey = VocativeMiningService.canonicalKey(for: selfName)
+        let others = participants
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && VocativeMiningService.canonicalKey(for: $0) != selfKey }
+        return others.count == 1 ? others.first : nil
+    }
+
+    /// Most recent past meeting (before `upcoming`) that includes the person.
+    static func lastMeeting(with personKey: String, before date: Date,
+                            excluding meetingId: String, in all: [Meeting]) -> Meeting? {
+        all.filter { m in
+            m.id != meetingId
+            && m.effectiveDate < date
+            && m.participantList.contains { VocativeMiningService.canonicalKey(for: $0) == personKey }
+        }
+        .max(by: { $0.effectiveDate < $1.effectiveDate })
+    }
+
+    /// Assemble the diff: dossier facts in the window, open action items
+    /// assigned to them, and mentions in meetings they did NOT attend.
+    @MainActor
+    static func build(person: String, upcomingMeeting: Meeting,
+                      allMeetings: [Meeting], database: AppDatabase,
+                      transcriptRepo: TranscriptRepository,
+                      actionItemRepo: ActionItemRepository) async -> SinceLastMet? {
+        let personKey = VocativeMiningService.canonicalKey(for: person)
+        guard !personKey.isEmpty,
+              let last = lastMeeting(with: personKey, before: Date(),
+                                     excluding: upcomingMeeting.id, in: allMeetings) else { return nil }
+        let windowStart = last.effectiveDate
+        let titles = Dictionary(uniqueKeysWithValues: allMeetings.map { ($0.id, $0.title) })
+        var items: [SinceLastMet.Item] = []
+
+        // Dossier facts extracted after the last session (their commitments,
+        // decisions in rooms they were part of, owner-attributed items).
+        let facts = (try? await EntityFactRepository(database: database)
+            .facts(entityType: "person", entityKey: personKey, limit: 30)) ?? []
+        for f in facts where f.extractedAt > windowStart && f.meetingId != last.id {
+            items.append(.init(kind: f.kind, text: f.text,
+                               meetingId: f.meetingId, meetingTitle: titles[f.meetingId]))
+            if items.count >= 4 { break }
+        }
+
+        // Open action items assigned to them.
+        let open = (try? await actionItemRepo.openItemsForParticipants([person])) ?? []
+        for item in open.prefix(2) {
+            items.append(.init(kind: "actionItem", text: item.title,
+                               meetingId: item.meetingId, meetingTitle: titles[item.meetingId]))
+        }
+
+        // Mentions in meetings they did NOT attend (first name, window-bound).
+        let firstName = person.components(separatedBy: " ").first ?? person
+        if firstName.count > 2,
+           let hits = try? await transcriptRepo.searchAllMeetings(query: firstName, limit: 6) {
+            let attendedIds = Set(allMeetings.filter { m in
+                m.participantList.contains { VocativeMiningService.canonicalKey(for: $0) == personKey }
+            }.map(\.id))
+            for hit in hits where !attendedIds.contains(hit.meetingId) {
+                guard let m = allMeetings.first(where: { $0.id == hit.meetingId }),
+                      m.effectiveDate > windowStart else { continue }
+                items.append(.init(kind: "mention", text: hit.snippet,
+                                   meetingId: hit.meetingId, meetingTitle: titles[hit.meetingId]))
+                if items.count >= 7 { break }
+            }
+        }
+
+        guard !items.isEmpty else { return nil }
+        return SinceLastMet(personName: person, lastMetDate: windowStart, items: Array(items.prefix(6)))
+    }
 }
 
 /// Lightweight snapshot of a prior session in the same series, suitable for UI.
@@ -79,6 +174,22 @@ final class MeetingPrepService {
 
         Logger.general.debug("PrepBrief for \(meeting.title): \(participants.count) participants, \(openItems.count) open items, \(relatedMeetings.count) related meetings")
 
+        // TASK-058: 1:1 counterpart diff — what happened involving them
+        // since the last session. Pure queries, no LLM.
+        var sinceLastMet: SinceLastMet?
+        if let counterpart = SinceLastMetBuilder.counterpart(
+            participants: participants,
+            selfName: ProcessInfo.processInfo.fullUserName
+        ) {
+            let all = (try? await MeetingRepository(database: AppDatabase.shared).allActiveMeetings()) ?? []
+            sinceLastMet = await SinceLastMetBuilder.build(
+                person: counterpart, upcomingMeeting: meeting,
+                allMeetings: all, database: AppDatabase.shared,
+                transcriptRepo: TranscriptRepository(database: AppDatabase.shared),
+                actionItemRepo: actionItemRepo
+            )
+        }
+
         return MeetingPrepBrief(
             meetingId: meeting.id,
             participants: participants,
@@ -86,7 +197,8 @@ final class MeetingPrepService {
             relatedMeetings: relatedMeetings,
             lastSummaryExcerpt: lastExcerpt,
             meetLink: meeting.meetLink,
-            previousSession: previousSession
+            previousSession: previousSession,
+            sinceLastMet: sinceLastMet
         )
     }
 

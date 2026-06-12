@@ -279,6 +279,40 @@ struct MeetingPrepCardView: View {
                 }
             }
 
+            // TASK-058: 1:1 counterpart diff — what happened involving them
+            // since the last session.
+            if let diff = brief.sinceLastMet {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle.badge.clock")
+                            .font(.caption2)
+                            .foregroundStyle(Color.appAccent)
+                        Text("Since you last met \(diff.personName) (\(diff.lastMetDate, format: .dateTime.month(.abbreviated).day()))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                    ForEach(diff.items) { item in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(sinceKindLabel(item.kind))
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.appAccent)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.appAccentSubtle)
+                                .clipShape(Capsule())
+                            Text(item.text)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextTertiary)
+                                .lineLimit(2)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.appSurfaceSecondary.opacity(0.35))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
             // Full participant list
             if brief.participants.count > 3 {
                 VStack(alignment: .leading, spacing: 6) {
@@ -434,3 +468,14 @@ struct MeetingPrepCardView: View {
 
 /// Simple flow layout that wraps items to the next line.
 // FlowLayout defined in ParticipantBar.swift (module-level)
+
+private func sinceKindLabel(_ kind: String) -> String {
+    switch kind {
+    case "actionItem": return "OWES"
+    case "mention":    return "MENTIONED"
+    case "commitment": return "COMMITTED"
+    case "decision":   return "DECIDED"
+    case "question":   return "OPEN Q"
+    default:           return kind.uppercased()
+    }
+}

@@ -37,7 +37,8 @@ final class KnowledgeRetrievalTests: XCTestCase {
             relatedMeetings: [],
             lastSummaryExcerpt: nil,
             meetLink: nil,
-            previousSession: nil
+            previousSession: nil,
+            sinceLastMet: nil
         )
     }
 

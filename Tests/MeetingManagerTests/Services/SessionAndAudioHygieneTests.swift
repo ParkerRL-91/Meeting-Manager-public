@@ -282,4 +282,26 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Since you last met (TASK-058)
+
+    func testCounterpartDetectsOneOnOne() {
+        XCTAssertEqual(SinceLastMetBuilder.counterpart(
+            participants: ["Parker Reid", "Erica Smith"], selfName: "Parker Reid"), "Erica Smith")
+        XCTAssertNil(SinceLastMetBuilder.counterpart(
+            participants: ["Parker Reid", "Erica Smith", "Dave Brown"], selfName: "Parker Reid"),
+            "Two others = not a 1:1")
+        XCTAssertNil(SinceLastMetBuilder.counterpart(
+            participants: ["A","B","C","D"], selfName: "Parker"), "Big meetings skip")
+    }
+
+    func testLastMeetingPicksMostRecentPastWithPerson() {
+        let key = VocativeMiningService.canonicalKey(for: "Erica Smith")
+        let old = SampleData.makeMeeting(id: "old", title: "1:1", startDate: Date(timeIntervalSinceNow: -14*86400), status: .complete)
+        let recent = SampleData.makeMeeting(id: "recent", title: "1:1", startDate: Date(timeIntervalSinceNow: -7*86400), status: .complete)
+        var withPerson = [old, recent]
+        for i in withPerson.indices { withPerson[i].participants = "Parker Reid, Erica Smith" }
+        let without = SampleData.makeMeeting(id: "other", title: "Standup", startDate: Date(timeIntervalSinceNow: -2*86400), status: .complete)
+        let result = SinceLastMetBuilder.lastMeeting(with: key, before: Date(), excluding: "upcoming", in: withPerson + [without])
+        XCTAssertEqual(result?.id, "recent")
+    }
 }
