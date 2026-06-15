@@ -21,6 +21,10 @@ You only do this once.
 
 ---
 
+## What's New in v4.6.2
+
+**The app now finds a working microphone instead of giving up on a busy one.** When a recording starts, Meeting Manager tries every available input device in turn — your selected mic, the system default, the built-in microphone, then any others — until one actually starts capturing, and it logs which device it landed on. Earlier versions retried a single device (a problem when your selected mic and system default were the same Bluetooth headset that the meeting app was holding), which could leave a recording with no microphone audio. Bluetooth earbuds in listening mode can't provide microphone input, so the app falls back to the built-in mic automatically — your call audio quality is never downgraded, and your voice is still captured. This release also carries the earlier fix that re-checks the audio format against the hardware before starting, preventing a class of -10868 capture failures after a device switch.
+
 ## What's New in v4.6.1
 
 **Capture a slide while it's on screen, find it months later.** A camera button on the recording bar grabs the call window, extracts its text on-device with Apple's Vision OCR, and stores it searchably — nothing is photographed permanently and nothing leaves your Mac. Captured slides appear as a timestamped strip on the meeting's transcript tab and in ⌘K search, so "find the meeting where they showed the pricing slide" works by keyword or by meaning. Capture is strictly manual — one click per slide, no automatic screen monitoring — and the button fails closed: when it can't confidently identify the call window, it captures nothing rather than the wrong thing. Slide text is deliberately kept out of chat answers, where OCR fragments would crowd out transcript content on local models.
