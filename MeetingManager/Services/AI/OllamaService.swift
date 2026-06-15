@@ -482,76 +482,84 @@ final class OllamaService {
         // degrade hybrid-thinking models and can trigger endless repetition
         // loops mid-reasoning. 0.3 (with Ollama's default top_p/top_k) stays
         // for non-thinking models, where low-variance summarization is right.
-        let sendsThink = selectedModel.contains("qwen3") && think
-
+        let isQwen3 = selectedModel.contains("qwen3")
         let schemaFormat = schemaJSON.flatMap { OllamaJSONValue.schema(fromJSON: $0) }
         let format: OllamaJSONValue? = schemaFormat ?? (jsonMode || schemaJSON != nil ? .string("json") : nil)
 
-        let body = OllamaChatRequest(
-            model: selectedModel,
-            messages: [
-                OllamaMessage(role: "system", content: finalSystem),
-                OllamaMessage(role: "user", content: finalUser),
-            ],
-            // Only send the `think` field to thinking-capable models (qwen3,
-            // deepseek-r1). Instruct models (qwen2.5, llama) don't support it and
-            // can error/stall on it — omit so they just generate directly.
-            think: selectedModel.contains("qwen3") ? think : nil,
-            format: format,
-            options: OllamaOptions(
-                temperature: sendsThink ? 0.6 : 0.3,
-                num_predict: numPredict,
-                num_ctx: numCtx > 0 ? numCtx : nil,
-                top_p: sendsThink ? 0.95 : nil,
-                top_k: sendsThink ? 20 : nil
+        // One send+decode for a given think flag. Retries up to 3× on
+        // transient failures — network errors and 5xx. /api/chat is
+        // idempotent (the model is the only mutable resource and we pass no
+        // state-changing options), so re-sending is safe; 4xx/decode errors
+        // are terminal. Match the ClaudeService backoff: 2^attempt + rand.
+        func performChat(useThink: Bool) async throws -> OllamaChatResponse {
+            let sendsThink = isQwen3 && useThink
+            let body = OllamaChatRequest(
+                model: selectedModel,
+                messages: [
+                    OllamaMessage(role: "system", content: finalSystem),
+                    OllamaMessage(role: "user", content: finalUser),
+                ],
+                // Only send `think` to thinking-capable models (qwen3,
+                // deepseek-r1). Instruct models don't support it and can
+                // error/stall — omit so they just generate directly.
+                think: isQwen3 ? useThink : nil,
+                format: format,
+                options: OllamaOptions(
+                    temperature: sendsThink ? 0.6 : 0.3,
+                    num_predict: numPredict,
+                    num_ctx: numCtx > 0 ? numCtx : nil,
+                    top_p: sendsThink ? 0.95 : nil,
+                    top_k: sendsThink ? 20 : nil
+                )
             )
-        )
-        request.httpBody = try JSONEncoder().encode(body)
+            request.httpBody = try JSONEncoder().encode(body)
+            return try await Self.withRetry(maxAttempts: 3) {
+                let data: Data
+                let response: URLResponse
+                do {
+                    (data, response) = try await URLSession.shared.data(for: request)
+                } catch {
+                    Logger.ai.error("Ollama network error: \(error.localizedDescription)")
+                    if (error as? URLError)?.code == .timedOut {
+                        throw OllamaServiceError.timedOut
+                    }
+                    throw OllamaServiceError.networkError(error)
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw OllamaServiceError.networkError(URLError(.badServerResponse))
+                }
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    throw OllamaServiceError.httpError(statusCode: httpResponse.statusCode)
+                }
+                do {
+                    return try JSONDecoder().decode(OllamaChatResponse.self, from: data)
+                } catch {
+                    Logger.ai.error("Ollama decode error: \(error.localizedDescription)")
+                    throw OllamaServiceError.decodingError(error)
+                }
+            }
+        }
 
         Logger.ai.info("Sending request to Ollama (model: \(selectedModel), ctx: \(numCtx > 0 ? "\(numCtx)" : "default"), maxOut: \(numPredict))")
-
-        // Retry up to 3 times on transient failures — network errors and 5xx.
-        // /api/chat is idempotent at the protocol level (the model is the only
-        // mutable resource, and we don't pass any state-changing options here),
-        // so re-sending the same prompt is safe. 4xx and decode errors are
-        // terminal — they won't get better with another attempt. Match the
-        // ClaudeService backoff: 2^attempt + random(0...1)s.
         beginWork(label: activityLabel ?? "Generating (\(selectedModel))")
         defer { endWork() }
-        let decoded: OllamaChatResponse = try await Self.withRetry(maxAttempts: 3) {
-            let data: Data
-            let response: URLResponse
-            do {
-                (data, response) = try await URLSession.shared.data(for: request)
-            } catch {
-                Logger.ai.error("Ollama network error: \(error.localizedDescription)")
-                if (error as? URLError)?.code == .timedOut {
-                    throw OllamaServiceError.timedOut
-                }
-                throw OllamaServiceError.networkError(error)
-            }
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw OllamaServiceError.networkError(URLError(.badServerResponse))
-            }
-            guard (200...299).contains(httpResponse.statusCode) else {
-                throw OllamaServiceError.httpError(statusCode: httpResponse.statusCode)
-            }
+        var decoded = try await performChat(useThink: think)
+        var text = Self.stripThinkBlock(decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines))
 
-            do {
-                return try JSONDecoder().decode(OllamaChatResponse.self, from: data)
-            } catch {
-                Logger.ai.error("Ollama decode error: \(error.localizedDescription)")
-                throw OllamaServiceError.decodingError(error)
-            }
+        // Empty content under think:true means Qwen3 spent its whole budget
+        // reasoning and never emitted the answer — the reasoning sits in the
+        // separate `thinking` field with NO </think> tag to strip. The old
+        // code surfaced that raw reasoning as the answer, which is what put
+        // chain-of-thought in the daily brief. Instead retry once with
+        // think:false so the answer lands directly in `content` (any inline
+        // tag is stripped); never present the reasoning field as output.
+        if text.isEmpty && think && isQwen3 {
+            Logger.ai.warning("Ollama: empty content under think:true — retrying think:false to avoid reasoning leak")
+            decoded = try await performChat(useThink: false)
+            text = Self.stripThinkBlock(decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
-        var text = decoded.message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty, let thinking = decoded.message.thinking?.trimmingCharacters(in: .whitespacesAndNewlines), !thinking.isEmpty {
-            Logger.ai.warning("Ollama: content was empty but thinking had \(thinking.count) chars — using thinking as fallback")
-            text = thinking
-        }
-        text = Self.stripThinkBlock(text)
         guard !text.isEmpty else {
             throw OllamaServiceError.emptyResponse
         }
@@ -597,8 +605,19 @@ final class OllamaService {
     /// dangling preamble that ends in a stray "</think>" with no opening tag —
     /// ahead of the real answer. Keep only what follows the last "</think>".
     static func stripThinkBlock(_ s: String) -> String {
-        guard let closeRange = s.range(of: "</think>", options: .backwards) else { return s }
-        return String(s[closeRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Closed block (possibly inline): keep everything after the LAST
+        // </think> — that's the real answer.
+        if let closeRange = s.range(of: "</think>", options: .backwards) {
+            return String(s[closeRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Opening <think> with no close: the model was cut off mid-reasoning
+        // and never reached the answer. Drop from the tag onward (what
+        // precedes it, usually nothing, is the only non-reasoning text) so
+        // truncated chain-of-thought can't leak into the output.
+        if let openRange = s.range(of: "<think>") {
+            return String(s[..<openRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return s
     }
 
     // MARK: - Streaming Generation (for task queue / long meetings)
@@ -743,22 +762,19 @@ final class OllamaService {
             throw error
         }
 
-        // Prefer content; fall back to thinking only if the model put its
-        // whole answer in the reasoning field (rare edge case).
-        var trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty && !fullThinking.isEmpty {
-            Logger.ai.warning("Ollama: content was empty but thinking had \(fullThinking.count) chars — using thinking as fallback")
-            trimmed = fullThinking.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard !trimmed.isEmpty else {
+        // Strip any inline <think>…</think> from content. Do NOT fall back to
+        // the separate `thinking` field when content is empty: that field is
+        // pure reasoning with no </think> tag, so surfacing it leaked raw
+        // chain-of-thought into summaries/briefs. Empty content here means the
+        // generation truncated before the answer — fail cleanly so the task
+        // queue retries, rather than emit reasoning as the result.
+        let cleaned = Self.stripThinkBlock(fullText.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !cleaned.isEmpty else {
+            if !fullThinking.isEmpty {
+                Logger.ai.warning("Ollama stream: content empty, only reasoning present (\(fullThinking.count) chars) — failing rather than leaking it")
+            }
             throw OllamaServiceError.emptyResponse
         }
-
-        // Strip any <think>…</think> block emitted inline (the non-streaming
-        // generate() path does this too). Without it, Qwen3's reasoning — which
-        // restates the prompt while it works — leaked verbatim into summaries.
-        let cleaned = Self.stripThinkBlock(trimmed)
-        guard !cleaned.isEmpty else { throw OllamaServiceError.emptyResponse }
 
         Logger.ai.info("Streaming response complete (\(cleaned.count) chars, model: \(selectedModel))")
         return cleaned

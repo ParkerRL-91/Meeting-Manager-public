@@ -341,6 +341,32 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+    // MARK: - Think-block stripping (daily brief reasoning leak)
+
+    func testStripThinkBlockHandlesClosedInlineAndTruncated() {
+        // Closed inline block: keep only what follows the last </think>.
+        XCTAssertEqual(
+            OllamaService.stripThinkBlock("<think>let me reason about this</think>\n## Summary\nReal brief."),
+            "## Summary\nReal brief.")
+        // Multiple/nested closes: the LAST close wins.
+        XCTAssertEqual(
+            OllamaService.stripThinkBlock("<think>a</think>mid<think>b</think>answer"),
+            "answer")
+        // Truncated reasoning — opened <think>, never closed (ran out of
+        // budget mid-thought). Must NOT leak the reasoning.
+        XCTAssertEqual(
+            OllamaService.stripThinkBlock("<think>the user wants a brief so I should list the meetings and"),
+            "")
+        // Truncated reasoning after a little real preamble: drop from <think>.
+        XCTAssertEqual(
+            OllamaService.stripThinkBlock("## Summary\n<think>now I will pad with reasoning that got cut"),
+            "## Summary")
+        // No think markers at all: returned unchanged.
+        XCTAssertEqual(
+            OllamaService.stripThinkBlock("## Summary\nPlain brief with no reasoning."),
+            "## Summary\nPlain brief with no reasoning.")
+    }
+
     // MARK: - Slide capture (TASK-069)
 
     func testSlideWindowPickFailsClosed() {
