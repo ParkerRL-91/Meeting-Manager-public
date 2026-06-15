@@ -108,28 +108,41 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     }
     // MARK: - Mic input format guard (TASK-029)
 
-    func testMicCandidateCycleAlwaysReachesBuiltInWhenDefaultIsDead() {
+    func testMicCycleBuiltInIsLastAndAlwaysReachable() {
         // 2026-06-15 incident: the Bluetooth IEM (121) was BOTH preferred
-        // and system default. The built-in mic (81) must still be in the
-        // cycle so a dead default doesn't strand capture.
+        // and system default. The built-in mic (81) must be in the cycle so
+        // a dead default doesn't strand capture — but LAST, because in
+        // clamshell the lid-closed built-in captures silence.
         let all: [AudioDeviceID] = [121, 81, 86]   // IEM, built-in, AnkerWork
         let order = MicrophoneCapture.orderedCandidates(
-            preferred: 121, systemDefault: 121, builtIn: 81, all: all)
+            inUseByOthers: [], preferred: 121, systemDefault: 121, builtIn: 81, all: all)
         XCTAssertEqual(order.first, 121, "honor the user's preferred device first")
-        XCTAssertTrue(order.contains(81), "the built-in mic is always reachable")
-        XCTAssertEqual(order.count, Set(order).count, "no device tried twice")
+        XCTAssertEqual(order.last, 81, "built-in is tried LAST (dead in clamshell)")
         XCTAssertEqual(Set(order), Set(all), "every input device is eventually tried")
-        // The built-in comes before the unrelated AnkerWork (anchor priority).
-        XCTAssertLessThan(order.firstIndex(of: 81)!, order.firstIndex(of: 86)!)
+        XCTAssertEqual(order.count, Set(order).count, "no device tried twice")
     }
 
-    func testMicCandidateCycleSkipsUnknownAndOfflineDevices() {
+    func testMicCyclePrioritizesTheMeetingsInUseMic() {
+        // The user's real setup: lid closed, on an external mic the call
+        // app is already using. That device must be tried FIRST, and the
+        // dead built-in must not preempt it.
+        let all: [AudioDeviceID] = [81, 86, 121]   // built-in, AnkerWork(in call), IEM(default)
+        let order = MicrophoneCapture.orderedCandidates(
+            inUseByOthers: [86],       // the call is on the AnkerWork
+            preferred: 121,            // stale preferred = the IEM
+            systemDefault: 121,
+            builtIn: 81, all: all)
+        XCTAssertEqual(order.first, 86, "the mic the meeting is using wins")
+        XCTAssertEqual(order.last, 81, "built-in still last")
+        XCTAssertEqual(Set(order), Set(all))
+    }
+
+    func testMicCycleSkipsUnknownAndOfflineDevices() {
         let all: [AudioDeviceID] = [81]   // only the built-in is actually present
         let order = MicrophoneCapture.orderedCandidates(
-            preferred: 999,            // a saved-but-unplugged USB mic
-            systemDefault: kAudioObjectUnknown,
-            builtIn: 81, all: all)
-        XCTAssertEqual(order, [81], "absent/unknown devices are dropped; built-in remains")
+            inUseByOthers: [], preferred: 999,   // a saved-but-unplugged USB mic
+            systemDefault: kAudioObjectUnknown, builtIn: 81, all: all)
+        XCTAssertEqual(order, [81], "absent/unknown devices are dropped; built-in remains as the only option")
     }
 
     func testEngineFormatAgreementCatchesThePhantomDefault() {

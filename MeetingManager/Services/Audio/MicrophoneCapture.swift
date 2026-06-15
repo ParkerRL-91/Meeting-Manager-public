@@ -558,30 +558,60 @@ final class MicrophoneCapture: @unchecked Sendable {
         return ids.filter { getDeviceInputChannelCount($0) > 0 }
     }
 
-    /// The built-in (Apple) microphone — the reliability anchor. It is
-    /// almost always startable and capturing from it does NOT force a
-    /// Bluetooth headset out of high-quality A2DP output into headset mode.
+    /// The built-in (Apple) microphone. NOT a reliability anchor — when the
+    /// laptop lid is closed (clamshell, the user's normal setup) the
+    /// built-in mic is disabled or delivers pure silence, so it must be
+    /// tried LAST, never ahead of a real external mic.
     private func builtInInputDeviceID() -> AudioDeviceID? {
         allInputDeviceIDs().first { deviceTransportType($0) == kAudioDeviceTransportTypeBuiltIn }
     }
 
-    /// Ordered, deduped device list the cycle will try, most-preferred
-    /// first. Pure so the ordering is unit-tested: the property that the
-    /// built-in mic is ALWAYS reachable even when preferred == default ==
-    /// a dead device is what fixes the 2026-06-15 hang.
-    static func orderedCandidates(preferred: AudioDeviceID?,
+    /// True when ANOTHER process (the meeting/call app) is actively running
+    /// IO on this device — i.e. this is the microphone the meeting is using.
+    /// Same property the call detector keys on. Read BEFORE we open
+    /// anything, so it reflects other apps, not us.
+    private func isDeviceRunningSomewhere(_ deviceID: AudioDeviceID) -> Bool {
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &running) == noErr else { return false }
+        return running != 0
+    }
+
+    /// Input devices the meeting app currently has open — "the microphone
+    /// assigned to the meeting", in enumeration order.
+    private func inUseInputDeviceIDs() -> [AudioDeviceID] {
+        allInputDeviceIDs().filter { isDeviceRunningSomewhere($0) }
+    }
+
+    /// Ordered, deduped device list the cycle will try. The meeting's
+    /// in-use mic goes FIRST (the user's explicit ask: capture from the
+    /// device the call is using), and the built-in mic goes LAST (dead in
+    /// clamshell). Pure → unit-tested.
+    static func orderedCandidates(inUseByOthers: [AudioDeviceID],
+                                  preferred: AudioDeviceID?,
                                   systemDefault: AudioDeviceID?,
                                   builtIn: AudioDeviceID?,
                                   all: [AudioDeviceID]) -> [AudioDeviceID] {
         var ordered: [AudioDeviceID] = []
         func add(_ id: AudioDeviceID?) {
             guard let id, id != kAudioObjectUnknown, all.contains(id), !ordered.contains(id) else { return }
+            if id == builtIn { return }   // built-in deferred to the very end
             ordered.append(id)
         }
-        add(preferred)       // 1. what the user explicitly chose
-        add(systemDefault)   // 2. what macOS thinks is active
-        add(builtIn)         // 3. reliability anchor — reached even if 1 == 2 and dead
-        for id in all { add(id) }   // 4. everything else
+        for id in inUseByOthers { add(id) }   // 1. the mic the MEETING is using
+        add(preferred)                        // 2. user's explicit choice
+        add(systemDefault)                    // 3. macOS default
+        for id in all { add(id) }             // 4. other external inputs
+        // 5. built-in LAST — only when no external mic could start, because
+        //    lid-closed it captures silence and must not preempt a real mic.
+        if let builtIn, builtIn != kAudioObjectUnknown, all.contains(builtIn) {
+            ordered.append(builtIn)
+        }
         return ordered
     }
 
@@ -591,7 +621,12 @@ final class MicrophoneCapture: @unchecked Sendable {
     private func startByCyclingDevices() throws {
         let all = allInputDeviceIDs()
         let preferredID = preferredInputDeviceID.map { getDeviceIDForUID($0) }
+        let inUse = inUseInputDeviceIDs()
+        if !inUse.isEmpty {
+            onDiagnostic?("DIAG:mic_cycle meeting is using: \(inUse.map { getDeviceName($0) }.joined(separator: ", "))")
+        }
         let candidates = Self.orderedCandidates(
+            inUseByOthers: inUse,
             preferred: preferredID,
             systemDefault: getDefaultInputDeviceID(),
             builtIn: builtInInputDeviceID(),
