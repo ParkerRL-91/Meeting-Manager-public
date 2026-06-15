@@ -21,6 +21,10 @@ You only do this once.
 
 ---
 
+## What's New in v4.6.3
+
+**Meeting Manager now captures from the microphone your meeting is actually using.** When a recording starts, it looks at which input device the meeting app already has open and tries that one first — so if you're on an external mic or headset, that's what gets recorded. The built-in laptop microphone is now tried last rather than as a fallback anchor, because with the lid closed (clamshell mode) the built-in mic is disabled and would capture silence. Combined with the device-cycling from v4.6.2, the app reliably finds a working mic across closed-lid, external-mic, and Bluetooth setups instead of getting stuck on an unusable default.
+
 ## What's New in v4.6.2
 
 **The app now finds a working microphone instead of giving up on a busy one.** When a recording starts, Meeting Manager tries every available input device in turn — your selected mic, the system default, the built-in microphone, then any others — until one actually starts capturing, and it logs which device it landed on. Earlier versions retried a single device (a problem when your selected mic and system default were the same Bluetooth headset that the meeting app was holding), which could leave a recording with no microphone audio. Bluetooth earbuds in listening mode can't provide microphone input, so the app falls back to the built-in mic automatically — your call audio quality is never downgraded, and your voice is still captured. This release also carries the earlier fix that re-checks the audio format against the hardware before starting, preventing a class of -10868 capture failures after a device switch.
