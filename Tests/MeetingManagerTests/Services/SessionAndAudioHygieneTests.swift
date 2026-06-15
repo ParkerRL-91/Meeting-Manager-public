@@ -348,26 +348,60 @@ final class SessionAndAudioHygieneTests: XCTestCase {
             SlideCapture.WindowCandidate(index: i, bundleID: bundle, title: title, area: area)
         }
         let isCall: (String) -> Bool = { $0 == "us.zoom.xos" }
-        let isBrowser: (String) -> Bool = { $0 == "com.google.Chrome" }
+        let titleCall = SlideCapture.titleLooksLikeCall
+        let isPWA = SlideCapture.isPWABundle
 
-        // Call-app window wins by area, beating a call-titled browser tab.
+        // Tier 1: a native call-app window wins by area, beating a
+        // call-titled browser tab.
         XCTAssertEqual(SlideCapture.pickWindow([
             cand(0, "us.zoom.xos", "Zoom Meeting", 800_000),
             cand(1, "us.zoom.xos", "Zoom toolbar", 50_000 * 41),  // bigger area wins
             cand(2, "com.google.Chrome", "Weekly Sync - Google Meet", 900_000),
-        ], isCallApp: isCall, isBrowser: isBrowser), 1)
+        ], isCallApp: isCall, titleLooksLikeCall: titleCall, isPWA: isPWA), 1)
 
-        // No call app: browser needs a call-ish TITLE.
+        // Tier 2: no native call app — ANY window whose title looks like a
+        // call wins, regardless of bundle (browser tab here).
         XCTAssertEqual(SlideCapture.pickWindow([
             cand(0, "com.google.Chrome", "Hacker News", 900_000),
             cand(1, "com.google.Chrome", "Standup - Google Meet", 600_000),
-        ], isCallApp: isCall, isBrowser: isBrowser), 1)
+        ], isCallApp: isCall, titleLooksLikeCall: titleCall, isPWA: isPWA), 1)
+
+        // The reported bug: the Google Meet PWA (Chrome app bundle, NOT the
+        // bare browser) with a "Meet" title must be found via the title tier.
+        XCTAssertEqual(SlideCapture.pickWindow([
+            cand(0, "com.apple.finder", "Desktop", 2_000_000),
+            cand(1, "com.google.Chrome.app.kjgfgldnnfoeklkmfkjf", "Standup - Google Meet", 700_000),
+        ], isCallApp: isCall, titleLooksLikeCall: titleCall, isPWA: isPWA), 1)
+
+        // Tier 3: a Meet PWA whose title is just the meeting name (no "Meet")
+        // is still found when it's the ONLY PWA window open.
+        XCTAssertEqual(SlideCapture.pickWindow([
+            cand(0, "com.apple.finder", "Desktop", 2_000_000),
+            cand(1, "com.google.Chrome.app.kjgfgldnnfoeklkmfkjf", "Q3 Planning", 700_000),
+        ], isCallApp: isCall, titleLooksLikeCall: titleCall, isPWA: isPWA), 1)
+
+        // But two PWAs with no call title → refuse to guess (fail closed).
+        XCTAssertNil(SlideCapture.pickWindow([
+            cand(0, "com.google.Chrome.app.notionnotionnotion", "Roadmap", 900_000),
+            cand(1, "com.google.Chrome.app.kjgfgldnnfoeklkmfkjf", "Q3 Planning", 700_000),
+        ], isCallApp: isCall, titleLooksLikeCall: titleCall, isPWA: isPWA))
 
         // Nothing qualifies → nil, never a desktop fallback.
         XCTAssertNil(SlideCapture.pickWindow([
             cand(0, "com.apple.finder", "Desktop", 2_000_000),
             cand(1, "com.google.Chrome", "Hacker News", 900_000),
-        ], isCallApp: isCall, isBrowser: isBrowser))
+        ], isCallApp: isCall, titleLooksLikeCall: titleCall, isPWA: isPWA))
+    }
+
+    func testSlideTitleMatchingCoversMeetVariantsNotFalsePositives() {
+        XCTAssertTrue(SlideCapture.titleLooksLikeCall("Standup - Google Meet"))
+        XCTAssertTrue(SlideCapture.titleLooksLikeCall("Meet - abc-defg-hij"))
+        XCTAssertTrue(SlideCapture.titleLooksLikeCall("meet.google.com/abc-defg"))
+        XCTAssertTrue(SlideCapture.titleLooksLikeCall("Parker is presenting"))
+        XCTAssertFalse(SlideCapture.titleLooksLikeCall("Q3 meeting notes.md"),
+                       "the bare word 'meeting' must not match a document")
+        XCTAssertTrue(SlideCapture.isPWABundle("com.google.Chrome.app.kjgfgldn"))
+        XCTAssertFalse(SlideCapture.isPWABundle("com.google.Chrome"))
     }
 
     func testSlideDedupeNormalization() {

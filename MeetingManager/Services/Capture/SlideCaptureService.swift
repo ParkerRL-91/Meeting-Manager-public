@@ -61,9 +61,6 @@ enum SlideCapture {
     /// not slides.
     static let minTextLength = 40
 
-    /// Title keywords that mark a browser window as the call window.
-    static let browserCallTitleKeywords = ["meet", "zoom", "teams", "webex", "huddle", "whereby", "gather"]
-
     enum Outcome: Equatable {
         case captured(chars: Int)
         case duplicate
@@ -89,21 +86,53 @@ enum SlideCapture {
         let area: Double
     }
 
-    /// Pure window choice — fail closed. A call-app window wins by
-    /// largest area; otherwise a browser window whose title looks like a
-    /// call. Anything else (Finder, the user's editor, this app) returns
-    /// nil and the capture aborts: we never fall back to display capture.
+    /// Title substrings that identify a meeting window, regardless of which
+    /// app owns it. Reuses the call detector's canonical keyword list and
+    /// adds the patterns the Google Meet PWA / standalone app uses for its
+    /// window title ("Meet - <name>", various dashes). Lowercased compare.
+    static let callTitleKeywords: [String] = (
+        CallAppRegistry.browserMeetingKeywords.map { $0.lowercased() }
+        + ["google meet", "meet.google.com", "meet - ", "meet – ", "meet — ", "is presenting"]
+    )
+
+    static func titleLooksLikeCall(_ title: String) -> Bool {
+        let t = title.lowercased()
+        return callTitleKeywords.contains { t.contains($0) }
+    }
+
+    /// Bundle-ID prefixes for browser-installed web apps (PWAs). The Google
+    /// Meet "app" is a Chrome PWA — `com.google.Chrome.app.<hash>` — so it
+    /// is neither a registered native call app nor the bare browser bundle.
+    static let pwaBundlePrefixes = [
+        "com.google.Chrome.app.", "com.microsoft.edgemac.app.",
+        "com.brave.Browser.app.", "com.google.Chrome.canary.app.",
+    ]
+
+    static func isPWABundle(_ bundleID: String) -> Bool {
+        pwaBundlePrefixes.contains { bundleID.hasPrefix($0) }
+    }
+
+    /// Pure window choice — fail closed. Tiers, each picking the largest
+    /// matching window: (1) a registered native call app (Zoom, Teams);
+    /// (2) ANY window whose TITLE looks like a meeting — this is the robust
+    /// path that catches the Google Meet PWA, browser tabs, and Electron
+    /// apps alike; (3) a browser-installed web-app (PWA) window, since the
+    /// Meet app sometimes titles its window just the meeting name. Anything
+    /// else (Finder, the user's editor, this app) returns nil and the
+    /// capture aborts — we never fall back to whole-display capture.
     static func pickWindow(_ candidates: [WindowCandidate],
                            isCallApp: (String) -> Bool,
-                           isBrowser: (String) -> Bool) -> Int? {
-        let callWindows = candidates.filter { isCallApp($0.bundleID) }
-        if let best = callWindows.max(by: { $0.area < $1.area }) { return best.index }
-        let browserCalls = candidates.filter { c in
-            guard isBrowser(c.bundleID) else { return false }
-            let t = c.title.lowercased()
-            return browserCallTitleKeywords.contains { t.contains($0) }
-        }
-        return browserCalls.max(by: { $0.area < $1.area })?.index
+                           titleLooksLikeCall: (String) -> Bool,
+                           isPWA: (String) -> Bool) -> Int? {
+        let byArea: (WindowCandidate, WindowCandidate) -> Bool = { $0.area < $1.area }
+        if let best = candidates.filter({ isCallApp($0.bundleID) }).max(by: byArea) { return best.index }
+        if let best = candidates.filter({ titleLooksLikeCall($0.title) }).max(by: byArea) { return best.index }
+        // Tier 3 only when UNAMBIGUOUS: a single browser-installed web-app
+        // window with a real title. Grabbing "the only PWA" is safe; if the
+        // user has several PWAs open we refuse rather than guess (fail closed).
+        let pwaWindows = candidates.filter { isPWA($0.bundleID) && !$0.title.isEmpty }
+        if pwaWindows.count == 1 { return pwaWindows[0].index }
+        return nil
     }
 
     /// Dedupe key: case/whitespace-insensitive text equality.
@@ -113,11 +142,6 @@ enum SlideCapture {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
     }
-
-    static let knownBrowserBundleIDs: Set<String> = [
-        "com.google.Chrome", "com.apple.Safari", "org.mozilla.firefox",
-        "com.microsoft.edgemac", "company.thebrowser.Browser", "com.brave.Browser",
-    ]
 
     /// One full manual capture: resolve window → screenshot → OCR →
     /// gate → dedupe → save. Runs the pixel work off the main actor.
@@ -141,8 +165,18 @@ enum SlideCapture {
         }
         guard let pick = pickWindow(candidates,
                                     isCallApp: { CallAppRegistry.isCallApp(bundleIdentifier: $0) },
-                                    isBrowser: { knownBrowserBundleIDs.contains($0) }),
+                                    titleLooksLikeCall: { titleLooksLikeCall($0) },
+                                    isPWA: { isPWABundle($0) }),
               pick < windows.count else {
+            // Log what we DID see so a "can't find the window" report is
+            // diagnosable instead of opaque.
+            let seen = candidates
+                .sorted { $0.area > $1.area }
+                .prefix(8)
+                .map { "\($0.bundleID)|'\($0.title)'" }
+                .joined(separator: "  ")
+            Logger(subsystem: "com.meetingmanager.app", category: "SlideCapture")
+                .error("SlideCapture noWindow — \(candidates.count) candidate(s): \(seen, privacy: .public)")
             return .noWindow
         }
         let window = windows[pick]
