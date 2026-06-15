@@ -21,6 +21,10 @@ You only do this once.
 
 ---
 
+## What's New in v4.6.4
+
+**Slide capture now finds your meeting window even when you use the Google Meet app.** The capture button identifies the meeting window by its title (for example "Google Meet") rather than only by a hardcoded list of apps, so the Google Meet desktop app — which runs as a Chrome web app and was previously unrecognized — is now captured correctly, alongside meetings in a browser tab, Zoom, and Teams. If the window genuinely can't be identified, the app still declines to capture rather than grabbing your whole desktop, and it now records what it saw so the case can be diagnosed.
+
 ## What's New in v4.6.3
 
 **Meeting Manager now captures from the microphone your meeting is actually using.** When a recording starts, it looks at which input device the meeting app already has open and tries that one first — so if you're on an external mic or headset, that's what gets recorded. The built-in laptop microphone is now tried last rather than as a fallback anchor, because with the lid closed (clamshell mode) the built-in mic is disabled and would capture silence. Combined with the device-cycling from v4.6.2, the app reliably finds a working mic across closed-lid, external-mic, and Bluetooth setups instead of getting stuck on an unusable default.
