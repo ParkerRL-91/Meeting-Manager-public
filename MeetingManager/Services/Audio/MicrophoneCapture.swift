@@ -109,6 +109,10 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Lock-guarded snapshot of `activeDeviceID` for callers on other actors
     /// (e.g. `AudioCaptureService.switchMicrophone` doing a no-op identity compare).
     var currentDeviceID: AudioDeviceID { lock.withLock { activeDeviceID } }
+    /// The device the engine is ACTUALLY on — after device cycling this can
+    /// differ from the device the caller requested, so recovery logs the
+    /// truth instead of the target it asked for.
+    var currentDeviceName: String { getDeviceName(currentDeviceID) }
 
     /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
@@ -177,86 +181,14 @@ final class MicrophoneCapture: @unchecked Sendable {
             break
         }
 
-        // Try to set the preferred device; fall back to system default on failure.
-        configureInputDevice()
-
-        try validateInputFormat(stage: "initial")
-        try syncEngineFormatToDevice(stage: "initial")
-        installTapOnInputNode()
-
-        // Try to start the engine. If it fails (e.g., device error -10868),
-        // reset the engine, fall back to the system default device, and retry once.
-        do {
-            try engine.start()
-        } catch {
-            onDiagnostic?("DIAG:mic_engine FIRST START FAILED: \(error.localizedDescription), attempting fallback")
-            Logger.audio.error("AVAudioEngine start failed: \(error.localizedDescription) — attempting fallback to default device")
-
-            engine.inputNode.removeTap(onBus: 0)
-            engine.reset()
-
-            // Fall back to system default device
-            let defaultID = getDefaultInputDeviceID()
-            if defaultID != kAudioObjectUnknown && defaultID != activeDeviceID {
-                activeDeviceID = defaultID
-                _ = setInputDeviceByID(defaultID)
-                onDiagnostic?("DIAG:mic_device fallback to default deviceID=\(defaultID) name=\(getDeviceName(defaultID))")
-            }
-
-            // Re-check format after reset — including AU-vs-HAL agreement;
-            // a reused engine keeps the PREVIOUS device's format cached,
-            // which is exactly what sank the 2026-06-12 recording.
-            try validateInputFormat(stage: "fallback")
-            try syncEngineFormatToDevice(stage: "fallback")
-
-            // Re-install tap and retry
-            installTapOnInputNode()
-
-            do {
-                try engine.start()
-                onDiagnostic?("DIAG:mic_engine fallback START succeeded with default device")
-                Logger.audio.info("AVAudioEngine fallback start succeeded with default device")
-            } catch {
-                // Last-resort recovery for -10868 and friends: discard this
-                // engine instance entirely and try once more with a fresh one.
-                // Same logic as stop() — works around the HAL not releasing
-                // the input format when the engine is reused. Sleeps briefly
-                // to give CoreAudio time to settle.
-                onDiagnostic?("DIAG:mic_engine FALLBACK START FAILED: \(error.localizedDescription) — recreating engine")
-                Logger.audio.error("AVAudioEngine fallback failed: \(error.localizedDescription) — rebuilding engine")
-                engine.inputNode.removeTap(onBus: 0)
-                engine.stop()
-                engine = AVAudioEngine()
-                Thread.sleep(forTimeInterval: 0.3)
-                // Last resort uses the SYSTEM DEFAULT, not the preferred
-                // device — the old code re-selected the preferred device
-                // here, so when that device was the contested one (a call
-                // app holding the webcam mic), rung 3 just repeated rung 1.
-                let lastResortID = getDefaultInputDeviceID()
-                if lastResortID != kAudioObjectUnknown {
-                    activeDeviceID = lastResortID
-                    _ = setInputDeviceByID(lastResortID)
-                    onDiagnostic?("DIAG:mic_device last resort: system default deviceID=\(lastResortID) name=\(getDeviceName(lastResortID))")
-                } else {
-                    configureInputDevice()
-                }
-                try validateInputFormat(stage: "rebuilt")
-                try syncEngineFormatToDevice(stage: "rebuilt")
-                installTapOnInputNode()
-                do {
-                    try engine.start()
-                    onDiagnostic?("DIAG:mic_engine rebuilt engine START succeeded")
-                    Logger.audio.info("AVAudioEngine succeeded after engine rebuild")
-                } catch {
-                    onDiagnostic?("DIAG:mic_engine REBUILT ENGINE ALSO FAILED: \(error.localizedDescription)")
-                    Logger.audio.error("AVAudioEngine even after rebuild failed: \(error.localizedDescription)")
-                    throw AudioCaptureError.captureSetupFailed(
-                        "Could not start audio capture: \(error.localizedDescription). "
-                        + "Please check that your microphone is connected and enabled in System Settings > Sound > Input."
-                    )
-                }
-            }
-        }
+        // Acquire the mic by CYCLING through every input device until one
+        // actually starts. The old preferred → default → "last resort =
+        // default" ladder collapsed to a single device whenever the
+        // preferred device WAS the system default (2026-06-15 incident: a
+        // Bluetooth IEM was both, so all three rungs retried the same dead
+        // input and the working built-in mic was never tried). The cycle
+        // always reaches the built-in mic.
+        try startByCyclingDevices()
 
         lock.lock()
         isRunning = true
@@ -595,6 +527,117 @@ final class MicrophoneCapture: @unchecked Sendable {
             "Microphone format never settled: the audio engine reports a different format than the device. "
             + "Another app may be reconfiguring the microphone — recovery will retry shortly."
         )
+    }
+
+    /// Core Audio transport type for a device (USB, Bluetooth, Built-in…).
+    private func deviceTransportType(_ deviceID: AudioDeviceID) -> UInt32 {
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport)
+        return transport
+    }
+
+    /// Every input-capable device on the system (has ≥1 input channel).
+    private func allInputDeviceIDs() -> [AudioDeviceID] {
+        var size: UInt32 = 0
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr,
+              size > 0 else { return [] }
+        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else { return [] }
+        return ids.filter { getDeviceInputChannelCount($0) > 0 }
+    }
+
+    /// The built-in (Apple) microphone — the reliability anchor. It is
+    /// almost always startable and capturing from it does NOT force a
+    /// Bluetooth headset out of high-quality A2DP output into headset mode.
+    private func builtInInputDeviceID() -> AudioDeviceID? {
+        allInputDeviceIDs().first { deviceTransportType($0) == kAudioDeviceTransportTypeBuiltIn }
+    }
+
+    /// Ordered, deduped device list the cycle will try, most-preferred
+    /// first. Pure so the ordering is unit-tested: the property that the
+    /// built-in mic is ALWAYS reachable even when preferred == default ==
+    /// a dead device is what fixes the 2026-06-15 hang.
+    static func orderedCandidates(preferred: AudioDeviceID?,
+                                  systemDefault: AudioDeviceID?,
+                                  builtIn: AudioDeviceID?,
+                                  all: [AudioDeviceID]) -> [AudioDeviceID] {
+        var ordered: [AudioDeviceID] = []
+        func add(_ id: AudioDeviceID?) {
+            guard let id, id != kAudioObjectUnknown, all.contains(id), !ordered.contains(id) else { return }
+            ordered.append(id)
+        }
+        add(preferred)       // 1. what the user explicitly chose
+        add(systemDefault)   // 2. what macOS thinks is active
+        add(builtIn)         // 3. reliability anchor — reached even if 1 == 2 and dead
+        for id in all { add(id) }   // 4. everything else
+        return ordered
+    }
+
+    /// Try each candidate input device with a fresh engine until one
+    /// starts. First success commits `activeDeviceID`; total failure
+    /// throws (→ system-only recovery, which re-enters this cycle).
+    private func startByCyclingDevices() throws {
+        let all = allInputDeviceIDs()
+        let preferredID = preferredInputDeviceID.map { getDeviceIDForUID($0) }
+        let candidates = Self.orderedCandidates(
+            preferred: preferredID,
+            systemDefault: getDefaultInputDeviceID(),
+            builtIn: builtInInputDeviceID(),
+            all: all)
+
+        guard !candidates.isEmpty else {
+            onDiagnostic?("DIAG:mic_cycle no input devices found")
+            throw AudioCaptureError.captureSetupFailed(
+                "No microphone input devices were found. Check System Settings > Sound > Input.")
+        }
+        onDiagnostic?("DIAG:mic_cycle \(candidates.count) candidate device(s): \(candidates.map { getDeviceName($0) }.joined(separator: ", "))")
+
+        var lastError: Error?
+        for (idx, deviceID) in candidates.enumerated() {
+            // Fresh engine per candidate — a failed start leaves the IO
+            // unit half-wired, and reusing it re-triggers -10868.
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            engine = AVAudioEngine()
+            if idx > 0 { Thread.sleep(forTimeInterval: 0.15) }
+
+            activeDeviceID = deviceID
+            let label = "\(getDeviceName(deviceID)) (\(idx + 1)/\(candidates.count))"
+            guard setInputDeviceByID(deviceID) else {
+                onDiagnostic?("DIAG:mic_cycle SET-DEVICE failed for \(label) — next")
+                continue
+            }
+            do {
+                try validateInputFormat(stage: "cycle \(idx + 1)")
+                try syncEngineFormatToDevice(stage: "cycle \(idx + 1)")
+                installTapOnInputNode()
+                try engine.start()
+                onDiagnostic?("DIAG:mic_cycle SUCCESS on \(label)")
+                Logger.audio.info("Mic acquired on '\(self.getDeviceName(deviceID))' (candidate \(idx + 1) of \(candidates.count))")
+                return
+            } catch {
+                lastError = error
+                onDiagnostic?("DIAG:mic_cycle \(label) FAILED: \(error.localizedDescription) — trying next device")
+                Logger.audio.error("Mic cycle \(idx + 1) on '\(self.getDeviceName(deviceID))' failed: \(error.localizedDescription)")
+            }
+        }
+
+        throw AudioCaptureError.captureSetupFailed(
+            "Tried \(candidates.count) microphone(s); none could start. "
+            + "Last error: \(lastError?.localizedDescription ?? "unknown"). "
+            + "If you're on Bluetooth earbuds, the meeting app may be holding the mic.")
     }
 
     /// Get the system default input device ID.

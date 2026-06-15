@@ -872,7 +872,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         await switchMicrophone(toUID: target.uniqueID)
         guard isMicRecovering else { return true }   // a concurrent attempt may have ended it
         if micCapture.engine.isRunning {
-            endMicRecovery(resumedOn: target.localizedName)
+            // Device cycling may have landed on a different (working) mic
+            // than the target we asked for — report the device we're
+            // actually capturing on.
+            endMicRecovery(resumedOn: micCapture.currentDeviceName)
             return true
         }
         return false
