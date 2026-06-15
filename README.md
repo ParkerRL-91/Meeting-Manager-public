@@ -21,6 +21,10 @@ You only do this once.
 
 ---
 
+## What's New in v4.6.5
+
+**The daily brief no longer shows the model's reasoning in its output.** When the on-device model occasionally spent its entire budget thinking and produced no final answer, the app fell back to displaying the raw reasoning text — so the brief showed the model "thinking out loud" instead of the briefing. The app now retries to get a clean answer, never surfaces the reasoning field as output, and strips any cut-off reasoning, so the brief always reads as a finished briefing. The same hardening applies to summaries and other on-device generations.
+
 ## What's New in v4.6.4
 
 **Slide capture now finds your meeting window even when you use the Google Meet app.** The capture button identifies the meeting window by its title (for example "Google Meet") rather than only by a hardcoded list of apps, so the Google Meet desktop app — which runs as a Chrome web app and was previously unrecognized — is now captured correctly, alongside meetings in a browser tab, Zoom, and Teams. If the window genuinely can't be identified, the app still declines to capture rather than grabbing your whole desktop, and it now records what it saw so the case can be diagnosed.
