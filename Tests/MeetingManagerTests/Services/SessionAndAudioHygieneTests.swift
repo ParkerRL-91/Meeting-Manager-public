@@ -318,20 +318,26 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     func testGovernorHardBlocks() {
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(recording: true)), .deferFor(minutes: 15))
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(battery: true)), .deferFor(minutes: 30))
-        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(interactive: true)), .deferFor(minutes: 2))
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(battery: true, allowBattery: true)), .run,
                        "Battery opt-in unblocks")
+        // Recording + battery are the ONLY hard blocks — they survive starvation.
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(recording: true, deferredHours: 25)), .deferFor(minutes: 15))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(battery: true, deferredHours: 25)), .deferFor(minutes: 30))
     }
 
     func testGovernorSoftPreferencesAndStarvationCap() {
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(nextMeeting: 10)), .deferFor(minutes: 15))
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(thermal: .serious)), .deferFor(minutes: 20))
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(interactive: true)), .deferFor(minutes: 2),
+                       "interactivePending defers when not starved")
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs()), .run)
         // Starved work overrides soft preferences but not an imminent meeting.
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(nextMeeting: 10, deferredHours: 25)), .run)
         XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(nextMeeting: 3, deferredHours: 25)), .deferFor(minutes: 10))
-        // Hard blocks survive starvation.
-        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(recording: true, deferredHours: 25)), .deferFor(minutes: 15))
+        // TASK-092: a latched broker (interactivePending) must NOT defer past
+        // the starvation cap — that's the regression this guards.
+        XCTAssertEqual(BackgroundWorkPolicy.decision(inputs(interactive: true, deferredHours: 25)), .run,
+                       "Starvation cap overrides interactivePending")
     }
 
     func testBackgroundClassificationIsPerItem() {
@@ -341,6 +347,32 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertTrue(TaskQueueItem.isBackgroundItem(type: .weeklyDigest, meetingId: "__weekly_digest__"))
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
+
+    // MARK: - Interactive-AI broker self-heal (TASK-092)
+
+    func testBrokerExpiresStaleEntryWithoutAnExternalDrainEdge() {
+        let ollama = OllamaService()
+        let broker = InteractiveAIBroker(ollama: ollama)
+        var timedOut: [UUID] = []
+        broker.onTimeout = { timedOut.append($0) }
+
+        // A busy backend forces submit() down the queue path (the inline path
+        // only runs when nothing is in flight and the queue is empty).
+        ollama.beginWork(label: "blocker")
+        let id = UUID()
+        XCTAssertTrue(broker.submit(id: id, label: "Daily brief") {})
+        XCTAssertEqual(broker.pendingCount, 1)
+
+        // No chokepoint-release or queue-idle edge ever fires here. The entry
+        // must still expire once it has waited past the ceiling — the latch
+        // this task fixes. Advancing `asOf` stands in for the timer's tick.
+        broker.expireStaleEntries(
+            asOf: Date().addingTimeInterval((InteractiveAIBroker.maxWaitMinutes + 1) * 60))
+
+        XCTAssertEqual(broker.pendingCount, 0, "Stale entry must clear without an external trigger")
+        XCTAssertEqual(timedOut, [id], "Owner must be notified so interactivePending can clear")
+    }
+
     // MARK: - Think-block stripping (daily brief reasoning leak)
 
     func testStripThinkBlockHandlesClosedInlineAndTruncated() {

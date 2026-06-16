@@ -30,15 +30,20 @@ enum BackgroundWorkPolicy {
     static let maxDeferHorizonHours: Double = 24
 
     static func decision(_ i: Inputs) -> Decision {
-        // Hard blocks — never contend with capture or the user's queue.
+        // Hard blocks — never contend with capture, and never drain the
+        // battery without opt-in. These are the ONLY hard blocks (see the
+        // maxDeferHorizonHours contract); they hold even when starved.
         if i.isRecording { return .deferFor(minutes: 15) }
-        if i.interactivePending { return .deferFor(minutes: 2) }
         if !i.allowOnBattery && i.onBattery { return .deferFor(minutes: 30) }
 
         let starved = i.deferredSinceHours >= maxDeferHorizonHours
 
         // Soft preferences — overridden once the starvation cap is hit.
+        // interactivePending is SOFT, not hard (TASK-092): a broker that
+        // latches pendingCount > 0 must never be able to defer background work
+        // past the starvation cap, or the escape hatch below is unreachable.
         if !starved {
+            if i.interactivePending { return .deferFor(minutes: 2) }
             if let mins = i.minutesToNextMeeting, mins <= 20 {
                 return .deferFor(minutes: max(5, mins + 5))
             }
