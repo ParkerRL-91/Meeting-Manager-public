@@ -477,6 +477,38 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
     }
 
+    // MARK: - Audio playback sync (TASK-077)
+
+    func testActiveSegmentBinarySearch() {
+        let starts = [0.0, 5.0, 12.0, 30.0]
+        XCTAssertNil(AudioPlaybackService.activeSegmentIndex(forTime: -1, sortedStarts: starts),
+                     "before the first segment → none")
+        XCTAssertEqual(AudioPlaybackService.activeSegmentIndex(forTime: 0, sortedStarts: starts), 0)
+        XCTAssertEqual(AudioPlaybackService.activeSegmentIndex(forTime: 4.9, sortedStarts: starts), 0)
+        XCTAssertEqual(AudioPlaybackService.activeSegmentIndex(forTime: 5, sortedStarts: starts), 1,
+                       "exactly on a boundary belongs to that segment")
+        XCTAssertEqual(AudioPlaybackService.activeSegmentIndex(forTime: 29.9, sortedStarts: starts), 2)
+        XCTAssertEqual(AudioPlaybackService.activeSegmentIndex(forTime: 999, sortedStarts: starts), 3,
+                       "past the last start → last segment")
+        XCTAssertNil(AudioPlaybackService.activeSegmentIndex(forTime: 10, sortedStarts: []))
+    }
+
+    func testClampSeekBounds() {
+        XCTAssertEqual(AudioPlaybackService.clampSeek(-5, duration: 100), 0)
+        XCTAssertEqual(AudioPlaybackService.clampSeek(50, duration: 100), 50)
+        XCTAssertEqual(AudioPlaybackService.clampSeek(150, duration: 100), 100)
+        XCTAssertEqual(AudioPlaybackService.clampSeek(50, duration: 0), 50,
+                       "unknown duration (0) doesn't clamp the upper bound")
+    }
+
+    func testCumulativeOffsetsForAppendedSessions() {
+        // A meeting with three appended audio files: global time maps to the
+        // right file via the cumulative offsets.
+        XCTAssertEqual(AudioPlaybackService.cumulativeOffsets(durations: [10, 20, 5]), [0, 10, 30])
+        XCTAssertEqual(AudioPlaybackService.cumulativeOffsets(durations: []), [])
+        XCTAssertEqual(AudioPlaybackService.cumulativeOffsets(durations: [42]), [0])
+    }
+
     // MARK: - In-app LLM runtime + model tags (TASK-082)
 
     func testSmallTierIsTheNonThinkingInstructTag() {
