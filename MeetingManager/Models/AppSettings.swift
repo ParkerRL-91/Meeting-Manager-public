@@ -39,15 +39,16 @@ struct AppSettings: Codable, Equatable {
     var useLocalLLM: Bool = false
 
     /// The Ollama model name to use for on-device summarization.
-    /// Default `qwen3:8b`: the hybrid Qwen3 8B run with thinking ON (see
-    /// OllamaService — `think:true` for qwen3, with `<think>` blocks stripped
-    /// from the output). Thinking-on produces cleaner, higher-quality summaries
-    /// and avoids the chain-of-thought leak `think:false` caused on rule-heavy
-    /// prompts; it runs comfortably on Apple Silicon (~5 GB). `"auto"` enables
-    /// adaptive size-based selection; an explicit tag (e.g. `qwen2.5:7b-instruct`)
-    /// forces one model. Existing users keep their saved choice; this default
-    /// only applies to fresh installs.
-    var ollamaModel: String = "qwen3:8b"
+    /// Default `qwen3:4b-instruct` (TASK-082 / ADR-016): the small,
+    /// NON-thinking 4B (~2.5 GB) — fast direct summaries, and the model the
+    /// onboarding picker pre-selects/pushes. `qwen3:8b` (thinking, ~5 GB) is
+    /// the offered higher-quality option; `qwen2.5:Nb-instruct` are faster
+    /// non-thinking alternatives; `"auto"` enables adaptive size-based
+    /// selection (small rungs now resolve to `qwen3:4b-instruct`). NEVER the
+    /// bare `qwen3:4b`/`-thinking` tag (thinking-only, 30 min–2 h summaries —
+    /// ADR-007; enforced by `OllamaService.isPushableDefault`). Existing users
+    /// keep their saved choice; this default only applies to fresh installs.
+    var ollamaModel: String = "qwen3:4b-instruct"
 
     /// When true, automatically generate a summary ~10 minutes after transcription completes.
     var autoGenerateSummary: Bool = false

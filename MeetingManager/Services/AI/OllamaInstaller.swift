@@ -282,17 +282,20 @@ final class OllamaInstaller {
             // Non-fatal — user may have downloaded a development build
         }
 
-        // Move to ~/Applications
-        let appsDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications")
-        let dest = appsDir.appendingPathComponent("Ollama.app")
+        // Move into our PRIVATE runtime dir (TASK-082 / ADR-016 A1), NOT
+        // ~/Applications — so it never appears as a separate app/menu-bar/
+        // updater. The whole signed .app is kept intact (server finds its
+        // Metal runners by relative layout; signature stays valid).
+        let runtimeDir = Self.privateRuntimeDir
+        let dest = Self.privateRuntimeAppURL
         do {
-            try fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
             if fm.fileExists(atPath: dest.path) {
                 try fm.removeItem(at: dest)
             }
             try fm.moveItem(at: ollamaApp, to: dest)
         } catch {
-            phase = .failed("Could not move Ollama.app to ~/Applications: \(error.localizedDescription)")
+            phase = .failed("Could not install the on-device AI runtime: \(error.localizedDescription)")
             return nil
         }
 
@@ -327,6 +330,12 @@ final class OllamaInstaller {
             var env = ProcessInfo.processInfo.environment
             env["OLLAMA_FLASH_ATTENTION"] = "1"
             env["OLLAMA_KV_CACHE_TYPE"] = "q8_0"
+            // TASK-082: keep models in our private dir, not ~/.ollama, so the
+            // runtime is self-contained and resettable. Only applied when WE
+            // launch the bundled/private server; a user's own running Ollama
+            // keeps its own config.
+            env["OLLAMA_MODELS"] = Self.privateModelsDir.path
+            try? FileManager.default.createDirectory(at: Self.privateModelsDir, withIntermediateDirectories: true)
             process.environment = env
             do {
                 try process.run()
@@ -352,6 +361,9 @@ final class OllamaInstaller {
     /// opens the GUI app instead (which schedules at its own QoS).
     private static func findServerBinary(appURL: URL) -> URL? {
         let candidates = [
+            // Private runtime first (TASK-082), then the passed app, then
+            // common user installs.
+            privateRuntimeAppURL.appendingPathComponent("Contents/Resources/ollama"),
             appURL.appendingPathComponent("Contents/Resources/ollama"),
             URL(fileURLWithPath: "/usr/local/bin/ollama"),
             URL(fileURLWithPath: "/opt/homebrew/bin/ollama"),
@@ -368,7 +380,7 @@ final class OllamaInstaller {
                 return
             }
         }
-        phase = .failed("Ollama server didn't start. Try opening Ollama from ~/Applications.")
+        phase = .failed("The on-device AI runtime didn't start. Reopen Meeting Manager to retry, or switch to Claude in Settings.")
     }
 
     /// Query the running Ollama's /api/version and log a warning when the
@@ -501,10 +513,38 @@ final class OllamaInstaller {
 
     static func findInstalledOllama() -> URL? {
         let candidates = [
+            // TASK-082 / ADR-016: our private headless runtime is preferred —
+            // a relocated Ollama.app the user never sees in ~/Applications.
+            privateRuntimeAppURL,
+            // A user's own install is still honored as a fallback.
             URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications/Ollama.app"),
             URL(fileURLWithPath: "/Applications/Ollama.app"),
         ]
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    // MARK: - Private runtime location (TASK-082 / ADR-016 A1)
+
+    /// `~/Library/Application Support/MeetingManager/runtime/` — where the
+    /// downloaded Ollama lives so it is NOT a user-facing app in
+    /// ~/Applications (no Launchpad/menu-bar/updater presence).
+    static var privateRuntimeDir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("MeetingManager/runtime", isDirectory: true)
+    }
+
+    /// The relocated `Ollama.app` inside the private runtime dir. Kept as a
+    /// whole signed `.app` (not cherry-picked files) so the server finds its
+    /// Metal runners by relative layout and the code signature stays valid.
+    static var privateRuntimeAppURL: URL {
+        privateRuntimeDir.appendingPathComponent("Ollama.app")
+    }
+
+    /// Models live under our control (TASK-082): `OLLAMA_MODELS` points here
+    /// so they are not managed in `~/.ollama`. Existing users pull fresh.
+    static var privateModelsDir: URL {
+        privateRuntimeDir.appendingPathComponent("models", isDirectory: true)
     }
 }
 

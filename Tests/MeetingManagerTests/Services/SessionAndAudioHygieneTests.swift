@@ -477,6 +477,37 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
     }
 
+    // MARK: - In-app LLM runtime + model tags (TASK-082)
+
+    func testSmallTierIsTheNonThinkingInstructTag() {
+        // The pushed small/default model must be the NON-thinking instruct
+        // build, never the bare/thinking qwen3:4b (ADR-007: 30 min–2 h
+        // summaries). This guards the regression at its source.
+        XCTAssertEqual(OllamaService.smallTier, "qwen3:4b-instruct")
+        XCTAssertEqual(OllamaService.defaultModel, "qwen3:4b-instruct")
+        XCTAssertFalse(OllamaService.isPushableDefault("qwen3:4b"),
+                       "bare qwen3:4b is thinking-only — never a default")
+        XCTAssertFalse(OllamaService.isPushableDefault("qwen3:4b-thinking"))
+        XCTAssertTrue(OllamaService.isPushableDefault("qwen3:4b-instruct"))
+        XCTAssertTrue(OllamaService.isPushableDefault("qwen3:8b"))
+        // The default the app ships must itself be pushable.
+        XCTAssertTrue(OllamaService.isPushableDefault(AppSettings.default.ollamaModel))
+        XCTAssertTrue(OllamaService.isPushableDefault(OllamaService.smallTier))
+        // Adaptive tiers must not contain the bare/thinking 4B either.
+        XCTAssertFalse(OllamaService.modelTiers.contains { $0.name == "qwen3:4b" },
+                       "adaptive selection must use the instruct 4B, not the thinking one")
+    }
+
+    func testPrivateRuntimePathsLiveUnderApplicationSupport() {
+        // The managed runtime + models live in our private Application
+        // Support dir, not ~/Applications or ~/.ollama (TASK-082 / ADR-016).
+        XCTAssertTrue(OllamaInstaller.privateRuntimeDir.path.contains("Application Support/MeetingManager/runtime"))
+        XCTAssertEqual(OllamaInstaller.privateRuntimeAppURL.lastPathComponent, "Ollama.app")
+        XCTAssertEqual(OllamaInstaller.privateModelsDir.lastPathComponent, "models")
+        XCTAssertFalse(OllamaInstaller.privateRuntimeDir.path.contains("/Applications/"),
+                       "the runtime must NOT live in a user-facing Applications folder")
+    }
+
     // MARK: - KB email ingestion (TASK-068)
 
     func testParseEMLKeepsHeadersBodyAndDropsAttachments() {

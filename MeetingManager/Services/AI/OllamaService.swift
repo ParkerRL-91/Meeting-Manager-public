@@ -178,9 +178,25 @@ final class OllamaService {
     // still exposes it and the truncation fallback (line ~145) prefers
     // qwen3:8b but falls back to llama3.1:8b when the user has only Llama
     // installed. ADR-007 has the rationale and migration story.
-    static let smallTier   = "qwen3:4b"
+    // TASK-082 / ADR-016: the small tier is the NON-THINKING instruct
+    // variant. The bare `qwen3:4b` tag resolves to the thinking-only
+    // "Qwen3 4B Thinking" model that cannot disable reasoning — ADR-007
+    // documented it making summaries take 30 min–2 h. `qwen3:4b-instruct`
+    // generates directly (seconds), is ~2.5 GB, and is the pushed default.
+    // NEVER set the bare/thinking 4B tag as a default (see isPushableDefault).
+    static let smallTier   = "qwen3:4b-instruct"
     static let defaultTier = "qwen3:8b"
-    static let defaultModel = defaultTier
+    static let defaultModel = smallTier
+
+    /// Tags we refuse to ever PUSH as the default model — thinking-only
+    /// builds whose reasoning can't be disabled (ADR-007). They stay
+    /// selectable for advanced users, but onboarding/auto-setup must never
+    /// pick them. Guarded by `isPushableDefault` + a unit test.
+    static let nonPushableDefaultTags: Set<String> = ["qwen3:4b", "qwen3:4b-thinking"]
+
+    static func isPushableDefault(_ tag: String) -> Bool {
+        !nonPushableDefaultTags.contains(tag)
+    }
 
     /// Model tiers ranked by capability. The adaptive selector picks the best
     /// installed model that can handle the input size. Window values must
@@ -192,12 +208,14 @@ final class OllamaService {
     /// clamped to `ramContextCap` — the table expresses model capability,
     /// the cap expresses what this machine can hold (ADR-015).
     static let modelTiers: [(name: String, maxInputTokens: Int, contextWindow: Int)] = [
-        // NOTE: explicit "qwen3:4b"/"qwen3:8b" rather than Self.smallTier — Swift
-        // won't let a static stored property reference Self in its initializer.
-        // Keep these identifiers in sync with smallTier / defaultTier above.
-        ("qwen3:4b",  4000,   8192),   // Fast — short 1:1s
-        ("qwen3:4b",  8000,  16384),   // Medium — standard meetings
-        ("qwen3:4b", 14000,  32768),   // Large — extended meetings
+        // NOTE: explicit tags rather than Self.smallTier — Swift won't let a
+        // static stored property reference Self in its initializer. Keep in
+        // sync with smallTier / defaultTier above. Small rungs use the
+        // non-thinking instruct 4B (TASK-082) so adaptive selection never
+        // lands on the slow thinking-only build.
+        ("qwen3:4b-instruct",  4000,   8192),   // Fast — short 1:1s
+        ("qwen3:4b-instruct",  8000,  16384),   // Medium — standard meetings
+        ("qwen3:4b-instruct", 14000,  32768),   // Large — extended meetings
         ("qwen3:8b", 22000,  32768),   // XL — long meetings, better reasoning
         ("qwen3:8b", 32000,  40960),   // XXL — marathon sessions, full trained window
     ]

@@ -83,7 +83,10 @@ struct ModelDownloadBanner: View {
             .replacingOccurrences(of: "llama3.2", with: "Llama 3.2")
             .replacingOccurrences(of: "llama3.1", with: "Llama 3.1")
             .replacingOccurrences(of: "phi3", with: "Phi-3")
-        let size = String(parts[1]).uppercased()
+        // "4b-instruct" → "4B Instruct"; "8b" → "8B".
+        let size = String(parts[1]).split(separator: "-").map { seg -> String in
+            seg.allSatisfy { $0.isNumber || $0 == "b" } ? seg.uppercased() : seg.capitalized
+        }.joined(separator: " ")
         return "\(base) \(size)"
     }
 

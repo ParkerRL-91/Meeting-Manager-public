@@ -217,19 +217,22 @@ struct OnDeviceSettingsView: View {
             Picker("Model", selection: $appState.settings.ollamaModel) {
                 Text("Auto (Dynamic)").tag("auto")
                 Divider()
-                // Fast non-thinking instruct models — recommended for speed.
-                // Selecting one downloads it automatically (see onChange below).
-                Text("Qwen2.5 7B Instruct — fast, recommended").tag("qwen2.5:7b-instruct")
-                Text("Qwen2.5 3B Instruct — fastest").tag("qwen2.5:3b-instruct")
+                // Fast NON-thinking models — recommended. qwen3:4b-instruct is
+                // the pushed default (TASK-082): newest small model, ~2.5 GB,
+                // direct (no reasoning step). Selecting one downloads it
+                // automatically (see onChange below). The bare qwen3:4b tag is
+                // deliberately NOT offered — it is thinking-only (ADR-007).
+                Text("Qwen3 4B Instruct — fast, recommended").tag("qwen3:4b-instruct")
+                Text("Qwen3 8B — higher quality, larger").tag("qwen3:8b")
+                Text("Qwen2.5 3B Instruct — fastest, smallest").tag("qwen2.5:3b-instruct")
                 Divider()
-                ForEach(models.filter { $0 != "qwen2.5:7b-instruct" && $0 != "qwen2.5:3b-instruct" }, id: \.self) { model in
+                ForEach(models.filter { !["qwen3:4b-instruct", "qwen3:8b", "qwen2.5:3b-instruct"].contains($0) }, id: \.self) { model in
                     Text(model).tag(model)
                 }
                 // If the saved model is not "auto", not a recommended tag, and not
                 // in the installed list, still show it so the picker reflects reality.
                 if appState.settings.ollamaModel != "auto"
-                    && appState.settings.ollamaModel != "qwen2.5:7b-instruct"
-                    && appState.settings.ollamaModel != "qwen2.5:3b-instruct"
+                    && !["qwen3:4b-instruct", "qwen3:8b", "qwen2.5:3b-instruct"].contains(appState.settings.ollamaModel)
                     && !models.contains(appState.settings.ollamaModel) {
                     Text(appState.settings.ollamaModel).tag(appState.settings.ollamaModel)
                 }
@@ -256,8 +259,12 @@ struct OnDeviceSettingsView: View {
                 Label("Qwen2.5 3B Instruct is the fastest option and finishes most summaries in under a minute, using about 2 GB of memory. It is a good fit for shorter meetings.", systemImage: "hare.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if appState.settings.ollamaModel.contains("qwen3:4b-instruct") {
+                Label("Qwen3 4B Instruct is the recommended default — about 2.5 GB, and it generates summaries directly without a reasoning step, so it finishes in seconds rather than the many minutes the thinking models take.", systemImage: "hare.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else if appState.settings.ollamaModel.contains("qwen3:4b") {
-                Label("Qwen3 4B uses about 3 GB of memory and runs comfortably alongside live transcription on any Apple Silicon Mac.", systemImage: "desktopcomputer")
+                Label("This is the thinking-only Qwen3 4B build, which cannot disable its reasoning step and can make summaries take many minutes. Switch to Qwen3 4B Instruct for fast, direct summaries.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if appState.settings.ollamaModel.contains("qwen3:8b") {
