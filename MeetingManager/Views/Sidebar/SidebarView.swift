@@ -96,6 +96,16 @@ struct SidebarView: View {
                         appState.selectedMeetingId = nil
                     }
 
+                    NavItem(
+                        icon: "quote.bubble",
+                        label: "Key Quotes",
+                        destination: .keyQuotes,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .keyQuotes
+                        appState.selectedMeetingId = nil
+                    }
+
                     // MARK: - Spaces (auto-grouped meeting folders)
                     // Pinned folders sort first (stable — recency order kept
                     // within each group); pin/unpin via row context menu

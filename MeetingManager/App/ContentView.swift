@@ -56,6 +56,9 @@ struct ContentView: View {
         case .analytics:
             AnalyticsView()
 
+        case .keyQuotes:
+            KeyQuotesView()
+
         case .folder(let key):
             let folders = appState.meetingFolders()
             if let folder = folders.first(where: { $0.key == key }) {

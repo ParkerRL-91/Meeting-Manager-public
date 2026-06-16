@@ -552,6 +552,14 @@ struct MeetingDetailView: View {
             appState.audioPlayback.load(meetingId: meetingId,
                                         audioFilePaths: m.audioFilePaths,
                                         segments: segments)
+            // TASK-078: a quote opened from the global Key Quotes list cues
+            // its span once the player is ready.
+            if let pending = appState.pendingPlaybackRange, pending.meetingId == meetingId {
+                appState.pendingPlaybackRange = nil
+                if appState.audioPlayback.isAvailable {
+                    appState.audioPlayback.playRange(start: pending.start, end: pending.end)
+                }
+            }
         }
 
         // Model info for tab strip caption.

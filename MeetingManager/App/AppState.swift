@@ -42,6 +42,11 @@ final class AppState {
     var isRecording = false
     var activeMeeting: Meeting?
 
+    /// TASK-078: a clip span to cue once its meeting's player has loaded.
+    /// Set when opening a quote from the global Key Quotes list; consumed
+    /// (and cleared) by MeetingDetailView after it loads the player.
+    var pendingPlaybackRange: (meetingId: String, start: Double, end: Double)?
+
     /// True while the recording mic has disconnected and the app is holding the
     /// recording open waiting for a replacement (system audio keeps capturing).
     /// Mirrored from `AudioCaptureService`; drives the "reconnecting mic" banner.
@@ -6420,5 +6425,6 @@ enum SidebarDestination: Hashable {
     case search
     case meetings
     case analytics
+    case keyQuotes       // TASK-078: saved clips across all meetings
     case folder(String)  // folder key = normalised base title
 }
