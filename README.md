@@ -21,6 +21,22 @@ You only do this once.
 
 ---
 
+## What's New in v4.7.0
+
+**Meeting Manager can now run a private language model entirely on your Mac, set up during onboarding.** A new onboarding step lets you choose and download an on-device model, so summaries, the daily brief, chat, and the other AI features work without an internet connection or an API key, and no meeting content ever leaves your machine. You can still point the app at Claude or your own provider if you prefer.
+
+**You can play a meeting's audio back in sync with its transcript.** A playback bar on the meeting detail view lets you scrub the recording, tap any transcript line to jump straight to that moment, and watch the current line highlight and follow along as the audio plays.
+
+**You can save the exact moments that matter and revisit them as clips and key quotes.** Select a passage in the transcript to keep it as a clip you can replay, mark a line as a key quote with an optional note, and review every quote you have saved across all your meetings in one global list. Clips and quotes stay on your Mac and are never shared anywhere.
+
+**Each meeting now carries a coarse, on-device read of its overall tone.** A lexicon-based sentiment pass runs entirely on your Mac, with no model and no network, and labels each meeting's tone in neutral terms so you can gauge how a conversation went at a glance.
+
+**You can define the topics you care about and see how often they come up across your meetings.** Topic trackers let you name a subject once, and the app then counts and links every meeting where that topic was discussed, so recurring themes are easy to follow over time.
+
+**Meeting Manager can optionally capture the screen or video of a call, and this stays turned off until you enable it.** When you opt in, the app records screen or video alongside the audio through a separate capture path that fails safe — if it cannot start, it never disturbs the audio recording you depend on.
+
+This release also fixes a reliability issue in background maintenance: the weekly digest, glossary, sentiment and topic backfills, and semantic indexing no longer stall behind interactive AI requests, so they finish during quiet periods as intended.
+
 ## What's New in v4.6.5
 
 **The daily brief no longer shows the model's reasoning in its output.** When the on-device model occasionally spent its entire budget thinking and produced no final answer, the app fell back to displaying the raw reasoning text — so the brief showed the model "thinking out loud" instead of the briefing. The app now retries to get a clean answer, never surfaces the reasoning field as output, and strips any cut-off reasoning, so the brief always reads as a finished briefing. The same hardening applies to summaries and other on-device generations.
