@@ -794,7 +794,8 @@ final class TaskQueueManager {
     /// predicate makes that drift impossible. Returns false if the write fails,
     /// so the caller can back off instead of busy-looping.
     private func deferPendingBackgroundRows(minutes: Int) async -> Bool {
-        let until = Date().addingTimeInterval(Double(minutes) * 60)
+        let now = Date()
+        let until = now.addingTimeInterval(Double(minutes) * 60)
         let ok: Bool
         do {
             try await database.writer.write { db in
@@ -806,10 +807,13 @@ final class TaskQueueManager {
                     .map(\.id)
                 guard !ids.isEmpty else { return }
                 let placeholders = ids.map { _ in "?" }.joined(separator: ",")
-                var arguments: [DatabaseValueConvertible] = [until]
+                // firstDeferredAt is stamped once and preserved via COALESCE so
+                // the starvation clock measures continuous-deferral age, not the
+                // age of the most recent defer (TASK-093). Cleared in markRunning.
+                var arguments: [DatabaseValueConvertible] = [until, now]
                 arguments.append(contentsOf: ids)
                 try db.execute(
-                    sql: "UPDATE taskQueue SET runAfter = ? WHERE id IN (\(placeholders))",
+                    sql: "UPDATE taskQueue SET runAfter = ?, firstDeferredAt = COALESCE(firstDeferredAt, ?) WHERE id IN (\(placeholders))",
                     arguments: StatementArguments(arguments)
                 )
             }
@@ -967,6 +971,9 @@ final class TaskQueueManager {
                 var t = task
                 t.status = .running
                 t.startedAt = Date()
+                // The row got a turn — reset its starvation clock so a later
+                // re-defer (e.g. after a retry) starts fresh (TASK-093).
+                t.firstDeferredAt = nil
                 try t.update(db)
             }
         } catch {

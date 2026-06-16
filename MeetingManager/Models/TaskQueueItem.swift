@@ -19,6 +19,12 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
     /// Governor (TASK-055): rows with a future runAfter are invisible to
     /// the pop query — deferred until a quiet moment. NULL = run normally.
     var runAfter: Date? = nil
+    /// Governor (TASK-093): wall-clock time this row was FIRST deferred.
+    /// Set once on the first defer (COALESCE-preserved across subsequent
+    /// defers), cleared when the row actually runs. This anchors the
+    /// starvation clock to continuous-deferral age rather than row-creation
+    /// time (createdAt). NULL = never deferred.
+    var firstDeferredAt: Date? = nil
 
     enum TaskType: String, Codable, CaseIterable {
         case transcription
@@ -122,6 +128,25 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .topicBackfill: return true
         default:            return false
         }
+    }
+
+    /// Starvation-cap clock (TASK-093): the continuous-deferral age, in
+    /// hours, of the longest-waiting still-pending background obligation —
+    /// the input the governor compares against `maxDeferHorizonHours`.
+    /// Anchored to `firstDeferredAt` (the first defer), NOT `createdAt`, so it
+    /// reflects how long a row has actually sat deferred-without-running
+    /// rather than how long ago its row was created — `createdAt` drifts as
+    /// polls re-create terminal sentinel rows. Only pending background rows
+    /// that have actually been deferred count; never-deferred rows
+    /// (`firstDeferredAt == nil`), running/terminal rows, and non-background
+    /// rows are ignored. Returns 0 when nothing qualifies.
+    static func backgroundDeferralAgeHours(_ items: [TaskQueueItem], now: Date) -> Double {
+        let oldest = items
+            .filter { $0.status == .pending && isBackgroundItem(type: $0.type, meetingId: $0.meetingId) }
+            .compactMap(\.firstDeferredAt)
+            .min()
+        guard let oldest else { return 0 }
+        return max(0, now.timeIntervalSince(oldest) / 3600)
     }
 
     /// Types whose handler makes local-LLM calls — the governor's

@@ -348,6 +348,51 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(TaskQueueItem.isBackgroundItem(type: .summary, meetingId: "m"))
     }
 
+    // MARK: - Starvation clock — per-row deferral age (TASK-093)
+
+    private func bgRow(_ type: TaskQueueItem.TaskType, _ meetingId: String,
+                       status: TaskQueueItem.TaskStatus = .pending,
+                       deferredHoursAgo: Double?, now: Date) -> TaskQueueItem {
+        var t = TaskQueueItem.create(type: type, meetingId: meetingId, priority: 9)
+        t.status = status
+        t.firstDeferredAt = deferredHoursAgo.map { now.addingTimeInterval(-$0 * 3600) }
+        return t
+    }
+
+    func testDeferralClockUsesOldestPendingBackgroundFirstDeferredAt() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+
+        // Nothing qualifies → 0. A never-deferred row contributes no age:
+        // the clock is deferral age, not row age (the TASK-093 fix).
+        XCTAssertEqual(TaskQueueItem.backgroundDeferralAgeHours([], now: now), 0)
+        XCTAssertEqual(TaskQueueItem.backgroundDeferralAgeHours(
+            [bgRow(.glossary, "__glossary__", deferredHoursAgo: nil, now: now)], now: now), 0,
+            "A pending background row that was never deferred contributes no deferral age")
+
+        // Only pending background rows that were actually deferred count. The
+        // 99h-ago running/terminal/non-background rows are decoys — under the
+        // old min(createdAt) clock an old non-pending or non-background row
+        // could skew the aggregate; here the clock pins to the genuinely
+        // starved obligation (the 25h glossary row).
+        let rows = [
+            bgRow(.glossary, "__glossary__", deferredHoursAgo: 25, now: now),
+            bgRow(.weeklyDigest, "__weekly_digest__", deferredHoursAgo: 3, now: now),
+            bgRow(.glossary, "__glossary__", status: .running, deferredHoursAgo: 99, now: now),
+            bgRow(.speechStats, "__speech_stats__", status: .completed, deferredHoursAgo: 99, now: now),
+            bgRow(.summary, "real-meeting", deferredHoursAgo: 99, now: now),
+            bgRow(.embedIndex, "real-meeting", deferredHoursAgo: 99, now: now),
+        ]
+        XCTAssertEqual(TaskQueueItem.backgroundDeferralAgeHours(rows, now: now), 25, accuracy: 0.001,
+                       "Clock = age of the oldest still-pending background row that has been deferred")
+
+        // End-to-end: that 25h clock matures the cap even under a latched
+        // broker — the behavior the whole fix protects.
+        XCTAssertEqual(
+            BackgroundWorkPolicy.decision(inputs(interactive: true,
+                deferredHours: TaskQueueItem.backgroundDeferralAgeHours(rows, now: now))),
+            .run, "A 25h-deferred row matures the starvation cap even under interactive load")
+    }
+
     // MARK: - Interactive-AI broker self-heal (TASK-092)
 
     func testBrokerExpiresStaleEntryWithoutAnExternalDrainEdge() {

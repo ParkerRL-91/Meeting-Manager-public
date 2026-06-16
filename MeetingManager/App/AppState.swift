@@ -1535,8 +1535,9 @@ final class AppState {
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
-        // tracks. deferredSinceHours uses the oldest pending background row's
-        // createdAt as the starvation clock.
+        // tracks. deferredSinceHours is the continuous-deferral age of the
+        // longest-waiting pending background row — anchored to firstDeferredAt
+        // (set on first defer, reset on run; TASK-093), not row-creation time.
         ollamaService.onAllWorkFinished = { [weak self] in
             self?.interactiveAIBroker.drain()
         }
@@ -1560,9 +1561,6 @@ final class AppState {
                 .compactMap(\.scheduledStartDate)
                 .filter { $0 > Date() }
                 .min()
-            let oldestBackground = self.taskQueueManager.allTasks
-                .filter { $0.status == .pending && TaskQueueItem.isBackgroundItem(type: $0.type, meetingId: $0.meetingId) }
-                .map(\.createdAt).min()
             return BackgroundWorkPolicy.Inputs(
                 isRecording: self.isRecording,
                 minutesToNextMeeting: nextStart.map { Int($0.timeIntervalSinceNow / 60) },
@@ -1571,7 +1569,7 @@ final class AppState {
                 allowOnBattery: UserDefaults.standard.bool(forKey: "backgroundAI.allowOnBattery"),
                 interactivePending: self.interactiveAIBroker.pendingCount > 0,
                 localHour: Calendar.current.component(.hour, from: Date()),
-                deferredSinceHours: oldestBackground.map { -$0.timeIntervalSinceNow / 3600 } ?? 0
+                deferredSinceHours: TaskQueueItem.backgroundDeferralAgeHours(self.taskQueueManager.allTasks, now: Date())
             )
         }
 

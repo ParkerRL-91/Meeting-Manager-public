@@ -1355,5 +1355,17 @@ enum Migrations {
                 t.column("createdAt", .datetime).notNull()
             }
         }
+
+        // TASK-093: per-row starvation clock. firstDeferredAt anchors the
+        // governor's deferral age to the FIRST defer (not row creation), so the
+        // 24 h maxDeferHorizonHours cap measures how long a row has actually sat
+        // deferred-without-running. Nullable (NULL = never deferred); set via
+        // COALESCE on defer, cleared on run. Append-only ALTER, mirrors v50's
+        // runAfter add — no default, no ON DELETE.
+        migrator.registerMigration("v60-governor-first-deferred-at") { db in
+            try db.alter(table: "taskQueue") { t in
+                t.add(column: "firstDeferredAt", .datetime)
+            }
+        }
     }
 }
