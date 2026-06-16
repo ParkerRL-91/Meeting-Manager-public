@@ -53,6 +53,7 @@ struct SummaryView: View {
     // Empty state
     @State private var transcriptCount = 0
     @State private var intentRecord: MeetingIntent?
+    @State private var sentiment: [MeetingSentiment] = []
     @State private var recipes: [Recipe] = []
     @State private var selectedRecipe: Recipe? = nil
     @State private var previousSessions: [Meeting] = []
@@ -113,6 +114,7 @@ struct SummaryView: View {
         .task {
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             intentRecord = try? await MeetingIntentRepository(database: appState.database).find(meetingId: meetingId)
+            sentiment = (try? await SentimentRepository(database: appState.database).sentiment(meetingId: meetingId)) ?? []
             async let summaryLoad: () = loadSummary()
             async let metaLoad: () = loadEmptyStateMeta()
             await summaryLoad
@@ -294,9 +296,43 @@ struct SummaryView: View {
 
     // MARK: - Summary Content
 
+    /// TASK-079: coarse, neutral tone read — meeting-level chip + per-speaker
+    /// chips. An observation, not a judgment.
+    @ViewBuilder
+    private var toneStrip: some View {
+        let meetingTone = sentiment.first { $0.scope == "meeting" }
+        let speakerTones = sentiment.filter { $0.scope == "speaker" && $0.label != "neutral" }
+        if let meetingTone {
+            HStack(spacing: 8) {
+                Image(systemName: meetingTone.icon)
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                Text("Tone: \(meetingTone.displayLabel)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.appTextSecondary)
+                ForEach(speakerTones.prefix(4)) { t in
+                    if let key = t.speakerKey {
+                        Text("\(key.capitalized): \(t.displayLabel.replacingOccurrences(of: "Leaned ", with: ""))")
+                            .font(.caption2)
+                            .foregroundStyle(Color.appTextTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Color.appSurfaceSecondary.opacity(0.6))
+                            .clipShape(Capsule())
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .help("A coarse, on-device read of the conversation's tone. An observation, not a judgment.")
+        }
+    }
+
     @ViewBuilder
     private func summaryContent(_ summary: MeetingSummary) -> some View {
         VStack(spacing: 0) {
+            toneStrip
             // TASK-065: what you needed from this meeting, and whether the
             // record shows you got it.
             if let intent = intentRecord, let score = intent.outcomeScore {

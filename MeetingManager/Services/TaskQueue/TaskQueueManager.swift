@@ -84,6 +84,7 @@ final class TaskQueueManager {
     var factBackfillHandler: (() async throws -> Void)?
     var glossaryHandler: (() async throws -> Void)?
     var speechStatsHandler: (() async throws -> Void)?
+    var sentimentBackfillHandler: (() async throws -> Void)?
 
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
@@ -739,6 +740,7 @@ final class TaskQueueManager {
         case .factBackfill:       stage = "Extracting insights from history"
         case .glossary:           stage = "Updating glossary"
         case .speechStats:        stage = "Computing speaking stats"
+        case .sentimentBackfill:  stage = "Reading tone"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -890,6 +892,12 @@ final class TaskQueueManager {
         case .speechStats:
             guard let handler = speechStatsHandler else {
                 throw TaskQueueError.noHandler("speechStats")
+            }
+            try await handler()
+
+        case .sentimentBackfill:
+            guard let handler = sentimentBackfillHandler else {
+                throw TaskQueueError.noHandler("sentimentBackfill")
             }
             try await handler()
 

@@ -477,6 +477,32 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
     }
 
+    // MARK: - Sentiment (TASK-079)
+
+    func testSentimentLexiconPolarityNegationIntensifier() {
+        XCTAssertEqual(SentimentLexicon.score("This is great, I love it.").label, "positive")
+        XCTAssertEqual(SentimentLexicon.score("This is a terrible, broken mess.").label, "negative")
+        // Negation flips: "not good" must not read positive.
+        XCTAssertLessThan(SentimentLexicon.score("this is not good at all").polarity, 0)
+        // Intensifier strengthens.
+        XCTAssertGreaterThan(SentimentLexicon.score("very good").polarity,
+                             SentimentLexicon.score("good").polarity - 0.0001)
+        // No valence words → neutral, low magnitude.
+        let plain = SentimentLexicon.score("the meeting is on tuesday at three")
+        XCTAssertEqual(plain.label, "neutral")
+        XCTAssertEqual(plain.magnitude, 0, accuracy: 0.0001)
+        XCTAssertEqual(SentimentLexicon.score("").label, "neutral")
+    }
+
+    func testSentimentDeadZoneAndMixed() {
+        // A faint score stays neutral (dead-zone) rather than flip-flopping.
+        XCTAssertEqual(SentimentLexicon.meetingLabel(speakerPolarities: [0.05, -0.05], overall: "neutral"), "neutral")
+        // Genuine divergence → mixed.
+        XCTAssertEqual(SentimentLexicon.meetingLabel(speakerPolarities: [0.6, -0.6], overall: "positive"), "mixed")
+        // One-sided → keep the overall.
+        XCTAssertEqual(SentimentLexicon.meetingLabel(speakerPolarities: [0.6, 0.2], overall: "positive"), "positive")
+    }
+
     // MARK: - Clips / key quotes (TASK-078)
 
     func testClipBuilderFromSegments() {

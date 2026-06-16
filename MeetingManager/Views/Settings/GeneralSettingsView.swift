@@ -253,6 +253,12 @@ struct GeneralSettingsView: View {
                 get: { UserDefaults.standard.object(forKey: "summary.learnFromEdits") as? Bool ?? true },
                 set: { UserDefaults.standard.set($0, forKey: "summary.learnFromEdits") }
             ))
+
+            // TASK-079: coarse on-device tone read. Default ON.
+            Toggle("Show meeting tone (sentiment)", isOn: Binding(
+                get: { UserDefaults.standard.object(forKey: "sentiment.enabled") as? Bool ?? true },
+                set: { UserDefaults.standard.set($0, forKey: "sentiment.enabled") }
+            ))
         } header: {
             Text("Summary Automation")
         } footer: {

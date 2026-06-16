@@ -1296,5 +1296,25 @@ enum Migrations {
             try db.create(index: "idx_clip_meeting", on: "clip",
                           columns: ["meetingId", "startTime"])
         }
+
+        // TASK-079 (PRJ-011): coarse, neutral tone read per meeting + speaker.
+        // Lexicon baseline (no model); derived data, replaced on regen.
+        migrator.registerMigration("v57-sentiment") { db in
+            try db.create(table: "meetingSentiment") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("scope", .text).notNull()       // meeting | speaker
+                t.column("speakerKey", .text)
+                t.column("label", .text).notNull()       // positive|neutral|negative|mixed
+                t.column("polarity", .double).notNull()
+                t.column("magnitude", .double).notNull()
+                t.column("method", .text).notNull()      // lexicon | llm
+                t.column("note", .text)
+                t.column("computedAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_meetingSentiment_meeting", on: "meetingSentiment",
+                          columns: ["meetingId", "scope"])
+        }
     }
 }

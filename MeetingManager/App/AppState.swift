@@ -1013,6 +1013,78 @@ final class AppState {
         try? await SpeechStatsRepository(database: database).save(stats)
     }
 
+    static let sentimentBackfillSentinel = "__sentiment_backfill__"
+    static let sentimentBackfillDoneKey = "sentiment.processedMeetingIds"
+
+    /// TASK-079: coarse, neutral lexicon sentiment per meeting + speaker.
+    /// Pure/instant — runs inline in the summary chain. Honors the
+    /// `sentiment.enabled` toggle (default on).
+    private func computeSentimentBestEffort(meetingId: String) async {
+        guard UserDefaults.standard.object(forKey: "sentiment.enabled") as? Bool ?? true else { return }
+        let rows = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)) ?? []
+        let spoken = rows.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard spoken.count >= 2 else { return }
+        let now = Date()
+
+        // Per-speaker (grouped by canonical key; skip system channel).
+        var sentimentRows: [MeetingSentiment] = []
+        var speakerPolarities: [Double] = []
+        let groups = Dictionary(grouping: spoken) { seg -> String in
+            VocativeMiningService.canonicalKey(for: seg.speakerLabel ?? "")
+        }
+        for (key, segs) in groups where !key.isEmpty && key != "system" {
+            let text = segs.map(\.text).joined(separator: " ")
+            let s = SentimentLexicon.score(text)
+            speakerPolarities.append(s.polarity)
+            sentimentRows.append(MeetingSentiment(
+                id: nil, meetingId: meetingId, scope: "speaker", speakerKey: key,
+                label: s.label, polarity: s.polarity, magnitude: s.magnitude,
+                method: "lexicon", note: nil, computedAt: now))
+        }
+
+        // Meeting-level over all spoken text, with divergence → "mixed".
+        let overall = SentimentLexicon.score(spoken.map(\.text).joined(separator: " "))
+        let meetingLabel = SentimentLexicon.meetingLabel(speakerPolarities: speakerPolarities, overall: overall.label)
+        sentimentRows.append(MeetingSentiment(
+            id: nil, meetingId: meetingId, scope: "meeting", speakerKey: nil,
+            label: meetingLabel, polarity: overall.polarity, magnitude: overall.magnitude,
+            method: "lexicon", note: nil, computedAt: now))
+
+        try? await SentimentRepository(database: database).replaceForMeeting(meetingId, with: sentimentRows)
+    }
+
+    private func enqueueSentimentBackfillIfNeeded() async {
+        guard UserDefaults.standard.object(forKey: "sentiment.enabled") as? Bool ?? true else { return }
+        let queued = taskQueueManager.allTasks.contains { $0.type == .sentimentBackfill && !$0.isTerminal }
+        guard !queued else { return }
+        let done = Set(UserDefaults.standard.stringArray(forKey: Self.sentimentBackfillDoneKey) ?? [])
+        let pending = ((try? await SentimentRepository(database: database).unprocessedMeetingIds()) ?? [])
+            .filter { !done.contains($0) }
+        guard !pending.isEmpty else { return }
+        fileLog("Sentiment: \(pending.count) meeting(s) lack a tone read — enqueueing backfill")
+        await taskQueueManager.enqueue(type: .sentimentBackfill, meetingId: Self.sentimentBackfillSentinel, priority: 9)
+    }
+
+    private func runSentimentBackfill() async {
+        var done = Set(UserDefaults.standard.stringArray(forKey: Self.sentimentBackfillDoneKey) ?? [])
+        let pending = ((try? await SentimentRepository(database: database).unprocessedMeetingIds()) ?? [])
+            .filter { !done.contains($0) }
+        guard !pending.isEmpty else { return }
+        var processed = 0
+        for meetingId in pending {
+            if Task.isCancelled { break }
+            await computeSentimentBestEffort(meetingId: meetingId)
+            done.insert(meetingId)
+            processed += 1
+            if processed.isMultiple(of: 25) {
+                UserDefaults.standard.set(Array(done), forKey: Self.sentimentBackfillDoneKey)
+                taskQueueManager.reportCurrentProgress(stage: "Reading tone (\(processed)/\(pending.count))")
+            }
+        }
+        UserDefaults.standard.set(Array(done), forKey: Self.sentimentBackfillDoneKey)
+        fileLog("Sentiment: processed \(processed)/\(pending.count) meeting(s)")
+    }
+
     static let embedBackfillSentinel = "__embed_backfill__"
 
     /// TASK-045: semantic-index one meeting, or — for the backfill
@@ -1339,6 +1411,7 @@ final class AppState {
             await self.extractInsightsBestEffort(meetingId: meetingId)
             await self.scoreIntentBestEffort(meetingId: meetingId)
             await self.computeSpeechStatsBestEffort(meetingId: meetingId)
+            await self.computeSentimentBestEffort(meetingId: meetingId)
             await self.updateSeriesThreadBestEffort(meetingId: meetingId)
             // Semantic index (TASK-045): priority 8 — after cleanup (6) and
             // the follow-up email (7), embedding is the least urgent step.
@@ -1374,6 +1447,11 @@ final class AppState {
         taskQueueManager.speechStatsHandler = { [weak self] in
             guard let self else { return }
             await self.runSpeechStatsBackfill()
+        }
+
+        taskQueueManager.sentimentBackfillHandler = { [weak self] in
+            guard let self else { return }
+            await self.runSentimentBackfill()
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
@@ -5656,6 +5734,7 @@ final class AppState {
             await self?.enqueueEmbeddingBackfillIfNeeded()
             await self?.enqueueFactBackfillIfNeeded()
             await self?.enqueueSpeechStatsBackfillIfNeeded()
+            await self?.enqueueSentimentBackfillIfNeeded()
         }
 
         // Hourly safety net — tighter than once-a-day so a missed sync hook
@@ -5674,6 +5753,7 @@ final class AppState {
                     await self?.enqueueEmbeddingBackfillIfNeeded()
                     await self?.enqueueFactBackfillIfNeeded()
                     await self?.enqueueSpeechStatsBackfillIfNeeded()
+                    await self?.enqueueSentimentBackfillIfNeeded()
                 }
                 // Governor backstop (TASK-055): wake any due deferred work.
                 self?.taskQueueManager.reevaluate()
