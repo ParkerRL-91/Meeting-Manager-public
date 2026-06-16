@@ -477,6 +477,41 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
     }
 
+    // MARK: - Clips / key quotes (TASK-078)
+
+    func testClipBuilderFromSegments() {
+        let segs = [
+            SampleData.makeTranscript(meetingId: "m1", speakerLabel: "Erica", text: "We should ship Friday.", startTime: 10, endTime: 14),
+            SampleData.makeTranscript(meetingId: "m1", speakerLabel: "Parker", text: "Agreed.", startTime: 14, endTime: 16),
+        ]
+        let clip = ClipBuilder.fromSegments(segs, meetingId: "m1", now: Date(timeIntervalSince1970: 0))
+        let c = try! XCTUnwrap(clip)
+        XCTAssertEqual(c.startTime, 10)
+        XCTAssertEqual(c.endTime, 16)
+        XCTAssertEqual(c.quoteText, "We should ship Friday. Agreed.")
+        XCTAssertEqual(c.speakerLabels, "Erica, Parker")
+        XCTAssertEqual(c.timestampLabel, "0:10")
+    }
+
+    func testClipBuilderRejectsEmptyAndInverted() {
+        XCTAssertNil(ClipBuilder.fromSegments([], meetingId: "m1"))
+        let blank = [SampleData.makeTranscript(meetingId: "m1", speakerLabel: "x", text: "   ", startTime: 5, endTime: 8)]
+        XCTAssertNil(ClipBuilder.fromSegments(blank, meetingId: "m1"),
+                     "all-blank quote → no clip")
+        // Single segment is fine (the common case from the context menu).
+        let one = [SampleData.makeTranscript(meetingId: "m1", speakerLabel: "Dave", text: "Pricing is the blocker.", startTime: 90, endTime: 95)]
+        let c = ClipBuilder.fromSegments(one, meetingId: "m1")
+        XCTAssertEqual(c?.timestampLabel, "1:30")
+        XCTAssertEqual(c?.quoteText, "Pricing is the blocker.")
+    }
+
+    func testClipQuoteLengthCapped() {
+        let long = String(repeating: "word ", count: 2000)   // ~10k chars
+        let seg = [SampleData.makeTranscript(meetingId: "m1", speakerLabel: "x", text: long, startTime: 0, endTime: 60)]
+        let c = ClipBuilder.fromSegments(seg, meetingId: "m1")
+        XCTAssertLessThanOrEqual(c?.quoteText.count ?? .max, ClipBuilder.maxQuoteChars + 1)
+    }
+
     // MARK: - Audio playback sync (TASK-077)
 
     func testActiveSegmentBinarySearch() {

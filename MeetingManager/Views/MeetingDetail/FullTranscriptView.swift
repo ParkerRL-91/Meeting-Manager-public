@@ -6,6 +6,7 @@ import AppKit
 struct FullTranscriptView: View {
     let meetingId: String
     @State private var slides: [MeetingSlide] = []
+    @State private var clips: [Clip] = []
 
     @Environment(AppState.self) private var appState
     @State private var transcripts: [Transcript] = []
@@ -162,6 +163,8 @@ struct FullTranscriptView: View {
         .task {
             slides = (try? await MeetingSlideRepository(database: AppDatabase.shared)
                 .slides(meetingId: meetingId)) ?? []
+            clips = (try? await ClipRepository(database: AppDatabase.shared)
+                .clips(meetingId: meetingId)) ?? []
             meeting = try? await appState.meetingRepository.find(id: meetingId)
             await loadTranscripts()
             updateFilteredTranscripts()
@@ -367,6 +370,7 @@ struct FullTranscriptView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
             }
+            clipsSection
             LazyVStack(spacing: 0) {
                 ForEach(filteredTranscripts) { transcript in
                     TranscriptBubble(
@@ -383,6 +387,12 @@ struct FullTranscriptView: View {
                     // (diarization bleed at a speaker change) needs a one-row
                     // fix that doesn't touch the rest of the cluster.
                     .contextMenu {
+                        // TASK-078: keep this line as a clip / key quote.
+                        Button {
+                            saveClip(from: transcript)
+                        } label: {
+                            Label("Save as Key Quote", systemImage: "quote.opening")
+                        }
                         if let rowId = transcript.id, let participants = meeting?.participantList, !participants.isEmpty {
                             Menu("Reassign This Segment To") {
                                 ForEach(participants, id: \.self) { name in
@@ -638,6 +648,76 @@ struct FullTranscriptView: View {
         Task {
             try? await appState.transcriptRepository.updateSpeakerLabels([rowId: name])
             await loadTranscripts()
+        }
+    }
+
+    // MARK: - Clips / key quotes (TASK-078)
+
+    private func saveClip(from transcript: Transcript) {
+        guard let clip = ClipBuilder.fromSegments([transcript], meetingId: meetingId) else { return }
+        Task {
+            try? await ClipRepository(database: AppDatabase.shared).save(clip)
+            clips = (try? await ClipRepository(database: AppDatabase.shared).clips(meetingId: meetingId)) ?? clips
+        }
+    }
+
+    private func deleteClip(_ clip: Clip) {
+        guard let id = clip.id else { return }
+        Task {
+            try? await ClipRepository(database: AppDatabase.shared).delete(id: id)
+            clips.removeAll { $0.id == id }
+        }
+    }
+
+    private func playClip(_ clip: Clip) {
+        guard appState.audioPlayback.isAvailable,
+              appState.audioPlayback.loadedMeetingId == meetingId else { return }
+        appState.audioPlayback.playRange(start: clip.startTime, end: clip.endTime)
+    }
+
+    @ViewBuilder
+    private var clipsSection: some View {
+        if !clips.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("KEY QUOTES · \(clips.count)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.appTextMuted)
+                    .tracking(0.4)
+                ForEach(clips) { clip in
+                    HStack(alignment: .top, spacing: 8) {
+                        Button { playClip(clip) } label: {
+                            Image(systemName: "play.circle")
+                                .foregroundStyle(Color.appAccent)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!(appState.audioPlayback.isAvailable
+                                    && appState.audioPlayback.loadedMeetingId == meetingId))
+                        .help("Play this quote")
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(clip.quoteText)
+                                .font(.caption)
+                                .foregroundStyle(Color.appTextSecondary)
+                                .lineLimit(3)
+                                .textSelection(.enabled)
+                            Text("\(clip.speakerLabels.map { "\($0) · " } ?? "")\(clip.timestampLabel)")
+                                .font(.caption2)
+                                .foregroundStyle(Color.appTextTertiary)
+                        }
+                        Spacer(minLength: 0)
+                        Button { deleteClip(clip) } label: {
+                            Image(systemName: "xmark.circle")
+                                .foregroundStyle(Color.appTextTertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Delete this quote")
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color.appSurfaceSecondary.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
         }
     }
 

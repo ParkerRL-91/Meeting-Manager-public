@@ -1277,5 +1277,24 @@ enum Migrations {
             try db.create(index: "idx_meetingSlide_meeting", on: "meetingSlide",
                           columns: ["meetingId", "atSeconds"])
         }
+
+        // TASK-078 (PRJ-011): saved clips / key quotes — a time range + the
+        // verbatim quote snapshot + speakers. Search/keep/listen only; no
+        // sharing. Derived from a meeting; CASCADE on delete.
+        migrator.registerMigration("v56-clips") { db in
+            try db.create(table: "clip") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("startTime", .double).notNull()
+                t.column("endTime", .double).notNull()
+                t.column("quoteText", .text).notNull()
+                t.column("speakerLabels", .text)
+                t.column("note", .text)
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_clip_meeting", on: "clip",
+                          columns: ["meetingId", "startTime"])
+        }
     }
 }
