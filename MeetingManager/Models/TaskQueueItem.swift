@@ -69,6 +69,9 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// PRJ-011 TASK-079: backfill coarse lexicon sentiment over history.
         /// Pure, no LLM. Sentinel meetingId "__sentiment_backfill__".
         case sentimentBackfill
+        /// PRJ-011 TASK-081: scan history for user topic trackers. Pure
+        /// keyword match. Sentinel meetingId "__topic_backfill__".
+        case topicBackfill
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -99,6 +102,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .glossary:           return "Update Glossary"
         case .speechStats:        return "Compute Speaking Stats"
         case .sentimentBackfill:  return "Read Tone (History)"
+        case .topicBackfill:      return "Scan Topics (History)"
         }
     }
 
@@ -115,6 +119,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .glossary:     return true
         case .speechStats:  return true
         case .sentimentBackfill: return true
+        case .topicBackfill: return true
         default:            return false
         }
     }
@@ -129,7 +134,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
              .enrichment, .gardener, .factBackfill, .glossary:
             return true
         case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex,
-             .speechStats, .sentimentBackfill:
+             .speechStats, .sentimentBackfill, .topicBackfill:
             return false
         }
     }

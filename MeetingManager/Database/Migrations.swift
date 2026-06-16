@@ -1316,5 +1316,32 @@ enum Migrations {
             try db.create(index: "idx_meetingSentiment_meeting", on: "meetingSentiment",
                           columns: ["meetingId", "scope"])
         }
+
+        // TASK-081 (PRJ-011): user-defined topic trackers + their hits.
+        migrator.registerMigration("v58-topic-trackers") { db in
+            try db.create(table: "topicTracker") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("keywords", .text).notNull()     // JSON array
+                t.column("semanticSeed", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("hiddenAt", .datetime)            // delete tombstone
+            }
+            try db.create(table: "topicTrackerHit") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("trackerId", .integer).notNull()
+                    .references("topicTracker", onDelete: .cascade)
+                t.column("meetingId", .text).notNull()
+                    .references("meeting", onDelete: .cascade)
+                t.column("atSeconds", .double)
+                t.column("snippet", .text).notNull()
+                t.column("matchType", .text).notNull()     // keyword | semantic
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_trackerHit_tracker", on: "topicTrackerHit",
+                          columns: ["trackerId", "meetingId"])
+            try db.create(index: "idx_trackerHit_meeting", on: "topicTrackerHit",
+                          columns: ["meetingId"])
+        }
     }
 }

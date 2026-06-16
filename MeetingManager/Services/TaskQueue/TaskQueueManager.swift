@@ -85,6 +85,7 @@ final class TaskQueueManager {
     var glossaryHandler: (() async throws -> Void)?
     var speechStatsHandler: (() async throws -> Void)?
     var sentimentBackfillHandler: (() async throws -> Void)?
+    var topicBackfillHandler: (() async throws -> Void)?
 
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
@@ -596,7 +597,12 @@ final class TaskQueueManager {
                let inputs = backgroundPolicyInputs?() {
                 if case .deferFor(let minutes) = BackgroundWorkPolicy.decision(inputs) {
                     Logger.general.info("TaskQueue: deferring background work \(next.type.rawValue) for \(minutes)m (recording=\(inputs.isRecording), nextMeeting=\(inputs.minutesToNextMeeting.map(String.init) ?? "none")m, battery=\(inputs.onBattery))")
-                    await deferPendingBackgroundRows(minutes: minutes)
+                    let deferred = await deferPendingBackgroundRows(minutes: minutes)
+                    // Backstop: the defer must make `next` non-runnable, or the
+                    // loop re-pops the same row at CPU rate — there is no other
+                    // suspension on this path. If the write didn't land, back off
+                    // so a failed defer can never peg a core.
+                    if !deferred { try? await Task.sleep(for: .seconds(1)) }
                     continue
                 }
             }
@@ -741,6 +747,7 @@ final class TaskQueueManager {
         case .glossary:           stage = "Updating glossary"
         case .speechStats:        stage = "Computing speaking stats"
         case .sentimentBackfill:  stage = "Reading tone"
+        case .topicBackfill:      stage = "Scanning topics"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -778,17 +785,42 @@ final class TaskQueueManager {
 
     /// Defer ALL currently-pending background rows in one statement
     /// (review M2: per-pop writes are O(n) churn for a fanned-out batch).
-    private func deferPendingBackgroundRows(minutes: Int) async {
+    ///
+    /// The deferred set MUST equal `isBackgroundItem`'s set: the processLoop
+    /// gate fires for every background type, so any row it can pop must get a
+    /// runAfter here — otherwise the loop hot-spins re-popping the uncovered
+    /// row (it was a hardcoded `embedIndex`/`weeklyDigest` list that silently
+    /// fell out of sync as background types were added). Filtering by the same
+    /// predicate makes that drift impossible. Returns false if the write fails,
+    /// so the caller can back off instead of busy-looping.
+    private func deferPendingBackgroundRows(minutes: Int) async -> Bool {
         let until = Date().addingTimeInterval(Double(minutes) * 60)
-        _ = try? await database.writer.write { db in
-            try db.execute(sql: """
-                UPDATE taskQueue SET runAfter = ?
-                WHERE status = 'pending'
-                  AND ((type = 'embedIndex' AND meetingId = '__embed_backfill__')
-                       OR type = 'weeklyDigest')
-                """, arguments: [until])
+        let ok: Bool
+        do {
+            try await database.writer.write { db in
+                let pending = try TaskQueueItem
+                    .filter(TaskQueueItem.Columns.status == TaskQueueItem.TaskStatus.pending.rawValue)
+                    .fetchAll(db)
+                let ids = pending
+                    .filter { TaskQueueItem.isBackgroundItem(type: $0.type, meetingId: $0.meetingId) }
+                    .map(\.id)
+                guard !ids.isEmpty else { return }
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                var arguments: [DatabaseValueConvertible] = [until]
+                arguments.append(contentsOf: ids)
+                try db.execute(
+                    sql: "UPDATE taskQueue SET runAfter = ? WHERE id IN (\(placeholders))",
+                    arguments: StatementArguments(arguments)
+                )
+            }
+            ok = true
+        } catch {
+            AppFileLogger.shared.log("TaskQueue: deferPendingBackgroundRows failed — \(error.localizedDescription)")
+            Logger.general.error("TaskQueue: deferPendingBackgroundRows failed: \(error.localizedDescription)")
+            ok = false
         }
         await refreshTaskList()
+        return ok
     }
 
     private func execute(_ task: TaskQueueItem) async throws {
@@ -898,6 +930,12 @@ final class TaskQueueManager {
         case .sentimentBackfill:
             guard let handler = sentimentBackfillHandler else {
                 throw TaskQueueError.noHandler("sentimentBackfill")
+            }
+            try await handler()
+
+        case .topicBackfill:
+            guard let handler = topicBackfillHandler else {
+                throw TaskQueueError.noHandler("topicBackfill")
             }
             try await handler()
 

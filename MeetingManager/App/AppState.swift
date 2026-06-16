@@ -796,6 +796,22 @@ final class AppState {
             content += "\n\n## Meeting ROI\n" + roiLines.joined(separator: "\n")
         }
 
+        // TASK-081: tracked-topic counts for the week (deterministic, only
+        // when there were hits).
+        let trackerRepo = TopicTrackerRepository(database: database)
+        let activeTrackers = (try? await trackerRepo.activeTrackers()) ?? []
+        if !activeTrackers.isEmpty {
+            var topicLines: [String] = []
+            for tracker in activeTrackers {
+                guard let tid = tracker.id else { continue }
+                let n = (try? await trackerRepo.recentHitCount(trackerId: tid, since: range.start)) ?? 0
+                if n > 0 { topicLines.append("- \(tracker.name): came up in \(n) meeting\(n == 1 ? "" : "s") this week.") }
+            }
+            if !topicLines.isEmpty {
+                content += "\n\n## Tracked topics\n" + topicLines.joined(separator: "\n")
+            }
+        }
+
         try await WeeklyDigestRepository(database: database).save(
             WeeklyDigestRecord(isoWeek: range.isoWeek, content: content, createdAt: Date()))
         fileLog("WeeklyDigest: wrote \(range.isoWeek)")
@@ -1011,6 +1027,64 @@ final class AppState {
             meetingId: meetingId, transcripts: rows,
             selfName: ProcessInfo.processInfo.fullUserName) else { return }
         try? await SpeechStatsRepository(database: database).save(stats)
+    }
+
+    static let topicBackfillSentinel = "__topic_backfill__"
+
+    /// TASK-081: match all active topic trackers against one meeting's
+    /// transcript (one hit per tracker per meeting). Inline in the summary
+    /// chain so new meetings populate immediately. Pure keyword match.
+    private func matchTopicTrackersBestEffort(meetingId: String) async {
+        let repo = TopicTrackerRepository(database: database)
+        let trackers = (try? await repo.activeTrackers()) ?? []
+        guard !trackers.isEmpty else { return }
+        let segs = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)) ?? []
+        guard !segs.isEmpty else { return }
+        for tracker in trackers {
+            guard let tid = tracker.id else { continue }
+            if (try? await repo.hasHit(trackerId: tid, meetingId: meetingId)) == true { continue }
+            if let m = TopicMatcher.firstMatch(keywords: tracker.keywordList, in: segs) {
+                try? await repo.saveHit(TopicTrackerHit(
+                    id: nil, trackerId: tid, meetingId: meetingId,
+                    atSeconds: m.atSeconds, snippet: m.snippet,
+                    matchType: "keyword", createdAt: Date()))
+            }
+        }
+    }
+
+    /// Scan history for active trackers (triggered on tracker create/edit).
+    func enqueueTopicBackfill() async {
+        let queued = taskQueueManager.allTasks.contains { $0.type == .topicBackfill && !$0.isTerminal }
+        guard !queued else { return }
+        await taskQueueManager.enqueue(type: .topicBackfill, meetingId: Self.topicBackfillSentinel, priority: 9)
+    }
+
+    private func runTopicBackfill() async {
+        let repo = TopicTrackerRepository(database: database)
+        let trackers = (try? await repo.activeTrackers()) ?? []
+        guard !trackers.isEmpty else { return }
+        let meetings = (try? await meetingRepository.allActiveMeetings()) ?? []
+        var processed = 0
+        for meeting in meetings {
+            if Task.isCancelled { break }
+            let segs = (try? await transcriptRepository.transcriptsForMeeting(meeting.id, limit: 5000)) ?? []
+            guard !segs.isEmpty else { continue }
+            for tracker in trackers {
+                guard let tid = tracker.id else { continue }
+                if (try? await repo.hasHit(trackerId: tid, meetingId: meeting.id)) == true { continue }
+                if let m = TopicMatcher.firstMatch(keywords: tracker.keywordList, in: segs) {
+                    try? await repo.saveHit(TopicTrackerHit(
+                        id: nil, trackerId: tid, meetingId: meeting.id,
+                        atSeconds: m.atSeconds, snippet: m.snippet,
+                        matchType: "keyword", createdAt: Date()))
+                }
+            }
+            processed += 1
+            if processed.isMultiple(of: 20) {
+                taskQueueManager.reportCurrentProgress(stage: "Scanning topics (\(processed)/\(meetings.count))")
+            }
+        }
+        fileLog("TopicTrackers: scanned \(processed) meeting(s) for \(trackers.count) tracker(s)")
     }
 
     static let sentimentBackfillSentinel = "__sentiment_backfill__"
@@ -1412,6 +1486,7 @@ final class AppState {
             await self.scoreIntentBestEffort(meetingId: meetingId)
             await self.computeSpeechStatsBestEffort(meetingId: meetingId)
             await self.computeSentimentBestEffort(meetingId: meetingId)
+            await self.matchTopicTrackersBestEffort(meetingId: meetingId)
             await self.updateSeriesThreadBestEffort(meetingId: meetingId)
             // Semantic index (TASK-045): priority 8 — after cleanup (6) and
             // the follow-up email (7), embedding is the least urgent step.
@@ -1452,6 +1527,11 @@ final class AppState {
         taskQueueManager.sentimentBackfillHandler = { [weak self] in
             guard let self else { return }
             await self.runSentimentBackfill()
+        }
+
+        taskQueueManager.topicBackfillHandler = { [weak self] in
+            guard let self else { return }
+            await self.runTopicBackfill()
         }
 
         // Governor inputs (TASK-055): composed from signals AppState already
@@ -6506,5 +6586,6 @@ enum SidebarDestination: Hashable {
     case meetings
     case analytics
     case keyQuotes       // TASK-078: saved clips across all meetings
+    case topics          // TASK-081: topic trackers across all meetings
     case folder(String)  // folder key = normalised base title
 }

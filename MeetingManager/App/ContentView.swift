@@ -59,6 +59,9 @@ struct ContentView: View {
         case .keyQuotes:
             KeyQuotesView()
 
+        case .topics:
+            TopicTrackersView()
+
         case .folder(let key):
             let folders = appState.meetingFolders()
             if let folder = folders.first(where: { $0.key == key }) {

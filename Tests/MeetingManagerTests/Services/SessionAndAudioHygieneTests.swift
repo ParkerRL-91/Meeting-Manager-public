@@ -477,6 +477,34 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
     }
 
+    // MARK: - Topic trackers (TASK-081)
+
+    func testTopicMatcherFirstMatchAndValidity() {
+        let segs = [
+            SampleData.makeTranscript(meetingId: "m", speakerLabel: "a", text: "Let's talk roadmap.", startTime: 5, endTime: 9),
+            SampleData.makeTranscript(meetingId: "m", speakerLabel: "b", text: "The pricing is the blocker.", startTime: 20, endTime: 25),
+            SampleData.makeTranscript(meetingId: "m", speakerLabel: "a", text: "Pricing again later.", startTime: 40, endTime: 44),
+        ]
+        let m = TopicMatcher.firstMatch(keywords: ["pricing", "discount"], in: segs)
+        XCTAssertEqual(m?.atSeconds, 20, "first matching segment by time wins (one hit per meeting)")
+        XCTAssertEqual(m?.snippet, "The pricing is the blocker.")
+        XCTAssertNil(TopicMatcher.firstMatch(keywords: ["renewal"], in: segs), "no match → nil")
+        XCTAssertNil(TopicMatcher.firstMatch(keywords: [], in: segs), "no keywords → nil")
+        // Case-insensitive.
+        XCTAssertNotNil(TopicMatcher.firstMatch(keywords: ["PRICING"], in: segs))
+
+        XCTAssertTrue(TopicMatcher.isValid(keywords: ["x"], semanticSeed: nil))
+        XCTAssertTrue(TopicMatcher.isValid(keywords: [], semanticSeed: "renewals"))
+        XCTAssertFalse(TopicMatcher.isValid(keywords: ["  "], semanticSeed: nil))
+        XCTAssertFalse(TopicMatcher.isValid(keywords: [], semanticSeed: nil))
+    }
+
+    func testTopicKeywordEncodingRoundTrip() {
+        let encoded = TopicTracker.encode(keywords: ["price", "pricing", "discount"])
+        let t = TopicTracker(id: 1, name: "Pricing", keywords: encoded, semanticSeed: nil, createdAt: Date(), hiddenAt: nil)
+        XCTAssertEqual(t.keywordList, ["price", "pricing", "discount"])
+    }
+
     // MARK: - Sentiment (TASK-079)
 
     func testSentimentLexiconPolarityNegationIntensifier() {

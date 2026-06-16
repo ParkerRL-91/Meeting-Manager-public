@@ -557,7 +557,13 @@ struct MeetingDetailView: View {
             if let pending = appState.pendingPlaybackRange, pending.meetingId == meetingId {
                 appState.pendingPlaybackRange = nil
                 if appState.audioPlayback.isAvailable {
-                    appState.audioPlayback.playRange(start: pending.start, end: pending.end)
+                    if pending.end > pending.start {
+                        appState.audioPlayback.playRange(start: pending.start, end: pending.end)
+                    } else {
+                        // Topic-hit moment (TASK-081): seek + play normally.
+                        appState.audioPlayback.seek(to: pending.start)
+                        appState.audioPlayback.play()
+                    }
                 }
             }
         }
