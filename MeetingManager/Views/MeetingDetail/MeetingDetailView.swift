@@ -99,6 +99,10 @@ struct MeetingDetailView: View {
 
         tabContent
             .layoutPriority(1)
+
+        // Transcript-synced playback transport (TASK-077). Hides itself
+        // when the meeting has no audio.
+        MeetingPlaybackBar()
     }
 
     @ViewBuilder
@@ -166,6 +170,14 @@ struct MeetingDetailView: View {
             }
             .task {
                 await loadInitialContext()
+            }
+            .onChange(of: meetingId) { _, _ in
+                // Switching meetings: drop the prior meeting's player so the
+                // transport never controls the wrong audio.
+                appState.audioPlayback.unload()
+            }
+            .onDisappear {
+                appState.audioPlayback.pause()
             }
     }
 
@@ -531,6 +543,15 @@ struct MeetingDetailView: View {
         // P5-T02: detect prior sessions in the same series.
         if let m = meeting {
             previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
+        }
+
+        // TASK-077: load the player for transcript-synced playback. Hidden
+        // (no transport) when this meeting has no audio on disk.
+        if let m = meeting, !m.audioFilePaths.isEmpty {
+            let segments = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+            appState.audioPlayback.load(meetingId: meetingId,
+                                        audioFilePaths: m.audioFilePaths,
+                                        segments: segments)
         }
 
         // Model info for tab strip caption.

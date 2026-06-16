@@ -201,6 +201,9 @@ final class AppState {
     let ollamaService: OllamaService
     let embeddingService: EmbeddingService
     let interactiveAIBroker: InteractiveAIBroker
+    /// Shared transcript-synced player (TASK-077). One instance so the
+    /// transport persists across meeting-detail tabs.
+    let audioPlayback = AudioPlaybackService()
     let ollamaInstaller: OllamaInstaller
     let meetingRepository: MeetingRepository
     let transcriptRepository: TranscriptRepository

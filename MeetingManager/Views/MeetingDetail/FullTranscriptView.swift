@@ -20,6 +20,9 @@ struct FullTranscriptView: View {
     /// "correct once, recognized forever" value loop actually happen. Cleared
     /// automatically after a few seconds.
     @State private var learnedToast: String?
+    /// TASK-077: auto-scroll the transcript to follow playback. On by default;
+    /// the toolbar toggle lets the user read freely without the list jumping.
+    @AppStorage("transcript.followPlayback") private var followPlayback = true
 
     /// #8 — after a rename in a recurring meeting, offer to re-check the other
     /// meetings in the same series (they now benefit from the new alias and
@@ -62,6 +65,19 @@ struct FullTranscriptView: View {
                     .pickerStyle(.segmented)
                     .frame(width: 160)
                     .help("Toggle between the AI-cleaned paragraph view and the raw per-segment transcript")
+                }
+
+                // TASK-077: follow playback — auto-scroll the active line into
+                // view. Shown only when the meeting has playable audio.
+                if appState.audioPlayback.isAvailable,
+                   appState.audioPlayback.loadedMeetingId == meetingId {
+                    Toggle(isOn: $followPlayback) {
+                        Label("Follow", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .help("Auto-scroll the transcript to the line being played")
                 }
 
                 CopyButton(
@@ -295,7 +311,33 @@ struct FullTranscriptView: View {
 
     // MARK: - Transcript List
 
+    /// The transcript line the playhead is in — drives the highlight and the
+    /// auto-follow scroll (TASK-077). `filteredTranscripts` is ascending by
+    /// startTime, so the active line is the last one starting at/ before now.
+    private var activePlaybackTranscriptId: Int64? {
+        guard appState.audioPlayback.isAvailable,
+              appState.audioPlayback.loadedMeetingId == meetingId else { return nil }
+        let t = appState.audioPlayback.currentTime
+        var active: Transcript?
+        for seg in filteredTranscripts {
+            if seg.startTime <= t { active = seg } else { break }
+        }
+        return active?.id
+    }
+
     private var transcriptList: some View {
+        ScrollViewReader { proxy in
+            scrollBody
+                .onChange(of: appState.audioPlayback.currentTime) { _, _ in
+                    guard followPlayback, let id = activePlaybackTranscriptId else { return }
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                }
+        }
+    }
+
+    private var scrollBody: some View {
         ScrollView {
             // TASK-069: slides captured during this meeting, in order.
             if !slides.isEmpty {
@@ -348,6 +390,18 @@ struct FullTranscriptView: View {
                                 }
                             }
                         }
+                    }
+                    // TASK-077: highlight the line being played; tap to jump
+                    // playback there.
+                    .id(transcript.id)
+                    .background(transcript.id == activePlaybackTranscriptId
+                                ? Color.appAccentSubtle : Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard appState.audioPlayback.isAvailable,
+                              appState.audioPlayback.loadedMeetingId == meetingId else { return }
+                        appState.audioPlayback.seek(to: transcript.startTime)
+                        appState.audioPlayback.play()
                     }
 
                     if transcript.id != filteredTranscripts.last?.id {
