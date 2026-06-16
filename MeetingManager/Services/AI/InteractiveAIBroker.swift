@@ -27,10 +27,17 @@ final class InteractiveAIBroker {
     /// completion regardless.
     static let maxWaitMinutes: Double = 10
 
+    /// Cadence of the self-heal sweep (TASK-092). Must be < maxWaitMinutes so
+    /// expiry stays bounded; the sweep is a pure in-memory array filter (no
+    /// I/O), so 60 s is negligible even in an app that idles for hours.
+    private static let expirySweepSeconds: TimeInterval = 60
+
     private let logger = Logger(subsystem: "com.meetingmanager.app", category: "AIBroker")
     private let ollama: OllamaService
     private var queue: [Entry] = []
     private var draining = false
+    /// Runs only while the queue is non-empty (TASK-092).
+    private var expiryTimer: Timer?
 
     /// Called when an entry times out before starting — the owner updates
     /// its UI (e.g. replaces the chat placeholder with a retry message).
@@ -60,27 +67,25 @@ final class InteractiveAIBroker {
             return false
         }
         queue.append(Entry(id: id, label: label, enqueuedAt: Date(), work: work))
+        startExpiryTimerIfNeeded()
         logger.info("Broker: queued '\(label)' behind \(self.ollama.inFlightLabel ?? "pending work") (\(self.queue.count) waiting)")
         return true
     }
 
     func cancel(id: UUID) {
         queue.removeAll { $0.id == id }
+        if queue.isEmpty { stopExpiryTimer() }
     }
 
     /// Service the FIFO. Called on every chokepoint release and queue-idle
-    /// edge; re-entrancy-guarded; one entry at a time (the backend is
-    /// serial anyway).
+    /// edge, and by the self-heal timer (TASK-092); re-entrancy-guarded; one
+    /// entry at a time (the backend is serial anyway). Expiry runs first and
+    /// unconditionally — before the `draining`/`isBlocked` guard — so neither
+    /// a busy backend nor an in-flight drain can keep a long-waited entry
+    /// alive.
     func drain() {
-        guard !draining, !isBlocked, !queue.isEmpty else { return }
-        // Expire entries that waited past the ceiling.
-        let cutoff = Date().addingTimeInterval(-Self.maxWaitMinutes * 60)
-        for expired in queue.filter({ $0.enqueuedAt < cutoff }) {
-            logger.info("Broker: '\(expired.label)' timed out waiting")
-            onTimeout?(expired.id)
-        }
-        queue.removeAll { $0.enqueuedAt < cutoff }
-        guard let next = queue.first else { return }
+        expireStaleEntries()
+        guard !draining, !isBlocked, let next = queue.first else { return }
         queue.removeFirst()
         draining = true
         logger.info("Broker: running '\(next.label)' (\(self.queue.count) still waiting)")
@@ -91,5 +96,41 @@ final class InteractiveAIBroker {
                 self?.drain()
             }
         }
+    }
+
+    /// Remove entries that waited past `maxWaitMinutes` and notify their
+    /// owners. Independent of `isBlocked`: the ceiling is about how long an
+    /// entry WAITED without starting, not whether the backend is busy now.
+    /// `asOf` is injectable for tests.
+    func expireStaleEntries(asOf now: Date = Date()) {
+        let cutoff = now.addingTimeInterval(-Self.maxWaitMinutes * 60)
+        for expired in queue.filter({ $0.enqueuedAt < cutoff }) {
+            logger.info("Broker: '\(expired.label)' timed out waiting")
+            onTimeout?(expired.id)
+        }
+        queue.removeAll { $0.enqueuedAt < cutoff }
+        if queue.isEmpty { stopExpiryTimer() }
+    }
+
+    // MARK: - Self-heal timer (TASK-092)
+
+    /// The broker otherwise drains ONLY on external edges — a chokepoint
+    /// release (`ollama.onAllWorkFinished`) or a queue-idle edge — and both
+    /// are edge-triggered. An entry enqueued AFTER the last edge has no future
+    /// trigger, so `drain()` (and the wait ceiling that lives inside it) would
+    /// never run: `pendingCount` latches > 0, permanently asserting
+    /// `interactivePending`, which defeats the background-work governor's
+    /// starvation cap. This timer pokes `drain()` on a fixed cadence so stale
+    /// entries expire on schedule. Runs only while work is queued.
+    private func startExpiryTimerIfNeeded() {
+        guard expiryTimer == nil else { return }
+        expiryTimer = Timer.scheduledTimer(withTimeInterval: Self.expirySweepSeconds, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.drain() }
+        }
+    }
+
+    private func stopExpiryTimer() {
+        expiryTimer?.invalidate()
+        expiryTimer = nil
     }
 }

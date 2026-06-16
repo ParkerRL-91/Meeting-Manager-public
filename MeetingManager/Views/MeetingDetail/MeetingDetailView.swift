@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -13,6 +14,8 @@ struct MeetingDetailView: View {
     @State private var showingEditor = false
     @State private var showingDeleteConfirmation = false
     @State private var showingRecipes = false
+    @State private var videoPath: String?      // TASK-080
+    @State private var showingVideo = false
     @State private var errorMessage: String?
     @State private var showUpNext = true
     @State private var upNextBrief: MeetingPrepBrief?
@@ -193,6 +196,21 @@ struct MeetingDetailView: View {
             .sheet(isPresented: $showingRecipes) {
                 RecipeListView(meetingId: meetingId)
             }
+            .sheet(isPresented: $showingVideo) {
+                if let path = videoPath {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("Meeting Video").font(.headline)
+                            Spacer()
+                            Button("Done") { showingVideo = false }
+                        }
+                        .padding(12)
+                        VideoPlayer(player: AVPlayer(url: URL(fileURLWithPath: path)))
+                            .frame(minWidth: 640, minHeight: 400)
+                    }
+                    .frame(width: 760, height: 520)
+                }
+            }
             .sheet(isPresented: $showingEditor) {
                 editorSheet
             }
@@ -266,6 +284,16 @@ struct MeetingDetailView: View {
                     Label("Recipes", systemImage: "text.book.closed")
                 }
                 .help("Run AI recipes on this meeting")
+
+                // TASK-080: replay the captured video, when one exists.
+                if videoPath != nil {
+                    Button {
+                        showingVideo = true
+                    } label: {
+                        Label("Watch Video", systemImage: "play.rectangle")
+                    }
+                    .help("Replay the recorded meeting video")
+                }
 
                 // Consolidated actions menu — share, export, archive, delete
                 Menu {
@@ -544,6 +572,10 @@ struct MeetingDetailView: View {
         if let m = meeting {
             previousSessions = MeetingSeriesService.shared.detectSeries(for: m, in: appState.meetings)
         }
+
+        // TASK-080: a captured video to replay, if any.
+        videoPath = (try? await MeetingVideoRepository(database: appState.database)
+            .video(meetingId: meetingId))?.filePath
 
         // TASK-077: load the player for transcript-synced playback. Hidden
         // (no transport) when this meeting has no audio on disk.

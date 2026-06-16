@@ -3086,6 +3086,11 @@ final class AppState {
 
                 loadMeetings()
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
+                // TASK-080: optional video capture — no-op unless the user
+                // opted in (off by default); fail-safe, never touches audio.
+                if let mid = self.stateMachine.currentMeeting?.id {
+                    await VideoCaptureService.shared.start(meetingId: mid, database: self.database)
+                }
             } catch {
                 Logger.general.error("Failed to start recording: \(error.localizedDescription)")
                 self.lastUserError = error.localizedDescription
@@ -3258,6 +3263,8 @@ final class AppState {
         // surface as a spurious user-facing alert.
         guard !isStoppingMeeting else { return }
         isStoppingMeeting = true
+        // TASK-080: finalize any video capture (no-op when off).
+        Task { await VideoCaptureService.shared.stop(database: database) }
         // Recording end is a governor re-evaluation point (TASK-055):
         // background work deferred during capture can run again.
         taskQueueManager.reevaluate()
@@ -5809,6 +5816,12 @@ final class AppState {
         enqueueWeeklyDigestIfDue()
         enqueueGardenerIfDue()
         enqueueGlossaryIfDue()
+        // TASK-080: prune video past the retention window (no-op when the
+        // feature was never used).
+        Task { [weak self] in
+            guard let self else { return }
+            await VideoCaptureService.shared.sweepRetention(database: self.database)
+        }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
             await self?.enqueueEmbeddingBackfillIfNeeded()

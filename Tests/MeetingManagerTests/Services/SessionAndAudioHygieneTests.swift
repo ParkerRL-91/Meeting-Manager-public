@@ -477,6 +477,22 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(SpeechStatsBuilder.isUserLabel(nil, selfKey: "x"))
     }
 
+    // MARK: - Video retention (TASK-080)
+
+    func testVideoRetentionExpiry() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let entries: [(meetingId: String, createdAt: Date)] = [
+            ("fresh", now.addingTimeInterval(-2 * 86_400)),    // 2 days
+            ("old", now.addingTimeInterval(-20 * 86_400)),     // 20 days
+            ("edge", now.addingTimeInterval(-14 * 86_400 - 1)),// just past 14d
+        ]
+        let expired = VideoRetention.expired(entries, retentionDays: 14, now: now)
+        XCTAssertEqual(Set(expired), Set(["old", "edge"]))
+        XCTAssertFalse(expired.contains("fresh"))
+        // retentionDays 0 → never expire (disabled).
+        XCTAssertTrue(VideoRetention.expired(entries, retentionDays: 0, now: now).isEmpty)
+    }
+
     // MARK: - Topic trackers (TASK-081)
 
     func testTopicMatcherFirstMatchAndValidity() {

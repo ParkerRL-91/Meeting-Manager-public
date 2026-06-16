@@ -12,11 +12,30 @@ struct OnDeviceSettingsView: View {
         Form {
             toggleSection
             statusSection
+            videoCaptureSection
             aboutSection
         }
         .formStyle(.grouped)
         .onAppear {
             Task { await appState.ollamaService.refreshStatus() }
+        }
+    }
+
+    // MARK: - Video capture (TASK-080)
+
+    @ViewBuilder
+    private var videoCaptureSection: some View {
+        if #available(macOS 15.0, *) {
+            Section {
+                Toggle("Record meeting video", isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "video.captureEnabled") },
+                    set: { UserDefaults.standard.set($0, forKey: "video.captureEnabled") }
+                ))
+            } header: {
+                Text("Video Capture")
+            } footer: {
+                Text("When on, Meeting Manager records the video of the meeting window you're in (on-device only, never uploaded), so you can revisit what was shown. Off by default. Old videos are removed automatically after the retention period. Audio capture is unaffected either way.")
+            }
         }
     }
 

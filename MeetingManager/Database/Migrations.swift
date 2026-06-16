@@ -1343,5 +1343,17 @@ enum Migrations {
             try db.create(index: "idx_trackerHit_meeting", on: "topicTrackerHit",
                           columns: ["meetingId"])
         }
+
+        // TASK-080 (PRJ-011 / ADR-017): optional per-meeting video capture.
+        // Own table so the off-by-default feature + retention stay
+        // self-contained.
+        migrator.registerMigration("v59-meeting-video") { db in
+            try db.create(table: "meetingVideo") { t in
+                t.column("meetingId", .text).primaryKey()
+                    .references("meeting", onDelete: .cascade)
+                t.column("filePath", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+        }
     }
 }
