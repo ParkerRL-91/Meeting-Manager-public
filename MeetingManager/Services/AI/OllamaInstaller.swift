@@ -83,6 +83,16 @@ final class OllamaInstaller {
     private(set) var phase: Phase = .idle
     private(set) var ollamaAppURL: URL? = OllamaInstaller.findInstalledOllama()
 
+    /// Single-flight set keyed by model tag. `@MainActor` isolation serializes
+    /// the Set's mutations without locks. BOTH the foreground (`pullModel`) and
+    /// background (`backgroundPullModel`) paths guard on membership before
+    /// inserting and `defer`-remove on exit, so a duplicate same-tag pull backs
+    /// off instead of racing `phase` or removing the tag from under a live pull.
+    /// (Ollama's server also coalesces identical pulls; this guard only avoids
+    /// redundant client connections and `phase` flicker — it does NOT prevent
+    /// on-disk corruption.)
+    private var inFlightPulls: Set<String> = []
+
     // MARK: - Public API
 
     var isOllamaInstalled: Bool {
@@ -154,10 +164,13 @@ final class OllamaInstaller {
         }
     }
 
-    /// One-shot check: re-pull any missing tier model if the user is on
-    /// `auto`. No-op when both tier models are already installed. Cheap
-    /// enough to call on every launch via `verifyLocalModelsOnStartup`.
-    func verifyAndPullMissing() async {
+    /// One-shot check: pull any missing model the user needs. Honors a
+    /// concrete pin that is NOT a tier model (an explicit user choice such as
+    /// `qwen2.5:3b-instruct`) exactly; otherwise runs the two-tier `auto`
+    /// fan-out so the default population still gets the 8b background pull.
+    /// No-op when nothing is missing. Cheap enough to call on every launch
+    /// via `verifyLocalModelsOnStartup`.
+    func verifyAndPullMissing(preferredModel: String) async {
         guard await isServerReachable() else { return }
         let available = await fetchAvailableModels()
         // Embedding model (TASK-045): small (~274 MB), pulled quietly in the
@@ -165,9 +178,24 @@ final class OllamaInstaller {
         if !available.contains(where: { $0.hasPrefix(EmbeddingService.embedModel) }) {
             Task { await self.backgroundPullModel(EmbeddingService.embedModel) }
         }
+
+        // A concrete pin that is NOT a tier model is an explicit user choice
+        // — honor it exactly. Otherwise fall through to the two-tier "auto"
+        // fan-out so the 8b background pull is preserved for the default
+        // population (ollamaModel defaults to smallTier, a concrete tag — see
+        // AppSettings.swift). The default cannot distinguish "user pinned 4b"
+        // from "user never chose", so a tier-equal pin keeps the fan-out.
+        let isTierPin = preferredModel == OllamaService.smallTier
+            || preferredModel == OllamaService.defaultTier
+        if !preferredModel.isEmpty, preferredModel != "auto", !isTierPin {
+            guard !available.contains(preferredModel) else { return }
+            await setupIfNeeded(model: preferredModel)
+            return
+        }
+
         let missingSmall   = !available.contains(OllamaService.smallTier)
         let missingDefault = !available.contains(OllamaService.defaultTier)
-        if !missingSmall && !missingDefault { return }
+        guard missingSmall || missingDefault else { return }
         // Non-blocking: kick off the background fan-out. setupIfNeeded
         // already does small-foreground + default-background.
         await setupIfNeeded(model: "auto")
@@ -177,6 +205,12 @@ final class OllamaInstaller {
     /// public `phase` state away from `.ready`. The user keeps the small
     /// tier productive while this runs.
     private func backgroundPullModel(_ model: String) async {
+        // A user-initiated (foreground) or another background pull of the same
+        // tag is already running — don't race it. The foreground path drives
+        // `phase`, so this back-off prevents the duplicate flicker.
+        guard !inFlightPulls.contains(model) else { return }
+        inFlightPulls.insert(model)
+        defer { inFlightPulls.remove(model) }
         // Reuse the same pull endpoint pattern as `pullModel` but ignore
         // failures. Implementation kept inline to avoid restructuring the
         // existing pull path's progress reporting.
@@ -410,6 +444,14 @@ final class OllamaInstaller {
     }
 
     private func pullModel(_ model: String) async {
+        // Single-flight: if a pull of this tag is already running (foreground
+        // OR background), don't start a second concurrent download of the same
+        // model — the duplicate would race `phase` and the first finisher's
+        // `defer` would remove the shared tag out from under the second pull.
+        // Mirrors backgroundPullModel's guard.
+        guard !inFlightPulls.contains(model) else { return }
+        inFlightPulls.insert(model)
+        defer { inFlightPulls.remove(model) }
         phase = .pullingModel(name: model, progress: 0)
 
         let url = OllamaService.baseURL.appendingPathComponent("api/pull")
@@ -471,24 +513,15 @@ final class OllamaInstaller {
     }
 
     private func downloadFile(from url: URL, to dest: URL, onProgress: @escaping (Double) -> Void) async throws {
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
-        let total = Double((response as? HTTPURLResponse)?
-            .value(forHTTPHeaderField: "Content-Length")
-            .flatMap { Int64($0) } ?? 0)
-
-        // URLSession.download writes directly to disk — no byte-by-byte buffering.
-        // Move the completed download to the destination.
+        // URLSession.download streams directly to disk — no byte-by-byte
+        // buffering. Move the completed download into place.
+        let (tempURL, _) = try await URLSession.shared.download(from: url)
         let fm = FileManager.default
         if fm.fileExists(atPath: dest.path) {
             try fm.removeItem(at: dest)
         }
         try fm.moveItem(at: tempURL, to: dest)
-
-        if total > 0 {
-            onProgress(1.0)
-        } else {
-            onProgress(1.0)
-        }
+        onProgress(1.0)   // app .zip download is a single move; report completion
     }
 
     private func runProcess(_ executable: String, args: [String]) async throws {

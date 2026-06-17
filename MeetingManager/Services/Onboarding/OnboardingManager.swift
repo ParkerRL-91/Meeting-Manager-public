@@ -22,15 +22,18 @@ final class OnboardingManager {
         didSet { UserDefaults.standard.set(aiChoice.rawValue, forKey: aiChoiceKey) }
     }
 
-    /// Reduced 3-step onboarding (P2-T01). Welcome+permissions are combined,
-    /// calendar is optional, and the model download moves to a background banner
-    /// rather than a blocking step. AI choice / local model / prompts steps were
-    /// removed entirely — they live in Settings now.
+    /// Onboarding flow. P2-T01 reduced this and moved AI choice / prompts to
+    /// Settings; the on-device model step was re-added (ADR-016 / TASK-082 —
+    /// it captures the model choice; the pull happens via the startup verify).
+    /// Raw values are legacy-pinned — `init()` maps persisted indices onto
+    /// them — so `.localModel` is appended as 4 and the display order is set
+    /// explicitly in `visibleSteps`, not by raw value.
     enum OnboardingStep: Int, CaseIterable {
         case welcome = 0
         case calendar = 1
         case knowledgeBase = 2
         case ready = 3
+        case localModel = 4
 
         var title: String {
             switch self {
@@ -38,6 +41,7 @@ final class OnboardingManager {
             case .calendar: return "Calendar"
             case .knowledgeBase: return "Knowledge Base"
             case .ready: return "Ready"
+            case .localModel: return "On-Device AI"
             }
         }
     }
@@ -58,10 +62,12 @@ final class OnboardingManager {
         self.aiChoice = AIChoice(rawValue: savedChoice) ?? .local
     }
 
-    /// All steps are now visible — no conditional steps remain. Kept for the
-    /// dot-indicator binding in `OnboardingView`.
+    /// Display order — the single source of truth for navigation and the dot
+    /// indicator. Explicit (not `allCases`) because `.localModel`'s raw value
+    /// is legacy-pinned to 4 and must appear before `.ready`, not after it.
+    /// `nextStep()/previousStep()` walk this array, so order here governs.
     var visibleSteps: [OnboardingStep] {
-        OnboardingStep.allCases
+        [.welcome, .calendar, .localModel, .knowledgeBase, .ready]
     }
 
     func nextStep() {

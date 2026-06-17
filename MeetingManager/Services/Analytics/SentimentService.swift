@@ -4,10 +4,9 @@ import GRDB
 // MARK: - MeetingSentiment (TASK-079, migration v57)
 
 /// A coarse, neutral tone read for a meeting or one speaker. Deterministic
-/// lexicon baseline (no model, no network); an optional local-LLM pass may
-/// refine the label later. Presented as an observation, never a judgment
-/// (the RelationshipHealth precedent). Derived data — regeneration
-/// replaces a meeting's rows.
+/// lexicon baseline (no model, no network). Presented as an observation,
+/// never a judgment (the RelationshipHealth precedent). Derived data —
+/// regeneration replaces a meeting's rows.
 struct MeetingSentiment: Codable, FetchableRecord, MutablePersistableRecord, Identifiable {
     static let databaseTableName = "meetingSentiment"
 
@@ -18,7 +17,7 @@ struct MeetingSentiment: Codable, FetchableRecord, MutablePersistableRecord, Ide
     var label: String        // positive | neutral | negative | mixed
     var polarity: Double     // [-1, +1]
     var magnitude: Double    // 0...1 coverage/confidence
-    var method: String       // "lexicon" | "llm"
+    var method: String       // "lexicon"
     var note: String?
     var computedAt: Date
 
@@ -99,9 +98,21 @@ enum SentimentLexicon {
         "confused": -2, "confusing": -2, "frustrated": -3, "frustrating": -3,
         "angry": -3, "delay": -2, "delayed": -2, "wrong": -2, "broken": -2,
         "unclear": -1, "difficult": -1, "hard": -1, "stuck": -2, "disappointed": -3,
-        "unfortunately": -1, "cannot": -1, "won't": -1, "doesn't": -1,
+        "unfortunately": -1,
+        // NB: "cannot" / "won't" / "doesn't" used to live here but never
+        // scored — the old tokenizer stripped apostrophes so they were
+        // unreachable. They are negators (below), not valence words; routing
+        // them to the negator role only avoids future double-counting now
+        // that the tokenizer preserves apostrophes. "no" keeps its own -1
+        // (a terse "the answer is no" reads negative) *and* its negator role.
     ]
-    static let negators: Set<String> = ["not", "no", "never", "n't", "without", "hardly", "barely"]
+    static let negators: Set<String> = [
+        "not", "no", "never", "n't", "without", "hardly", "barely",
+        "isn't", "doesn't", "don't", "didn't", "wasn't", "weren't",
+        "won't", "wouldn't", "can't", "couldn't", "shouldn't",
+        "haven't", "hasn't", "hadn't", "aren't", "ain't", "cannot",
+        "neither", "nor", "nothing", "nowhere", "scarcely", "rarely", "seldom",
+    ]
     static let intensifiers: Set<String> = ["very", "really", "extremely", "so", "totally", "absolutely", "incredibly"]
 
     struct Score: Equatable {
@@ -111,10 +122,18 @@ enum SentimentLexicon {
     }
 
     static func score(_ text: String) -> Score {
-        let tokens = text.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        // Preserve apostrophes/hyphens so contractions ("won't", "doesn't")
+        // survive and the "n't" negator suffix is reachable. Normalize the
+        // curly apostrophe U+2019 (which STT emits) to a straight one first.
+        let normalized = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        var wordChars = CharacterSet.alphanumerics
+        wordChars.insert(charactersIn: "'-")
+        let tokens = normalized.components(separatedBy: wordChars.inverted)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "'-")) }
             .filter { !$0.isEmpty }
         guard !tokens.isEmpty else { return Score(polarity: 0, magnitude: 0, label: "neutral") }
+
+        func isNegator(_ t: String) -> Bool { negators.contains(t) || t.hasSuffix("n't") }
 
         var sum = 0.0
         var hits = 0
@@ -124,7 +143,7 @@ enum SentimentLexicon {
             // Look back up to two tokens for a negator / intensifier.
             let prev = i > 0 ? tokens[i - 1] : ""
             let prev2 = i > 1 ? tokens[i - 2] : ""
-            if negators.contains(prev) || negators.contains(prev2) { v = -v }
+            if isNegator(prev) || isNegator(prev2) { v = -v }
             if intensifiers.contains(prev) { v *= 1.5 }
             sum += v
             hits += 1

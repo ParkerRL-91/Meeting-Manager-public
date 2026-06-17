@@ -33,9 +33,6 @@ final class AudioPlaybackService {
     private var endObserver: NSObjectProtocol?
     /// Range auto-stop boundary (TASK-078 clip playback).
     private var rangeEnd: Double?
-    /// Sorted segment start times for the loaded meeting — O(log n) active-
-    /// segment lookup per tick instead of a linear scan.
-    private var sortedStarts: [Double] = []
 
     // MARK: - Load
 
@@ -45,7 +42,6 @@ final class AudioPlaybackService {
         if loadedMeetingId == meetingId, player != nil { return }
         unload()
         loadedMeetingId = meetingId
-        sortedStarts = segments.map(\.startTime).sorted()
 
         let existing = audioFilePaths.filter { FileManager.default.fileExists(atPath: $0) }
         guard !existing.isEmpty else {
@@ -84,7 +80,10 @@ final class AudioPlaybackService {
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isPlaying = false }
+            // Direct main-queue mutation, matching the sibling periodic
+            // observer above (self.currentTime = …). Synchronous with the end
+            // event; no Task hop needed.
+            self?.isPlaying = false
         }
     }
 
@@ -101,13 +100,20 @@ final class AudioPlaybackService {
         isAvailable = false
         rangeEnd = nil
         loadedMeetingId = nil
-        sortedStarts = []
     }
 
     // MARK: - Transport
 
     func play() {
-        guard let player else { return }
+        guard let player, let item = player.currentItem else { return }
+        // Once the head parks at the end (actionAtItemEnd == .pause), setting
+        // rate is a no-op — rewind first. Use the item's own time, not the
+        // published currentTime, which the 0.15s observer can leave a hair
+        // short of duration.
+        if item.currentTime() >= item.duration {
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            currentTime = 0
+        }
         player.rate = rate           // applying rate also resumes playback
         isPlaying = true
     }
@@ -143,12 +149,6 @@ final class AudioPlaybackService {
         seek(to: start)
         rangeEnd = min(end, duration)
         play()
-    }
-
-    /// The segment containing the current playhead — drives the active-line
-    /// highlight. Returns the index into the meeting's start-sorted segments.
-    var activeSegmentIndex: Int? {
-        Self.activeSegmentIndex(forTime: currentTime, sortedStarts: sortedStarts)
     }
 
     // MARK: - Pure helpers (unit-tested)

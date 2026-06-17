@@ -8,6 +8,7 @@ struct KeyQuotesView: View {
     @Environment(AppState.self) private var appState
     @State private var clips: [Clip] = []
     @State private var isLoading = true
+    @State private var errorMessage: String?
 
     private var meetingsById: [String: Meeting] {
         Dictionary(appState.meetings.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -38,7 +39,7 @@ struct KeyQuotesView: View {
             .padding(.vertical, 16)
             Divider().background(Color.appSeparator)
 
-            if isLoading {
+            if isLoading && clips.isEmpty {
                 Spacer(); ProgressView(); Spacer()
             } else if clips.isEmpty {
                 emptyState
@@ -55,6 +56,19 @@ struct KeyQuotesView: View {
         }
         .background(Color.appBackground)
         .task { await load() }
+        // A quote saved from a meeting's transcript should appear without a
+        // relaunch. The spinner is gated on first load (clips empty) so a tab
+        // switch doesn't flash it; `.task` + `.onAppear` both fire on first
+        // appearance, but `load()` is idempotent (one harmless extra load).
+        .onAppear { Task { await load() } }
+        .alert("Couldn't Update Quote", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
     }
 
     private var emptyState: some View {
@@ -112,8 +126,12 @@ struct KeyQuotesView: View {
     private func delete(_ clip: Clip) {
         guard let id = clip.id else { return }
         Task {
-            try? await ClipRepository(database: appState.database).delete(id: id)
-            clips.removeAll { $0.id == id }
+            do {
+                try await ClipRepository(database: appState.database).delete(id: id)
+                clips.removeAll { $0.id == id }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -121,9 +139,13 @@ struct KeyQuotesView: View {
         guard let id = clip.id else { return }
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            try? await ClipRepository(database: appState.database).updateNote(id: id, note: trimmed.isEmpty ? nil : trimmed)
-            if let idx = clips.firstIndex(where: { $0.id == id }) {
-                clips[idx].note = trimmed.isEmpty ? nil : trimmed
+            do {
+                try await ClipRepository(database: appState.database).updateNote(id: id, note: trimmed.isEmpty ? nil : trimmed)
+                if let idx = clips.firstIndex(where: { $0.id == id }) {
+                    clips[idx].note = trimmed.isEmpty ? nil : trimmed
+                }
+            } catch {
+                errorMessage = error.localizedDescription
             }
         }
     }

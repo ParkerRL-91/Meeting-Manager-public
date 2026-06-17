@@ -174,11 +174,6 @@ struct MeetingDetailView: View {
             .task {
                 await loadInitialContext()
             }
-            .onChange(of: meetingId) { _, _ in
-                // Switching meetings: drop the prior meeting's player so the
-                // transport never controls the wrong audio.
-                appState.audioPlayback.unload()
-            }
             .onDisappear {
                 appState.audioPlayback.pause()
             }
@@ -581,6 +576,10 @@ struct MeetingDetailView: View {
         // (no transport) when this meeting has no audio on disk.
         if let m = meeting, !m.audioFilePaths.isEmpty {
             let segments = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+            // Meeting-switch isolation: ContentView applies `.id(meetingId)`, so a
+            // new meeting builds a fresh MeetingDetailView (fresh `.task`). load()
+            // also self-guards (returns if already loaded) and unloads the prior
+            // player — the transport never controls the wrong meeting's audio.
             appState.audioPlayback.load(meetingId: meetingId,
                                         audioFilePaths: m.audioFilePaths,
                                         segments: segments)

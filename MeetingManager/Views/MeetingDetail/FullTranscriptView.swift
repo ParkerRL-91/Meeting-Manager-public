@@ -14,6 +14,14 @@ struct FullTranscriptView: View {
     @State private var searchQuery: String = ""
     @State private var isLoading = true
     @State private var filteredTranscripts: [Transcript] = []
+    /// The active (playing) transcript line, recomputed only on a playhead
+    /// boundary crossing — never read per-row in the list body, so a 0.15s
+    /// tick no longer re-evaluates the whole LazyVStack (TASK-077 perf).
+    @State private var activeRowId: Int64?
+    /// Cached ascending start times of `filteredTranscripts`, refreshed only
+    /// when the filtered set changes — the binary search reads this instead of
+    /// mapping the segments every tick.
+    @State private var sortedFilteredStarts: [Double] = []
     @State private var speakerToCustomRename: Transcript?
     @State private var renameError: String?
 
@@ -314,28 +322,35 @@ struct FullTranscriptView: View {
 
     // MARK: - Transcript List
 
-    /// The transcript line the playhead is in — drives the highlight and the
-    /// auto-follow scroll (TASK-077). `filteredTranscripts` is ascending by
-    /// startTime, so the active line is the last one starting at/ before now.
-    private var activePlaybackTranscriptId: Int64? {
+    /// Recompute the active line on a playhead boundary crossing (TASK-077).
+    /// Reads the cached `sortedFilteredStarts` via the tested binary search —
+    /// O(log n), no per-tick allocation — and only touches `activeRowId` (and
+    /// scrolls) when the active segment actually changes.
+    private func recomputeActiveRow(proxy: ScrollViewProxy) {
         guard appState.audioPlayback.isAvailable,
-              appState.audioPlayback.loadedMeetingId == meetingId else { return nil }
-        let t = appState.audioPlayback.currentTime
-        var active: Transcript?
-        for seg in filteredTranscripts {
-            if seg.startTime <= t { active = seg } else { break }
+              appState.audioPlayback.loadedMeetingId == meetingId else {
+            if activeRowId != nil { activeRowId = nil }
+            return
         }
-        return active?.id
+        let idx = AudioPlaybackService.activeSegmentIndex(
+            forTime: appState.audioPlayback.currentTime,
+            sortedStarts: sortedFilteredStarts)
+        let newId = idx.flatMap { filteredTranscripts[$0].id }
+        guard newId != activeRowId else { return }
+        activeRowId = newId
+        if followPlayback, let id = activeRowId {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
+        }
     }
 
     private var transcriptList: some View {
         ScrollViewReader { proxy in
             scrollBody
                 .onChange(of: appState.audioPlayback.currentTime) { _, _ in
-                    guard followPlayback, let id = activePlaybackTranscriptId else { return }
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo(id, anchor: .center)
-                    }
+                    recomputeActiveRow(proxy: proxy)
+                }
+                .onChange(of: filteredTranscripts) { _, _ in
+                    recomputeActiveRow(proxy: proxy)
                 }
         }
     }
@@ -404,7 +419,7 @@ struct FullTranscriptView: View {
                     // TASK-077: highlight the line being played; tap to jump
                     // playback there.
                     .id(transcript.id)
-                    .background(transcript.id == activePlaybackTranscriptId
+                    .background(transcript.id == activeRowId
                                 ? Color.appAccentSubtle : Color.clear)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -612,6 +627,10 @@ struct FullTranscriptView: View {
                     .localizedCaseInsensitiveContains(searchQuery)
             }
         }
+        // Refresh the cached starts here (transcripts/search drive this), not
+        // per playback tick. transcripts/filteredTranscripts preserve time
+        // order, so this is already ascending.
+        sortedFilteredStarts = filteredTranscripts.map(\.startTime)
     }
 
     // MARK: - Copy
@@ -646,8 +665,12 @@ struct FullTranscriptView: View {
     /// evidence about the whole cluster.
     private func reassignSegment(rowId: Int64, to name: String) {
         Task {
-            try? await appState.transcriptRepository.updateSpeakerLabels([rowId: name])
-            await loadTranscripts()
+            do {
+                try await appState.transcriptRepository.updateSpeakerLabels([rowId: name])
+                await loadTranscripts()
+            } catch {
+                renameError = error.localizedDescription
+            }
         }
     }
 
@@ -656,16 +679,25 @@ struct FullTranscriptView: View {
     private func saveClip(from transcript: Transcript) {
         guard let clip = ClipBuilder.fromSegments([transcript], meetingId: meetingId) else { return }
         Task {
-            try? await ClipRepository(database: AppDatabase.shared).save(clip)
-            clips = (try? await ClipRepository(database: AppDatabase.shared).clips(meetingId: meetingId)) ?? clips
+            do {
+                let repo = ClipRepository(database: AppDatabase.shared)
+                try await repo.save(clip)
+                clips = (try? await repo.clips(meetingId: meetingId)) ?? clips
+            } catch {
+                renameError = error.localizedDescription
+            }
         }
     }
 
     private func deleteClip(_ clip: Clip) {
         guard let id = clip.id else { return }
         Task {
-            try? await ClipRepository(database: AppDatabase.shared).delete(id: id)
-            clips.removeAll { $0.id == id }
+            do {
+                try await ClipRepository(database: AppDatabase.shared).delete(id: id)
+                clips.removeAll { $0.id == id }
+            } catch {
+                renameError = error.localizedDescription
+            }
         }
     }
 
@@ -806,19 +838,3 @@ struct FullTranscriptView: View {
         return formatTranscriptMarkdown()
     }
 }
-
-// MARK: - Previews
-
-// #Preview("With Transcripts") {
-//     FullTranscriptView(meetingId: "preview-1")
-//         .environment(AppState())
-//         .frame(width: 600, height: 500)
-//         .background(Color.appBackground)
-// }
-
-// #Preview("Empty") {
-//     FullTranscriptView(meetingId: "no-transcript")
-//         .environment(AppState())
-//         .frame(width: 600, height: 500)
-//         .background(Color.appBackground)
-// }

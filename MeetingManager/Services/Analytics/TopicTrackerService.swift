@@ -121,6 +121,10 @@ enum TopicMatcher {
     /// First transcript segment containing any of the tracker's keywords
     /// (case-insensitive substring). One match per meeting — the meeting is
     /// the unit of "came up". nil when nothing matches. Pure.
+    ///
+    /// Short, all-alphanumeric needles ("AI", "ML", "QA") require a word
+    /// boundary so they don't match inside "again"/"html"/"squad". Longer or
+    /// punctuated needles keep the plain substring contract.
     static func firstMatch(keywords: [String], in segments: [Transcript]) -> Match? {
         let needles = keywords
             .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -128,13 +132,24 @@ enum TopicMatcher {
         guard !needles.isEmpty else { return nil }
         for seg in segments.sorted(by: { $0.startTime < $1.startTime }) {
             let hay = seg.text.lowercased()
-            if needles.contains(where: { hay.contains($0) }) {
+            if needles.contains(where: { matches($0, in: hay) }) {
                 let snip = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 return Match(atSeconds: seg.startTime,
                              snippet: snip.count <= snippetCap ? snip : String(snip.prefix(snippetCap)) + "…")
             }
         }
         return nil
+    }
+
+    private static func matches(_ needle: String, in hay: String) -> Bool {
+        let isShort = needle.count <= 3
+        let isAlnum = needle.allSatisfy { $0.isLetter || $0.isNumber }
+        guard isShort, isAlnum else { return hay.contains(needle) }
+        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: needle) + "\\b"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return hay.contains(needle)   // never silently drop a keyword
+        }
+        return re.firstMatch(in: hay, range: NSRange(hay.startIndex..., in: hay)) != nil
     }
 
     /// Validity for a new tracker: at least one non-blank keyword OR a seed.

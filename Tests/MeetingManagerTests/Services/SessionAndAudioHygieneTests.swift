@@ -583,8 +583,20 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertEqual(m?.snippet, "The pricing is the blocker.")
         XCTAssertNil(TopicMatcher.firstMatch(keywords: ["renewal"], in: segs), "no match → nil")
         XCTAssertNil(TopicMatcher.firstMatch(keywords: [], in: segs), "no keywords → nil")
-        // Case-insensitive.
+        // Case-insensitive; >3-char keyword keeps the substring contract.
         XCTAssertNotNil(TopicMatcher.firstMatch(keywords: ["PRICING"], in: segs))
+
+        // Short, all-alphanumeric needles need a word boundary so they don't
+        // match inside a longer word.
+        let aiSegs = [
+            SampleData.makeTranscript(meetingId: "m", speakerLabel: "a", text: "Let's discuss this again tomorrow.", startTime: 1, endTime: 4),
+            SampleData.makeTranscript(meetingId: "m", speakerLabel: "b", text: "The AI roadmap is the priority.", startTime: 8, endTime: 12),
+        ]
+        let ai = TopicMatcher.firstMatch(keywords: ["AI"], in: aiSegs)
+        XCTAssertEqual(ai?.atSeconds, 8, "\"AI\" matches \"the AI roadmap\", not \"again\"")
+        XCTAssertNil(TopicMatcher.firstMatch(keywords: ["AI"],
+                     in: [SampleData.makeTranscript(meetingId: "m", speakerLabel: "a", text: "again and again", startTime: 1, endTime: 3)]),
+                     "short needle must not match inside \"again\"")
 
         XCTAssertTrue(TopicMatcher.isValid(keywords: ["x"], semanticSeed: nil))
         XCTAssertTrue(TopicMatcher.isValid(keywords: [], semanticSeed: "renewals"))
@@ -603,11 +615,17 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     func testSentimentLexiconPolarityNegationIntensifier() {
         XCTAssertEqual(SentimentLexicon.score("This is great, I love it.").label, "positive")
         XCTAssertEqual(SentimentLexicon.score("This is a terrible, broken mess.").label, "negative")
-        // Negation flips: "not good" must not read positive.
+        // Negation flips sign: "not good" reads negative (good +1 → -1).
         XCTAssertLessThan(SentimentLexicon.score("this is not good at all").polarity, 0)
         // Intensifier strengthens.
         XCTAssertGreaterThan(SentimentLexicon.score("very good").polarity,
                              SentimentLexicon.score("good").polarity - 0.0001)
+        // Contraction negation is now reachable (the tokenizer keeps the
+        // apostrophe). "don't agree" negates a positive → negative.
+        XCTAssertLessThan(SentimentLexicon.score("I don't agree with this").polarity, 0)
+        XCTAssertLessThan(SentimentLexicon.score("that won't be helpful and doesn't look great").polarity, 0)
+        // Double negation: "wasn't" flips bad (-2 → +2) → positive.
+        XCTAssertGreaterThan(SentimentLexicon.score("the demo wasn't bad").polarity, 0)
         // No valence words → neutral, low magnitude.
         let plain = SentimentLexicon.score("the meeting is on tuesday at three")
         XCTAssertEqual(plain.label, "neutral")

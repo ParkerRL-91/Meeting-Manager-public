@@ -16,6 +16,8 @@ struct OnboardingView: View {
                     WelcomeStepView(onNext: onboardingManager.nextStep)
                 case .calendar:
                     CalendarStepView(onAdvance: onboardingManager.nextStep)
+                case .localModel:
+                    LocalModelStepView()
                 case .knowledgeBase:
                     KnowledgeBaseStepView(onSkip: onboardingManager.nextStep)
                 case .ready:
@@ -93,12 +95,15 @@ struct OnboardingView: View {
 
             Spacer()
 
-            // Next / Skip — welcome and ready own their CTAs; calendar +
-            // knowledge-base steps offer a subtle "Next" link in the bar.
+            // Next / Skip — welcome and ready own their CTAs; calendar,
+            // on-device, and knowledge-base steps offer a subtle "Next" link
+            // in the bar. The on-device step only advances here — the model
+            // choice is already persisted by the step, and the pull runs via
+            // verifyLocalModelsOnStartup (no second download path).
             switch onboardingManager.currentStep {
             case .welcome, .ready:
                 Spacer().frame(width: 80)
-            case .calendar, .knowledgeBase:
+            case .calendar, .localModel, .knowledgeBase:
                 Button(action: onboardingManager.nextStep) {
                     Label("Next", systemImage: "chevron.right")
                         .labelStyle(TrailingIconLabelStyle())

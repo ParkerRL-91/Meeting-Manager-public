@@ -14,6 +14,7 @@ struct TopicTrackersView: View {
     @State private var expandedId: Int64?
     @State private var hits: [Int64: [TopicTrackerHit]] = [:]
     @State private var isLoading = true
+    @State private var errorMessage: String?
 
     private var meetingsById: [String: Meeting] {
         Dictionary(appState.meetings.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -51,6 +52,14 @@ struct TopicTrackersView: View {
         }
         .background(Color.appBackground)
         .task { await load() }
+        .alert("Couldn't Save Topic", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
     }
 
     private var editorCard: some View {
@@ -168,12 +177,17 @@ struct TopicTrackersView: View {
         guard TopicMatcher.isValid(keywords: kws, semanticSeed: nil) else { return }
         let repo = TopicTrackerRepository(database: appState.database)
         Task {
-            if let id = editingId {
-                try? await repo.updateKeywords(id: id, name: name, keywords: kws, semanticSeed: nil)
-            } else {
-                try? await repo.save(TopicTracker(id: nil, name: name,
-                                                  keywords: TopicTracker.encode(keywords: kws),
-                                                  semanticSeed: nil, createdAt: Date(), hiddenAt: nil))
+            do {
+                if let id = editingId {
+                    try await repo.updateKeywords(id: id, name: name, keywords: kws, semanticSeed: nil)
+                } else {
+                    try await repo.save(TopicTracker(id: nil, name: name,
+                                                      keywords: TopicTracker.encode(keywords: kws),
+                                                      semanticSeed: nil, createdAt: Date(), hiddenAt: nil))
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                return
             }
             resetEditor()
             await load()
@@ -194,7 +208,12 @@ struct TopicTrackersView: View {
     private func delete(_ tracker: TopicTracker) {
         guard let id = tracker.id else { return }
         Task {
-            try? await TopicTrackerRepository(database: appState.database).hide(id: id)
+            do {
+                try await TopicTrackerRepository(database: appState.database).hide(id: id)
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
             await load()
         }
     }

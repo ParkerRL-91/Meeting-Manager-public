@@ -2358,16 +2358,13 @@ final class AppState {
         guard settings.useLocalLLM else { return }
         await ollamaService.refreshStatus()
         guard ollamaService.isReachable else { return }
-        // Inspect availableModels first so we don't spin up the installer
-        // when there's nothing to do.
-        let installed = Set(ollamaService.availableModels)
-        let needSmall   = !installed.contains(OllamaService.smallTier)
-        let needDefault = !installed.contains(OllamaService.defaultTier)
-        guard needSmall || needDefault else { return }
         // The Settings UI subscribes to `ollamaInstaller.phase`; calling
         // `verifyAndPullMissing` flips that phase through `.pulling` →
-        // `.ready` so the in-progress notice shows up automatically.
-        await ollamaInstaller.verifyAndPullMissing()
+        // `.ready` so the in-progress notice shows up automatically. The
+        // installer owns the missing-check (it re-reads /api/tags) so a
+        // non-tier pin like qwen2.5:3b-instruct is pulled too — duplicating
+        // a tier-only guard here would strand that case.
+        await ollamaInstaller.verifyAndPullMissing(preferredModel: settings.ollamaModel)
     }
 
     /// app version: a UserDefaults flag (`speakerAttribution.retroScan.<v>`)
@@ -3086,8 +3083,11 @@ final class AppState {
                 fileLog("Recording started for meeting \(self.stateMachine.currentMeeting?.id ?? "?")")
                 // TASK-080: optional video capture — no-op unless the user
                 // opted in (off by default); fail-safe, never touches audio.
+                // Detached so the start path doesn't block on SCShareableContent/
+                // startCapture; safe because start() now guards on lifecycle and
+                // awaits any in-flight teardown (C1).
                 if let mid = self.stateMachine.currentMeeting?.id {
-                    await VideoCaptureService.shared.start(meetingId: mid, database: self.database)
+                    Task { await VideoCaptureService.shared.start(meetingId: mid) }
                 }
             } catch {
                 Logger.general.error("Failed to start recording: \(error.localizedDescription)")
@@ -3261,8 +3261,11 @@ final class AppState {
         // surface as a spurious user-facing alert.
         guard !isStoppingMeeting else { return }
         isStoppingMeeting = true
-        // TASK-080: finalize any video capture (no-op when off).
-        Task { await VideoCaptureService.shared.stop(database: database) }
+        // TASK-080: finalize any video capture (no-op when off). Synchronous
+        // trigger creates the teardown handle on the main actor *now* so a
+        // back-to-back meeting's start() can observe and await it (the actual
+        // teardown still runs off the synchronous path, so the UI isn't blocked).
+        VideoCaptureService.shared.beginStop(database: database)
         // Recording end is a governor re-evaluation point (TASK-055):
         // background work deferred during capture can run again.
         taskQueueManager.reevaluate()
