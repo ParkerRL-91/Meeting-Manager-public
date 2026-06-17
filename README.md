@@ -21,6 +21,18 @@ You only do this once.
 
 ---
 
+## What's New in v4.7.1
+
+This release refines the features introduced in v4.7.0 with reliability fixes across model setup, playback, and on-device analysis.
+
+**You can now choose your on-device model during onboarding, and its download shows real progress.** The model-selection step is wired into the setup flow, and the runtime download reports its actual percentage as it runs instead of appearing to jump straight to finished. A model you choose is also the one that gets downloaded, rather than being overridden by a default.
+
+**Replaying a finished clip or meeting now works as expected.** Pressing play after a recording has reached its end rewinds to the start and plays, instead of doing nothing.
+
+**Each meeting's tone now reads negated statements correctly.** The on-device sentiment pass recognizes contractions such as "doesn't" and "won't," so a sentence like "this doesn't work" is no longer scored as positive.
+
+This release also serializes optional video capture so two back-to-back meetings can never overlap a recording, makes the active transcript line track playback smoothly on long meetings, and gives clearer messages when an action can't be saved.
+
 ## What's New in v4.7.0
 
 **Meeting Manager can now run a private language model entirely on your Mac, set up during onboarding.** A new onboarding step lets you choose and download an on-device model, so summaries, the daily brief, chat, and the other AI features work without an internet connection or an API key, and no meeting content ever leaves your machine. You can still point the app at Claude or your own provider if you prefer.
