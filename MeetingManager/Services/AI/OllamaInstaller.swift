@@ -219,7 +219,7 @@ final class OllamaInstaller {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 60 * 60   // 1 hour cap for large downloads
-        let body: [String: Any] = ["name": model, "stream": false]
+        let body: [String: Any] = ["model": model, "stream": false]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         _ = try? await URLSession.shared.data(for: request)
     }
@@ -512,16 +512,37 @@ final class OllamaInstaller {
         return json.models.map { $0.name }
     }
 
+    /// Surfaces real fractional progress for the runtime zip (A3). The async
+    /// `download(from:delegate:)` still returns the completed file, but a
+    /// per-task download delegate also receives `didWriteData`, so the UI
+    /// advances smoothly instead of jumping 0 → 100%. `URLSession.download`
+    /// alone reports nothing until completion, and iterating `AsyncBytes` would
+    /// walk one byte at a time over tens of MB.
+    private final class DownloadProgressReporter: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        private let onProgress: (Double) -> Void
+        init(onProgress: @escaping (Double) -> Void) { self.onProgress = onProgress }
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                        didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                        totalBytesExpectedToWrite: Int64) {
+            guard totalBytesExpectedToWrite > 0 else { return }  // length unknown → stay indeterminate
+            onProgress(min(0.99, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+        }
+
+        // Required by the protocol; the async download() consumes the file itself.
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                        didFinishDownloadingTo location: URL) {}
+    }
+
     private func downloadFile(from url: URL, to dest: URL, onProgress: @escaping (Double) -> Void) async throws {
-        // URLSession.download streams directly to disk — no byte-by-byte
-        // buffering. Move the completed download into place.
-        let (tempURL, _) = try await URLSession.shared.download(from: url)
+        let reporter = DownloadProgressReporter(onProgress: onProgress)
+        let (tempURL, _) = try await URLSession.shared.download(from: url, delegate: reporter)
         let fm = FileManager.default
         if fm.fileExists(atPath: dest.path) {
             try fm.removeItem(at: dest)
         }
         try fm.moveItem(at: tempURL, to: dest)
-        onProgress(1.0)   // app .zip download is a single move; report completion
+        onProgress(1.0)   // download complete + moved into place
     }
 
     private func runProcess(_ executable: String, args: [String]) async throws {

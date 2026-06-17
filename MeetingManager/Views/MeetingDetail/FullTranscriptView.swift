@@ -23,7 +23,7 @@ struct FullTranscriptView: View {
     /// mapping the segments every tick.
     @State private var sortedFilteredStarts: [Double] = []
     @State private var speakerToCustomRename: Transcript?
-    @State private var renameError: String?
+    @State private var actionError: String?
 
     /// Transient confirmation shown after a manual rename so the user sees the
     /// "correct once, recognized forever" value loop actually happen. Cleared
@@ -200,13 +200,13 @@ struct FullTranscriptView: View {
                 renameSpeaker(transcript: transcript, newName: newName)
             }
         }
-        .alert("Rename Failed", isPresented: Binding(
-            get: { renameError != nil },
-            set: { if !$0 { renameError = nil } }
+        .alert("Action Failed", isPresented: Binding(
+            get: { actionError != nil },
+            set: { if !$0 { actionError = nil } }
         )) {
-            Button("OK", role: .cancel) { renameError = nil }
+            Button("OK", role: .cancel) { actionError = nil }
         } message: {
-            Text(renameError ?? "")
+            Text(actionError ?? "")
         }
         .confirmationDialog(
             "Apply across this series?",
@@ -509,7 +509,7 @@ struct FullTranscriptView: View {
                     to: trimmed
                 )
             } catch {
-                renameError = error.localizedDescription
+                actionError = error.localizedDescription
                 return
             }
 
@@ -530,7 +530,7 @@ struct FullTranscriptView: View {
                 // Non-fatal — the transcripts are already renamed; the alias
                 // upsert below still records the user's intent for future
                 // meetings in the series.
-                renameError = error.localizedDescription
+                actionError = error.localizedDescription
             }
 
             // 3. Patch the cleaned transcript blob in place so the readable
@@ -669,7 +669,7 @@ struct FullTranscriptView: View {
                 try await appState.transcriptRepository.updateSpeakerLabels([rowId: name])
                 await loadTranscripts()
             } catch {
-                renameError = error.localizedDescription
+                actionError = error.localizedDescription
             }
         }
     }
@@ -684,7 +684,7 @@ struct FullTranscriptView: View {
                 try await repo.save(clip)
                 clips = (try? await repo.clips(meetingId: meetingId)) ?? clips
             } catch {
-                renameError = error.localizedDescription
+                actionError = error.localizedDescription
             }
         }
     }
@@ -696,7 +696,7 @@ struct FullTranscriptView: View {
                 try await ClipRepository(database: AppDatabase.shared).delete(id: id)
                 clips.removeAll { $0.id == id }
             } catch {
-                renameError = error.localizedDescription
+                actionError = error.localizedDescription
             }
         }
     }
