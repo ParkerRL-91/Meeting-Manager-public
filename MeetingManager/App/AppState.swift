@@ -47,10 +47,27 @@ final class AppState {
     /// (and cleared) by MeetingDetailView after it loads the player.
     var pendingPlaybackRange: (meetingId: String, start: Double, end: Double)?
 
+    /// TASK-094: incremented when a topic backfill run finishes. TopicTrackersView
+    /// observes this to refresh counts/hits after a just-added topic has been
+    /// scanned against history, so a new topic doesn't sit at a stale "0 meetings".
+    var topicBackfillToken = 0
+
+    /// TASK-094 (REQ-2): set when a topic is added/edited while a backfill is
+    /// already running. That in-flight pass snapshotted the old tracker set, so
+    /// the new topic wouldn't be scanned; `runTopicBackfill` honors this flag by
+    /// looping for another pass before it signals completion.
+    private var topicBackfillRerunRequested = false
+
     /// True while the recording mic has disconnected and the app is holding the
     /// recording open waiting for a replacement (system audio keeps capturing).
     /// Mirrored from `AudioCaptureService`; drives the "reconnecting mic" banner.
     var isMicRecovering = false
+
+    /// Signal-independent mic-health snapshot (TASK-095), mirrored from
+    /// `AudioCaptureService` on the audio-level poll. Drives the recording-bar
+    /// live/identity/muted status (REQ-6), which is shown even while the user is
+    /// silent — distinct from the `micLevel` talk-time meter.
+    var micHealth: MicHealthSnapshot = .unknown
 
     /// Debounces rapid in-app mic-picker changes into a single live switch.
     private var micSwitchDebounceTask: Task<Void, Never>?
@@ -1054,12 +1071,37 @@ final class AppState {
 
     /// Scan history for active trackers (triggered on tracker create/edit).
     func enqueueTopicBackfill() async {
-        let queued = taskQueueManager.allTasks.contains { $0.type == .topicBackfill && !$0.isTerminal }
-        guard !queued else { return }
+        // If a pass is already running it snapshotted the trackers before this
+        // topic existed (REQ-2). Don't drop the request — flag a rerun so the
+        // running pass re-enqueues itself on completion and the new topic is
+        // scanned, instead of sitting at a stale "0 meetings". A *pending* pass
+        // hasn't snapshotted yet, so the queue's own dedup correctly folds this
+        // into it.
+        let running = taskQueueManager.allTasks.contains { $0.type == .topicBackfill && $0.status == .running }
+        if running {
+            topicBackfillRerunRequested = true
+            return
+        }
         await taskQueueManager.enqueue(type: .topicBackfill, meetingId: Self.topicBackfillSentinel, priority: 9)
     }
 
     private func runTopicBackfill() async {
+        // REQ-2: a topic added *while this run is in flight* missed the snapshot
+        // each pass takes. Rather than enqueue a fresh task (the queue would see
+        // this one still `.running` and dedup it away), loop here: clear the flag
+        // before a pass, and if `enqueueTopicBackfill` set it again during the
+        // pass, scan once more. Each pass re-reads activeTrackers() so the new
+        // topic is included. The completion token bumps once, at the very end.
+        repeat {
+            topicBackfillRerunRequested = false
+            await runTopicBackfillPass()
+            if Task.isCancelled { break }
+        } while topicBackfillRerunRequested
+
+        topicBackfillToken &+= 1   // TASK-094: signal TopicTrackersView to refresh counts/hits
+    }
+
+    private func runTopicBackfillPass() async {
         let repo = TopicTrackerRepository(database: database)
         let trackers = (try? await repo.activeTrackers()) ?? []
         guard !trackers.isEmpty else { return }
@@ -5780,6 +5822,11 @@ final class AppState {
                 // Read directly from atomic storage — bypasses @Published / MainActor scheduling
                 self.micLevel = self.audioCaptureService.latestMicLevel
                 self.systemLevel = self.audioCaptureService.latestSystemLevel
+                // Mirror the signal-independent mic-health snapshot (TASK-095) so
+                // the recording bar shows live/identity/muted status while silent.
+                if self.audioCaptureService.micHealth != self.micHealth {
+                    self.micHealth = self.audioCaptureService.micHealth
+                }
                 // Track when remote audio was last genuinely active — the
                 // browser call-end keep-alive reads this (title probes can't
                 // see a minimized/tab-switched meeting, but a live call keeps
@@ -5799,6 +5846,7 @@ final class AppState {
         levelPollingCancellable = nil
         micLevel = 0
         systemLevel = 0
+        micHealth = .unknown
     }
 
     // MARK: - Prep Context Pre-Computation

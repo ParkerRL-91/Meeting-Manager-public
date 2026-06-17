@@ -25,6 +25,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     @Published var micLevel: Float = 0
     @Published var systemLevel: Float = 0
 
+    /// Signal-independent mic-health snapshot (TASK-095). Reflects liveness (noise
+    /// floor present), device identity, and mute-state even while no one is
+    /// speaking — drives the recording-bar status (REQ-6) and is distinct from the
+    /// talk-time level meter (`micLevel`). Updated on the 1 Hz health tick.
+    @Published private(set) var micHealth: MicHealthSnapshot = .unknown
+
     /// Called when sustained silence is detected (no speech for `silenceTimeout` seconds).
     /// The meeting should be auto-stopped.
     var onSilenceDetected: (() -> Void)?
@@ -110,13 +116,6 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private var consecutiveMicDeadSeconds: Int = 0
     /// Latches true once the mic-problem warning has fired, so it only warns once per recording.
     private var micProblemWarned = false
-    /// Mic RMS below this is treated as "effectively dead". A real working mic
-    /// always has a noise floor above this even when the user is silent — only a
-    /// truly broken/output-only/disconnected input reads near literal zero. The
-    /// old 0.0005 threshold tripped on a quietly-listening user (e.g. the first
-    /// minute of a meeting before they speak), which caused the warning to fire
-    /// false-positive on most calls.
-    private let micDeadThreshold: Float = 0.00005
     /// System RMS above this means remote participants are clearly *talking*
     /// (not just ambient/blip noise). Raised from 0.01 so a brief network blip
     /// doesn't accumulate dead-mic seconds while the user is listening quietly.
@@ -126,6 +125,34 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// at the start of a call. 5 minutes of continuous "mic at zero while others
     /// are loudly talking" is the actual dead-device signal worth surfacing.
     private let micDeadWarnSeconds = 300
+
+    // MARK: - Signal-independent mic health (TASK-095)
+
+    /// Window of recent per-tick mic RMS used to classify liveness. Liveness is
+    /// "is there a noise floor", so the classifier keys on the loudest sample in
+    /// the window (a working mic floor flickers; a dead stream is flat zero
+    /// throughout). Capped at `healthWindowTicks`.
+    private var recentMicRMS: [Float] = []
+    private let healthWindowTicks = 3
+
+    /// Event-driven re-validation clock (REQ-3): armed on a CoreAudio config
+    /// change, it gives the re-pinned device a short window to show a live floor
+    /// before the self-heal fires — ≤ ~15 s, vs the old 300 s silence window.
+    private var configRevalidateDeadlineTask: Task<Void, Never>?
+    private let configRevalidateWindow: TimeInterval = 12
+
+    /// Self-heal (REQ-5) state: bounded in-place input rebuilds after a config
+    /// change wedges capture on a flat/dead stream. Reset per recording.
+    private var selfHealAttempts = 0
+    private let maxSelfHealAttempts = 3
+    private var isSelfHealing = false
+    private var selfHealWarned = false
+    /// Internal retry clock for the self-heal ladder (REQ-5). A clean wedge with no
+    /// further CoreAudio events would otherwise spend only ONE of the budgeted
+    /// attempts and stall; after an unverified heal this re-fires the next attempt
+    /// without waiting on an external config/device event. Cancelled on stop.
+    private var selfHealRetryTask: Task<Void, Never>?
+    private let selfHealRetryDelay: TimeInterval = 3
 
     /// Thread-safe atomic levels updated directly in audio buffer callbacks.
     /// Use these for polling from the main thread instead of the @Published properties
@@ -297,6 +324,15 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             self?.logToFile(msg)
         }
 
+        // REQ-3: on a CoreAudio configuration change (device (dis)connect, a
+        // meeting app renegotiating the shared mic mid-call), run event-driven
+        // liveness re-validation on a short clock instead of waiting on the
+        // 300 s silence window. MicrophoneCapture has already re-pinned + restarted
+        // the engine by the time this fires.
+        micCapture.onConfigChangeRevalidate = { [weak self] in
+            Task { @MainActor in self?.armConfigChangeRevalidation() }
+        }
+
         // Wire device disconnection handler. Instead of ending the meeting, enter
         // bounded recovery: keep the file + system tap alive and wait for a
         // replacement mic (see beginMicRecovery). System audio keeps capturing
@@ -457,6 +493,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         consecutiveMicDeadSeconds = 0
         micProblemWarned = false
         lastSystemAudioActiveAt = .distantPast
+        recentMicRMS.removeAll(keepingCapacity: true)
+        selfHealAttempts = 0
+        isSelfHealing = false
+        selfHealWarned = false
+        selfHealRetryTask?.cancel()
+        selfHealRetryTask = nil
+        micHealth = .unknown
         silenceCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
 
@@ -467,10 +510,17 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 return
             }
 
-            // Dead-mic detection: mic produces no signal while system audio is clearly
-            // live. This is the "wrong input device" failure (e.g. an output-only
-            // headphone dongle selected as the mic) — the call records remote audio
-            // fine but the local mic is silent, so we warn the user without stopping.
+            // Signal-independent mic health (TASK-095): classify the noise floor
+            // and combine with device identity + mute-state every tick.
+            self.updateMicHealth()
+
+            // Dead-mic detection, now verdict-driven. The "wrong input device on
+            // a live call" failure is real (an output-only dongle selected as the
+            // mic records the call fine but no local voice) — but a `flatZero`
+            // reading is NEVER enough on its own: a quiet listener and a muted
+            // user both read zero and must NOT be warned (REQ-1, REQ-7). Only a
+            // `.dead`/`.deviceMismatch` verdict — which requires device-level
+            // failure evidence — counts, and only while the call is live.
             // "System active" is a 10 s recency window, not a same-tick check:
             // remote audio fluctuates around the threshold between sentences,
             // and the old same-tick requirement reset the counter every quiet
@@ -480,21 +530,24 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 self.lastSystemAudioActiveAt = Date()
             }
             let systemRecentlyActive = Date().timeIntervalSince(self.lastSystemAudioActiveAt) < 10
+            let verdict = self.micHealth.verdict
+            let verdictWarnsDead = (verdict == .dead || verdict == .deviceMismatch)
             if !self.micProblemWarned
                 && !self.isMicRecovering
-                && self.micLevel < self.micDeadThreshold
+                && !self.isSelfHealing
+                && verdictWarnsDead
                 && systemRecentlyActive {
                 self.consecutiveMicDeadSeconds += 1
                 if self.consecutiveMicDeadSeconds >= self.micDeadWarnSeconds {
                     self.micProblemWarned = true
-                    self.logToFile("Audio: mic appears DEAD — no signal for \(self.consecutiveMicDeadSeconds)s while system audio active. Likely wrong input device.")
+                    self.logToFile("Audio: mic appears DEAD — verdict=\(verdict) for \(self.consecutiveMicDeadSeconds)s while system audio active. Likely wrong input device.")
                     Logger.audio.warning("Mic dead-signal detected while system audio active — warning user")
                     self.onMicProblemDetected?(
                         "Your microphone isn't picking up any sound, but the call audio is being recorded. "
                         + "Check System Settings > Sound > Input and pick your microphone — your voice won't be in this transcript otherwise."
                     )
                 }
-            } else if self.micLevel >= self.micDeadThreshold {
+            } else if verdict.isHealthy {
                 self.consecutiveMicDeadSeconds = 0
             }
 
@@ -542,7 +595,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// stays responsive between attempts (no UI freeze). Throws only if every
     /// path fails; callers then reset state so the app stays usable.
     private func startMicrophoneWithRetry(systemTapRunning: Bool) async throws {
-        func attempt(useDefaultDevice: Bool) -> Error? {
+        // `micCapture.start()` cycles devices and runs the ~0.6 s liveness probe
+        // (REQ-4), which blocks its calling thread. Run it OFF the main actor so
+        // the initial acquisition doesn't beachball the UI for the probe window —
+        // the mid-recording switch/heal paths already detach for the same reason.
+        // Device resolution stays on the main actor (it reads `sessionManager`).
+        func attempt(useDefaultDevice: Bool) async -> Error? {
             if useDefaultDevice {
                 micCapture.configure(inputDeviceID: "")
             } else if let dev = resolveInputDevice() {
@@ -550,11 +608,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             } else {
                 micCapture.configure(inputDeviceID: "")
             }
-            do { try micCapture.start(); return nil } catch { return error }
+            return await Task.detached(priority: .userInitiated) { [micCapture] in
+                do { try micCapture.start(); return nil } catch { return error }
+            }.value
         }
 
         // Attempt 1: the preferred/auto-selected device.
-        if attempt(useDefaultDevice: false) == nil { return }
+        if await attempt(useDefaultDevice: false) == nil { return }
 
         // Attempts 2…5: let the contending app / HAL settle, recreate the engine,
         // and fall back to the system default device. The final 3 s rung exists
@@ -566,7 +626,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         for (i, delay) in backoffsNs.enumerated() {
             micCapture.stop()  // recreates the engine — makes the next start idempotent
             try? await Task.sleep(nanoseconds: delay)
-            if let err = attempt(useDefaultDevice: true) {
+            if let err = await attempt(useDefaultDevice: true) {
                 lastError = err
                 logToFile("Audio: mic start retry \(i + 2)/\(backoffsNs.count + 1) failed after backoff: \(err.localizedDescription)")
             } else {
@@ -661,6 +721,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         micRecoveryDeadlineTask = nil
         micRecoveryWarnTask?.cancel()
         micRecoveryWarnTask = nil
+        configRevalidateDeadlineTask?.cancel()
+        configRevalidateDeadlineTask = nil
+        selfHealRetryTask?.cancel()
+        selfHealRetryTask = nil
+        isSelfHealing = false
         if isMicRecovering {
             isMicRecovering = false
             onMicRecoveryStateChanged?(false)
@@ -697,6 +762,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         isCapturing = false
         micLevel = 0
         systemLevel = 0
+        micHealth = .unknown
 
         return currentAudioFileURL
     }
@@ -931,6 +997,242 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         micRecoveryDeadlineTask = nil
         logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired — no replacement; ending recording")
         onSilenceDetected?()   // reuse the established auto-stop → AppState.stopRecording
+    }
+
+    // MARK: - Signal-independent mic health (TASK-095)
+
+    /// The device the capture is MEANT to be on (REQ-2). Used as the "intended
+    /// device" for the identity check. nil means "no opinion" (the snapshot treats
+    /// that as a match — identity mismatch is only ever flagged on positive proof,
+    /// never inferred from a missing reading).
+    ///
+    /// Two modes, matching how the cycler actually binds the device:
+    ///   • Override ON — the user pinned a device. The intended device is that pin
+    ///     (when still present), so if the cycler couldn't honor it and fell to a
+    ///     different mic, the identity check correctly surfaces `.deviceMismatch`.
+    ///   • Override OFF (auto-detect) — the cycler's intent IS "capture from the mic
+    ///     it bound," whose ordering puts the meeting's in-use mic FIRST
+    ///     (`orderedCandidates`). That can differ from `bestInputDevice()`'s
+    ///     independent ranking, so comparing against `bestInputDevice()` would
+    ///     false-flag a working, meeting-bound mic as a mismatch during a silent
+    ///     stretch — needlessly self-healing a live device (the exact false positive
+    ///     this task eliminates, and a cardinal-rule violation). In auto-detect mode
+    ///     the bound device is by definition the intended one, so report it.
+    private func intendedDeviceUID() -> String? {
+        if isMicOverrideEnabledProvider?() == true,
+           let uid = preferredInputDeviceIDProvider?(),
+           sessionManager.inputDevice(forUID: uid) != nil {
+            return uid
+        }
+        return micCapture.currentDeviceUID ?? resolveInputDevice()?.uniqueID
+    }
+
+    /// Recompute the mic-health snapshot (called on the 1 Hz tick). Folds the
+    /// latest mic RMS into a short window, classifies the noise floor (liveness),
+    /// and asks MicrophoneCapture to combine it with device identity + mute-state.
+    /// `deviceLevelFailure` — the hard gate for a "dead" verdict — is true only on
+    /// real device-level evidence: the engine isn't running, or the input format
+    /// is invalid. A `flatZero` reading by itself is NEVER device-level failure.
+    private func updateMicHealth() {
+        // Fold the latest mic RMS into a short window and classify the floor.
+        // Liveness keys on the loudest sample in the window: a working mic's floor
+        // flickers above the denormal band, a dead stream stays flat at zero.
+        let level = latestMicLevel
+        recentMicRMS.append(level)
+        if recentMicRMS.count > healthWindowTicks {
+            recentMicRMS.removeFirst(recentMicRMS.count - healthWindowTicks)
+        }
+        let peak = recentMicRMS.max() ?? level
+        // "Constant" must catch a FROZEN stream, not just a bit-exact-zero one: a
+        // wedged IO buffer can repeat a non-zero DC value whose per-tick RMS is
+        // identical every second, while a live mic's floor always flickers. The pure
+        // `windowIsConstant` helper treats zero movement across a full window as
+        // frozen, so a frozen non-zero constant classifies as `.flatZero` instead of
+        // a false `.live` (D1) — and never demotes a genuinely quiet, flickering mic.
+        let isConstant = MicLivenessClassifier.windowIsConstant(
+            recentMicRMS, minSamples: healthWindowTicks)
+        let liveness = MicLivenessClassifier.classify(rms: peak, isConstant: isConstant)
+
+        // SCK-mic fallback path has no AVAudioEngine to introspect for identity /
+        // mute / format, and SCK death is handled by `onStreamStopped`. Report the
+        // HONEST floor classification rather than asserting "Live": a floor present
+        // reads live/quietLive; a flat-zero SCK stream reads `.silentOK` (calm, no
+        // warning, no device switch) — never a false "Live" and never a false
+        // "dead" (deviceLevelFailure stays false, so the cardinal rule holds).
+        if micSource == .screenCaptureKit {
+            let verdict = MicLivenessClassifier.verdict(
+                liveness: liveness, isIntendedDevice: true,
+                isMuted: false, deviceLevelFailure: false)
+            micHealth = MicHealthSnapshot(
+                deviceUID: nil,
+                deviceName: resolveInputDevice()?.localizedName ?? "",
+                isIntendedDevice: true,
+                isMuted: false,
+                liveness: liveness,
+                verdict: verdict
+            )
+            return
+        }
+
+        // Device-level failure evidence (NOT a flat-zero reading): the engine
+        // stopped, or the input format is unusable. While recovering/self-healing
+        // the engine is legitimately torn down, so don't count that as failure.
+        // `engineLiveness` snapshots both under MicrophoneCapture's lock so this
+        // MainActor read never races the config-change handler reassigning `engine`
+        // (D2).
+        let engineState = micCapture.engineLiveness
+        let deviceLevelFailure = !isMicRecovering && !isSelfHealing
+            && (!engineState.isRunning || !engineState.isFormatUsable)
+
+        let snapshot = micCapture.healthSnapshot(
+            liveness: liveness,
+            intendedDeviceUID: intendedDeviceUID(),
+            deviceLevelFailure: deviceLevelFailure
+        )
+        micHealth = snapshot
+    }
+
+    // MARK: - Event-driven re-validation + self-heal (REQ-3, REQ-5)
+
+    /// Armed when MicrophoneCapture reports a configuration-change restart. Gives
+    /// the re-pinned device a short window (`configRevalidateWindow`) to show a
+    /// live floor; if it stays wedged on a flat/dead stream — and is NOT muted —
+    /// trigger a bounded in-place self-heal. Muted, quiet, or recovered streams
+    /// cancel the clock and do nothing.
+    private func armConfigChangeRevalidation() {
+        guard isCapturing, !isStoppingCapture else { return }
+        guard micSource == .engine else { return }   // SCK path heals via its own retry
+        logToFile("Audio: config change — arming \(Int(configRevalidateWindow))s liveness re-validation (REQ-3)")
+        configRevalidateDeadlineTask?.cancel()
+        configRevalidateDeadlineTask = Task { [weak self] in
+            guard let self else { return }
+            // Sample the floor a few times across the window — a live floor
+            // returning at any point clears the clock without a heal.
+            let pollOffsets: [TimeInterval] = [3, 6, 9, 12]
+            var elapsed: TimeInterval = 0
+            for offset in pollOffsets {
+                if offset > elapsed {
+                    try? await Task.sleep(nanoseconds: UInt64((offset - elapsed) * 1_000_000_000))
+                    elapsed = offset
+                }
+                guard !Task.isCancelled, self.isCapturing, !self.isStoppingCapture,
+                      !self.isMicRecovering, !self.isSelfHealing else { return }
+                self.updateMicHealth()
+                let v = self.micHealth.verdict
+                if v.isHealthy {
+                    if v == .muted {
+                        self.logToFile("Audio: config-change re-validation — device is MUTED, healthy; no heal")
+                    }
+                    return   // live / quietLive / muted / silentOK — nothing to heal
+                }
+                if v == .dead {
+                    self.logToFile("Audio: config-change re-validation — verdict DEAD after \(Int(elapsed))s; self-healing input")
+                    await self.selfHealInput()
+                    return
+                }
+                // .deviceMismatch: the engine drifted onto the wrong device.
+                // Choosing a replacement device is the user's call (out of scope),
+                // but re-acquiring the INTENDED device in place is exactly REQ-5.
+                if v == .deviceMismatch {
+                    self.logToFile("Audio: config-change re-validation — engine on WRONG device after \(Int(elapsed))s; re-acquiring intended device in place")
+                    await self.selfHealInput()
+                    return
+                }
+            }
+        }
+    }
+
+    /// Bounded in-place input rebuild (REQ-5): tear down + rebuild the
+    /// AVAudioEngine input on the SAME intended device with a fresh format
+    /// negotiation, keeping the SAME recording session/file (no split). Backoff
+    /// between attempts; after `maxSelfHealAttempts` give up to a surfaced
+    /// failure. Never runs while muted, recovering, or stopping.
+    private func selfHealInput() async {
+        guard isCapturing, !isStoppingCapture, !isMicRecovering, !isSelfHealing else { return }
+        guard micSource == .engine else { return }
+        guard selfHealAttempts < maxSelfHealAttempts else {
+            if !selfHealWarned {
+                selfHealWarned = true
+                logToFile("Audio: self-heal exhausted (\(maxSelfHealAttempts) attempts) — surfacing failure; recording continues with available audio")
+                onMicProblemDetected?(
+                    "Your microphone stopped capturing and couldn't be recovered automatically. "
+                    + "The call audio is still being recorded — pick your microphone again in System Settings > Sound > Input to restore your voice."
+                )
+            }
+            return
+        }
+
+        isSelfHealing = true
+        onMicRecoveryStateChanged?(true)   // reuse the "reconnecting mic" banner
+        defer {
+            isSelfHealing = false
+            onMicRecoveryStateChanged?(false)
+        }
+
+        selfHealAttempts += 1
+        let attempt = selfHealAttempts
+        // Exponential-ish backoff lets coreaudiod finish whatever reconfiguration
+        // wedged us before we rebuild.
+        let backoffNs: UInt64 = UInt64(attempt) * 400_000_000
+        try? await Task.sleep(nanoseconds: backoffNs)
+        guard isCapturing, !isStoppingCapture, !isMicRecovering else { return }
+
+        logToFile("Audio: self-heal attempt \(attempt)/\(maxSelfHealAttempts) — rebuilding mic input in place")
+        let failure: String? = await Task.detached(priority: .userInitiated) { [micCapture] in
+            micCapture.rebuildInputInPlace()?.localizedDescription
+        }.value
+        guard isCapturing, !isStoppingCapture else { return }
+
+        if let failure {
+            logToFile("Audio: self-heal attempt \(attempt) FAILED: \(failure)")
+            // No external event is guaranteed after a clean wedge, so drive the
+            // next attempt on our own clock (REQ-5) instead of stalling at 1 of N.
+            scheduleSelfHealRetry()
+            return
+        }
+        // Verify the rebuilt input actually carries a floor before declaring success.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        guard isCapturing, !isStoppingCapture else { return }
+        updateMicHealth()
+        if micHealth.verdict.isHealthy {
+            selfHealAttempts = 0
+            selfHealWarned = false
+            consecutiveMicDeadSeconds = 0
+            selfHealRetryTask?.cancel()
+            selfHealRetryTask = nil
+            logToFile("Audio: self-heal SUCCEEDED on attempt \(attempt) — mic floor restored on \(micCapture.currentDeviceName), recording continues as one session")
+        } else {
+            logToFile("Audio: self-heal attempt \(attempt) rebuilt the engine but the stream is still \(micHealth.verdict) — scheduling next attempt")
+            scheduleSelfHealRetry()
+        }
+    }
+
+    /// Drive the next self-heal attempt on an internal clock (REQ-5). A clean wedge
+    /// (the input stays flat with no further CoreAudio config/device events) would
+    /// otherwise leave the remaining attempts unused; this re-fires `selfHealInput`
+    /// after a short delay so the bounded ladder actually runs to its budget. The
+    /// attempt cap + the muted/healthy guards inside `selfHealInput` still bound it,
+    /// and `scheduleSelfHealRetry` is a no-op once the budget is spent (the next
+    /// `selfHealInput` surfaces the failure). Cancelled on stop and on success.
+    private func scheduleSelfHealRetry() {
+        guard isCapturing, !isStoppingCapture, micSource == .engine else { return }
+        guard selfHealAttempts < maxSelfHealAttempts else { return }
+        selfHealRetryTask?.cancel()
+        selfHealRetryTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.selfHealRetryDelay * 1_000_000_000))
+            guard !Task.isCancelled, self.isCapturing, !self.isStoppingCapture,
+                  !self.isMicRecovering, !self.isSelfHealing else { return }
+            // Re-validate before re-healing: a floor may have returned on its own,
+            // or the device may now be muted — both cancel the ladder (cardinal
+            // rule: never re-acquire a healthy/muted mic).
+            self.updateMicHealth()
+            guard !self.micHealth.verdict.isHealthy else {
+                self.logToFile("Audio: self-heal retry — mic recovered to \(self.micHealth.verdict); no further heal")
+                return
+            }
+            await self.selfHealInput()
+        }
     }
 
     // MARK: - CoreAudio device listeners

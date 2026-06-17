@@ -7,16 +7,25 @@ import SwiftUI
 struct KeyQuotesView: View {
     @Environment(AppState.self) private var appState
     @State private var clips: [Clip] = []
+    @State private var searchText = ""
+    @State private var pendingDelete: Clip?
     @State private var isLoading = true
     @State private var errorMessage: String?
+
+    /// REQ-6: only surface the filter once the list is big enough to need it.
+    private static let filterThreshold = 8
 
     private var meetingsById: [String: Meeting] {
         Dictionary(appState.meetings.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
+    private var filteredClips: [Clip] {
+        Self.filter(clips, query: searchText, titleFor: { meetingsById[$0]?.title })
+    }
+
     /// Clips grouped by meeting, newest meeting first.
     private var grouped: [(meeting: Meeting?, meetingId: String, clips: [Clip])] {
-        let byMeeting = Dictionary(grouping: clips, by: \.meetingId)
+        let byMeeting = Dictionary(grouping: filteredClips, by: \.meetingId)
         return byMeeting
             .map { (meetingsById[$0.key], $0.key, $0.value.sorted { $0.startTime < $1.startTime }) }
             .sorted { ($0.meeting?.effectiveDate ?? .distantPast) > ($1.meeting?.effectiveDate ?? .distantPast) }
@@ -44,13 +53,20 @@ struct KeyQuotesView: View {
             } else if clips.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        ForEach(grouped, id: \.meetingId) { group in
-                            quoteGroup(group)
+                if clips.count >= Self.filterThreshold {
+                    filterField
+                }
+                if filteredClips.isEmpty {
+                    noMatchesState
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 18) {
+                            ForEach(grouped, id: \.meetingId) { group in
+                                quoteGroup(group)
+                            }
                         }
+                        .padding(20)
                     }
-                    .padding(20)
                 }
             }
         }
@@ -69,6 +85,54 @@ struct KeyQuotesView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        .confirmationDialog(
+            "Delete this quote?",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            presenting: pendingDelete
+        ) { clip in
+            Button("Delete Quote", role: .destructive) { delete(clip) }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { _ in
+            Text("This saved quote will be removed. This can't be undone.")
+        }
+    }
+
+    private var filterField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Color.appTextTertiary)
+            TextField("Filter by quote, speaker, or meeting", text: $searchText)
+                .textFieldStyle(.plain)
+                .accessibilityLabel("Filter key quotes")
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Color.appTextTertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear filter")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.appSurfaceSecondary.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+    }
+
+    private var noMatchesState: some View {
+        VStack(spacing: 6) {
+            Spacer()
+            Text("No quotes match your filter")
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextSecondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var emptyState: some View {
@@ -92,6 +156,7 @@ struct KeyQuotesView: View {
 
     @ViewBuilder
     private func quoteGroup(_ group: (meeting: Meeting?, meetingId: String, clips: [Clip])) -> some View {
+        let hasAudio = !(group.meeting?.audioFilePaths.isEmpty ?? true)
         VStack(alignment: .leading, spacing: 8) {
             Button {
                 appState.selectedMeetingId = group.meetingId
@@ -111,8 +176,9 @@ struct KeyQuotesView: View {
 
             ForEach(group.clips) { clip in
                 QuoteRow(clip: clip,
+                         hasAudio: hasAudio,
                          onPlay: { open(clip) },
-                         onDelete: { delete(clip) },
+                         onDelete: { pendingDelete = clip },
                          onNote: { note in saveNote(clip, note: note) })
             }
         }
@@ -155,12 +221,26 @@ struct KeyQuotesView: View {
         defer { isLoading = false }
         clips = (try? await ClipRepository(database: appState.database).allClips()) ?? []
     }
+
+    /// REQ-6: case-insensitive match on quote text, speaker labels, or the
+    /// clip's meeting title. An empty/whitespace query passes everything. Pure.
+    static func filter(_ clips: [Clip], query: String, titleFor: (String) -> String?) -> [Clip] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return clips }
+        return clips.filter { clip in
+            if clip.quoteText.lowercased().contains(needle) { return true }
+            if let s = clip.speakerLabels, s.lowercased().contains(needle) { return true }
+            if let t = titleFor(clip.meetingId), t.lowercased().contains(needle) { return true }
+            return false
+        }
+    }
 }
 
 /// One quote row with play, the quote + speaker/time, an inline note, and
 /// delete.
 private struct QuoteRow: View {
     let clip: Clip
+    let hasAudio: Bool
     let onPlay: () -> Void
     let onDelete: () -> Void
     let onNote: (String) -> Void
@@ -173,10 +253,12 @@ private struct QuoteRow: View {
             Button(action: onPlay) {
                 Image(systemName: "play.circle")
                     .font(.title3)
-                    .foregroundStyle(Color.appAccent)
+                    .foregroundStyle(hasAudio ? Color.appAccent : Color.appTextTertiary)
             }
             .buttonStyle(.plain)
-            .help("Open the meeting and play this quote")
+            .disabled(!hasAudio)
+            .help(hasAudio ? "Open the meeting and play this quote" : "No audio available for this meeting")
+            .accessibilityLabel(hasAudio ? "Play this quote" : "Play unavailable, no audio for this meeting")
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(clip.quoteText)
@@ -193,7 +275,13 @@ private struct QuoteRow: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.caption)
                             .onSubmit { commitNote() }
-                        Button("Save") { commitNote() }.font(.caption)
+                            .onExitCommand { cancelNote() }   // REQ-8: Escape cancels
+                        Button("Save") { commitNote() }
+                            .font(.caption)
+                            .accessibilityLabel("Save note")
+                        Button("Cancel") { cancelNote() }
+                            .font(.caption)
+                            .accessibilityLabel("Cancel note edit")
                     }
                 } else if let note = clip.note, !note.isEmpty {
                     Button { startEditing() } label: {
@@ -202,6 +290,7 @@ private struct QuoteRow: View {
                             .foregroundStyle(Color.appTextSecondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Edit note")
                 } else {
                     Button { startEditing() } label: {
                         Label("Add note", systemImage: "plus.circle")
@@ -209,6 +298,7 @@ private struct QuoteRow: View {
                             .foregroundStyle(Color.appTextTertiary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Add note")
                 }
             }
             Spacer(minLength: 0)
@@ -218,6 +308,7 @@ private struct QuoteRow: View {
             }
             .buttonStyle(.plain)
             .help("Delete this quote")
+            .accessibilityLabel("Delete this quote")
         }
         .padding(10)
         .background(Color.appSurfaceSecondary.opacity(0.35))
@@ -231,6 +322,11 @@ private struct QuoteRow: View {
 
     private func commitNote() {
         onNote(noteText)
+        editingNote = false
+    }
+
+    private func cancelNote() {
+        noteText = clip.note ?? ""
         editingNote = false
     }
 }

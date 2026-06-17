@@ -20,6 +20,177 @@ enum MicrophoneCaptureError: LocalizedError {
     }
 }
 
+// MARK: - Mic liveness & health (TASK-095)
+
+/// What a short window of mic samples proves about the *capture path* —
+/// independent of whether the user is talking. The discriminator is the noise
+/// floor, NOT the speech level: a working mic always carries a tiny noise floor
+/// even in silence, while a wedged/output-only/disconnected input reads bit-exact
+/// zero or a frozen constant.
+enum MicLiveness: Equatable {
+    /// Noise floor present above ε — the capture path is unambiguously alive.
+    case live
+    /// A tiny but non-zero floor (below the comfortable `live` ε but above the
+    /// denormal/zero band). Still proof the path is alive, just very quiet.
+    case quietLive
+    /// Bit-exact `0.0` or a frozen constant across the whole window. INCONCLUSIVE
+    /// on its own: it can mean muted, genuinely-digital-silence, or dead. Must be
+    /// disambiguated by mute-state + device health before any "dead" verdict.
+    case flatZero
+}
+
+/// The combined, signal-independent verdict for the recording-bar status and the
+/// self-heal decision. Only `.dead` drives a self-heal — and reaching `.dead`
+/// requires device-level failure evidence, never a `flatZero` reading by itself.
+enum MicHealthVerdict: Equatable {
+    /// Floor present — recording the intended device, live.
+    case live
+    /// Floor present but very quiet — still live.
+    case quietLive
+    /// `flatZero` on a correct, alive, running device that is muted. Healthy:
+    /// no warning, no self-heal, resumes automatically on unmute.
+    case muted
+    /// `flatZero` on a correct, alive, running device that is NOT muted. The user
+    /// is in genuine digital silence (or listening). Healthy: never "dead".
+    case silentOK
+    /// The engine's bound device is not the intended device. Surfaced so the user
+    /// can switch; does NOT auto-switch to a different device (out of scope).
+    case deviceMismatch
+    /// Device-level failure (wrong/absent device, format mismatch, IO not
+    /// advancing) with no floor. The ONLY verdict that drives self-heal.
+    case dead
+
+    /// True when the capture path is healthy — recording the right device with a
+    /// floor, or correctly muted/silent on it. Used to suppress false warnings.
+    var isHealthy: Bool {
+        switch self {
+        case .live, .quietLive, .muted, .silentOK: return true
+        case .deviceMismatch, .dead: return false
+        }
+    }
+}
+
+/// Snapshot of mic health used by the status surface (REQ-6) and the verdict.
+/// A value type of trivially-sendable fields; produced on the audio/lifecycle
+/// path and consumed on `@MainActor` (AudioCaptureService → AppState → the pill).
+struct MicHealthSnapshot: Equatable {
+    var deviceUID: String?
+    var deviceName: String
+    var isIntendedDevice: Bool
+    var isMuted: Bool
+    var liveness: MicLiveness
+    var verdict: MicHealthVerdict
+
+    static let unknown = MicHealthSnapshot(
+        deviceUID: nil, deviceName: "", isIntendedDevice: true,
+        isMuted: false, liveness: .flatZero, verdict: .silentOK
+    )
+}
+
+/// Lock-guarded snapshot of the AVAudioEngine's run/format state for cross-actor
+/// health readers (D2). Trivially `Sendable` — two `Bool`s, copied out under `lock`
+/// so the caller never touches the `engine` reference, which is reassigned on the
+/// config-change thread.
+struct EngineLiveness: Sendable {
+    var isRunning: Bool
+    var isFormatUsable: Bool
+}
+
+/// Pure liveness + verdict math. Extracted so it is unit-testable without any
+/// CoreAudio hardware (REQ-1, REQ-4, REQ-7). All thresholds are justified
+/// against the 2026-06-17 incident floor data.
+enum MicLivenessClassifier {
+    /// Comfortable "alive" floor. The incident's quiet-but-alive mic read
+    /// `0.0001–0.0007`; a real noise floor sits at/above this. RMS ≥ this is
+    /// unambiguously `live`.
+    static let liveEpsilon: Float = 1e-4
+    /// Denormal / gated-zero guard. Anything at or below this is treated as the
+    /// zero band — a working mic never floats this low, and FTZ/denormal flushing
+    /// can leave sub-`1e-7` trash that must not read as a floor. The dead case in
+    /// the incident was bit-exact `0.0000`.
+    static let zeroFloor: Float = 1e-7
+
+    /// Classify a window by its RMS and whether every sample is the SAME constant
+    /// (a frozen IO buffer reads a flat non-zero constant; a dead buffer reads
+    /// flat zero — both are `flatZero` because neither carries a moving floor).
+    ///
+    /// - `rms`: RMS of the window (already clamped to [0, 1] by the caller).
+    /// - `isConstant`: true when max-min across the window is within the zero band
+    ///   (no variation — a frozen or bit-exact-zero stream).
+    static func classify(rms: Float, isConstant: Bool) -> MicLiveness {
+        // A frozen constant (including bit-exact zero) carries no moving floor,
+        // regardless of its DC level — inconclusive on its own.
+        if isConstant { return .flatZero }
+        if rms <= zeroFloor { return .flatZero }
+        if rms >= liveEpsilon { return .live }
+        return .quietLive
+    }
+
+    /// Decide whether a window of per-tick RMS magnitudes is "frozen/constant" for
+    /// the steady-state live monitor (D1). A live mic's floor flickers tick-to-tick,
+    /// so a window whose max−min stays within the zero band carries no moving floor —
+    /// this catches a frozen NON-zero DC stream (identical RMS every second), not just
+    /// a bit-exact-zero one. Requires a full window (`minSamples`); with fewer samples
+    /// it can't tell "frozen" from "just started", so it falls back to the level-only
+    /// zero check (a single tiny sample is not yet proof of a frozen stream).
+    ///
+    /// A genuine quiet floor moves orders of magnitude more than `zeroFloor`
+    /// tick-to-tick (the incident floor swung 1e-4…7e-4, ~1e3× the guard), so this
+    /// never demotes a working-but-quiet mic — and even a misfire reads `.silentOK`
+    /// (healthy) without device-level failure, so it can never drop or switch a mic.
+    static func windowIsConstant(_ window: [Float], minSamples: Int) -> Bool {
+        guard let peak = window.max(), let low = window.min() else { return true }
+        if window.count >= minSamples {
+            return (peak - low) <= zeroFloor
+        }
+        return peak <= zeroFloor
+    }
+
+    /// Reduce the cycler probe accumulators (REQ-4) into a liveness verdict. Pure
+    /// so the acquisition gate is unit-testable without CoreAudio — the live wiring
+    /// once silently regressed (probe buffers were gated behind the engine's own
+    /// `isRunning` flag, so `bufferCount` stayed 0 and a live mic read `.flatZero`
+    /// and was rejected). This locks the reduction: NO buffers means no proof of a
+    /// floor → `.flatZero`; buffers that carried real variation above the zero band
+    /// reduce to `.live`/`.quietLive` (a working mic is never rejected at the gate).
+    static func probeVerdict(bufferCount: Int, peakRMS: Float, sawVariation: Bool) -> MicLiveness {
+        guard bufferCount > 0 else { return .flatZero }
+        // `isConstant` is the inverse of "saw variation": a window with no variation
+        // across its whole length is frozen/bit-exact regardless of its peak level.
+        return classify(rms: peakRMS, isConstant: !sawVariation)
+    }
+
+    /// Combine liveness with device identity, mute-state, and device-level failure
+    /// evidence into the final verdict. The reconciliation the spec mandates:
+    ///   • floor present (`live`/`quietLive`) → always healthy (path is alive).
+    ///   • `flatZero` + muted → `.muted` (never dead, never self-heal).
+    ///   • `flatZero` + correct/alive device + not muted → `.silentOK`.
+    ///   • wrong/absent device → `.deviceMismatch`.
+    ///   • `flatZero` + device-level failure (and NOT muted) → `.dead`.
+    ///
+    /// `deviceLevelFailure` is the hard evidence gate: wrong/absent device, format
+    /// mismatch, or IO not advancing. A `flatZero` reading alone NEVER yields
+    /// `.dead`, and muting always wins over any failure signal.
+    static func verdict(
+        liveness: MicLiveness,
+        isIntendedDevice: Bool,
+        isMuted: Bool,
+        deviceLevelFailure: Bool
+    ) -> MicHealthVerdict {
+        // Muted is a first-class healthy state and wins over everything except a
+        // present floor (a muted device producing a floor is just "live").
+        switch liveness {
+        case .live: return .live
+        case .quietLive: return .quietLive
+        case .flatZero:
+            if isMuted { return .muted }
+            if !isIntendedDevice { return .deviceMismatch }
+            if deviceLevelFailure { return .dead }
+            return .silentOK
+        }
+    }
+}
+
 /// 2nd-order (RBJ) low-pass applied BEFORE linear-interpolation decimation.
 /// Without it, content above the 16 kHz target's 8 kHz Nyquist aliases into
 /// the speech band and degrades the transcription input. Stateful IIR —
@@ -66,8 +237,14 @@ struct BiquadLowPass {
 ///
 /// `@unchecked Sendable`: every mutable field is either confined to the serialized
 /// start/stop/switch lifecycle or guarded by `lock` (`isRunning`, `rawBufferCount`,
-/// `activeDeviceID` via `currentDeviceID`). The engine itself is only mutated inside
-/// `start`/`stop`/`switchDevice`, which never run concurrently with each other.
+/// `activeDeviceID` via `currentDeviceID`). The `engine` reference is reassigned in
+/// `stop`, `startByCyclingDevices`, `syncEngineFormatToDevice`, and the config-change
+/// handler. The config handler runs on the notification-posting thread and reassigns
+/// `engine` while holding `lock` (it can race a cross-actor reader); the start/switch
+/// reassignments run before `isRunning` flips true, so no health reader observes them
+/// on a live session. Cross-actor readers therefore go through `engineLiveness`,
+/// which snapshots the engine reference + its run/format state under `lock` — never
+/// touching `engine` unsynchronized.
 final class MicrophoneCapture: @unchecked Sendable {
     /// 16kHz mono Float32 buffers for WhisperKit + WAV recording.
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
@@ -96,9 +273,27 @@ final class MicrophoneCapture: @unchecked Sendable {
     var onDiagnostic: ((String) -> Void)?
     private var rawBufferCount: Int = 0
 
-    /// Lock protecting mutable state (`isRunning`, `rawBufferCount`) accessed
-    /// from both the main thread and the audio callback queue.
+    /// Lock protecting mutable state (`isRunning`, `rawBufferCount`,
+    /// probe stats) accessed from both the main thread and the audio
+    /// callback queue.
     private let lock = NSLock()
+
+    /// Cycler-probe accumulators (REQ-4), updated in the tap callback under
+    /// `lock`. `probePeakRMS` is the loudest window seen since the last reset;
+    /// `probeSawVariation` latches true once any window carries real variation
+    /// (max≠min beyond the zero band) — together they distinguish a live floor
+    /// from a bit-exact-zero / frozen stream.
+    private var probePeakRMS: Float = 0
+    private var probeSawVariation = false
+    private var probeBufferCount = 0
+    /// Cheap gate so probe-stat computation costs nothing during steady-state
+    /// recording — only the brief cycler probe window sets it.
+    private var isProbing = false
+
+    /// Fired (off any audio thread) after a configuration-change restart so the
+    /// owner (AudioCaptureService) can run event-driven liveness re-validation on
+    /// a short clock (REQ-3) instead of waiting on the 300 s silence window.
+    var onConfigChangeRevalidate: (() -> Void)?
 
     /// Observer token for audio engine configuration change notifications.
     private var configChangeObserver: NSObjectProtocol?
@@ -113,6 +308,75 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// differ from the device the caller requested, so recovery logs the
     /// truth instead of the target it asked for.
     var currentDeviceName: String { getDeviceName(currentDeviceID) }
+
+    /// The CoreAudio UID of the device the engine is ACTUALLY bound to (REQ-2),
+    /// or nil if it can't be resolved. Signal-independent identity — answers
+    /// "which mic are we on" with zero audio.
+    var currentDeviceUID: String? { deviceUID(currentDeviceID) }
+
+    /// Lock-guarded read of the engine's run state + input-format usability for a
+    /// cross-actor health reader (D2). Snapshots `engine.isRunning` and the input
+    /// node's output format under `lock`, so the caller (`AudioCaptureService`,
+    /// `@MainActor`) never reads the `engine` reference unsynchronized while the
+    /// config-change handler reassigns it under the same lock. Pure reads on
+    /// AVAudioEngine — they do not start/stop IO — so holding `lock` briefly here
+    /// can't deadlock the audio path.
+    var engineLiveness: EngineLiveness {
+        lock.withLock {
+            let running = engine.isRunning
+            let fmt = engine.inputNode.outputFormat(forBus: 0)
+            return EngineLiveness(
+                isRunning: running,
+                isFormatUsable: Self.isUsableInputFormat(
+                    sampleRate: fmt.sampleRate, channelCount: fmt.channelCount)
+            )
+        }
+    }
+
+    /// Signal-independent mic-health snapshot for the status surface (REQ-6) and
+    /// the verdict combiner. Reads the bound device's identity + mute state via
+    /// CoreAudio (no audio required) and combines them with the supplied
+    /// liveness + device-level-failure evidence. The window's RMS/constant
+    /// classification is computed by the caller (it owns the level samples);
+    /// this fills in identity + mute and runs the pure verdict math.
+    ///
+    /// `intendedDeviceUID` is the device the caller meant to be on (the user's
+    /// selection and/or the mic the meeting is using); nil means "no opinion",
+    /// which is treated as a match so we never false-flag a mismatch we can't
+    /// prove. Safe to call from any thread (pure CoreAudio reads + a lock-guarded
+    /// id snapshot).
+    func healthSnapshot(
+        liveness: MicLiveness,
+        intendedDeviceUID: String?,
+        deviceLevelFailure: Bool
+    ) -> MicHealthSnapshot {
+        let id = currentDeviceID
+        let uid = deviceUID(id)
+        let muted = isDeviceMuted(id)
+        // Unknown intended device, or an unresolvable bound UID, is treated as a
+        // match — identity mismatch must be POSITIVELY proven, never inferred
+        // from a missing reading (cardinal rule: don't drop a working device).
+        let intended: Bool
+        if let want = intendedDeviceUID, let have = uid {
+            intended = (want == have)
+        } else {
+            intended = true
+        }
+        let verdict = MicLivenessClassifier.verdict(
+            liveness: liveness,
+            isIntendedDevice: intended,
+            isMuted: muted,
+            deviceLevelFailure: deviceLevelFailure
+        )
+        return MicHealthSnapshot(
+            deviceUID: uid,
+            deviceName: getDeviceName(id),
+            isIntendedDevice: intended,
+            isMuted: muted,
+            liveness: liveness,
+            verdict: verdict
+        )
+    }
 
     /// Target format: 16kHz mono Float32.
     private let targetFormat = AVAudioFormat(
@@ -256,6 +520,31 @@ final class MicrophoneCapture: @unchecked Sendable {
         }
     }
 
+    /// Self-heal re-acquire (REQ-5): tear down and rebuild the input on the SAME
+    /// intended device — the programmatic equivalent of "switch the device away
+    /// and back" — to recover a wedged/flat stream after a mid-recording format
+    /// reconfiguration, WITHOUT restarting the app or splitting the recording.
+    /// The WAV file + system tap live in AudioCaptureService and are untouched;
+    /// only the AVAudioEngine input is rebuilt with a fresh format negotiation.
+    ///
+    /// Unlike `switchDevice`, this preserves the current device target (it does
+    /// not change `preferredInputDeviceID`) and re-runs the full cycle so format
+    /// renegotiation + the liveness probe both apply. Returns `start()`'s error on
+    /// failure, `nil` on success. May block on HAL-release throttling — callers
+    /// run it off the main actor. Bounded retries/backoff are the caller's job.
+    func rebuildInputInPlace() -> Error? {
+        onDiagnostic?("DIAG:mic_heal rebuilding input in place (same device, fresh format)")
+        stop()
+        do {
+            try start()
+            onDiagnostic?("DIAG:mic_heal rebuild SUCCEEDED on \(currentDeviceName)")
+            return nil
+        } catch {
+            onDiagnostic?("DIAG:mic_heal rebuild FAILED: \(error.localizedDescription)")
+            return error
+        }
+    }
+
     // MARK: - Device Configuration
 
     /// Configure the input device: try preferred, fall back to system default.
@@ -308,12 +597,26 @@ final class MicrophoneCapture: @unchecked Sendable {
             [weak self] buffer, time in
             guard let self else { return }
 
-            // Check if still running under lock
             self.lock.lock()
-            guard self.isRunning else { self.lock.unlock(); return }
-            self.rawBufferCount += 1
+            let running = self.isRunning
+            let probing = self.isProbing
+            if running { self.rawBufferCount += 1 }
             let currentRawBufferCount = self.rawBufferCount
             self.lock.unlock()
+
+            // Cycler liveness probe (REQ-4): collected independently of
+            // `isRunning`. The probe runs DURING startByCyclingDevices, before
+            // start() flips `isRunning` true — AVAudioEngine delivers tap buffers
+            // the moment engine.start() succeeds, so the probe must read them here
+            // or it would always see zero buffers and reject a live mic at
+            // acquisition (the cardinal-rule regression). Steady-state recording
+            // never sets `isProbing`, so it still pays nothing.
+            if probing { self.collectProbeStats(buffer) }
+
+            // Everything below feeds the live recording pipeline and must NOT run
+            // until the session is officially running (a cycle-probe buffer is not
+            // recording audio).
+            guard running else { return }
 
             // Diagnostic: log raw hardware buffer info periodically
             if currentRawBufferCount <= 3 || currentRawBufferCount % 200 == 0 {
@@ -340,6 +643,59 @@ final class MicrophoneCapture: @unchecked Sendable {
                 self.onBuffer?(downsampled, time)
             }
         }
+    }
+
+    // MARK: - Cycler liveness probe (REQ-4)
+
+    /// Fold one tap buffer into the probe accumulators under `lock`. Computes the
+    /// window's RMS and whether it carries real variation (max−min beyond the
+    /// zero band) — a bit-exact-zero or frozen-constant stream carries neither.
+    private func collectProbeStats(_ buffer: AVAudioPCMBuffer) {
+        guard let fcd = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+        let ptr = fcd[0]
+        let n = Int(buffer.frameLength)
+        var sum: Float = 0
+        var minV = ptr[0]
+        var maxV = ptr[0]
+        for i in 0..<n {
+            let s = ptr[i]
+            sum += s * s
+            if s < minV { minV = s }
+            if s > maxV { maxV = s }
+        }
+        let rms = sqrtf(sum / Float(n))
+        let varied = (maxV - minV) > MicLivenessClassifier.zeroFloor
+        lock.lock()
+        probeBufferCount += 1
+        if rms > probePeakRMS { probePeakRMS = rms }
+        if varied { probeSawVariation = true }
+        lock.unlock()
+    }
+
+    /// Sample a short live window and classify it (REQ-4). Used by the cycler to
+    /// require a live floor — not mere buffer presence — before declaring SUCCESS.
+    /// Blocks ~`window` seconds on the calling (lifecycle) thread, which is the
+    /// same thread that already sleeps for HAL settling, so this adds no new
+    /// concurrency. Returns `.flatZero` when no buffers arrived at all.
+    private func probeLiveness(window: TimeInterval) -> MicLiveness {
+        lock.lock()
+        probePeakRMS = 0
+        probeSawVariation = false
+        probeBufferCount = 0
+        isProbing = true
+        lock.unlock()
+
+        Thread.sleep(forTimeInterval: window)
+
+        lock.lock()
+        let peak = probePeakRMS
+        let varied = probeSawVariation
+        let count = probeBufferCount
+        isProbing = false
+        lock.unlock()
+
+        return MicLivenessClassifier.probeVerdict(
+            bufferCount: count, peakRMS: peak, sawVariation: varied)
     }
 
     // MARK: - Downsampling
@@ -615,6 +971,18 @@ final class MicrophoneCapture: @unchecked Sendable {
         return ordered
     }
 
+    /// The cycler's accept/reject decision for a started candidate (REQ-4). Pure
+    /// so the gate is unit-testable. Accept when a floor is present (`live`/
+    /// `quietLive`) OR the device is muted (a muted-but-correct mic is healthy and
+    /// must never be dropped — cardinal rule). Reject ONLY a `flatZero` probe on a
+    /// not-muted device (a silent aggregate/wedged stream — the TASK-034 gap).
+    static func cyclerAcceptsCandidate(liveness: MicLiveness, isMuted: Bool) -> Bool {
+        switch liveness {
+        case .live, .quietLive: return true
+        case .flatZero: return isMuted
+        }
+    }
+
     /// Try each candidate input device with a fresh engine until one
     /// starts. First success commits `activeDeviceID`; total failure
     /// throws (→ system-only recovery, which re-enters this cycle).
@@ -659,8 +1027,25 @@ final class MicrophoneCapture: @unchecked Sendable {
                 try syncEngineFormatToDevice(stage: "cycle \(idx + 1)")
                 installTapOnInputNode()
                 try engine.start()
-                onDiagnostic?("DIAG:mic_cycle SUCCESS on \(label)")
-                Logger.audio.info("Mic acquired on '\(self.getDeviceName(deviceID))' (candidate \(idx + 1) of \(candidates.count))")
+
+                // REQ-4: require a LIVE floor over a short probe window before
+                // accepting this candidate — buffer presence alone is not
+                // success. This stops the cycle landing on a silent
+                // aggregate/device (the recurring TASK-034 gap, e.g. the
+                // incident's CADefaultDeviceAggregate that started fine yet
+                // carried bit-exact zero). A `flatZero` probe is only accepted
+                // when the device is MUTED — a muted-but-correct mic is healthy
+                // and must never be dropped (cardinal rule).
+                let liveness = probeLiveness(window: 0.6)
+                let muted = isDeviceMuted(deviceID)
+                if !Self.cyclerAcceptsCandidate(liveness: liveness, isMuted: muted) {
+                    onDiagnostic?("DIAG:mic_cycle \(label) started but probe was FLAT-ZERO (not muted) — silent device, trying next")
+                    Logger.audio.warning("Mic cycle \(idx + 1) on '\(self.getDeviceName(deviceID))' started but produced a flat-zero stream — rejecting silent device")
+                    continue
+                }
+                let livenessLabel = muted && liveness == .flatZero ? "muted" : "\(liveness)"
+                onDiagnostic?("DIAG:mic_cycle SUCCESS on \(label) (liveness=\(livenessLabel))")
+                Logger.audio.info("Mic acquired on '\(self.getDeviceName(deviceID))' (candidate \(idx + 1) of \(candidates.count), liveness=\(livenessLabel))")
                 return
             } catch {
                 lastError = error
@@ -726,6 +1111,78 @@ final class MicrophoneCapture: @unchecked Sendable {
         )
         AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &name)
         return name as String
+    }
+
+    /// The CoreAudio UID string for a device id, or nil if it can't be resolved.
+    /// Mirrors AudioSessionManager.uid(forDeviceID:) — duplicated here because
+    /// MicrophoneCapture owns the bound AudioDeviceID and must answer identity
+    /// without reaching across to the session manager on the audio path.
+    private func deviceUID(_ deviceID: AudioDeviceID) -> String? {
+        guard deviceID != kAudioObjectUnknown, deviceID != 0 else { return nil }
+        var cfUID: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &cfUID) == noErr else { return nil }
+        return cfUID as String
+    }
+
+    /// Is the bound input device muted (REQ-7)? Mute is a first-class HEALTHY
+    /// state, so this read must be conservative: report muted only on positive
+    /// evidence. Checks, in order, on the input scope:
+    ///   • `kAudioDevicePropertyMute` (master element 0, then per-channel 1/2),
+    ///   • `kAudioDevicePropertyVolumeScalar == 0` (master, then per-channel).
+    /// Any one positive read → muted. Unreadable properties are simply skipped
+    /// (a device that doesn't expose mute/volume is reported as not-muted, never
+    /// guessed). The macOS *system* mic-mute (the menu-bar / hardware mute) also
+    /// drives `kAudioDevicePropertyMute` on the active input device, so this same
+    /// read covers it without a private API.
+    private func isDeviceMuted(_ deviceID: AudioDeviceID) -> Bool {
+        guard deviceID != kAudioObjectUnknown, deviceID != 0 else { return false }
+
+        func uint32Property(_ selector: AudioObjectPropertySelector, element: AudioObjectPropertyElement) -> UInt32? {
+            var address = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: element
+            )
+            guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+            var value: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else { return nil }
+            return value
+        }
+
+        func floatProperty(_ selector: AudioObjectPropertySelector, element: AudioObjectPropertyElement) -> Float? {
+            var address = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: element
+            )
+            guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+            var value: Float = 0
+            var size = UInt32(MemoryLayout<Float>.size)
+            guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else { return nil }
+            return value
+        }
+
+        // Master + per-channel mute. Element 0 is master; 1/2 are L/R.
+        for element: AudioObjectPropertyElement in [kAudioObjectPropertyElementMain, 1, 2] {
+            if let muted = uint32Property(kAudioDevicePropertyMute, element: element), muted != 0 {
+                return true
+            }
+        }
+        // Volume scalar pinned to 0 is an effective mute (some devices model the
+        // menu-bar mute this way instead of the mute property).
+        for element: AudioObjectPropertyElement in [kAudioObjectPropertyElementMain, 1, 2] {
+            if let vol = floatProperty(kAudioDevicePropertyVolumeScalar, element: element), vol <= 0 {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Device Disconnection Handling
@@ -809,6 +1266,12 @@ final class MicrophoneCapture: @unchecked Sendable {
                     self?.handleEngineConfigurationChange()
                 }
                 onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(activeDeviceID)))")
+                // REQ-3: a config change is exactly when capture can silently
+                // wedge on a flat stream. Kick event-driven liveness
+                // re-validation now (≤ ~15 s clock in the owner) instead of
+                // waiting on the 300 s silence window. Fired off-lock so the
+                // owner's async work never reenters this lock.
+                onConfigChangeRevalidate?()
             }
         }
     }

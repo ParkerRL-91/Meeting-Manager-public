@@ -176,6 +176,226 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 48_000, channelCount: 0))
         XCTAssertFalse(MicrophoneCapture.isUsableInputFormat(sampleRate: 0, channelCount: 0))
     }
+
+    // MARK: - Mic liveness & health (TASK-095)
+
+    func testLivenessClassifierFloorVsDead() {
+        // Quiet-but-ALIVE: the incident's real noise floor (0.0001–0.0007) reads
+        // `live` — a quiet listener must never be mistaken for a dead mic.
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(rms: 0.0003, isConstant: false), .live,
+            "a real noise floor above ε is live, even with no speech")
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(rms: MicLivenessClassifier.liveEpsilon, isConstant: false), .live)
+
+        // A tiny but non-zero, VARYING floor below the comfortable ε is quietLive —
+        // still proof the capture path is alive (never dropped).
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(rms: 5e-6, isConstant: false), .quietLive)
+
+        // DEAD: bit-exact zero (the incident's mic=0.0000 for 12+ min).
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(rms: 0, isConstant: true), .flatZero,
+            "bit-exact zero is flatZero (inconclusive on its own)")
+        // A frozen NON-zero constant is also flatZero — no moving floor.
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(rms: 0.2, isConstant: true), .flatZero,
+            "a frozen constant carries no floor regardless of DC level")
+        // Denormal / gated-zero trash below the zero floor (no variation) is flatZero,
+        // not a phantom floor.
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(rms: 5e-8, isConstant: false), .flatZero)
+    }
+
+    func testLivenessVerdictMutedIsHealthyNeverDead() {
+        // REQ-7: flatZero + muted → muted (healthy), NOT dead — even when there is
+        // device-level failure evidence, muting always wins.
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: true, deviceLevelFailure: false),
+            .muted)
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: true, deviceLevelFailure: true),
+            .muted, "muted wins over a failure signal — never self-heal a muted mic")
+        XCTAssertTrue(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: true, deviceLevelFailure: true).isHealthy)
+    }
+
+    func testLivenessVerdictFlatZeroAloneIsNeverDead() {
+        // REQ-1: flatZero on a correct, alive, NOT-muted device with no
+        // device-level failure is silent-ok (a quiet user / genuine silence) —
+        // never dead.
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: false),
+            .silentOK)
+        XCTAssertTrue(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: false).isHealthy)
+    }
+
+    func testLivenessVerdictDeadRequiresDeviceLevelFailure() {
+        // A "dead" verdict requires device-level failure evidence AND a not-muted,
+        // correct device with no floor (the incident: wedged stream + format errors).
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: true),
+            .dead)
+        XCTAssertFalse(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: true).isHealthy)
+    }
+
+    func testLivenessVerdictFloorAlwaysHealthy() {
+        // A present floor means the capture path is alive regardless of identity /
+        // mute / failure flags — robustness cardinal rule (never drop a live mic).
+        for intended in [true, false] {
+            for muted in [true, false] {
+                for failure in [true, false] {
+                    XCTAssertEqual(
+                        MicLivenessClassifier.verdict(liveness: .live, isIntendedDevice: intended,
+                                                      isMuted: muted, deviceLevelFailure: failure),
+                        .live)
+                    XCTAssertEqual(
+                        MicLivenessClassifier.verdict(liveness: .quietLive, isIntendedDevice: intended,
+                                                      isMuted: muted, deviceLevelFailure: failure),
+                        .quietLive)
+                }
+            }
+        }
+    }
+
+    func testLivenessVerdictDeviceMismatchWhenWrongDevice() {
+        // REQ-2: a flatZero stream on the WRONG device (not muted) is a mismatch —
+        // surfaced so the user can switch (we never auto-switch to a different
+        // device). A wrong device with a floor is still "live" (handled above).
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: false,
+                                          isMuted: false, deviceLevelFailure: false),
+            .deviceMismatch)
+        // Mute still wins over a mismatch (a muted correct-or-wrong device is healthy-muted).
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: .flatZero, isIntendedDevice: false,
+                                          isMuted: true, deviceLevelFailure: false),
+            .muted)
+    }
+
+    func testIncidentLogReplayQuietAliveVsDead() {
+        // Replays the discriminator from the 2026-06-17 incident: the SAME device,
+        // correct + not muted, distinguished purely by the floor.
+        //   18:14 quiet-but-alive: mic=0.0001…0.0007 (varying floor) → live, healthy.
+        let quiet = MicLivenessClassifier.classify(rms: 0.0004, isConstant: false)
+        XCTAssertEqual(quiet, .live)
+        XCTAssertTrue(
+            MicLivenessClassifier.verdict(liveness: quiet, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: false).isHealthy,
+            "the quiet-but-alive 18:14 window must NOT be flagged dead")
+
+        //   19:10 dead: mic=0.0000 exact + format errors (device-level failure) → dead.
+        let dead = MicLivenessClassifier.classify(rms: 0.0, isConstant: true)
+        XCTAssertEqual(dead, .flatZero)
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: dead, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: true),
+            .dead,
+            "the 19:10 wedged-silent window WITH format errors is dead")
+        // …but the very same flat-zero reading WITHOUT device-level failure (a
+        // quiet user) is silent-ok, not dead — the false-positive the old 300 s
+        // timeout produced.
+        XCTAssertEqual(
+            MicLivenessClassifier.verdict(liveness: dead, isIntendedDevice: true,
+                                          isMuted: false, deviceLevelFailure: false),
+            .silentOK)
+    }
+
+    func testProbeVerdictRejectsZeroBuffersAndAcceptsAVaryingFloor() {
+        // Regression guard for the acquisition gate. The live wiring once gated
+        // probe collection behind the engine's `isRunning` flag, which is still
+        // false DURING the cycle — so NO buffers were ever folded in, the reduction
+        // saw bufferCount==0, returned `.flatZero`, and a perfectly live mic was
+        // rejected as a "silent device". This pins the reduction so that path
+        // can't silently regress without `swift build` + the suite catching it.
+
+        // Zero buffers → flatZero (no proof of a floor). This is the ONLY way a
+        // live mic gets rejected, and it must mean "we collected nothing", not
+        // "the mic is silent".
+        XCTAssertEqual(
+            MicLivenessClassifier.probeVerdict(bufferCount: 0, peakRMS: 0.5, sawVariation: true),
+            .flatZero, "no buffers collected → flatZero regardless of stale peak")
+
+        // Buffers that carried a real, varying floor reduce to live/quietLive — the
+        // working-mic case the regression broke. A quiet-but-alive floor is quietLive.
+        XCTAssertEqual(
+            MicLivenessClassifier.probeVerdict(bufferCount: 12, peakRMS: 0.0004, sawVariation: true),
+            .live)
+        XCTAssertEqual(
+            MicLivenessClassifier.probeVerdict(bufferCount: 12, peakRMS: 5e-6, sawVariation: true),
+            .quietLive)
+        // Buffers arrived but never varied (bit-exact zero / frozen) → flatZero.
+        XCTAssertEqual(
+            MicLivenessClassifier.probeVerdict(bufferCount: 12, peakRMS: 0.0, sawVariation: false),
+            .flatZero)
+    }
+
+    func testSteadyStateWindowDetectsFrozenNonZeroStream() {
+        // D1 regression guard for the live monitor's frozen-stream detection. The
+        // old steady-state check was `peak <= zeroFloor`, so it could ONLY catch
+        // bit-exact zero — a frozen NON-zero DC stream (identical RMS every tick)
+        // read `.live` forever. `windowIsConstant` keys on max−min movement instead.
+        let win = 3
+
+        // A frozen non-zero constant (wedged IO repeating the same DC value): a full
+        // window with zero movement → constant → classifies as flatZero, not a false
+        // live. This is the case the old check missed.
+        let frozen: [Float] = [0.2, 0.2, 0.2]
+        XCTAssertTrue(MicLivenessClassifier.windowIsConstant(frozen, minSamples: win),
+                      "a full window with no movement is frozen, even at a non-zero level")
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(
+                rms: frozen.max() ?? 0,
+                isConstant: MicLivenessClassifier.windowIsConstant(frozen, minSamples: win)),
+            .flatZero, "a frozen non-zero stream must read flatZero, never live")
+
+        // A genuinely quiet but ALIVE floor flickers tick-to-tick (the incident's
+        // 1e-4…7e-4) — far more than the zero-band guard — so it is NOT constant and
+        // stays live. Cardinal rule: never demote a working-but-quiet mic.
+        let quietAlive: [Float] = [0.0001, 0.0007, 0.0003]
+        XCTAssertFalse(MicLivenessClassifier.windowIsConstant(quietAlive, minSamples: win),
+                       "a real flickering floor is not frozen")
+        XCTAssertEqual(
+            MicLivenessClassifier.classify(
+                rms: quietAlive.max() ?? 0,
+                isConstant: MicLivenessClassifier.windowIsConstant(quietAlive, minSamples: win)),
+            .live)
+
+        // Bit-exact zero across the window stays flatZero (the original case).
+        XCTAssertTrue(MicLivenessClassifier.windowIsConstant([0, 0, 0], minSamples: win))
+
+        // A PARTIAL window can't distinguish "frozen" from "just started", so it
+        // falls back to the level-only zero check: a single non-zero sample is NOT
+        // declared frozen (it would otherwise mask a live mic at start-up).
+        XCTAssertFalse(MicLivenessClassifier.windowIsConstant([0.2], minSamples: win),
+                       "one non-zero sample is not yet proof of a frozen stream")
+        XCTAssertTrue(MicLivenessClassifier.windowIsConstant([0.0], minSamples: win),
+                      "a single zero sample is still in the zero band")
+    }
+
+    func testCyclerAcceptsLiveAndMutedButRejectsSilentNotMuted() {
+        // REQ-4 + cardinal rule. A floor present is always accepted; a muted-but-
+        // correct mic is accepted (never dropped); ONLY a flat-zero NOT-muted
+        // candidate (a silent aggregate / wedged device — the TASK-034 gap) is
+        // rejected so the cycle keeps looking.
+        XCTAssertTrue(MicrophoneCapture.cyclerAcceptsCandidate(liveness: .live, isMuted: false))
+        XCTAssertTrue(MicrophoneCapture.cyclerAcceptsCandidate(liveness: .quietLive, isMuted: false))
+        XCTAssertTrue(MicrophoneCapture.cyclerAcceptsCandidate(liveness: .live, isMuted: true))
+        XCTAssertTrue(MicrophoneCapture.cyclerAcceptsCandidate(liveness: .flatZero, isMuted: true),
+                      "a muted-but-correct mic is healthy — must be accepted, never dropped")
+        XCTAssertFalse(MicrophoneCapture.cyclerAcceptsCandidate(liveness: .flatZero, isMuted: false),
+                       "a flat-zero, not-muted candidate is a silent device — reject and keep cycling")
+    }
+
     // MARK: - Failure honesty (TASK-031) + recordable-match filter (TASK-033)
 
     func testHumanizedTaskErrorTranslatesCoreAudioCodes() {
@@ -1192,5 +1412,49 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         let without = SampleData.makeMeeting(id: "other", title: "Standup", startDate: Date(timeIntervalSinceNow: -2*86400), status: .complete)
         let result = SinceLastMetBuilder.lastMeeting(with: key, before: Date(), excluding: "upcoming", in: withPerson + [without])
         XCTAssertEqual(result?.id, "recent")
+    }
+
+    // MARK: - Key Quotes filter (TASK-094 REQ-6)
+
+    private func clip(_ id: Int64, meeting: String, quote: String, speaker: String?) -> Clip {
+        Clip(id: id, meetingId: meeting, startTime: 0, endTime: 1,
+             quoteText: quote, speakerLabels: speaker, note: nil, createdAt: Date())
+    }
+
+    func testKeyQuotesFilterEmptyQueryReturnsAll() {
+        let clips = [clip(1, meeting: "m1", quote: "hello", speaker: "Alice")]
+        XCTAssertEqual(KeyQuotesView.filter(clips, query: "   ", titleFor: { _ in nil }).count, 1)
+    }
+
+    func testKeyQuotesFilterMatchesQuoteSpeakerAndTitle() {
+        let clips = [
+            clip(1, meeting: "m1", quote: "discuss pricing terms", speaker: "Alice"),
+            clip(2, meeting: "m2", quote: "next steps", speaker: "Bob"),
+            clip(3, meeting: "m3", quote: "renewal date", speaker: "Carol"),
+        ]
+        let titles = ["m1": "Acme Sync", "m2": "Acme Sync", "m3": "Roadmap"]
+        let titleFor: (String) -> String? = { titles[$0] }
+
+        XCTAssertEqual(KeyQuotesView.filter(clips, query: "pricing", titleFor: titleFor).map(\.id), [1])
+        XCTAssertEqual(KeyQuotesView.filter(clips, query: "BOB", titleFor: titleFor).map(\.id), [2])
+        XCTAssertEqual(Set(KeyQuotesView.filter(clips, query: "acme", titleFor: titleFor).map(\.id)), [1, 2])
+        XCTAssertTrue(KeyQuotesView.filter(clips, query: "nonsense", titleFor: titleFor).isEmpty)
+    }
+
+    // MARK: - Topic hit overflow cap (TASK-094 REQ-7)
+
+    func testTopicOverflowCount() {
+        XCTAssertNil(TopicTrackersView.overflowCount(total: 0, shown: 10))
+        XCTAssertNil(TopicTrackersView.overflowCount(total: 10, shown: 10))
+        XCTAssertEqual(TopicTrackersView.overflowCount(total: 13, shown: 10), 3)
+    }
+
+    /// REQ-7: the overflow is fed the true lifetime total (unbounded hitCount),
+    /// not the capped fetch window — a topic with >50 mentions must report the
+    /// real remainder ("+110 more"), never top out at the window size.
+    func testTopicOverflowUsesTrueTotalBeyondFetchWindow() {
+        XCTAssertEqual(TopicTrackersView.overflowCount(total: 120, shown: 10), 110)
+        // Stale/under-counted total never overstates the remainder.
+        XCTAssertNil(TopicTrackersView.overflowCount(total: 5, shown: 10))
     }
 }

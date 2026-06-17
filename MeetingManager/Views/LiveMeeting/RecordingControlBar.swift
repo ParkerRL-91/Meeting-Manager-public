@@ -112,6 +112,14 @@ struct RecordingControlBar: View {
                 .help(meeting.participantList.joined(separator: ", "))
             }
 
+            // Signal-independent mic-health status (TASK-095): shows the mic is
+            // live + which device, muted, or not capturing — even while silent,
+            // distinct from the talk-time level meter below. Suppressed while the
+            // "Reconnecting mic…" banner is up (recovery/self-heal owns that).
+            if !appState.isMicRecovering {
+                MicHealthStatusPill(health: appState.micHealth)
+            }
+
             // Audio level meters
             AudioLevelIndicator(
                 label: "\u{1F3A4}",
@@ -303,6 +311,87 @@ private struct TranscribingPill: View {
         let active = appState.isRecording && appState.appleSpeechTranscriber.isActive
         if active != isTranscribing {
             isTranscribing = active
+        }
+    }
+}
+
+// MARK: - Mic Health Status Pill (TASK-095, REQ-6)
+
+/// Signal-independent mic-health pill: reflects liveness (noise floor present),
+/// device identity, and mute-state even while the user is silent — so the user
+/// can trust the mic before speaking. Distinct from the talk-time level meter.
+private struct MicHealthStatusPill: View {
+    let health: MicHealthSnapshot
+
+    var body: some View {
+        Group {
+            if let style {
+                HStack(spacing: 4) {
+                    Image(systemName: style.icon)
+                        .font(.caption)
+                    Text(style.text)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(style.color)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(style.color.opacity(0.12))
+                .clipShape(Capsule())
+                .help(style.help)
+                .accessibilityLabel(style.accessibility)
+            }
+        }
+    }
+
+    private struct Style {
+        let icon: String
+        let text: String
+        let color: Color
+        let help: String
+        let accessibility: String
+    }
+
+    /// nil → render nothing (status unknown before the first health tick).
+    private var style: Style? {
+        let device = health.deviceName.isEmpty ? "your microphone" : health.deviceName
+        switch health.verdict {
+        case .live, .quietLive:
+            // A noise floor is actually present — affirm the mic is live.
+            return Style(
+                icon: "mic.fill",
+                text: "Live · \(health.deviceName.isEmpty ? "mic" : health.deviceName)",
+                color: .appSuccess,
+                help: "Recording from \(device) — the mic is live even while you're silent.",
+                accessibility: "Microphone live, recording from \(device)"
+            )
+        case .silentOK:
+            // Correct, alive device but no floor right now (a quiet stretch) — we
+            // can't see a signal, so don't over-claim "Live". A calm "Listening"
+            // status is honest and still reassures the user the mic isn't broken.
+            return Style(
+                icon: "mic.fill",
+                text: "Listening · \(health.deviceName.isEmpty ? "mic" : health.deviceName)",
+                color: .appTextSecondary,
+                help: "Recording from \(device). No sound right now — Meeting Manager is listening and will pick up your voice when you speak.",
+                accessibility: "Microphone on \(device), listening, no sound detected yet"
+            )
+        case .muted:
+            return Style(
+                icon: "mic.slash.fill",
+                text: "Muted",
+                color: .appTextSecondary,
+                help: "\(device) is muted. Meeting Manager keeps recording and resumes your voice automatically when you unmute.",
+                accessibility: "Microphone muted on \(device). Recording continues; unmute to resume your voice."
+            )
+        case .deviceMismatch, .dead:
+            return Style(
+                icon: "exclamationmark.triangle.fill",
+                text: "Mic not capturing",
+                color: .appWarning,
+                help: "Your microphone isn't capturing. Pick your mic in System Settings > Sound > Input — the call audio is still being recorded.",
+                accessibility: "Microphone not capturing. Switch device. The call is still being recorded."
+            )
         }
     }
 }
