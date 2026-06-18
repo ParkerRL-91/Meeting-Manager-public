@@ -189,6 +189,20 @@ enum MicLivenessClassifier {
             return .silentOK
         }
     }
+
+    /// After a config-change re-validation window ends on a persistent `.silentOK`
+    /// (flat-zero on a correct, "running", NOT-muted device), decide whether it is a
+    /// SILENT WEDGE that warrants a self-heal versus a genuinely quiet user. The
+    /// discriminator is whether the mic was live immediately BEFORE the
+    /// reconfiguration: a was-live → flat-zero transition is the wedge (the
+    /// 2026-06-17 incident, where the engine still reports running so the verdict is
+    /// never `.dead`); a was-already-quiet stream is just a quiet user and must NOT
+    /// be healed (cardinal rule). Only `.silentOK` is ambiguous — every other end
+    /// verdict (live/quietLive/muted/dead/deviceMismatch) is resolved during the
+    /// window itself.
+    static func shouldHealSilentWedge(endVerdict: MicHealthVerdict, wasLiveBeforeChange: Bool) -> Bool {
+        endVerdict == .silentOK && wasLiveBeforeChange
+    }
 }
 
 /// 2nd-order (RBJ) low-pass applied BEFORE linear-interpolation decimation.

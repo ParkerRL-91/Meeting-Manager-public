@@ -248,6 +248,28 @@ final class SessionAndAudioHygieneTests: XCTestCase {
                                           isMuted: false, deviceLevelFailure: true).isHealthy)
     }
 
+    func testShouldHealSilentWedgeOnlyWhenWasLiveAndSilentOK() {
+        // The 2026-06-17 incident: after a reconfig the stream is .silentOK (flat-zero
+        // on a correct, running, not-muted device — NOT .dead), and the mic was live
+        // before. That is the silent wedge → heal.
+        XCTAssertTrue(
+            MicLivenessClassifier.shouldHealSilentWedge(endVerdict: .silentOK, wasLiveBeforeChange: true))
+        // Cardinal rule: a user who was already quiet before the change is NOT healed.
+        XCTAssertFalse(
+            MicLivenessClassifier.shouldHealSilentWedge(endVerdict: .silentOK, wasLiveBeforeChange: false))
+        // Muted (even if previously live) is healthy — never a wedge heal.
+        XCTAssertFalse(
+            MicLivenessClassifier.shouldHealSilentWedge(endVerdict: .muted, wasLiveBeforeChange: true))
+        // A returned floor is recovery, not a wedge.
+        XCTAssertFalse(
+            MicLivenessClassifier.shouldHealSilentWedge(endVerdict: .live, wasLiveBeforeChange: true))
+        XCTAssertFalse(
+            MicLivenessClassifier.shouldHealSilentWedge(endVerdict: .quietLive, wasLiveBeforeChange: true))
+        // .dead / .deviceMismatch are resolved inside the window, not by this gate.
+        XCTAssertFalse(
+            MicLivenessClassifier.shouldHealSilentWedge(endVerdict: .dead, wasLiveBeforeChange: true))
+    }
+
     func testLivenessVerdictFloorAlwaysHealthy() {
         // A present floor means the capture path is alive regardless of identity /
         // mute / failure flags — robustness cardinal rule (never drop a live mic).

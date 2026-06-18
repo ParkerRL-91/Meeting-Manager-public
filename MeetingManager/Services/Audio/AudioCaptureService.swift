@@ -147,6 +147,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     private let maxSelfHealAttempts = 3
     private var isSelfHealing = false
     private var selfHealWarned = false
+    /// Latches "the mic was live going into a reconfiguration" across re-arms within
+    /// one wedge episode (REQ-5). The 2026-06-17 incident reconfigured the shared mic
+    /// REPEATEDLY; re-reading was-live from the (now-silent) verdict on each re-arm
+    /// would lose the signal and miss the heal. Set true on a config change while a
+    /// floor is present; cleared the moment a floor returns or the device is muted
+    /// (updateMicHealth), on heal success, and at capture start.
+    private var micWasLiveBeforeWedge = false
     /// Internal retry clock for the self-heal ladder (REQ-5). A clean wedge with no
     /// further CoreAudio events would otherwise spend only ONE of the budgeted
     /// attempts and stall; after an unverified heal this re-fires the next attempt
@@ -568,6 +575,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         isCapturing = true
+        micWasLiveBeforeWedge = false   // fresh wedge-latch per recording
 
         // Install device-change listeners LAST — after isCapturing is set and all
         // start-time device churn (aggregate creation, the tap dance) is done — so
@@ -1090,6 +1098,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             deviceLevelFailure: deviceLevelFailure
         )
         micHealth = snapshot
+        // A returned floor or an intentional mute ends a wedge episode — clear the
+        // latch so a later, unrelated config change can never false-heal off a stale
+        // was-live signal (cardinal rule).
+        if snapshot.verdict == .live || snapshot.verdict == .quietLive || snapshot.verdict == .muted {
+            micWasLiveBeforeWedge = false
+        }
     }
 
     // MARK: - Event-driven re-validation + self-heal (REQ-3, REQ-5)
@@ -1103,11 +1117,24 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         guard isCapturing, !isStoppingCapture else { return }
         guard micSource == .engine else { return }   // SCK path heals via its own retry
         logToFile("Audio: config change — arming \(Int(configRevalidateWindow))s liveness re-validation (REQ-3)")
+        // LATCH (not snapshot) whether the mic was live just before this reconfig, and
+        // persist it across re-arms within one wedge episode: the 2026-06-17 incident
+        // reconfigured the shared mic REPEATEDLY, and re-reading was-live from the
+        // now-silent verdict on a second event would lose the signal and miss the heal.
+        // Set true only while a floor is present; the in-window polls and
+        // updateMicHealth clear it the moment a floor returns or the device is muted
+        // (cardinal rule: never heal a quiet/muted user). `micHealth` here is the last
+        // 1 Hz tick, computed before this config-change event fired.
+        if micHealth.verdict == .live || micHealth.verdict == .quietLive {
+            micWasLiveBeforeWedge = true
+        }
         configRevalidateDeadlineTask?.cancel()
         configRevalidateDeadlineTask = Task { [weak self] in
             guard let self else { return }
-            // Sample the floor a few times across the window — a live floor
-            // returning at any point clears the clock without a heal.
+            // Sample the floor a few times across the window. A returning floor or an
+            // intentional mute clears the clock with no heal; device-level failure heals
+            // immediately; a PERSISTENT flat-zero (.silentOK) is the ambiguous case,
+            // decided at the end of the window using `micWasLiveBeforeWedge`.
             let pollOffsets: [TimeInterval] = [3, 6, 9, 12]
             var elapsed: TimeInterval = 0
             for offset in pollOffsets {
@@ -1119,25 +1146,39 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                       !self.isMicRecovering, !self.isSelfHealing else { return }
                 self.updateMicHealth()
                 let v = self.micHealth.verdict
-                if v.isHealthy {
-                    if v == .muted {
-                        self.logToFile("Audio: config-change re-validation — device is MUTED, healthy; no heal")
-                    }
-                    return   // live / quietLive / muted / silentOK — nothing to heal
+                // Floor returned — recovered, no heal. Clear the wedge latch.
+                if v == .live || v == .quietLive { self.micWasLiveBeforeWedge = false; return }
+                // Intentional mute — healthy; resumes on unmute. No heal. Clear the latch.
+                if v == .muted {
+                    self.micWasLiveBeforeWedge = false
+                    self.logToFile("Audio: config-change re-validation — device is MUTED, healthy; no heal")
+                    return
                 }
-                if v == .dead {
-                    self.logToFile("Audio: config-change re-validation — verdict DEAD after \(Int(elapsed))s; self-healing input")
+                // Device-level failure / wrong device — heal immediately (REQ-5).
+                if v == .dead || v == .deviceMismatch {
+                    self.logToFile("Audio: config-change re-validation — verdict \(v) after \(Int(elapsed))s; self-healing input")
                     await self.selfHealInput()
                     return
                 }
-                // .deviceMismatch: the engine drifted onto the wrong device.
-                // Choosing a replacement device is the user's call (out of scope),
-                // but re-acquiring the INTENDED device in place is exactly REQ-5.
-                if v == .deviceMismatch {
-                    self.logToFile("Audio: config-change re-validation — engine on WRONG device after \(Int(elapsed))s; re-acquiring intended device in place")
-                    await self.selfHealInput()
-                    return
-                }
+                // .silentOK = flat-zero on a correct, running, NOT-muted device. In
+                // steady state that is a quiet user, but inside a config-change window
+                // it is the silent-wedge signature. Keep watching; decide below.
+            }
+            // Window elapsed still flat-zero (not muted, correct device, engine still
+            // reports "running"). This is the documented incident: the meeting app
+            // reconfigured the shared mic and our stream went dead-silent though the
+            // engine claims running — NOT `.dead` (the cardinal rule keeps that gate
+            // conservative), so a verdict-gated heal could never fire for it. Heal ONLY
+            // if the mic was live before the reconfig; a was-already-quiet user is left
+            // untouched (cardinal rule).
+            guard !Task.isCancelled, self.isCapturing, !self.isStoppingCapture,
+                  !self.isMicRecovering, !self.isSelfHealing else { return }
+            let endVerdict = self.micHealth.verdict
+            if MicLivenessClassifier.shouldHealSilentWedge(endVerdict: endVerdict, wasLiveBeforeChange: self.micWasLiveBeforeWedge) {
+                self.logToFile("Audio: config-change re-validation — SILENT WEDGE: mic was live, went flat-zero after reconfig and stayed silent \(Int(self.configRevalidateWindow))s while not muted and still 'running'; self-healing input (REQ-5)")
+                await self.selfHealInput()
+            } else if endVerdict == .silentOK {
+                self.logToFile("Audio: config-change re-validation — flat-zero across window but mic was already quiet at arm; treating as a quiet user, no heal (cardinal rule)")
             }
         }
     }
@@ -1198,6 +1239,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             selfHealAttempts = 0
             selfHealWarned = false
             consecutiveMicDeadSeconds = 0
+            micWasLiveBeforeWedge = false   // episode resolved
             selfHealRetryTask?.cancel()
             selfHealRetryTask = nil
             logToFile("Audio: self-heal SUCCEEDED on attempt \(attempt) — mic floor restored on \(micCapture.currentDeviceName), recording continues as one session")
