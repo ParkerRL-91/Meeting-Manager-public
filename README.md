@@ -21,6 +21,16 @@ You only do this once.
 
 ---
 
+## What's New in v4.7.2
+
+This release recovers a silently-failing microphone on its own and polishes the Key Quotes and Topics screens.
+
+**Your microphone now recovers by itself when it goes silent mid-meeting.** When another app reconfigures a shared microphone and Meeting Manager's capture wedges on a silent stream, the app now detects within seconds that the mic was live and has gone dead-silent, and re-acquires it in place — keeping one continuous recording instead of capturing silence until you notice. A microphone you have deliberately muted, or are simply not speaking into, is never disturbed: it is recognized as healthy and left alone.
+
+**The Topics screen no longer looks empty while it is still working.** Expanding a topic shows that its mentions are loading rather than briefly reading "No mentions yet," and a topic you just added scans your history and updates its own count instead of sitting at zero. Editing a topic from a long list now brings the editor into view.
+
+**Saved quotes and topics are protected from accidental loss, and both screens are more accessible.** Deleting a key quote or a topic now asks for confirmation first, every control on both screens carries a VoiceOver label, and a failed save surfaces a clear message instead of silently doing nothing.
+
 ## What's New in v4.7.1
 
 This release refines the features introduced in v4.7.0 with reliability fixes across model setup, playback, and on-device analysis.
