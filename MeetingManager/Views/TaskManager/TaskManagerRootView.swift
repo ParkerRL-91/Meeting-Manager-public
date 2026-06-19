@@ -52,7 +52,7 @@ struct TaskManagerRootView: View {
 
             if let taskId = appState.selectedTaskId {
                 detailPane(taskId)
-                    .frame(minWidth: 320, idealWidth: 420)
+                    .frame(minWidth: 320, idealWidth: 480, maxWidth: 640)
             }
         }
         .background(Color.appBackground)
