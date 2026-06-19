@@ -118,6 +118,8 @@ final class ActionItemExtractor {
                 assignee: raw.assignee,
                 dueDate: raw.dueDate.flatMap { dateFormatter.date(from: $0) },
                 isCompleted: false,
+                triageState: .inbox,   // PRJ-013: AI-identified tasks land in the review queue, not the board
+                source: "meeting",
                 extractedAt: now
             )
         }
