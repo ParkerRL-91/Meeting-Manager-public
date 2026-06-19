@@ -851,6 +851,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         consecutiveMicDeadSeconds = 0
         micProblemWarned = false
         logToFile("Audio: mic switch OK — now on \(target.localizedName) (engine.running=\(micCapture.engine.isRunning))")
+        // A successful switch — a user pick from the recovery banner, or an auto
+        // resume — ends any in-flight recovery search immediately, so the inline
+        // "finding a mic" banner clears right away instead of waiting for the next
+        // poll tick (TASK-104, "so it stops searching quickly").
+        if isMicRecovering, micCapture.engine.isRunning {
+            endMicRecovery(resumedOn: target.localizedName)
+        }
     }
 
     /// Switch the microphone while on the ScreenCaptureKit fallback path. Restarting
@@ -974,37 +981,31 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         micRecoveryWarnTask?.cancel()
         micRecoveryWarnTask = nil
 
-        // Start-time failure: the mic never joined, but the call audio has
-        // been recording the whole time — ending the meeting would discard
-        // good audio. Tell the user once, then keep recovery ALIVE at low
-        // frequency for the life of the recording: the notification-start
-        // flow begins with no call open at all, and the mic only becomes
-        // startable when the user joins the meeting minutes later — a dead
-        // 30 s window meant "never switches over" (TASK-034). The device
-        // listeners keep firing resume attempts too (they require
-        // isMicRecovering, which stays true here).
-        if micRecoveryReason == .startFailed {
-            logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired (startFailed) — continuing SYSTEM-ONLY; still watching for a usable mic")
-            onMicProblemDetected?(
-                "Your microphone couldn't be started, so the recording currently has the call audio only. "
-                + "Meeting Manager keeps watching — joining the meeting or switching inputs usually frees the mic, and it will be added automatically."
-            )
-            micRecoveryDeadlineTask = Task { [weak self] in
-                guard let self else { return }
-                while !Task.isCancelled, self.isMicRecovering, self.isCapturing {
-                    try? await Task.sleep(nanoseconds: 45_000_000_000)
-                    guard !Task.isCancelled, self.isMicRecovering, self.isCapturing else { return }
-                    if await self.attemptMicResume() { return }
-                }
+        // The initial recovery window expired without a replacement. Do NOT end
+        // the meeting (TASK-104) — the call keeps recording via system audio, and
+        // the user can pick a microphone from the inline recovery banner. Keep
+        // isMicRecovering TRUE so the banner + picker stay up, and keep watching at
+        // low frequency for the life of the recording: the device listeners + this
+        // poll resume the moment a usable mic appears (this is also the TASK-034
+        // start-time-failure behavior, now applied to every reason). The genuine
+        // all-silent (mic AND speaker) 5-minute auto-stop remains the backstop for
+        // a truly-ended call, so we never record silence forever.
+        logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired (\(micRecoveryReason)) — NOT ending; inline mic-picker stays up, still watching for a usable mic")
+        onMicProblemDetected?(micRecoveryReason == .startFailed
+            ? "Your microphone couldn't be started, so the recording currently has the call audio only. "
+              + "Reconnect or pick a microphone from the recording bar and it will be added automatically."
+            : "Your microphone disconnected. Meeting Manager is still recording the call — "
+              + "reconnect or pick a microphone from the recording bar and your audio resumes."
+        )
+        micRecoveryDeadlineTask?.cancel()
+        micRecoveryDeadlineTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, self.isMicRecovering, self.isCapturing {
+                try? await Task.sleep(nanoseconds: 45_000_000_000)
+                guard !Task.isCancelled, self.isMicRecovering, self.isCapturing else { return }
+                if await self.attemptMicResume() { return }
             }
-            return
         }
-
-        isMicRecovering = false
-        onMicRecoveryStateChanged?(false)
-        micRecoveryDeadlineTask = nil
-        logToFile("Audio: mic recovery window (\(Int(micRecoveryWindow))s) expired — no replacement; ending recording")
-        onSilenceDetected?()   // reuse the established auto-stop → AppState.stopRecording
     }
 
     // MARK: - Signal-independent mic health (TASK-095)

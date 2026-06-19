@@ -76,7 +76,9 @@ final class AppState {
 
     /// True while the recording mic has disconnected and the app is holding the
     /// recording open waiting for a replacement (system audio keeps capturing).
-    /// Mirrored from `AudioCaptureService`; drives the "reconnecting mic" banner.
+    /// Mirrored from `AudioCaptureService`; drives the inline red mic-recovery
+    /// banner + picker in the recording bar (TASK-104). The meeting is NOT ended on
+    /// mic loss alone — only the genuine all-silent 5-minute auto-stop ends it.
     var isMicRecovering = false
 
     /// Signal-independent mic-health snapshot (TASK-095), mirrored from
@@ -428,7 +430,8 @@ final class AppState {
             self?.settings.micOverrideEnabled ?? false
         }
 
-        // Mirror the mic-recovery state so the UI can show a "reconnecting" banner.
+        // Mirror the mic-recovery state so the recording bar shows the inline red
+        // "finding a mic" banner + picker (TASK-104).
         audioCaptureService.onMicRecoveryStateChanged = { [weak self] recovering in
             Task { @MainActor in self?.isMicRecovering = recovering }
         }
@@ -451,12 +454,14 @@ final class AppState {
             }
         }
 
-        // Warn (non-fatally) when the mic is dead while the call audio is live — the
-        // recording keeps the remote participants but the user's voice is missing.
+        // Mic died/disconnected. Do NOT raise a modal alert — the inline red
+        // recovery banner + mic picker in the recording bar (driven by
+        // isMicRecovering) surfaces it calmly, and the call keeps recording via
+        // system audio (TASK-104). Log for diagnostics only.
         audioCaptureService.onMicProblemDetected = { [weak self] message in
             Task { @MainActor in
                 guard let self, self.isRecording else { return }
-                self.lastUserError = message
+                self.fileLog("Mic problem (shown inline via recovery banner, no modal): \(message)")
             }
         }
 

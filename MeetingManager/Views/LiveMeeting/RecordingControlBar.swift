@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import os
+import AVFoundation
 
 /// Top bar displaying recording status, editable meeting title, elapsed time, audio levels, and stop control.
 struct RecordingControlBar: View {
@@ -18,6 +19,18 @@ struct RecordingControlBar: View {
     /// Gate on the stop button so users don't accidentally end a meeting. Surfaces a
     /// confirmationDialog with explicit copy about what "stop" does.
     @State private var showStopConfirmation = false
+
+    /// Input devices for the inline mic-picker shown when the mic disconnects (TASK-104).
+    @State private var availableMics: [AVCaptureDevice] = []
+    private let micEnumerator = AudioSessionManager()
+
+    /// User explicitly picked a mic from the recovery banner: switch to it immediately
+    /// and pin it via the override so the search stops right away (TASK-104).
+    private func pickMic(_ device: AVCaptureDevice) {
+        appState.settings.micOverrideEnabled = true
+        appState.settings.micOverrideDeviceID = device.uniqueID
+        Task { await appState.audioCaptureService.switchMicrophone(toUID: device.uniqueID) }
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -127,22 +140,48 @@ struct RecordingControlBar: View {
                 color: .appAccent
             )
 
-            // Shown while the mic disconnected and we're waiting for a replacement.
-            // The call is still being recorded via system audio in the meantime.
+            // Inline (non-modal) mic-loss status (TASK-104). The mic disconnected;
+            // the call keeps recording via system audio. While searching we show a
+            // calm "finding a new one"; if the search window expires we keep the
+            // banner up (no alarming popup) and lean on the picker. Either way a
+            // dropdown lets the user pick a mic to stop the search immediately.
             if appState.isMicRecovering {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
                         .font(.caption)
-                    Text("Reconnecting mic…")
+                    Text("Microphone disconnected — finding a new one…")
                         .font(.caption)
+                    Menu {
+                        if availableMics.isEmpty {
+                            Text("No microphones found")
+                        } else {
+                            ForEach(availableMics, id: \.uniqueID) { mic in
+                                Button(mic.localizedName) { pickMic(mic) }
+                            }
+                        }
+                    } label: {
+                        Label("Choose mic", systemImage: "chevron.down")
+                            .font(.caption)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-                .foregroundStyle(Color.appWarning)
+                .foregroundStyle(Color.appRecording)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.appWarningSubtle)
+                .background(Color.appRecordingSubtle)
                 .clipShape(Capsule())
-                .help("Your microphone disconnected. Meeting Manager is still recording the call — reconnect a microphone and your audio resumes automatically.")
-                .accessibilityLabel("Microphone disconnected, reconnecting. The call is still being recorded.")
+                .help("Your microphone disconnected. The call is still being recorded via system audio. Pick a microphone to switch right away, or reconnect one and it resumes automatically.")
+                .accessibilityLabel("Microphone disconnected, searching for a replacement. The call is still being recorded via system audio. Use the menu to choose a microphone.")
+                .task {
+                    // Keep the picker list fresh while the banner is up so a mic the
+                    // user plugs in AFTER the disconnect appears within a few seconds
+                    // (TASK-104). Auto-cancelled when the banner disappears.
+                    while !Task.isCancelled {
+                        availableMics = micEnumerator.availableInputDevices()
+                        try? await Task.sleep(for: .seconds(3))
+                    }
+                }
             }
 
             AudioLevelIndicator(
