@@ -1525,5 +1525,17 @@ enum Migrations {
             }
             try db.create(index: "idx_actionItem_projectId", on: "actionItem", columns: ["projectId"])
         }
+
+        // PRJ-014 Phase 3: persist the KB chunks that grounded an AI response so
+        // the "Context from your Knowledge Base" panel can render + deep-link
+        // them. Nullable JSON ([KBSourceRef]); no backfill — old rows decode nil.
+        migrator.registerMigration("v63-kb-citations") { db in
+            try db.alter(table: "meetingSummary") { t in
+                t.add(column: "kbSourcesJSON", .text)
+            }
+            try db.alter(table: "chatMessage") { t in
+                t.add(column: "kbSourcesJSON", .text)
+            }
+        }
     }
 }

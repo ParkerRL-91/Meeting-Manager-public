@@ -280,7 +280,7 @@ enum DefaultPrompts {
     {{priorNotes}}
 
     ## Relevant excerpts from the user's Knowledge Base
-    These are excerpts retrieved from the user's own document folder (not from prior meetings). Treat them as authoritative reference material — internal docs, OKRs, project briefs, etc. Cite the source path when you use them.
+    These excerpts are retrieved from the user's own document folder (not from prior meetings) and are provided as background context. Treat them as authoritative reference material — internal docs, OKRs, project briefs, etc. The app shows the reader which documents informed the brief, so you do not need to cite source paths inline.
     {{knowledgeBase}}
 
     ---

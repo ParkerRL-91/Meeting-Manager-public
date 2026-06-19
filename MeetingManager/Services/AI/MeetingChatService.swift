@@ -82,19 +82,22 @@ final class MeetingChatService {
         }
 
         // 2. Pull KB excerpts relevant to the user's question + meeting topic.
-        // Empty string when no KB folder is configured.
+        // Empty when no KB folder is configured. Capture the structured sources
+        // so the chat message can show "Context from your Knowledge Base".
         let kbExcerpts: String
+        let kbSources: [KBSourceRef]
         if let meeting {
-            kbExcerpts = await KnowledgeBaseService.shared.retrieveContext(
+            (kbExcerpts, kbSources) = await KnowledgeBaseService.shared.retrieve(
                 for: meeting,
                 chatQuery: question
             )
         } else {
             kbExcerpts = ""
+            kbSources = []
         }
         let kbBlock = kbExcerpts.isEmpty ? "" : """
 
-            Excerpts from the user's Knowledge Base (treat as authoritative reference; cite source paths when used):
+            Excerpts from the user's Knowledge Base, provided as background context for this answer:
             \(kbExcerpts)
             """
 
@@ -157,6 +160,7 @@ final class MeetingChatService {
             role: "assistant",
             content: response
         )
+        assistantMessage.kbSources = kbSources
         try await chatMessageRepository.save(&assistantMessage)
 
         Logger.ai.info("Meeting chat response saved for \(meetingId)")

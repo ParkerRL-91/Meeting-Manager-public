@@ -20,6 +20,19 @@ enum DailyBriefCache {
         let text: String          // Markdown body
         let model: String         // "claude-…", "qwen3:8b", etc.
         let generatedAt: Date
+        /// PRJ-014: KB notes the brief surfaced, for the "Context from your
+        /// Knowledge Base" panel. Optional so pre-v4.8 cache files (no key)
+        /// still decode via the `try?` load below.
+        var kbSources: [KBSourceRef]?
+
+        init(date: String, signature: String, text: String, model: String, generatedAt: Date, kbSources: [KBSourceRef]? = nil) {
+            self.date = date
+            self.signature = signature
+            self.text = text
+            self.model = model
+            self.generatedAt = generatedAt
+            self.kbSources = kbSources
+        }
     }
 
     // MARK: - Paths

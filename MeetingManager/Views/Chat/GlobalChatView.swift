@@ -218,16 +218,17 @@ struct GlobalChatView: View {
         pendingId: UUID,
         textGen: @escaping (String, String) async throws -> String
     ) async {
-        func complete(_ text: String, sources: [GlobalChatMessage.SourceRef] = []) {
+        func complete(_ text: String, sources: [GlobalChatMessage.SourceRef] = [], kbSources: [KBSourceRef] = []) {
             guard let idx = appState.globalChatMessages.firstIndex(where: { $0.id == pendingId }) else { return }
             withAnimation {
                 appState.globalChatMessages[idx].content = text
                 appState.globalChatMessages[idx].sources = sources
+                appState.globalChatMessages[idx].kbSources = kbSources
                 appState.globalChatMessages[idx].isPending = false
             }
         }
         do {
-            let (meetingContext, sources, kbContext) = await Self.buildRetrievalContextStatic(appState: appState, query: query)
+            let (meetingContext, sources, kbContext, kbSources) = await Self.buildRetrievalContextStatic(appState: appState, query: query)
 
             var systemPrompt = """
                 You are a helpful meeting assistant for \(ProcessInfo.processInfo.fullUserName). \
@@ -253,13 +254,13 @@ struct GlobalChatView: View {
                 systemPrompt += """
 
 
-                    Knowledge Base excerpts (authoritative reference material — cite source path when used):
+                    Knowledge Base excerpts, provided as background context for this answer:
                     \(kbContext)
                     """
             }
 
             let response = try await textGen(systemPrompt, query)
-            complete(response, sources: sources)
+            complete(response, sources: sources, kbSources: kbSources)
         } catch {
             complete("That didn't work: \(error.localizedDescription)")
         }
@@ -270,7 +271,7 @@ struct GlobalChatView: View {
     /// deduped to the best 2 chunks per meeting, capped at 8 numbered
     /// sources. Falls back to FTS alone — and to the most recent summaries
     /// when the query matches nothing — so the chat never goes blind.
-    private static func buildRetrievalContextStatic(appState: AppState, query: String) async -> (context: String, sources: [GlobalChatMessage.SourceRef], kb: String) {
+    private static func buildRetrievalContextStatic(appState: AppState, query: String) async -> (context: String, sources: [GlobalChatMessage.SourceRef], kb: String, kbSources: [KBSourceRef]) {
         var ranked: [(meetingId: String, snippet: String, score: Float)] = []
 
         let hits = (try? await appState.embeddingService.topK(
@@ -328,8 +329,8 @@ struct GlobalChatView: View {
         let context = blocks.isEmpty
             ? "SOURCES: none found for this question."
             : "SOURCES:\n\n" + blocks.joined(separator: "\n\n---\n\n")
-        let kbContext = await KnowledgeBaseService.shared.retrieveContext(query: query)
-        return (context, sources, kbContext)
+        let (kbContext, kbSources) = await KnowledgeBaseService.shared.retrieve(query: query)
+        return (context, sources, kbContext, kbSources)
     }
 
     private func getDisplayName() -> String {
@@ -588,6 +589,9 @@ struct GlobalChatMessage: Identifiable {
     /// Numbered retrieval sources behind an assistant answer (TASK-048).
     /// Index order matches the [n] citations the prompt mandates.
     var sources: [SourceRef] = []
+    /// PRJ-014: KB chunks fed to the model as background, shown under "Context
+    /// from your Knowledge Base". In-memory only — global chat is not persisted.
+    var kbSources: [KBSourceRef] = []
 
     enum Role { case user, assistant }
 

@@ -49,7 +49,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme requires SOC 2 Type II before signing any enterprise agreement" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -77,7 +77,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme requires SOC 2 Type II before signing any enterprise agreement" [KB99]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(result.contains("Background:"), "Sub-bullet with unknown id must be dropped")
         XCTAssertFalse(result.contains("[KB99]"), "Unknown id must not appear in output")
@@ -101,7 +101,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "SOC 2 certification is mandatory for Acme contracts" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(result.contains("Background:"), "Paraphrased sub-bullet must be dropped")
         XCTAssertFalse(result.contains("_Sources:"), "No sources footer when nothing survives")
@@ -127,7 +127,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Globex requires net-60 payment terms on all contracts exceeding five thousand dollars" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(
             result.contains("Background:"),
@@ -156,7 +156,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Globex requires net-60 payment terms on all contracts exceeding five thousand dollars" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -176,7 +176,7 @@ final class DailyBriefVerifierTests: XCTestCase {
         // Top-level line — no indentation, no Background prefix
         let input = "- **11:00 AM** — Acme Renewal is important [KB1] this quarter."
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(result.contains("[KB1]"), "Unverifiable marker on main line must be stripped")
         XCTAssertTrue(
@@ -205,7 +205,7 @@ final class DailyBriefVerifierTests: XCTestCase {
         // U+201C and U+201D smart quotes
         let input = "- **11:00 AM** — Acme Renewal\n    - Background: \u{201C}Acme requires SOC 2 Type II before signing any enterprise agreement\u{201D} [KB1]"
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -231,7 +231,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "SOC 2" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(result.contains("Background:"), "Quote shorter than 8 normalized chars must be dropped")
     }
@@ -256,7 +256,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "acme soc" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -281,7 +281,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "acmesoc" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(
             result.contains("Background:"),
@@ -312,7 +312,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme requires SOC 2 Type II before signing any enterprise agreement" [KB1] [KB2]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(result.contains("[KB1]"), "Valid id must be kept on surviving line")
         XCTAssertFalse(result.contains("[KB2]"), "Extra invalid id must be stripped from surviving line")
@@ -343,7 +343,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Globex has a net-60 payment requirement for contracts" [KB2]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("vendors/acme.md"),
@@ -365,7 +365,7 @@ final class DailyBriefVerifierTests: XCTestCase {
         // never adds to usedPaths → no footer
         let input = "- Acme Renewal note [KB1]"
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(
             result.contains("_Sources:"),
@@ -398,7 +398,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme also requests a dedicated account manager during the first year" [KB2]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         // Count occurrences of the path in the sources footer
         let footerStart = result.range(of: "_Sources:")
@@ -411,7 +411,7 @@ final class DailyBriefVerifierTests: XCTestCase {
     // MARK: - Empty input passes through untouched
 
     func testVerify_emptyInput_returnsEmpty() {
-        let result = DailyBriefAIService.verify(text: "", citations: [:])
+        let result = DailyBriefAIService.verify(text: "", citations: [:]).text
         XCTAssertEqual(result, "", "Empty input must return empty string")
     }
 
@@ -423,7 +423,7 @@ final class DailyBriefVerifierTests: XCTestCase {
 
         let input = "## Today's read\nThis is a normal brief with no citation markers."
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertEqual(result, input, "Text with no [KB markers must pass through unchanged")
     }
@@ -432,7 +432,7 @@ final class DailyBriefVerifierTests: XCTestCase {
 
     func testVerify_emptyCitationsAndNoMarkers_returnsInputUnchanged() {
         let input = "## Today's read\nA brief with no citations configured."
-        let result = DailyBriefAIService.verify(text: input, citations: [:])
+        let result = DailyBriefAIService.verify(text: input, citations: [:]).text
         XCTAssertEqual(result, input, "Completely citation-free brief must return unchanged")
     }
 
@@ -446,7 +446,7 @@ final class DailyBriefVerifierTests: XCTestCase {
         // Text contains no [KB…] markers at all
         let input = "- **9:00 AM** — Engineering standup\n- **11:00 AM** — Acme Renewal"
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertEqual(result, input, "Text with no [KB markers must be returned unchanged")
         XCTAssertFalse(result.contains("_Sources:"), "No sources footer when no markers appear")
@@ -474,7 +474,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "The deployment window is every Thursday at midnight Eastern time" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -654,7 +654,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme's security team requires SOC 2 Type II" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -682,7 +682,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme requires SOC 2 Type II before signing any enterprise agreement" [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(
             result.contains("Background:"),
@@ -712,7 +712,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: Acme requires SOC 2 Type II before signing [KB1]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertFalse(
             result.contains("[KB1]"),
@@ -743,7 +743,7 @@ final class DailyBriefVerifierTests: XCTestCase {
             - Background: "Acme insists on free professional services for onboarding" [KB2]
         """
 
-        let result = DailyBriefAIService.verify(text: input, citations: citations)
+        let result = DailyBriefAIService.verify(text: input, citations: citations).text
 
         XCTAssertTrue(result.contains("[KB1]"), "Valid sub-bullet KB1 must survive")
         XCTAssertFalse(result.contains("[KB2]"), "Invalid sub-bullet KB2 (paraphrase) must be dropped")

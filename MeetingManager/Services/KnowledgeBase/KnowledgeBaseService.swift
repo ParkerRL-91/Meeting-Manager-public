@@ -807,8 +807,13 @@ final class KnowledgeBaseService {
     /// brief. Returns the formatted Markdown block to inject into the LLM
     /// prompt under a `## Knowledge Base` header. Empty string when the KB
     /// is unconfigured or no chunks match.
-    func retrieveContext(for meeting: Meeting, additionalQuery: String? = nil) async -> String {
-        guard rootURL != nil else { return "" }
+    /// The single retrieval seam. Returns the formatted prompt block AND the
+    /// structured sources behind it. `promptText` is byte-identical to
+    /// `formatChunks(hits)`; the sources are the same chunks, so the UI can show
+    /// exactly what the model was given as background. Empty values when the KB
+    /// is unconfigured or nothing matches.
+    func retrieve(for meeting: Meeting, additionalQuery: String? = nil) async -> (promptText: String, sources: [KBSourceRef]) {
+        guard rootURL != nil else { return ("", []) }
 
         var queryParts: [String] = []
         queryParts.append(meeting.title)
@@ -819,31 +824,48 @@ final class KnowledgeBaseService {
         let query = queryParts
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return "" }
+        guard !query.isEmpty else { return ("", []) }
 
         let hits = (try? await repo.search(query: query, limit: 5)) ?? []
-        return Self.formatChunks(hits)
+        return (Self.formatChunks(hits), Self.sourceRefs(hits))
     }
 
     /// Free-form retrieval — used by GlobalChatView where there is no specific
     /// meeting to anchor the query. Searches across all indexed KB documents.
-    func retrieveContext(query: String) async -> String {
-        guard rootURL != nil, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+    func retrieve(query: String) async -> (promptText: String, sources: [KBSourceRef]) {
+        guard rootURL != nil, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return ("", []) }
         let hits = (try? await repo.search(query: query, limit: 5)) ?? []
-        return Self.formatChunks(hits)
+        return (Self.formatChunks(hits), Self.sourceRefs(hits))
     }
 
     /// For the chat path — query is the user's latest message + the meeting
     /// title to keep the retrieval anchored.
-    func retrieveContext(for meeting: Meeting, chatQuery: String) async -> String {
-        guard rootURL != nil else { return "" }
+    func retrieve(for meeting: Meeting, chatQuery: String) async -> (promptText: String, sources: [KBSourceRef]) {
+        guard rootURL != nil else { return ("", []) }
 
         let query = (meeting.title + " " + chatQuery)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return "" }
+        guard !query.isEmpty else { return ("", []) }
 
         let hits = (try? await repo.search(query: query, limit: 5)) ?? []
-        return Self.formatChunks(hits)
+        return (Self.formatChunks(hits), Self.sourceRefs(hits))
+    }
+
+    // MARK: - Retrieval (legacy string-only overloads)
+    //
+    // Kept for callers that only need the prompt block. Delegate to the seam so
+    // there is exactly one retrieval path.
+
+    func retrieveContext(for meeting: Meeting, additionalQuery: String? = nil) async -> String {
+        await retrieve(for: meeting, additionalQuery: additionalQuery).promptText
+    }
+
+    func retrieveContext(query: String) async -> String {
+        await retrieve(query: query).promptText
+    }
+
+    func retrieveContext(for meeting: Meeting, chatQuery: String) async -> String {
+        await retrieve(for: meeting, chatQuery: chatQuery).promptText
     }
 
     /// Retrieve KB chunks scoped to a single meeting for the daily brief, with
@@ -934,5 +956,19 @@ final class KnowledgeBaseService {
             let head = c.heading.map { "**\($0)**\n" } ?? ""
             return "_\(c.relativePath)_\n\(head)\(c.body.trimmingCharacters(in: .whitespacesAndNewlines))"
         }.joined(separator: "\n\n---\n\n")
+    }
+
+    /// Map retrieved chunks to citation refs, de-duplicated to one ref per
+    /// (relativePath, chunkIndex). These are the same chunks `formatChunks`
+    /// emitted, so the UI shows exactly the background the model was given.
+    static func sourceRefs(_ chunks: [KBDocument]) -> [KBSourceRef] {
+        var seen = Set<String>()
+        var out: [KBSourceRef] = []
+        for c in chunks {
+            let key = "\(c.relativePath)#\(c.chunkIndex)"
+            guard seen.insert(key).inserted else { continue }
+            out.append(KBSourceRef(chunk: c))
+        }
+        return out
     }
 }

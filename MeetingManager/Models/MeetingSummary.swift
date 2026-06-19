@@ -21,6 +21,10 @@ struct MeetingSummary: Identifiable, Codable, Equatable, Hashable {
     /// after the summary lands, and the cue should reflect how the summary was
     /// actually produced. Drives the "Shaped by your notes" badge in SummaryView.
     var notesInformedSummary: Bool
+    /// PRJ-014: JSON-encoded `[KBSourceRef]` — the KB chunks fed to the model as
+    /// background for this summary. Mirrors `TaskItem.tagsJSON` (synthesized
+    /// Codable; NO explicit CodingKeys). nil = no KB context used.
+    var kbSourcesJSON: String? = nil
 
     init(
         id: Int64? = nil,
@@ -30,7 +34,8 @@ struct MeetingSummary: Identifiable, Codable, Equatable, Hashable {
         modelUsed: String? = nil,
         generatedAt: Date = Date(),
         isEdited: Bool = false,
-        notesInformedSummary: Bool = false
+        notesInformedSummary: Bool = false,
+        kbSourcesJSON: String? = nil
     ) {
         self.id = id
         self.meetingId = meetingId
@@ -40,6 +45,20 @@ struct MeetingSummary: Identifiable, Codable, Equatable, Hashable {
         self.generatedAt = generatedAt
         self.isEdited = isEdited
         self.notesInformedSummary = notesInformedSummary
+        self.kbSourcesJSON = kbSourcesJSON
+    }
+
+    /// Convenience accessor over `kbSourcesJSON`. Not a stored column.
+    var kbSources: [KBSourceRef] {
+        get {
+            guard let kbSourcesJSON, let data = kbSourcesJSON.data(using: .utf8) else { return [] }
+            return (try? JSONDecoder().decode([KBSourceRef].self, from: data)) ?? []
+        }
+        set {
+            kbSourcesJSON = newValue.isEmpty
+                ? nil
+                : (try? JSONEncoder().encode(newValue)).flatMap { String(data: $0, encoding: .utf8) }
+        }
     }
 }
 
@@ -50,7 +69,7 @@ extension MeetingSummary: FetchableRecord, MutablePersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, meetingId, promptUsed, summaryText, modelUsed, generatedAt, isEdited, originalText
-        case notesInformedSummary
+        case notesInformedSummary, kbSourcesJSON
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) {

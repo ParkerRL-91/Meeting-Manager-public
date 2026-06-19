@@ -74,7 +74,9 @@ final class SummaryGenerator {
 
         // Pull KB excerpts (returns "" when no folder is configured —
         // substituteVariables falls back to "No Knowledge Base configured").
-        let kbContext = await KnowledgeBaseService.shared.retrieveContext(for: meeting)
+        // Capture the structured sources so the summary can show "Context from
+        // your Knowledge Base".
+        let (kbContext, kbSources) = await KnowledgeBaseService.shared.retrieve(for: meeting)
 
         let userPrompt = promptManager.substituteVariables(
             template: template,
@@ -114,6 +116,7 @@ final class SummaryGenerator {
             modelUsed: modelUsed,
             generatedAt: Date()
         )
+        summary.kbSources = kbSources
         try await summaryRepo.save(&summary)
 
         Logger.ai.info("Summary saved for meeting \(meeting.id), id=\(summary.id ?? -1)")

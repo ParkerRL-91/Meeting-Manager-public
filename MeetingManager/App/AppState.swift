@@ -6108,7 +6108,8 @@ final class AppState {
                     signature: signature,
                     text: result.text,
                     model: result.model,
-                    generatedAt: Date()
+                    generatedAt: Date(),
+                    kbSources: result.kbSources.isEmpty ? nil : result.kbSources
                 )
                 DailyBriefCache.save(entry)
                 await MainActor.run {

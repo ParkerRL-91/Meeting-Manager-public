@@ -34,6 +34,16 @@ struct DailyBriefAIService {
     struct Result: Sendable {
         let text: String
         let model: String
+        /// PRJ-014: the KB notes the brief actually surfaced (verbatim-verified),
+        /// in first-cited order. Threaded into `DailyBriefCache.Entry` so the
+        /// brief can show "Context from your Knowledge Base" with deep-links.
+        let kbSources: [KBSourceRef]
+
+        init(text: String, model: String, kbSources: [KBSourceRef] = []) {
+            self.text = text
+            self.model = model
+            self.kbSources = kbSources
+        }
     }
 
     /// One verifiable KB citation surfaced to the model as `[KBn]`. `body` is the
@@ -78,7 +88,8 @@ struct DailyBriefAIService {
                 userPrompt: prepared.userPrompt,
                 model: claudeModel
             )
-            return Result(text: Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations), model: claudeModel)
+            let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
+            return Result(text: verified.text, model: claudeModel, kbSources: verified.sources)
         }
 
         // think:true — Qwen3 with think:false still leaks chain-of-thought into
@@ -95,7 +106,8 @@ struct DailyBriefAIService {
                 jsonMode: false,
                 activityLabel: "Creating daily brief"
             )
-            return Result(text: Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations), model: ollamaModel)
+            let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
+            return Result(text: verified.text, model: ollamaModel, kbSources: verified.sources)
         }
 
         throw BriefError.noAIService
@@ -437,9 +449,9 @@ struct DailyBriefAIService {
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func verify(text rawText: String, citations: [String: Citation]) -> String {
+    static func verify(text rawText: String, citations: [String: Citation]) -> (text: String, sources: [KBSourceRef]) {
         // Nothing to check and nothing claimed → return untouched.
-        if citations.isEmpty && !rawText.contains("[KB") { return rawText }
+        if citations.isEmpty && !rawText.contains("[KB") { return (rawText, []) }
 
         let markerRegex = try? NSRegularExpression(pattern: "\\[(KB\\d+)\\]")
         let lines = rawText.components(separatedBy: "\n")
@@ -514,7 +526,12 @@ struct DailyBriefAIService {
         if !usedPaths.isEmpty {
             result += "\n\n_Sources: " + usedPaths.joined(separator: ", ") + "_"
         }
-        return result
+        // Brief sources carry relativePath only → fileName from lastPathComponent;
+        // deep-link lands at the file top (no chunk anchor).
+        let sources = usedPaths.map {
+            KBSourceRef(relativePath: $0, fileName: ($0 as NSString).lastPathComponent)
+        }
+        return (result, sources)
     }
 
     /// First double-quoted span on a line — straight quotes first, then smart
