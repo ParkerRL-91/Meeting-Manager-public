@@ -207,7 +207,8 @@ struct KnowledgeBaseBrowserView: View {
                 isDirty: $editorIsDirty,
                 saveAndProceedToken: saveAndProceedToken,
                 onSavedForNavigation: { performPendingNavigation() },
-                onDeleted: { handleDeleted(path) }
+                onDeleted: { handleDeleted(path) },
+                onTreeChanged: { Task { await loadTree() } }
             )
             .id(path)
         } else {
@@ -469,6 +470,9 @@ struct KBDocumentDetailView: View {
     var onSavedForNavigation: () -> Void
     /// Called after the file is deleted (so the browser can clear + reload).
     var onDeleted: () -> Void
+    /// Called when the on-disk tree changed but the current selection stays open
+    /// (e.g. "Save mine as a copy" adds a sibling without deselecting this file).
+    var onTreeChanged: () -> Void
 
     @State private var content: String = ""          // editor buffer
     @State private var loadedContent: String = ""    // last-saved baseline
@@ -857,7 +861,7 @@ struct KBDocumentDetailView: View {
             // Reload this view from the newer on-disk version; the user's text is
             // safe in the copy.
             resolveConflictReload()
-            onDeleted()   // reuse: triggers a tree reload so the new copy appears
+            onTreeChanged()   // refresh the tree so the new copy appears; keep this file open
         } else {
             saveError = "Couldn't save a copy."
         }
