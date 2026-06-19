@@ -302,6 +302,24 @@ struct DailyBriefView: View {
             Text("Enjoy your free day!")
                 .font(.subheadline)
                 .foregroundStyle(Color.appTextSecondary)
+
+            // PRJ-014: discoverability hook — the KB sidebar item is hidden
+            // until a folder is configured, so offer a way in from here.
+            if !appState.kbConfigured {
+                Button {
+                    appState.pendingSettingsTab = 9   // Knowledge Base tab
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Text("Connect a Knowledge Base to ground briefs in your own documents →")
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
+                        .multilineTextAlignment(.center)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 8)
+                .frame(maxWidth: 360)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 80)

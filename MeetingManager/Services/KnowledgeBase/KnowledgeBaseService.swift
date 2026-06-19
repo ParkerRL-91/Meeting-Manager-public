@@ -70,6 +70,7 @@ final class KnowledgeBaseService {
     /// itself lives in the SwiftUI view (NSOpenPanel via NSApp).
     func setRoot(url: URL) async {
         UserDefaults.standard.set(url.path, forKey: folderPathKey)
+        AppState.shared?.kbConfigured = true
         startWatching(url: url)
         await enqueueReindex()
     }
@@ -106,8 +107,95 @@ final class KnowledgeBaseService {
     func clearRoot() async {
         UserDefaults.standard.removeObject(forKey: folderPathKey)
         UserDefaults.standard.removeObject(forKey: lastIndexedKey)
+        AppState.shared?.kbConfigured = false
         stopWatching()
         try? await repo.wipe()
+    }
+
+    // MARK: - Browse (viewer/editor support)
+
+    /// A Sendable node in the on-disk KB tree. The viewer/editor treats files
+    /// under `rootURL` as the source of truth (the `kbDocument` table holds
+    /// search chunks, not whole files), so the browser walks the folder rather
+    /// than the index.
+    struct KBNode: Sendable, Identifiable, Equatable, Hashable {
+        let path: String          // absolute path; stable identity for the tree
+        let relativePath: String  // path relative to rootURL (breadcrumb label)
+        let name: String          // last path component
+        let isDirectory: Bool
+        let modifiedAt: Date?
+        var children: [KBNode]    // empty for files
+
+        var id: String { path }
+    }
+
+    /// Whether a path extension is one the viewer can render or open. Mirrors
+    /// `supportedExtensions` plus is reused by the browser to grey out nothing —
+    /// unsupported files are simply not surfaced.
+    nonisolated static func isSupportedExtension(_ ext: String) -> Bool {
+        ["md", "markdown", "txt", "text", "html", "htm", "docx", "pdf", "eml"].contains(ext.lowercased())
+    }
+
+    /// Walk `rootURL` off the main actor and return a Sendable tree of folders
+    /// and supported files. Hidden entries (leading `.`) and their descendants
+    /// are skipped; symlinks are NOT followed (cycle guard). Folders that end up
+    /// with no supported descendants are pruned so the browser never shows an
+    /// empty branch.
+    func documentTree() async -> KBNode? {
+        guard let root = rootURL else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            Self.buildTreeSync(at: root, root: root)
+        }.value
+    }
+
+    nonisolated private static func buildTreeSync(at url: URL, root: URL) -> KBNode? {
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey, .isSymbolicLinkKey, .isHiddenKey, .contentModificationDateKey,
+        ]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        if values.isSymbolicLink == true { return nil }          // no symlink-follow
+        if url.lastPathComponent.hasPrefix(".") && url != root { return nil }
+
+        let relative = relativePath(of: url, root: root)
+        let name = url == root ? url.lastPathComponent : url.lastPathComponent
+
+        if values.isDirectory == true {
+            let contents = (try? fm.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            )) ?? []
+            var children: [KBNode] = []
+            for child in contents {
+                if let node = buildTreeSync(at: child, root: root) {
+                    children.append(node)
+                }
+            }
+            // Prune folders with no supported descendants.
+            guard !children.isEmpty || url == root else { return nil }
+            children.sort { lhs, rhs in
+                if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory && !rhs.isDirectory }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            return KBNode(path: url.path, relativePath: relative, name: name,
+                          isDirectory: true, modifiedAt: values.contentModificationDate,
+                          children: children)
+        }
+
+        guard isSupportedExtension(url.pathExtension) else { return nil }
+        return KBNode(path: url.path, relativePath: relative, name: name,
+                      isDirectory: false, modifiedAt: values.contentModificationDate,
+                      children: [])
+    }
+
+    /// Read a whole text file (`.md`/`.txt`/`.html`) for the detail pane. Returns
+    /// nil for unreadable or binary formats (PDF/docx are opened externally).
+    func readTextFile(at url: URL) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            (try? String(contentsOf: url, encoding: .utf8))
+                ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+        }.value
     }
 
     // MARK: - Indexing

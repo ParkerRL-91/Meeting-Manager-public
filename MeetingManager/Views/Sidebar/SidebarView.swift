@@ -126,6 +126,21 @@ struct SidebarView: View {
                         appState.selectedMeetingId = nil
                     }
 
+                    // PRJ-014: shown only when a Knowledge Base folder is
+                    // configured. Unconfigured users discover the KB via the
+                    // chat / Daily Brief empty-state hooks instead.
+                    if appState.kbConfigured {
+                        NavItem(
+                            icon: "books.vertical",
+                            label: "Knowledge Base",
+                            destination: .knowledgeBase,
+                            current: appState.sidebarDestination
+                        ) {
+                            appState.sidebarDestination = .knowledgeBase
+                            appState.selectedMeetingId = nil
+                        }
+                    }
+
                     // MARK: - Spaces (auto-grouped meeting folders)
                     // Pinned folders sort first (stable — recency order kept
                     // within each group); pin/unpin via row context menu

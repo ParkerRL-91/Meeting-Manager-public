@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// App-level "Ask Anything" chat interface.
 /// Unlike MeetingChatView (scoped to one meeting), this searches across ALL meetings.
@@ -340,6 +341,7 @@ struct GlobalChatView: View {
 // MARK: - Empty State with Quick Prompts
 
 private struct GlobalChatEmptyState: View {
+    @Environment(AppState.self) private var appState
     let onSuggest: (String) -> Void
     private let suggestions: [(icon: String, label: String, prompt: String)] = [
         ("checklist", "Recent action items", "What are all the action items from my recent meetings?"),
@@ -407,6 +409,27 @@ private struct GlobalChatEmptyState: View {
                 }
             }
             .frame(maxWidth: 380)
+
+            // PRJ-014: discoverability hook — when no KB is configured the
+            // sidebar item is hidden, so offer a way in from here.
+            if !appState.kbConfigured {
+                Button {
+                    appState.pendingSettingsTab = 9   // Knowledge Base tab
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "books.vertical")
+                            .font(.caption)
+                        Text("Connect a Knowledge Base to ground answers in your own documents →")
+                            .font(.caption)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .foregroundStyle(Color.appAccent)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: 380)
+            }
 
             Spacer()
         }

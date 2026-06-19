@@ -44,6 +44,17 @@ final class AppState {
     /// shell focuses this task's detail. Notification "Open Task" actions and
     /// per-task alerts (Phase 5) route through this alongside `.taskBoard`.
     var selectedTaskId: Int64?
+
+    /// PRJ-014: reactive gate for the Knowledge Base viewer. `rootURL` is
+    /// UserDefaults-backed (not observable), so this mirror — seeded at init and
+    /// flipped by `KnowledgeBaseService.setRoot`/`clearRoot` — is what the
+    /// sidebar item and discoverability hooks observe.
+    var kbConfigured: Bool = false
+
+    /// PRJ-014: deep-link target for the KB browser. Citation click-through
+    /// (Phase 4) sets this alongside `sidebarDestination = .knowledgeBase`. The
+    /// browser consumes it to select the cited file. Unused until later phases.
+    var selectedKBPath: String?
     var isRecording = false
     var activeMeeting: Meeting?
 
@@ -482,6 +493,7 @@ final class AppState {
         // its FSEvents watcher and kick off a background re-index so the FTS
         // table reflects any external edits made while the app was closed.
         if let kbRoot = KnowledgeBaseService.shared.rootURL {
+            kbConfigured = true
             KnowledgeBaseService.shared.startWatching(url: kbRoot)
             Task { await KnowledgeBaseService.shared.reindex() }
         }
@@ -6690,5 +6702,6 @@ enum SidebarDestination: Hashable {
     case analytics
     case keyQuotes       // TASK-078: saved clips across all meetings
     case topics          // TASK-081: topic trackers across all meetings
+    case knowledgeBase   // PRJ-014: KB viewer/editor; gated on AppState.kbConfigured
     case folder(String)  // folder key = normalised base title
 }
