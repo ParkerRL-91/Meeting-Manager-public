@@ -204,10 +204,9 @@ struct TaskDetailView: View {
                 ProgressView(value: Double(completedSubtaskCount), total: Double(subtasks.count))
                     .frame(maxWidth: 280)
 
-                ForEach(subtasks) { sub in
-                    subtaskRow(sub)
+                ForEach(Array(subtasks.enumerated()), id: \.element.id) { index, sub in
+                    subtaskRow(sub, index: index)
                 }
-                .onMove { from, to in Task { await reorderSubtasks(from: from, to: to) } }
             }
 
             // One level only: a subtask itself cannot gain children.
@@ -226,7 +225,7 @@ struct TaskDetailView: View {
         }
     }
 
-    private func subtaskRow(_ sub: ActionItem) -> some View {
+    private func subtaskRow(_ sub: ActionItem, index: Int) -> some View {
         HStack(spacing: 8) {
             Button { Task { await completeSubtask(sub) } } label: {
                 Image(systemName: sub.isCompleted ? "checkmark.circle.fill" : "circle")
@@ -240,6 +239,20 @@ struct TaskDetailView: View {
                 .foregroundStyle(Color.appTextPrimary)
                 .strikethrough(sub.isCompleted, color: Color.appTextTertiary)
             Spacer(minLength: 0)
+            Button { Task { await moveSubtask(from: index, to: index - 1) } } label: {
+                Image(systemName: "chevron.up").font(.system(size: 11)).foregroundStyle(Color.appTextTertiary)
+            }
+            .buttonStyle(.plain)
+            .disabled(index == 0)
+            .help("Move up")
+            .accessibilityLabel("Move subtask up")
+            Button { Task { await moveSubtask(from: index, to: index + 2) } } label: {
+                Image(systemName: "chevron.down").font(.system(size: 11)).foregroundStyle(Color.appTextTertiary)
+            }
+            .buttonStyle(.plain)
+            .disabled(index == subtasks.count - 1)
+            .help("Move down")
+            .accessibilityLabel("Move subtask down")
             Button { Task { await deleteSubtask(sub) } } label: {
                 Image(systemName: "trash").font(.system(size: 11)).foregroundStyle(Color.appTextTertiary)
             }
@@ -515,11 +528,18 @@ struct TaskDetailView: View {
         subtasks = (try? await repo.subtasks(of: taskId)) ?? []
     }
 
-    private func reorderSubtasks(from: IndexSet, to: Int) async {
+    /// Reorder via explicit up/down affordances (each row carries chevron buttons).
+    /// `to` uses SwiftUI's `move(fromOffsets:toOffset:)` insertion-index semantics:
+    /// move-up passes `index - 1`, move-down passes `index + 2`. The new order is
+    /// persisted as a contiguous `sortOrder` sequence, so it survives a reload —
+    /// `subtasks(of:)` orders by `sortOrder`.
+    private func moveSubtask(from index: Int, to: Int) async {
+        guard subtasks.indices.contains(index) else { return }
+        let dest = min(max(to, 0), subtasks.count)
         var ordered = subtasks
-        ordered.move(fromOffsets: from, toOffset: to)
-        for (index, sub) in ordered.enumerated() {
-            if let id = sub.id { try? await repo.reorder(id: id, sortOrder: Double(index)) }
+        ordered.move(fromOffsets: IndexSet(integer: index), toOffset: dest)
+        for (i, sub) in ordered.enumerated() {
+            if let id = sub.id { try? await repo.reorder(id: id, sortOrder: Double(i)) }
         }
         subtasks = (try? await repo.subtasks(of: taskId)) ?? []
     }
