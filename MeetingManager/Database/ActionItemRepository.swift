@@ -371,8 +371,9 @@ final class ActionItemRepository {
 
     /// Hard-deletes tasks soft-deleted before `cutoff` and returns the relative
     /// paths of their attachments so the caller can remove the on-disk files
-    /// (the DB cascade only removes attachment rows). PRJ-013 Phase 4 wires the
-    /// file cleanup; until then this safely no-ops on files.
+    /// (the DB cascade only removes attachment rows). `TaskAttachmentService
+    /// .purgeDeletedTasks(olderThan:)` is the single caller that pairs this with
+    /// the on-disk file removal.
     @discardableResult
     func purgeDeleted(olderThan cutoff: Date) async throws -> [String] {
         try await database.writer.write { db in
