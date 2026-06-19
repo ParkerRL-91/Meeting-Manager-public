@@ -198,6 +198,142 @@ final class KnowledgeBaseService {
         }.value
     }
 
+    // MARK: - Edit / save (viewer/editor support)
+
+    /// Content hash of a file as it currently sits on disk — the conflict
+    /// detector. Same basis as `reindexFile` and the `kbExport` hash
+    /// (`EmbeddingService.hash` over raw UTF-8 content). Nil when the file is
+    /// gone or unreadable.
+    func fileHash(at url: URL) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            return EmbeddingService.hash(raw)
+        }.value
+    }
+
+    /// Outcome of a save attempt. `.conflict` carries the newer on-disk content
+    /// so the editor can offer "discard mine and reload" without a second read.
+    enum SaveOutcome: Sendable, Equatable {
+        case saved
+        case conflict(onDiskContent: String)
+        case failed(String)
+    }
+
+    /// Atomically write `content` to `url`, but only if the file on disk still
+    /// matches `expectedHash` (the hash captured when the editor loaded it).
+    /// A nil `expectedHash` means "the file did not exist when we loaded"
+    /// (create-new path) — a file appearing underneath us is still a conflict.
+    ///
+    /// On success the just-saved file is re-indexed via the targeted
+    /// `reindexFile(url:)`, which records its raw-content hash in
+    /// `indexedHashes`; the FSEvents-triggered full `reindex()` then skips it
+    /// because that pass now hashes raw content too (no full re-walk reprocess).
+    func saveTextFile(at url: URL, expectedHash: String?, content: String) async -> SaveOutcome {
+        let currentHash = await fileHash(at: url)
+        if currentHash != expectedHash {
+            if let onDisk = await readTextFile(at: url) {
+                return .conflict(onDiskContent: onDisk)
+            }
+            // File vanished or unreadable since load — treat as conflict so the
+            // user decides rather than silently re-creating it.
+            return .conflict(onDiskContent: "")
+        }
+
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+            }.value
+        } catch {
+            logger.error("KB save failed for \(url.path, privacy: .public): \(error.localizedDescription)")
+            return .failed(error.localizedDescription)
+        }
+
+        await reindexFile(url: url)
+        return .saved
+    }
+
+    /// Force-write `content` to `url` ignoring the conflict check. Used by the
+    /// "Keep my changes" branch of the conflict prompt and the create-new path.
+    /// Returns the new on-disk hash so the editor can refresh its baseline.
+    @discardableResult
+    func forceWriteTextFile(at url: URL, content: String) async -> String? {
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try await Task.detached(priority: .userInitiated) {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+            }.value
+        } catch {
+            logger.error("KB force-write failed for \(url.path, privacy: .public): \(error.localizedDescription)")
+            return nil
+        }
+        await reindexFile(url: url)
+        return EmbeddingService.hash(content)
+    }
+
+    /// Result of a create attempt.
+    enum CreateOutcome: Sendable, Equatable {
+        case created(URL)
+        case alreadyExists
+        case outsideRoot
+        case failed(String)
+    }
+
+    /// Create a new empty `.md` file named `name` inside `directory` (which must
+    /// be within the KB root). Returns the created URL so the browser can select
+    /// it. The file is seeded with a single H1 from the name so the rendered
+    /// view isn't blank.
+    func createMarkdownFile(name: String, in directory: URL) async -> CreateOutcome {
+        guard let root = rootURL else { return .outsideRoot }
+        let standardizedDir = directory.standardizedFileURL.path
+        guard standardizedDir == root.standardizedFileURL.path
+                || standardizedDir.hasPrefix(root.standardizedFileURL.path + "/") else {
+            return .outsideRoot
+        }
+
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = sanitizeBaseName(trimmed.isEmpty ? "Untitled" : trimmed)
+        let fileName = base.lowercased().hasSuffix(".md") ? base : base + ".md"
+        let target = directory.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: target.path) { return .alreadyExists }
+
+        let seed = "# \(base.replacingOccurrences(of: ".md", with: ""))\n\n"
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            try await Task.detached(priority: .userInitiated) {
+                try seed.write(to: target, atomically: true, encoding: .utf8)
+            }.value
+        } catch {
+            logger.error("KB create failed for \(target.path, privacy: .public): \(error.localizedDescription)")
+            return .failed(error.localizedDescription)
+        }
+        await reindexFile(url: target)
+        return .created(target)
+    }
+
+    /// Delete a KB file (moves it to the Trash so the action is recoverable) and
+    /// drop its chunks from the index.
+    func deleteFile(at url: URL) async -> Bool {
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            logger.error("KB delete failed for \(url.path, privacy: .public): \(error.localizedDescription)")
+            return false
+        }
+        await reindexFile(url: url)   // file is gone → drops chunks + embeddings
+        return true
+    }
+
+    private func sanitizeBaseName(_ name: String) -> String {
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        let safe = name
+            .components(separatedBy: forbidden)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return safe.isEmpty ? "Untitled" : String(safe.prefix(100))
+    }
+
     // MARK: - Indexing
 
     /// Walk the folder, parse every supported file, refresh chunks. Removes
@@ -225,13 +361,20 @@ final class KnowledgeBaseService {
 
         // Parse all files off the main actor so file I/O doesn't block the UI.
         // KBDocument is a value type (Sendable); URL, Int are also Sendable.
+        // We also capture each file's RAW content hash inside the detached loop:
+        // the per-file skip-check must hash raw file bytes (same basis as
+        // `reindexFile` and the `kbExport` conflict hash), NOT joined chunk
+        // bodies — otherwise a just-saved file (skipped via raw hash by the
+        // targeted save path) gets re-processed here on the post-save full pass.
         let maxChars = maxChunkChars
-        let fileResults: [(path: String, chunks: [KBDocument])] = await Task.detached(priority: .utility) {
-            var out: [(String, [KBDocument])] = []
+        let fileResults: [(path: String, rawHash: String?, chunks: [KBDocument])] = await Task.detached(priority: .utility) {
+            var out: [(String, String?, [KBDocument])] = []
             for url in urls {
                 if let chunks = try? KnowledgeBaseService.parseFileSync(url: url, rootURL: root, maxChunkChars: maxChars),
                    !chunks.isEmpty {
-                    out.append((url.path, chunks))
+                    let raw = try? String(contentsOf: url, encoding: .utf8)
+                    let rawHash = raw.map { EmbeddingService.hash($0) }
+                    out.append((url.path, rawHash, chunks))
                 }
             }
             return out
@@ -241,10 +384,11 @@ final class KnowledgeBaseService {
         var indexedPaths: Set<String> = []
         var totalChunks = 0
         let totalFiles = max(fileResults.count, 1)
-        for (idx, (path, chunks)) in fileResults.enumerated() {
+        for (idx, (path, rawHash, chunks)) in fileResults.enumerated() {
             do {
-                let joined = chunks.map(\.body).joined()
-                let hash = EmbeddingService.hash(joined)
+                // Binary formats (.pdf/.docx) have no UTF-8 raw hash — fall back
+                // to the chunk-body hash so they still skip when unchanged.
+                let hash = rawHash ?? EmbeddingService.hash(chunks.map(\.body).joined())
                 if indexedHashes[path] == hash { indexedPaths.insert(path); continue }
                 indexedHashes[path] = hash
                 try await repo.replaceChunks(filePath: path, with: chunks)

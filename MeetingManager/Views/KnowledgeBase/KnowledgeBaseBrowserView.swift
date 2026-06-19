@@ -18,6 +18,33 @@ struct KnowledgeBaseBrowserView: View {
     @State private var selectedPath: String?
     @State private var expandedPaths: Set<String> = []
 
+    // Editor coordination (Phase 2). The detail pane reports unsaved edits up
+    // here so an in-app navigation away (select another file, switch sidebar
+    // destination, incoming deep-link) can prompt the unsaved-edit guard.
+    @State private var editorIsDirty = false
+    /// A navigation the user requested while the editor had unsaved edits. Held
+    /// until they answer the guard; nil otherwise.
+    @State private var pendingNavigation: PendingNavigation?
+    /// The held navigation captured for the async "Save" path. Tapping any alert
+    /// button dismisses the alert, which synchronously runs `guardAlertBinding`'s
+    /// setter and nils `pendingNavigation` — so the deferred save callback would
+    /// otherwise find it gone. We snapshot it here when "Save" is tapped and have
+    /// the post-save callback consume this instead.
+    @State private var navAfterSave: PendingNavigation?
+    /// Bumped to ask the detail pane to save then run the held navigation.
+    @State private var saveAndProceedToken = 0
+
+    // Create-new sheet state.
+    @State private var showCreateSheet = false
+    @State private var newFileName = ""
+    @State private var newFileDirPath: String = ""
+    @State private var createError: String?
+
+    private enum PendingNavigation: Equatable {
+        case selectFile(String)
+        case clearSelection
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // MARK: - Left: folder tree + search
@@ -55,6 +82,31 @@ struct KnowledgeBaseBrowserView: View {
         }
         .background(Color.appBackground)
         .task { await loadTree() }
+        .alert("Save changes before leaving?", isPresented: guardAlertBinding) {
+            Button("Save") {
+                // Snapshot the target before the dismissal setter nils
+                // `pendingNavigation`; the post-save callback consumes it.
+                navAfterSave = pendingNavigation
+                saveAndProceedToken += 1
+            }
+            Button("Discard", role: .destructive) { performPendingNavigation() }
+            Button("Cancel", role: .cancel) {
+                pendingNavigation = nil
+                navAfterSave = nil
+            }
+        } message: {
+            Text("This note has unsaved edits. Save them, discard them, or stay here.")
+        }
+        .sheet(isPresented: $showCreateSheet) { createSheet }
+        .onChange(of: appState.selectedKBPath) { _, newPath in
+            // Incoming citation deep-link (later phases set this). Route through
+            // the same unsaved-edit guard so an in-progress edit is never lost.
+            guard let path = newPath else { return }
+            requestSelect(path)
+        }
+        .onAppear {
+            if let path = appState.selectedKBPath { requestSelect(path) }
+        }
     }
 
     // MARK: - Left pane
@@ -66,6 +118,15 @@ struct KnowledgeBaseBrowserView: View {
                     .font(.headline)
                     .foregroundStyle(Color.appTextPrimary)
                 Spacer()
+                Button {
+                    presentCreateSheet()
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .help("Create a new note")
+
                 Button {
                     Task { await loadTree() }
                 } label: {
@@ -100,7 +161,7 @@ struct KnowledgeBaseBrowserView: View {
             if node.isDirectory {
                 toggleExpanded(node.path)
             } else {
-                selectedPath = node.path
+                requestSelect(node.path)
             }
         } label: {
             HStack(spacing: 6) {
@@ -141,8 +202,14 @@ struct KnowledgeBaseBrowserView: View {
     @ViewBuilder
     private var detailPane: some View {
         if let path = selectedPath {
-            KBDocumentDetailView(fileURL: URL(fileURLWithPath: path))
-                .id(path)
+            KBDocumentDetailView(
+                fileURL: URL(fileURLWithPath: path),
+                isDirty: $editorIsDirty,
+                saveAndProceedToken: saveAndProceedToken,
+                onSavedForNavigation: { performPendingNavigation() },
+                onDeleted: { handleDeleted(path) }
+            )
+            .id(path)
         } else {
             EmptyStateView(
                 icon: "books.vertical",
@@ -225,6 +292,153 @@ struct KnowledgeBaseBrowserView: View {
         NSWorkspace.shared.activateFileViewerSelecting([root])
     }
 
+    // MARK: - Navigation guard
+
+    private var guardAlertBinding: Binding<Bool> {
+        Binding(
+            get: { pendingNavigation != nil },
+            set: { if !$0 { pendingNavigation = nil } }
+        )
+    }
+
+    /// Request selecting a file. If the current editor is dirty, hold the request
+    /// behind the unsaved-edit guard; otherwise switch immediately.
+    private func requestSelect(_ path: String) {
+        guard path != selectedPath else { return }
+        if editorIsDirty {
+            pendingNavigation = .selectFile(path)
+        } else {
+            selectedPath = path
+        }
+    }
+
+    /// Run whichever navigation was held behind the guard. Called synchronously
+    /// from "Discard" (where `pendingNavigation` is still set) and asynchronously
+    /// from the detail pane after a guard-triggered save completes (where the
+    /// alert dismissal already nilled `pendingNavigation`, so the "Save" snapshot
+    /// in `navAfterSave` is the live target). Prefer the snapshot.
+    private func performPendingNavigation() {
+        guard let nav = navAfterSave ?? pendingNavigation else { return }
+        navAfterSave = nil
+        pendingNavigation = nil
+        editorIsDirty = false
+        switch nav {
+        case .selectFile(let path): selectedPath = path
+        case .clearSelection: selectedPath = nil
+        }
+    }
+
+    private func handleDeleted(_ path: String) {
+        editorIsDirty = false
+        if selectedPath == path { selectedPath = nil }
+        Task { await loadTree() }
+    }
+
+    // MARK: - Create new note
+
+    private func presentCreateSheet() {
+        guard let root = KnowledgeBaseService.shared.rootURL else { return }
+        // Default the new file's folder to the selected file's directory, else root.
+        if let sel = selectedPath {
+            newFileDirPath = URL(fileURLWithPath: sel).deletingLastPathComponent().path
+        } else {
+            newFileDirPath = root.path
+        }
+        newFileName = ""
+        createError = nil
+        showCreateSheet = true
+    }
+
+    @ViewBuilder
+    private var createSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New note")
+                .font(.headline)
+                .foregroundStyle(Color.appTextPrimary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Name")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                TextField("Untitled", text: $newFileName)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Folder")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                Picker("", selection: $newFileDirPath) {
+                    ForEach(folderOptions(), id: \.path) { opt in
+                        Text(opt.label).tag(opt.path)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            Text("A new Markdown (.md) note will be created here.")
+                .font(.caption)
+                .foregroundStyle(Color.appTextTertiary)
+
+            if let createError {
+                Text(createError)
+                    .font(.caption)
+                    .foregroundStyle(Color.appWarning)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { showCreateSheet = false }
+                Button("Create") { Task { await createFile() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(newFileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
+    private struct FolderOption { let path: String; let label: String }
+
+    /// Flatten the tree's folders into picker options, relative-path labelled.
+    private func folderOptions() -> [FolderOption] {
+        guard let root else {
+            if let r = KnowledgeBaseService.shared.rootURL {
+                return [FolderOption(path: r.path, label: r.lastPathComponent)]
+            }
+            return []
+        }
+        var out: [FolderOption] = []
+        func walk(_ node: KnowledgeBaseService.KBNode) {
+            if node.isDirectory {
+                let label = node.relativePath.isEmpty ? node.name : node.relativePath
+                out.append(FolderOption(path: node.path, label: label))
+                for child in node.children where child.isDirectory { walk(child) }
+            }
+        }
+        walk(root)
+        return out
+    }
+
+    private func createFile() async {
+        let dir = URL(fileURLWithPath: newFileDirPath)
+        let outcome = await KnowledgeBaseService.shared.createMarkdownFile(name: newFileName, in: dir)
+        switch outcome {
+        case .created(let url):
+            showCreateSheet = false
+            await loadTree()
+            expandedPaths.insert(dir.path)
+            editorIsDirty = false
+            selectedPath = url.path
+        case .alreadyExists:
+            createError = "A note with that name already exists in this folder."
+        case .outsideRoot:
+            createError = "Pick a folder inside your Knowledge Base."
+        case .failed(let msg):
+            createError = "Couldn't create the note: \(msg)"
+        }
+    }
+
     private func icon(for node: KnowledgeBaseService.KBNode) -> String {
         if node.isDirectory { return "folder" }
         switch (node.name as NSString).pathExtension.lowercased() {
@@ -239,17 +453,42 @@ struct KnowledgeBaseBrowserView: View {
     }
 }
 
-/// Read-only detail pane for one KB file. Renders Markdown/HTML inline; offers
-/// "Open in default app" for formats with no in-app viewer (PDF, docx, eml).
-/// Edit mode arrives in Phase 2.
+/// Detail pane for one KB file. Defaults to the RENDERED view (Markdown/HTML);
+/// Edit is a deliberate toggle (mirrors SummaryView's Edit/Done). `.md`/`.txt`
+/// edit = `MarkdownTextEditor` + formatting toolbar + live `MarkdownRenderer`
+/// preview; `.html` edit = labeled source mode + live `HTMLStringView` preview.
+/// Save/Revert are explicit; saving does atomic write + content-hash conflict
+/// detection + targeted reindex. PDF/docx/eml open in their default app.
 struct KBDocumentDetailView: View {
     let fileURL: URL
+    /// Reports unsaved edits up to the browser so it can guard navigation.
+    @Binding var isDirty: Bool
+    /// Bumped by the browser to mean "save, then run the held navigation".
+    var saveAndProceedToken: Int
+    /// Called after a guard-triggered save completes successfully.
+    var onSavedForNavigation: () -> Void
+    /// Called after the file is deleted (so the browser can clear + reload).
+    var onDeleted: () -> Void
 
-    @State private var content: String?
+    @State private var content: String = ""          // editor buffer
+    @State private var loadedContent: String = ""    // last-saved baseline
+    @State private var loadedHash: String?           // hash at load (conflict basis)
     @State private var isLoading = true
+    @State private var readFailed = false
     @State private var modifiedAt: Date?
 
+    @State private var isEditing = false
+    @State private var formatCommand: MarkdownFormatCommand?
+
+    @State private var saveError: String?
+    @State private var conflictContent: String?      // newer on-disk content
+    @State private var showConflict = false
+    @State private var showDeleteConfirm = false
+
     private var ext: String { fileURL.pathExtension.lowercased() }
+    private var isTextEditable: Bool { ["md", "markdown", "txt", "text"].contains(ext) }
+    private var isHTML: Bool { ext == "html" || ext == "htm" }
+    private var isEditable: Bool { isTextEditable || isHTML }
 
     private var relativePath: String {
         guard let root = KnowledgeBaseService.shared.rootURL else { return fileURL.lastPathComponent }
@@ -265,11 +504,33 @@ struct KBDocumentDetailView: View {
         VStack(spacing: 0) {
             header
             Divider().background(Color.appSeparator)
-            content(for: ext)
+            if let saveError {
+                saveErrorBanner(saveError)
+            }
+            mainContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: fileURL) { await load() }
+        .onChange(of: content) { _, _ in updateDirty() }
+        .onChange(of: saveAndProceedToken) { _, _ in
+            Task { await saveThenProceed() }
+        }
+        .alert("This document changed on disk", isPresented: $showConflict) {
+            Button("Keep my changes") { Task { await resolveConflictKeepMine() } }
+            Button("Save mine as a copy") { Task { await resolveConflictSaveCopy() } }
+            Button("Discard and reload", role: .cancel) { resolveConflictReload() }
+        } message: {
+            Text("Someone (or another app) edited this file since you opened it. Choose what to do — reloading the newer version is the safe default.")
+        }
+        .confirmationDialog("Delete this note?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Move to Trash", role: .destructive) { Task { await delete() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(fileURL.lastPathComponent) will be moved to the Trash. You can restore it from there.")
+        }
     }
+
+    // MARK: - Header
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -279,48 +540,199 @@ struct KBDocumentDetailView: View {
                     .foregroundStyle(Color.appTextPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if let modifiedAt {
-                    Text("Modified \(modifiedAt.formatted(.relative(presentation: .named)))")
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextTertiary)
+                HStack(spacing: 6) {
+                    if isDirty {
+                        Text("Unsaved changes")
+                            .font(.caption)
+                            .foregroundStyle(Color.appWarning)
+                    } else if let modifiedAt {
+                        Text("Modified \(modifiedAt.formatted(.relative(presentation: .named)))")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                    }
                 }
             }
             Spacer()
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
-            } label: {
-                Label("Reveal in Finder", systemImage: "magnifyingglass")
-                    .font(.caption)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            headerActions
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
 
     @ViewBuilder
-    private func content(for ext: String) -> some View {
+    private var headerActions: some View {
+        if isEditing {
+            Button("Revert") { revert() }
+                .controlSize(.small)
+                .disabled(!isDirty)
+            Button("Save") { Task { await save() } }
+                .controlSize(.small)
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(!isDirty)
+            Button("Done") { Task { await finishEditing() } }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+        } else {
+            if isEditable && !readFailed {
+                Button {
+                    isEditing = true
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            Menu {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                } label: { Label("Reveal in Finder", systemImage: "magnifyingglass") }
+                if isEditable {
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: { Label("Delete…", systemImage: "trash") }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 28)
+        }
+    }
+
+    private func saveErrorBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.appWarning)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(Color.appTextPrimary)
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color.appWarning.opacity(0.12))
+    }
+
+    // MARK: - Content
+
+    @ViewBuilder
+    private var mainContent: some View {
         if isLoading {
             ProgressView().controlSize(.small)
-        } else {
-            switch ext {
-            case "md", "markdown", "txt", "text":
-                if let content {
-                    ScrollView {
-                        MarkdownRenderer(text: content, headingStyle: .display)
-                            .padding(20)
-                    }
-                } else {
-                    unreadableState
+        } else if isTextEditable {
+            if readFailed {
+                unreadableState
+            } else if isEditing {
+                markdownEditor
+            } else {
+                ScrollView {
+                    MarkdownRenderer(text: content, headingStyle: .display)
+                        .padding(20)
                 }
-            case "html", "htm":
+            }
+        } else if isHTML {
+            if isEditing {
+                htmlEditor
+            } else {
                 HTMLFileView(fileURL: fileURL)
-            default:
-                openExternallyState
+            }
+        } else {
+            openExternallyState
+        }
+    }
+
+    // MARK: - Markdown editor (toolbar + live preview)
+
+    private var markdownEditor: some View {
+        VStack(spacing: 0) {
+            formattingToolbar
+            Divider().background(Color.appSeparator)
+            HSplitView {
+                MarkdownTextEditor(
+                    text: $content,
+                    baseFontSize: 14,
+                    textColor: NSColor.labelColor,
+                    insets: NSSize(width: 16, height: 16),
+                    command: $formatCommand
+                )
+                .background(Color.appBackground)
+                .frame(minWidth: 280)
+
+                ScrollView {
+                    MarkdownRenderer(text: content, baseFontSize: 14, headingStyle: .display)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(20)
+                }
+                .frame(minWidth: 280)
+                .background(Color.appSurface)
             }
         }
     }
+
+    private var formattingToolbar: some View {
+        HStack(spacing: 4) {
+            toolbarButton("bold", "Bold", .bold)
+            toolbarButton("italic", "Italic", .italic)
+            toolbarButton("number", "Heading", .heading)
+            toolbarButton("list.bullet", "Bullet list", .bulletList)
+            toolbarButton("text.quote", "Quote", .quote)
+            toolbarButton("link", "Link", .link)
+            toolbarButton("chevron.left.forwardslash.chevron.right", "Inline code", .code)
+            Spacer()
+            Text("Live preview on the right")
+                .font(.caption2)
+                .foregroundStyle(Color.appTextTertiary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color.appSurface)
+    }
+
+    private func toolbarButton(_ icon: String, _ help: String, _ cmd: MarkdownFormatCommand) -> some View {
+        Button {
+            formatCommand = cmd
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .frame(width: 26, height: 22)
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+    }
+
+    // MARK: - HTML source editor (labeled + caveat + live preview)
+
+    private var htmlEditor: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.bubble")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextTertiary)
+                Text("This is the page's HTML code — editing requires knowing HTML.")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(Color.appSurface)
+            Divider().background(Color.appSeparator)
+            HSplitView {
+                TextEditor(text: $content)
+                    .font(.system(size: 13, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(Color.appBackground)
+                    .frame(minWidth: 280)
+
+                HTMLStringView(html: content, baseURL: fileURL.deletingLastPathComponent())
+                    .frame(minWidth: 280)
+            }
+        }
+    }
+
+    // MARK: - Empty / error states
 
     private var openExternallyState: some View {
         EmptyStateView(
@@ -342,14 +754,123 @@ struct KBDocumentDetailView: View {
         )
     }
 
+    // MARK: - Load / dirty
+
     private func load() async {
         isLoading = true
+        isEditing = false
+        saveError = nil
         modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        if ["md", "markdown", "txt", "text"].contains(ext) {
-            content = await KnowledgeBaseService.shared.readTextFile(at: fileURL)
+        if isEditable {
+            if let text = await KnowledgeBaseService.shared.readTextFile(at: fileURL) {
+                content = text
+                loadedContent = text
+                loadedHash = await KnowledgeBaseService.shared.fileHash(at: fileURL)
+                readFailed = false
+            } else {
+                content = ""
+                loadedContent = ""
+                loadedHash = nil
+                readFailed = true
+            }
         } else {
-            content = nil
+            content = ""
+            loadedContent = ""
         }
+        isDirty = false
         isLoading = false
+    }
+
+    private func updateDirty() {
+        guard isEditable else { return }
+        isDirty = isEditing && content != loadedContent
+    }
+
+    private func revert() {
+        content = loadedContent
+        isDirty = false
+    }
+
+    private func finishEditing() async {
+        if isDirty { await save(); if isDirty { return } }   // save failed/conflict → stay
+        isEditing = false
+    }
+
+    // MARK: - Save + conflict
+
+    private func save() async {
+        saveError = nil
+        let outcome = await KnowledgeBaseService.shared.saveTextFile(
+            at: fileURL, expectedHash: loadedHash, content: content)
+        switch outcome {
+        case .saved:
+            loadedContent = content
+            loadedHash = EmbeddingService.hash(content)
+            modifiedAt = Date()
+            isDirty = false
+        case .conflict(let onDisk):
+            conflictContent = onDisk
+            showConflict = true
+        case .failed(let msg):
+            saveError = "Couldn't save: \(msg)"
+        }
+    }
+
+    private func saveThenProceed() async {
+        await save()
+        // Only proceed if the save actually cleared the dirty flag (no conflict
+        // pending, no error). The conflict/error dialogs hold the user here.
+        if !isDirty && !showConflict && saveError == nil {
+            onSavedForNavigation()
+        }
+    }
+
+    private func resolveConflictKeepMine() async {
+        showConflict = false
+        if let newHash = await KnowledgeBaseService.shared.forceWriteTextFile(at: fileURL, content: content) {
+            loadedContent = content
+            loadedHash = newHash
+            modifiedAt = Date()
+            isDirty = false
+        } else {
+            saveError = "Couldn't save your changes."
+        }
+    }
+
+    private func resolveConflictReload() {
+        showConflict = false
+        let onDisk = conflictContent ?? loadedContent
+        content = onDisk
+        loadedContent = onDisk
+        Task { loadedHash = await KnowledgeBaseService.shared.fileHash(at: fileURL) }
+        modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        isDirty = false
+    }
+
+    private func resolveConflictSaveCopy() async {
+        showConflict = false
+        let dir = fileURL.deletingLastPathComponent()
+        let base = fileURL.deletingPathExtension().lastPathComponent
+        let stamp = Date().formatted(.iso8601.year().month().day())
+        let copyURL = dir.appendingPathComponent("\(base) (my copy \(stamp)).\(ext)")
+        if await KnowledgeBaseService.shared.forceWriteTextFile(at: copyURL, content: content) != nil {
+            // Reload this view from the newer on-disk version; the user's text is
+            // safe in the copy.
+            resolveConflictReload()
+            onDeleted()   // reuse: triggers a tree reload so the new copy appears
+        } else {
+            saveError = "Couldn't save a copy."
+        }
+    }
+
+    // MARK: - Delete
+
+    private func delete() async {
+        if await KnowledgeBaseService.shared.deleteFile(at: fileURL) {
+            isDirty = false
+            onDeleted()
+        } else {
+            saveError = "Couldn't move this file to the Trash."
+        }
     }
 }

@@ -1,6 +1,19 @@
 import SwiftUI
 import AppKit
 
+/// Formatting actions a toolbar can ask `MarkdownTextEditor` to apply to the
+/// current selection / cursor. Inline commands wrap the selection in markers;
+/// block commands prefix the current line(s).
+enum MarkdownFormatCommand: Equatable {
+    case bold          // **…**
+    case italic        // *…*
+    case code          // `…`
+    case heading       // toggle "## " on the line
+    case bulletList    // "- " line prefix
+    case quote         // "> " line prefix
+    case link          // [selection](url)
+}
+
 /// `NSTextView`-backed editor that styles Markdown inline as the user types
 /// (source mode — syntax characters stay visible, formatted content gets
 /// styled). Designed for meeting notes: serif by default, with looser line
@@ -21,6 +34,9 @@ struct MarkdownTextEditor: NSViewRepresentable {
     /// Optional callback fired after the text changes (in addition to the binding).
     /// Useful for side-effects like /action parsing that the parent owns.
     var onTextChange: ((String) -> Void)? = nil
+    /// A formatting command set by an external toolbar. The editor applies it to
+    /// the current selection on the next `updateNSView` and resets it to nil.
+    var command: Binding<MarkdownFormatCommand?>? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
@@ -62,6 +78,13 @@ struct MarkdownTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         textView.isEditable = isEditable
+
+        // Apply a pending toolbar command, then clear it. Done before the text
+        // sync so the command's mutation is what the binding picks up.
+        if let cmdBinding = command, let cmd = cmdBinding.wrappedValue {
+            context.coordinator.apply(cmd, to: textView)
+            DispatchQueue.main.async { cmdBinding.wrappedValue = nil }
+        }
 
         // Only replace the text when the binding changed externally — never when
         // the text view is the source of truth (would clobber undo + selection).
@@ -131,6 +154,77 @@ struct MarkdownTextEditor: NSViewRepresentable {
             }
             parent.onTextChange?(newString)
             applyMarkdownStyling(to: textView)
+        }
+
+        // MARK: - Toolbar commands
+
+        /// Apply a formatting command to the text view's current selection,
+        /// routing through `insertText`/`shouldChangeText` so undo and the
+        /// binding stay correct. Inline commands wrap the selection (or insert
+        /// empty markers at the cursor); block commands toggle a line prefix.
+        func apply(_ command: MarkdownFormatCommand, to textView: NSTextView) {
+            let ns = textView.string as NSString
+            let selection = textView.selectedRange()
+
+            switch command {
+            case .bold:    wrapSelection(textView, ns: ns, range: selection, marker: "**")
+            case .italic:  wrapSelection(textView, ns: ns, range: selection, marker: "*")
+            case .code:    wrapSelection(textView, ns: ns, range: selection, marker: "`")
+            case .heading: toggleLinePrefix(textView, ns: ns, range: selection, prefix: "## ")
+            case .bulletList: toggleLinePrefix(textView, ns: ns, range: selection, prefix: "- ")
+            case .quote:   toggleLinePrefix(textView, ns: ns, range: selection, prefix: "> ")
+            case .link:    insertLink(textView, ns: ns, range: selection)
+            }
+
+            // Push the mutated string through the binding + restyle.
+            let newString = textView.string
+            if parent.text != newString { parent.text = newString }
+            parent.onTextChange?(newString)
+            applyMarkdownStyling(to: textView)
+        }
+
+        private func wrapSelection(_ textView: NSTextView, ns: NSString, range: NSRange, marker: String) {
+            let selected = ns.substring(with: range)
+            let replacement = marker + selected + marker
+            guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
+            textView.replaceCharacters(in: range, with: replacement)
+            textView.didChangeText()
+            // Put the cursor between the markers when nothing was selected,
+            // otherwise leave the whole wrapped run selected.
+            if selected.isEmpty {
+                textView.setSelectedRange(NSRange(location: range.location + (marker as NSString).length, length: 0))
+            } else {
+                textView.setSelectedRange(NSRange(location: range.location, length: (replacement as NSString).length))
+            }
+        }
+
+        private func toggleLinePrefix(_ textView: NSTextView, ns: NSString, range: NSRange, prefix: String) {
+            let lineRange = ns.lineRange(for: range)
+            let line = ns.substring(with: lineRange)
+            let stripped = line.hasSuffix("\n") ? String(line.dropLast()) : line
+            let newLine: String
+            if stripped.hasPrefix(prefix) {
+                newLine = String(stripped.dropFirst(prefix.count)) + (line.hasSuffix("\n") ? "\n" : "")
+            } else {
+                newLine = prefix + line
+            }
+            guard textView.shouldChangeText(in: lineRange, replacementString: newLine) else { return }
+            textView.replaceCharacters(in: lineRange, with: newLine)
+            textView.didChangeText()
+            let delta = (newLine as NSString).length - lineRange.length
+            textView.setSelectedRange(NSRange(location: max(lineRange.location, range.location + delta), length: 0))
+        }
+
+        private func insertLink(_ textView: NSTextView, ns: NSString, range: NSRange) {
+            let selected = ns.substring(with: range)
+            let text = selected.isEmpty ? "link text" : selected
+            let replacement = "[\(text)](url)"
+            guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
+            textView.replaceCharacters(in: range, with: replacement)
+            textView.didChangeText()
+            // Select the "url" placeholder so the user can type the destination.
+            let urlOffset = ("[\(text)](" as NSString).length
+            textView.setSelectedRange(NSRange(location: range.location + urlOffset, length: 3))
         }
 
         // MARK: - Markdown styling

@@ -45,6 +45,9 @@ struct HTMLFileView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loadedURL: URL?
+        /// Last HTML string rendered (string-preview variant) — avoids reloading
+        /// the web view on every keystroke when the source hasn't actually changed.
+        var loadedHTML: String?
         /// The single file: URL we permit the top-level load for. Everything else
         /// (remote, about:, data:, even other local files) is cancelled.
         var allowedFileURL: URL?
@@ -56,10 +59,12 @@ struct HTMLFileView: NSViewRepresentable {
                 decisionHandler(.cancel)
                 return
             }
-            // Allow only file: navigations. This covers redirects (re-evaluated
-            // here) and any frame load; remote subresources are blocked by the
-            // resource-load policy below.
-            decisionHandler(url.isFileURL ? .allow : .cancel)
+            // Allow file: navigations and the local-only `about:blank` document
+            // (`loadHTMLString` commits through about:blank — it touches no
+            // network). This covers redirects (re-evaluated here) and any frame
+            // load; remote subresources are blocked by the resource-load policy.
+            let allowed = url.isFileURL || url.absoluteString == "about:blank"
+            decisionHandler(allowed ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView,
@@ -68,5 +73,40 @@ struct HTMLFileView: NSViewRepresentable {
             let isFile = navigationResponse.response.url?.isFileURL ?? false
             decisionHandler(isFile ? .allow : .cancel)
         }
+    }
+}
+
+/// Live preview of in-progress HTML *source* for the KB editor. Renders the
+/// edited string (not a file on disk) under the same sandbox as `HTMLFileView`:
+/// JS off, non-persistent store, and the file-only navigation delegate so a
+/// pasted `<img src=http…>`/`<iframe>` can't reach the network during editing.
+/// `baseURL` is scoped to the file's own directory so relative local assets
+/// resolve; cross-origin/remote loads are still cancelled by the delegate.
+struct HTMLStringView: NSViewRepresentable {
+    let html: String
+    let baseURL: URL?
+
+    func makeCoordinator() -> HTMLFileView.Coordinator { HTMLFileView.Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.defaultWebpagePreferences.allowsContentJavaScript = false
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+        loadIfNeeded(webView, context: context)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        loadIfNeeded(webView, context: context)
+    }
+
+    private func loadIfNeeded(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.loadedHTML != html else { return }
+        context.coordinator.loadedHTML = html
+        webView.loadHTMLString(html, baseURL: baseURL)
     }
 }
