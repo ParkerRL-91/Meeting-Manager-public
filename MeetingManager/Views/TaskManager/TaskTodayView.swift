@@ -6,6 +6,8 @@ import SwiftUI
 /// due date without opening the editor, so undated tasks are never invisible and
 /// dated ones can be repositioned in one click.
 struct TaskTodayView: View {
+    /// When set, only tasks in this project are shown (PRJ-013 Phase 7).
+    var projectFilter: Int64? = nil
     let onOpenTask: (ActionItem) -> Void
 
     @State private var overdue: [ActionItem] = []
@@ -111,10 +113,16 @@ struct TaskTodayView: View {
         async let d = repo.dueTodayItems()
         async let u = repo.upcomingItems()
         async let n = repo.noDateItems()
-        overdue = (try? await o) ?? []
-        dueToday = (try? await d) ?? []
-        upcoming = (try? await u) ?? []
-        noDate = (try? await n) ?? []
+        overdue = projected((try? await o) ?? [])
+        dueToday = projected((try? await d) ?? [])
+        upcoming = projected((try? await u) ?? [])
+        noDate = projected((try? await n) ?? [])
+    }
+
+    /// Applies the active project filter (PRJ-013 Phase 7).
+    private func projected(_ items: [ActionItem]) -> [ActionItem] {
+        guard let projectFilter else { return items }
+        return items.filter { $0.projectId == projectFilter }
     }
 }
 

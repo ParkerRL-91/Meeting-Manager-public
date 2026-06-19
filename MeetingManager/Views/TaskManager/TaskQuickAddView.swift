@@ -5,17 +5,21 @@ import SwiftUI
 /// accepted task in the **default (To Do) stage** with an "Added to To Do"
 /// confirmation. Used both as a standalone surface and inside the MenuBarExtra.
 ///
-/// `// EXEMPT: user-initiated, instant` — no network/AI on this path (the
-/// AI-assisted parse is a Phase 7 add-on); a plain repository write is correct
-/// here, not a TaskQueueManager job.
+/// `// EXEMPT: user-initiated, instant` — the optional AI assist (PRJ-013 Phase 7)
+/// runs the user-initiated text generator with a short timeout and falls back to
+/// the deterministic parse offline; a plain repository write is correct here, not a
+/// TaskQueueManager job.
 struct TaskQuickAddView: View {
     /// Called after a successful add so a host (e.g. the board) can refresh.
     var onAdded: ((ActionItem) -> Void)? = nil
     /// Called when the user asks to open the just-added task (deep-link).
     var onOpenTask: ((Int64) -> Void)? = nil
 
+    @Environment(AppState.self) private var appState
+
     @State private var text = ""
     @State private var confirmation: Confirmation?
+    @State private var isParsing = false
     @FocusState private var fieldFocused: Bool
 
     private let repo = ActionItemRepository(database: .shared)
@@ -121,7 +125,14 @@ struct TaskQuickAddView: View {
     private func add() async {
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
-        let parsed = TaskQuickAddParser().parse(raw)
+        let parser = TaskQuickAddParser()
+        var parsed = parser.parse(raw)
+        // Optional AI assist: fill a missing due/priority the regex pass couldn't
+        // resolve. Bounded + degrades to the deterministic result offline.
+        isParsing = true
+        let textGen = await appState.makeTextGenerator(maxOutputTokens: 256, think: false)
+        parsed = await parser.aiEnhance(raw: raw, base: parsed, textGenerator: textGen)
+        isParsing = false
 
         var item = ActionItem(
             title: parsed.title,

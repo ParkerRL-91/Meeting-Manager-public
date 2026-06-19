@@ -1490,5 +1490,40 @@ enum Migrations {
                 t.add(column: "taskDueAlertsEnabled", .boolean).notNull().defaults(to: true)
             }
         }
+
+        // PRJ-013 Phase 7 — advanced task features. `taskProject` groups tasks;
+        // `taskDependency` records blocked-by edges (a task is blocked while any of
+        // its `dependsOnTaskId` rows is incomplete). `actionItem.projectId` is added
+        // via ALTER (nullable, no FK cascade — SQLite ALTER cannot add an
+        // ON DELETE action; project deletion clears the column in app code).
+        migrator.registerMigration("v62-task-projects-dependencies") { db in
+            try db.create(table: "taskProject") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("colorHex", .text)
+                t.column("sortOrder", .double).notNull().defaults(to: 0)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("archivedAt", .datetime)
+            }
+
+            try db.create(table: "taskDependency") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("taskId", .integer).notNull().references("actionItem", onDelete: .cascade)
+                t.column("dependsOnTaskId", .integer).notNull().references("actionItem", onDelete: .cascade)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(
+                index: "idx_taskDependency_unique",
+                on: "taskDependency",
+                columns: ["taskId", "dependsOnTaskId"],
+                unique: true
+            )
+            try db.create(index: "idx_taskDependency_dependsOn", on: "taskDependency", columns: ["dependsOnTaskId"])
+
+            try db.alter(table: "actionItem") { t in
+                t.add(column: "projectId", .integer)
+            }
+            try db.create(index: "idx_actionItem_projectId", on: "actionItem", columns: ["projectId"])
+        }
     }
 }

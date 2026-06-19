@@ -346,14 +346,18 @@ final class ActionItemRepository {
         announceChange()
     }
 
-    /// Shared completion/stage logic — used by `setCompleted` and by the one-time
-    /// importer (PRJ-013 Phase 2) so both paths converge on one rule rather than a
-    /// raw `isCompleted` write.
+    /// Shared completion/stage logic — used by `setCompleted`, `moveToStage` (when
+    /// landing on a terminal stage), and the one-time importer (PRJ-013 Phase 2) so
+    /// every completion converges on one rule rather than a raw `isCompleted` write.
+    /// On the incomplete → complete transition it spawns the next occurrence of a
+    /// recurring task exactly once (PRJ-013 Phase 7) — inside this same transaction.
     static func applyCompletion(_ item: inout ActionItem, completed: Bool, db: Database) throws {
+        let wasCompleted = item.isCompleted
         if completed {
             item.isCompleted = true
             if item.completedAt == nil { item.completedAt = Date() }
             if let terminal = try terminalStageId(db) { item.stageId = terminal }
+            try TaskRecurrenceService.spawnNextIfNeeded(for: item, wasCompleted: wasCompleted, db: db)
         } else {
             item.isCompleted = false
             item.completedAt = nil
@@ -374,17 +378,34 @@ final class ActionItemRepository {
     func moveToStage(id: Int64, stageId: Int64?, sortOrder: Double? = nil) async throws {
         try await database.writer.write { db in
             guard var item = try ActionItem.fetchOne(db, key: id) else { return }
-            item.stageId = stageId
             if let sortOrder { item.sortOrder = sortOrder }
             if let stageId, let stage = try TaskStage.fetchOne(db, key: stageId) {
+                // Terminal/non-terminal completion converges through applyCompletion
+                // so drag-to-Done spawns a recurring task's next occurrence exactly
+                // once, identically to the checkbox path. applyCompletion also sets
+                // stageId to the terminal stage on completion.
                 if stage.isTerminal {
-                    item.isCompleted = true
-                    if item.completedAt == nil { item.completedAt = Date() }
-                } else if item.isCompleted {
-                    item.isCompleted = false
-                    item.completedAt = nil
+                    try Self.applyCompletion(&item, completed: true, db: db)
+                } else {
+                    if item.isCompleted {
+                        try Self.applyCompletion(&item, completed: false, db: db)
+                    }
+                    item.stageId = stageId
                 }
+            } else {
+                item.stageId = stageId
             }
+            item.updatedAt = Date()
+            try item.update(db)
+        }
+        announceChange()
+    }
+
+    /// Assigns (or clears) a task's project (PRJ-013 Phase 7).
+    func setProject(id: Int64, projectId: Int64?) async throws {
+        try await database.writer.write { db in
+            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            item.projectId = projectId
             item.updatedAt = Date()
             try item.update(db)
         }

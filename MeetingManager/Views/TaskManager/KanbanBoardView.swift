@@ -8,11 +8,14 @@ import SwiftUI
 /// are soft (warn + highlight, never block). Multi-select enables bulk move /
 /// complete.
 struct KanbanBoardView: View {
+    /// When set, only tasks in this project are shown (PRJ-013 Phase 7).
+    var projectFilter: Int64? = nil
     let onOpenTask: (ActionItem) -> Void
 
     @State private var stages: [TaskStage] = []
     @State private var itemsByStage: [Int64: [ActionItem]] = [:]
     @State private var noStageItems: [ActionItem] = []
+    @State private var blockedIds: Set<Int64> = []
     @State private var selectedIds: Set<Int64> = []
     /// The card that keyboard shortcuts act on (last tapped/selected).
     @State private var focusedItem: ActionItem?
@@ -20,6 +23,7 @@ struct KanbanBoardView: View {
 
     private let repo = ActionItemRepository(database: .shared)
     private let stageRepo = TaskStageRepository(database: .shared)
+    private let dependencyRepo = TaskDependencyRepository(database: .shared)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -89,6 +93,7 @@ struct KanbanBoardView: View {
             allStages: stages,
             items: items,
             selectedIds: selectedIds,
+            blockedIds: blockedIds,
             onDropTask: { tid in Task { await move(taskId: tid, to: stage?.id) } },
             onMoveItem: { item, target in Task { await move(item: item, to: target) } },
             onCompleteItem: { item in Task { await complete(item) } },
@@ -173,7 +178,10 @@ struct KanbanBoardView: View {
         isLoading = stages.isEmpty
         defer { isLoading = false }
         let loadedStages = (try? await stageRepo.allStages()) ?? []
-        let tasks = (try? await repo.boardTasks()) ?? []
+        var tasks = (try? await repo.boardTasks()) ?? []
+        if let projectFilter {
+            tasks = tasks.filter { $0.projectId == projectFilter }
+        }
         var grouped: [Int64: [ActionItem]] = [:]
         var noStage: [ActionItem] = []
         for task in tasks {
@@ -186,6 +194,7 @@ struct KanbanBoardView: View {
         stages = loadedStages
         itemsByStage = grouped
         noStageItems = noStage
+        blockedIds = (try? await dependencyRepo.blockedTaskIds(in: tasks.compactMap(\.id))) ?? []
         // Drop selections / focus for tasks that no longer appear.
         let liveIds = Set(tasks.compactMap(\.id))
         selectedIds.formIntersection(liveIds)

@@ -10,6 +10,8 @@ struct KanbanColumnView: View {
     let allStages: [TaskStage]
     let items: [ActionItem]
     let selectedIds: Set<Int64>
+    /// Task ids with an incomplete blocker (PRJ-013 Phase 7) — drives the badge.
+    var blockedIds: Set<Int64> = []
 
     let onDropTask: (Int64) -> Void          // a card was dropped here
     let onMoveItem: (ActionItem, Int64?) -> Void
@@ -81,6 +83,7 @@ struct KanbanColumnView: View {
                         item: item,
                         stages: allStages,
                         isSelected: item.id.map { selectedIds.contains($0) } ?? false,
+                        isBlocked: item.id.map { blockedIds.contains($0) } ?? false,
                         onMove: { onMoveItem(item, $0) },
                         onComplete: { onCompleteItem(item) },
                         onShiftStage: { onShiftItem(item, $0) },

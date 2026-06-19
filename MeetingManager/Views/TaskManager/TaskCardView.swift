@@ -9,6 +9,8 @@ struct TaskCardView: View {
     let item: ActionItem
     let stages: [TaskStage]
     let isSelected: Bool
+    /// True when an incomplete blocker exists (PRJ-013 Phase 7) — shows a badge.
+    var isBlocked: Bool = false
     /// All move/complete verbs route up so the single completion/stage owners stay
     /// authoritative. `onMove(stageId)` accepts nil for the "No stage" bucket.
     let onMove: (Int64?) -> Void
@@ -37,6 +39,13 @@ struct TaskCardView: View {
                     .strikethrough(item.isCompleted, color: Color.appTextTertiary)
                     .lineLimit(3)
                 Spacer(minLength: 0)
+            }
+
+            if isBlocked {
+                Label("Blocked", systemImage: "exclamationmark.octagon.fill")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.appWarning)
+                    .help("Waiting on an incomplete task it depends on")
             }
 
             if hasMeta {

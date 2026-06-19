@@ -12,8 +12,8 @@ import UniformTypeIdentifiers
 /// `ActionItemRepository.save`, completion via `setCompleted`, stage via
 /// `moveToStage`. Completing every subtask does NOT auto-complete the parent.
 ///
-/// DEFERRED to Phase 7 (their tables/rules arrive then): a dependencies
-/// (blocked-by) picker and a recurrence editor.
+/// PRJ-013 Phase 7 adds a project picker, a dependencies (blocked-by) picker with a
+/// cycle guard, and a recurrence editor (writes `recurrenceRuleJSON`).
 struct TaskDetailView: View {
     let taskId: Int64
     /// Called after a change that the parent shell should reflect (board reload,
@@ -24,12 +24,22 @@ struct TaskDetailView: View {
 
     @State private var item: ActionItem?
     @State private var stages: [TaskStage] = []
+    @State private var projects: [TaskProject] = []
     @State private var subtasks: [ActionItem] = []
     @State private var attachments: [TaskAttachment] = []
+    @State private var blockers: [ActionItem] = []
+    @State private var candidateBlockers: [ActionItem] = []
     @State private var meetingTitle: String?
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var newSubtaskTitle = ""
+
+    // Recurrence editor mirrors.
+    @State private var isRecurring = false
+    @State private var recurrenceFrequency: TaskRecurrenceRule.Frequency = .weekly
+    @State private var recurrenceInterval = 1
+    @State private var hasRecurrenceEnd = false
+    @State private var recurrenceEnd = Date()
 
     // Editable mirrors (committed to the repo on change / commit).
     @State private var title = ""
@@ -44,6 +54,8 @@ struct TaskDetailView: View {
 
     private let repo = ActionItemRepository(database: .shared)
     private let stageRepo = TaskStageRepository(database: .shared)
+    private let projectRepo = TaskProjectRepository(database: .shared)
+    private let dependencyRepo = TaskDependencyRepository(database: .shared)
     private let attachmentRepo = TaskAttachmentRepository(database: .shared)
     private let attachmentService = TaskAttachmentService()
 
@@ -77,6 +89,8 @@ struct TaskDetailView: View {
                 titleField
                 metaSection
                 notesSection
+                recurrenceSection
+                if item?.parentTaskId == nil { dependenciesSection }
                 subtasksSection
                 attachmentsSection
                 if meetingTitle != nil { backlinkSection }
@@ -132,6 +146,17 @@ struct TaskDetailView: View {
                     .labelsHidden()
                     .fixedSize()
                 }
+                VStack(alignment: .leading, spacing: 4) {
+                    fieldLabel("Project")
+                    Picker("Project", selection: projectSelection) {
+                        Text("None").tag(Int64?.none)
+                        ForEach(projects) { project in
+                            Text(project.name).tag(Optional(project.id ?? -1))
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -166,9 +191,6 @@ struct TaskDetailView: View {
                         .onChange(of: reminderAt) { _, _ in Task { await commitFields() } }
                 }
             }
-
-            // TODO: Phase 7 — dependencies (blocked-by) picker and recurrence editor
-            // land here once `taskDependency` / `recurrenceRuleJSON` rules ship.
         }
     }
 
@@ -183,6 +205,105 @@ struct TaskDetailView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.appSeparator, lineWidth: 1))
                 .onChange(of: notes) { _, _ in scheduleCommit() }
         }
+    }
+
+    // MARK: - Recurrence (PRJ-013 Phase 7)
+
+    private var recurrenceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $isRecurring) { fieldLabel("Repeats") }
+                .onChange(of: isRecurring) { _, _ in Task { await commitRecurrence() } }
+            if isRecurring {
+                HStack(spacing: 10) {
+                    Text("Every")
+                        .font(.system(size: 12)).foregroundStyle(Color.appTextSecondary)
+                    Stepper(value: $recurrenceInterval, in: 1...52) {
+                        Text("\(recurrenceInterval)").monospacedDigit()
+                            .font(.system(size: 12)).foregroundStyle(Color.appTextPrimary)
+                    }
+                    .fixedSize()
+                    .onChange(of: recurrenceInterval) { _, _ in Task { await commitRecurrence() } }
+                    Picker("Frequency", selection: $recurrenceFrequency) {
+                        ForEach(TaskRecurrenceRule.Frequency.allCases) { freq in
+                            Text(freq.label).tag(freq)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .onChange(of: recurrenceFrequency) { _, _ in Task { await commitRecurrence() } }
+                }
+                Toggle(isOn: $hasRecurrenceEnd) {
+                    Text("Stop after a date")
+                        .font(.system(size: 12)).foregroundStyle(Color.appTextSecondary)
+                }
+                .onChange(of: hasRecurrenceEnd) { _, _ in Task { await commitRecurrence() } }
+                if hasRecurrenceEnd {
+                    DatePicker("", selection: $recurrenceEnd, displayedComponents: [.date])
+                        .labelsHidden()
+                        .onChange(of: recurrenceEnd) { _, _ in Task { await commitRecurrence() } }
+                }
+                Text("A new occurrence is created when you complete this task, based on its due date.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Color.appTextTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: - Dependencies (PRJ-013 Phase 7)
+
+    private var dependenciesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                fieldLabel("Blocked by")
+                Spacer()
+                Menu {
+                    if candidateBlockers.isEmpty {
+                        Text("No other tasks available")
+                    }
+                    ForEach(candidateBlockers) { candidate in
+                        Button(candidate.title) { Task { await addBlocker(candidate) } }
+                    }
+                } label: {
+                    Label("Add", systemImage: "plus")
+                        .font(.system(size: 12))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+
+            if blockers.isEmpty {
+                Text("Not waiting on anything. Add a task here to mark this one blocked until that task is complete.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.appTextTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(blockers) { blocker in
+                    blockerRow(blocker)
+                }
+            }
+        }
+    }
+
+    private func blockerRow(_ blocker: ActionItem) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: blocker.isCompleted ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 13))
+                .foregroundStyle(blocker.isCompleted ? Color.appSuccess : Color.appWarning)
+            Text(blocker.title)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.appTextPrimary)
+                .strikethrough(blocker.isCompleted, color: Color.appTextTertiary)
+            Spacer(minLength: 0)
+            Button { Task { await removeBlocker(blocker) } } label: {
+                Image(systemName: "xmark.circle").font(.system(size: 12)).foregroundStyle(Color.appTextTertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove dependency")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Subtasks
@@ -410,14 +531,23 @@ struct TaskDetailView: View {
         )
     }
 
+    private var projectSelection: Binding<Int64?> {
+        Binding(
+            get: { item?.projectId },
+            set: { newValue in Task { await assignProject(newValue) } }
+        )
+    }
+
     // MARK: - Load
 
     private func load() async {
         isLoading = (item == nil)
         defer { isLoading = false }
         async let loadedStages = stageRepo.allStages()
+        async let loadedProjects = projectRepo.allProjects()
         async let loadedItem = repo.find(id: taskId)
         stages = (try? await loadedStages) ?? []
+        projects = (try? await loadedProjects) ?? []
         guard let fetched = (try? await loadedItem) ?? nil else {
             item = nil
             return
@@ -432,8 +562,11 @@ struct TaskDetailView: View {
         dueDate = fetched.dueDate ?? Date()
         hasReminder = fetched.reminderAt != nil
         reminderAt = fetched.reminderAt ?? (fetched.dueDate ?? Date())
+        seedRecurrence(from: fetched)
         subtasks = (try? await repo.subtasks(of: taskId)) ?? []
         attachments = (try? await attachmentRepo.attachments(forTask: taskId)) ?? []
+        blockers = (try? await dependencyRepo.blockers(of: taskId)) ?? []
+        await loadCandidateBlockers()
         if let mid = fetched.meetingId {
             meetingTitle = ((try? await appState.meetingRepository.find(id: mid)) ?? nil)?.title
         } else {
@@ -483,6 +616,77 @@ struct TaskDetailView: View {
     private func moveToStage(_ stageId: Int64?) async {
         try? await repo.moveToStage(id: taskId, stageId: stageId)
         await load()
+        onChange()
+    }
+
+    private func assignProject(_ projectId: Int64?) async {
+        try? await repo.setProject(id: taskId, projectId: projectId)
+        item?.projectId = projectId
+        onChange()
+    }
+
+    // MARK: - Recurrence (PRJ-013 Phase 7)
+
+    private func seedRecurrence(from fetched: ActionItem) {
+        if let rule = TaskRecurrenceRule.decode(fetched.recurrenceRuleJSON) {
+            isRecurring = true
+            recurrenceFrequency = rule.frequency
+            recurrenceInterval = max(rule.interval, 1)
+            hasRecurrenceEnd = rule.endDate != nil
+            recurrenceEnd = rule.endDate ?? (fetched.dueDate ?? Date())
+        } else {
+            isRecurring = false
+            recurrenceFrequency = .weekly
+            recurrenceInterval = 1
+            hasRecurrenceEnd = false
+        }
+    }
+
+    private func commitRecurrence() async {
+        guard var current = item else { return }
+        if isRecurring {
+            let rule = TaskRecurrenceRule(
+                frequency: recurrenceFrequency,
+                interval: recurrenceInterval,
+                endDate: hasRecurrenceEnd ? recurrenceEnd : nil
+            )
+            current.recurrenceRuleJSON = rule.encoded()
+        } else {
+            current.recurrenceRuleJSON = nil
+        }
+        try? await repo.save(&current)
+        item = current
+        onChange()
+    }
+
+    // MARK: - Dependencies (PRJ-013 Phase 7)
+
+    private func loadCandidateBlockers() async {
+        let board = (try? await repo.boardTasks()) ?? []
+        let existing = Set(blockers.compactMap(\.id))
+        candidateBlockers = board.filter { candidate in
+            guard let cid = candidate.id else { return false }
+            return cid != taskId && !existing.contains(cid)
+        }
+    }
+
+    private func addBlocker(_ blocker: ActionItem) async {
+        guard let blockerId = blocker.id else { return }
+        do {
+            try await dependencyRepo.add(taskId: taskId, dependsOnTaskId: blockerId)
+        } catch {
+            showError(error)
+        }
+        blockers = (try? await dependencyRepo.blockers(of: taskId)) ?? []
+        await loadCandidateBlockers()
+        onChange()
+    }
+
+    private func removeBlocker(_ blocker: ActionItem) async {
+        guard let blockerId = blocker.id else { return }
+        try? await dependencyRepo.remove(taskId: taskId, dependsOnTaskId: blockerId)
+        blockers = (try? await dependencyRepo.blockers(of: taskId)) ?? []
+        await loadCandidateBlockers()
         onChange()
     }
 

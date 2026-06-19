@@ -25,6 +25,9 @@ struct ActionItem: Identifiable, Codable, Equatable {
     var parentTaskId: Int64?
     /// Kanban column. Nil while the item sits in the inbox / has no stage.
     var stageId: Int64?
+    /// Optional project grouping (PRJ-013 Phase 7). Cleared (not cascaded) when the
+    /// project is deleted — the ALTER-added column carries no DB ON DELETE action.
+    var projectId: Int64?
     var title: String
     var assignee: String?
     /// Optional link to a `Person.id` for richer assignment; `assignee` stays as
@@ -60,6 +63,7 @@ struct ActionItem: Identifiable, Codable, Equatable {
         meetingId: String? = nil,
         parentTaskId: Int64? = nil,
         stageId: Int64? = nil,
+        projectId: Int64? = nil,
         title: String,
         assignee: String? = nil,
         assigneePersonId: String? = nil,
@@ -84,6 +88,7 @@ struct ActionItem: Identifiable, Codable, Equatable {
         self.meetingId = meetingId
         self.parentTaskId = parentTaskId
         self.stageId = stageId
+        self.projectId = projectId
         self.title = title
         self.assignee = assignee
         self.assigneePersonId = assigneePersonId
@@ -127,7 +132,7 @@ extension ActionItem: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "actionItem"
 
     enum Columns: String, ColumnExpression {
-        case id, meetingId, parentTaskId, stageId, title, assignee, assigneePersonId,
+        case id, meetingId, parentTaskId, stageId, projectId, title, assignee, assigneePersonId,
              dueDate, reminderAt, isCompleted, completedAt, triageState, priority,
              notes, tagsJSON, sortOrder, recurrenceRuleJSON, source,
              extractedAt, createdAt, updatedAt, archivedAt, deletedAt

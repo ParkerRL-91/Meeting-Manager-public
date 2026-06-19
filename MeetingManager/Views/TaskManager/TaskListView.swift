@@ -7,6 +7,8 @@ import SwiftUI
 /// an "Empty Trash now" action that purges soft-deleted rows (and their on-disk
 /// attachment files) immediately.
 struct TaskListView: View {
+    /// When set, only tasks in this project are shown (PRJ-013 Phase 7).
+    var projectFilter: Int64? = nil
     let onOpenTask: (ActionItem) -> Void
 
     enum Scope: String, CaseIterable, Identifiable {
@@ -57,6 +59,7 @@ struct TaskListView: View {
 
     private var filtered: [ActionItem] {
         var result = items
+        if let projectFilter { result = result.filter { $0.projectId == projectFilter } }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
             result = result.filter {

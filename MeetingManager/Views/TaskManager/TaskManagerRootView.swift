@@ -13,11 +13,15 @@ struct TaskManagerRootView: View {
         case board = "Board"
         case today = "Today"
         case all = "All"
+        case projects = "Projects"
         var id: String { rawValue }
     }
 
     @State private var tab: Tab = .board
     @State private var inboxCount = 0
+    /// Active project filter applied to Board / Today / All (nil = all). Owned here
+    /// so the Projects tab's selection scopes the other surfaces (PRJ-013 Phase 7).
+    @State private var projectFilter: Int64?
     /// Bumped after a detail edit so the active surface reloads.
     @State private var refreshToken = 0
     @State private var showQuickAdd = false
@@ -133,15 +137,18 @@ struct TaskManagerRootView: View {
             case .inbox:
                 TaskTriageInboxView()
             case .board:
-                KanbanBoardView(onOpenTask: openTask)
+                KanbanBoardView(projectFilter: projectFilter, onOpenTask: openTask)
             case .today:
-                TaskTodayView(onOpenTask: openTask)
+                TaskTodayView(projectFilter: projectFilter, onOpenTask: openTask)
             case .all:
-                TaskListView(onOpenTask: openTask)
+                TaskListView(projectFilter: projectFilter, onOpenTask: openTask)
+            case .projects:
+                TaskProjectsView(projectFilter: $projectFilter)
             }
         }
-        // Reload the active surface when a detail edit reports a change.
-        .id("\(tab.id)-\(refreshToken)")
+        // Reload the active surface when a detail edit reports a change or the
+        // project filter changes.
+        .id("\(tab.id)-\(refreshToken)-\(projectFilter.map(String.init) ?? "all")")
     }
 
     private func openTask(_ item: ActionItem) {
