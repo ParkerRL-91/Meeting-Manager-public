@@ -12,13 +12,7 @@ struct InlineActionItemsSection: View {
     @State private var isAddingNew = false
     @State private var newItemTitle = ""
     @State private var errorMessage: String?
-    /// Tracks per-item Reminders export confirmation flashes.
-    @State private var sentItemIds: Set<Int64> = []
-    /// Briefly true after a successful "Send all" to show a checkmark badge.
-    @State private var sentAll: Bool = false
     @FocusState private var newItemFocused: Bool
-
-    @AppStorage("reminders.listIdentifier") private var remindersListIdentifier: String = ""
 
     private let repo = ActionItemRepository()
 
@@ -42,10 +36,6 @@ struct InlineActionItemsSection: View {
 
             if isAddingNew {
                 newItemField
-            }
-
-            if items.count >= 2 {
-                sendAllButton
             }
         }
         .padding(.vertical, 12)
@@ -140,48 +130,7 @@ struct InlineActionItemsSection: View {
             }
 
             Spacer()
-
-            // Per-item "Send to Reminders" affordance.
-            Button {
-                sendToReminders(item)
-            } label: {
-                if let id = item.id, sentItemIds.contains(id) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.body)
-                        .foregroundStyle(Color.appSuccess)
-                        .transition(.opacity)
-                } else {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.body)
-                        .foregroundStyle(Color.appTextSecondary)
-                }
-            }
-            .buttonStyle(.plain)
-            .help("Send to Apple Reminders")
         }
-    }
-
-    // MARK: - Send all to Reminders
-
-    @ViewBuilder
-    private var sendAllButton: some View {
-        HStack {
-            Spacer()
-            Button {
-                sendAllToReminders()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: sentAll ? "checkmark.circle.fill" : "arrow.up.forward.app")
-                    Text(sentAll ? "Sent to Reminders" : "Send all to Reminders")
-                }
-                .font(.caption)
-                .fontWeight(.medium)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(sentAll ? Color.appSuccess : Color.appAccent)
-        }
-        .padding(.top, 4)
     }
 
     // MARK: - New item field
@@ -234,75 +183,6 @@ struct InlineActionItemsSection: View {
                 isAddingNew = false
             }
             await reload()
-        }
-    }
-
-    private func sendToReminders(_ item: ActionItem) {
-        Task {
-            let service = RemindersService.shared
-            if !service.isAuthorized {
-                let granted = await service.requestAccess()
-                guard granted else {
-                    await MainActor.run {
-                        errorMessage = "Reminders access was not granted. Enable it in System Settings > Privacy & Security > Reminders."
-                    }
-                    return
-                }
-            }
-            do {
-                let list = service.list(withIdentifier: remindersListIdentifier.isEmpty ? nil : remindersListIdentifier)
-                try service.add(item, list: list)
-                if let id = item.id {
-                    await MainActor.run {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            sentItemIds.insert(id)
-                        }
-                    }
-                    // Auto-clear the checkmark after a moment.
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    await MainActor.run {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            sentItemIds.remove(id)
-                        }
-                    }
-                }
-            } catch {
-                Logger.general.error("Failed to send action item to Reminders: \(error.localizedDescription, privacy: .public)")
-                await MainActor.run {
-                    errorMessage = "Failed to send to Reminders: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-
-    private func sendAllToReminders() {
-        Task {
-            let service = RemindersService.shared
-            if !service.isAuthorized {
-                let granted = await service.requestAccess()
-                guard granted else {
-                    await MainActor.run {
-                        errorMessage = "Reminders access was not granted. Enable it in System Settings > Privacy & Security > Reminders."
-                    }
-                    return
-                }
-            }
-            do {
-                let list = service.list(withIdentifier: remindersListIdentifier.isEmpty ? nil : remindersListIdentifier)
-                _ = try service.addAll(items, list: list)
-                await MainActor.run {
-                    withAnimation(.easeInOut(duration: 0.2)) { sentAll = true }
-                }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                await MainActor.run {
-                    withAnimation(.easeInOut(duration: 0.2)) { sentAll = false }
-                }
-            } catch {
-                Logger.general.error("Failed to send all action items to Reminders: \(error.localizedDescription, privacy: .public)")
-                await MainActor.run {
-                    errorMessage = "Failed to send to Reminders: \(error.localizedDescription)"
-                }
-            }
         }
     }
 

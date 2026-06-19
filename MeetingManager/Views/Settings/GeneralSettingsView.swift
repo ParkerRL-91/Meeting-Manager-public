@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
-import EventKit
 import os
 
 /// Settings view for appearance, startup behaviour, and notification preferences.
@@ -21,11 +20,9 @@ struct GeneralSettingsView: View {
     @State private var morningBriefHour: Int = 8
     @State private var morningBriefMinute: Int = 30
 
-    // Reminders integration (P4-T02).
-    @AppStorage("reminders.autoSend") private var remindersAutoSend: Bool = false
-    @AppStorage("reminders.listIdentifier") private var remindersListIdentifier: String = ""
-    @State private var remindersLists: [EKCalendar] = []
-    @State private var remindersAuthorized: Bool = false
+    // One-time Apple Reminders import (PRJ-013 Phase 2). The outbound push was removed.
+    @State private var isImporting = false
+    @State private var importSummary: String?
 
     // MARK: - Body
 
@@ -44,7 +41,7 @@ struct GeneralSettingsView: View {
             startupSection
             notificationSection
             summaryAutomationSection
-            remindersSection
+            tasksSection
             troubleshootingSection
             aboutSection
         }
@@ -64,7 +61,6 @@ struct GeneralSettingsView: View {
             morningBriefMinute = appState.settings.morningBriefMinute
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
-            await refreshRemindersLists()
             Logger.ui.info("[GeneralSettingsView] hydrated; theme=\(selectedTheme, privacy: .public)")
         }
     }
@@ -266,36 +262,45 @@ struct GeneralSettingsView: View {
         }
     }
 
-    private var remindersSection: some View {
+    private var tasksSection: some View {
         Section {
-            Toggle("Auto-send action items to Reminders", isOn: $remindersAutoSend)
-
-            if remindersAuthorized {
-                Picker("Reminders list", selection: $remindersListIdentifier) {
-                    Text("Default").tag("")
-                    ForEach(remindersLists, id: \.calendarIdentifier) { cal in
-                        Text(cal.title).tag(cal.calendarIdentifier)
+            Button {
+                runReminderImport()
+            } label: {
+                HStack(spacing: 8) {
+                    if isImporting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "square.and.arrow.down")
                     }
-                }
-            } else {
-                Button("Grant Reminders Access") {
-                    Task {
-                        _ = await RemindersService.shared.requestAccess()
-                        await refreshRemindersLists()
-                    }
+                    Text("Import your existing tasks from Apple Reminders")
                 }
             }
+            .disabled(isImporting)
+
+            if let importSummary {
+                Text(importSummary)
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
         } header: {
-            Text("Reminders")
+            Text("Tasks")
         } footer: {
-            Text("Action items extracted from meeting summaries can sync to Apple Reminders. Choose which list new items go into.")
+            Text("Bring your existing Apple Reminders into Meeting Manager as accepted tasks on the board. This is a one-time import, not an ongoing sync, and it skips reminders you have already imported.")
         }
     }
 
-    private func refreshRemindersLists() async {
-        let service = RemindersService.shared
-        remindersAuthorized = service.isAuthorized
-        remindersLists = service.availableLists()
+    private func runReminderImport() {
+        isImporting = true
+        importSummary = nil
+        Task {
+            // EXEMPT: user-initiated, modal-scoped one-time import; not post-meeting AI work.
+            let summary = await TaskImportService().importFromReminders()
+            await MainActor.run {
+                isImporting = false
+                importSummary = summary.message
+            }
+        }
     }
 
     /// Troubleshooting tools — primarily the permission-reset workflow.

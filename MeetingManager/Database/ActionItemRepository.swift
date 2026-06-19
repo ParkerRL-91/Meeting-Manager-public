@@ -37,6 +37,24 @@ final class ActionItemRepository {
         }
     }
 
+    /// Inserts imported tasks (PRJ-013 Phase 2). Each pair carries the source
+    /// reminder's completion flag; completion + stage are applied through the
+    /// shared `applyCompletion` helper so incomplete items land in the default
+    /// stage and completed items land in the terminal stage with `completedAt` —
+    /// never a raw `isCompleted` write. Items default to the default stage first
+    /// so an incomplete import gets a board home immediately.
+    func insertImported(_ items: [(item: ActionItem, completed: Bool)]) async throws {
+        guard !items.isEmpty else { return }
+        try await database.writer.write { db in
+            let defaultStage = try Self.defaultStageId(db)
+            for (var item, completed) in items {
+                item.stageId = defaultStage
+                try Self.applyCompletion(&item, completed: completed, db: db)
+                try item.insert(db)
+            }
+        }
+    }
+
     // MARK: - Per-meeting reads
 
     /// ALL rows for a meeting, regardless of triage state. Backs per-meeting
@@ -153,6 +171,17 @@ final class ActionItemRepository {
 
     func find(id: Int64) async throws -> ActionItem? {
         try await database.writer.read { db in try ActionItem.fetchOne(db, key: id) }
+    }
+
+    /// All non-deleted items from a given origin (e.g. "import"). Backs the
+    /// one-time importer's de-dupe so a re-run stays idempotent.
+    func itemsBySource(_ source: String) async throws -> [ActionItem] {
+        try await database.writer.read { db in
+            try ActionItem
+                .filter(ActionItem.Columns.source == source)
+                .filter(ActionItem.Columns.deletedAt == nil)
+                .fetchAll(db)
+        }
     }
 
     // MARK: - Smart lists (accepted, live, incomplete)

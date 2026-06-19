@@ -2,7 +2,11 @@ import EventKit
 import Foundation
 import os
 
-/// Pushes action items to Apple Reminders via EventKit. No third-party dep.
+/// Read-only bridge to Apple Reminders via EventKit. No third-party dep.
+///
+/// The outbound push was removed in PRJ-013 Phase 2 (the app is now the user's
+/// own task manager). Read access is kept solely for the one-time import that
+/// brings existing reminders across — see `TaskImportService`.
 ///
 /// Uses the modern `requestFullAccessToReminders()` API on macOS 14+,
 /// falling back to the legacy `requestAccess(to:)` on earlier systems.
@@ -45,56 +49,18 @@ final class RemindersService {
         store.calendars(for: .reminder)
     }
 
-    /// Resolves an EKCalendar from a stored identifier, falling back to the system default.
-    func list(withIdentifier identifier: String?) -> EKCalendar? {
-        if let id = identifier, !id.isEmpty,
-           let match = store.calendars(for: .reminder).first(where: { $0.calendarIdentifier == id }) {
-            return match
-        }
-        return store.defaultCalendarForNewReminders()
-    }
+    // MARK: - Read (one-time import)
 
-    // MARK: - Add
-
-    /// Adds a single ActionItem to Apple Reminders.
-    /// Title format: "Assignee: Title" when assignee is present, otherwise just title.
-    func add(_ item: ActionItem, list: EKCalendar? = nil) throws {
-        let reminder = EKReminder(eventStore: store)
-        let assigneePrefix: String? = {
-            guard let assignee = item.assignee, !assignee.isEmpty else { return nil }
-            return assignee
-        }()
-        reminder.title = assigneePrefix.map { "\($0): \(item.title)" } ?? item.title
-        reminder.calendar = list ?? store.defaultCalendarForNewReminders()
-        if let due = item.dueDate {
-            reminder.dueDateComponents = Calendar.current.dateComponents([.year, .month, .day], from: due)
-        }
-        try store.save(reminder, commit: true)
-        logger.info("Added action item to Reminders: \(item.title, privacy: .public)")
-    }
-
-    /// Adds multiple action items in a single batched commit.
-    /// - Returns: number of items successfully added.
-    @discardableResult
-    func addAll(_ items: [ActionItem], list: EKCalendar? = nil) throws -> Int {
-        let target = list ?? store.defaultCalendarForNewReminders()
-        var added = 0
-        for item in items {
-            let reminder = EKReminder(eventStore: store)
-            let prefix: String? = {
-                guard let assignee = item.assignee, !assignee.isEmpty else { return nil }
-                return assignee
-            }()
-            reminder.title = prefix.map { "\($0): \(item.title)" } ?? item.title
-            reminder.calendar = target
-            if let due = item.dueDate {
-                reminder.dueDateComponents = Calendar.current.dateComponents([.year, .month, .day], from: due)
+    /// Reads every reminder across all lists for the one-time import. Returns each
+    /// reminder paired with its list title (mapped to a tag by `TaskImportService`).
+    /// Wraps the callback-based `fetchReminders` in a continuation.
+    func fetchReminders() async -> [(reminder: EKReminder, listTitle: String)] {
+        let predicate = store.predicateForReminders(in: nil)
+        let fetched: [EKReminder] = await withCheckedContinuation { continuation in
+            store.fetchReminders(matching: predicate) { reminders in
+                continuation.resume(returning: reminders ?? [])
             }
-            try store.save(reminder, commit: false)
-            added += 1
         }
-        try store.commit()
-        logger.info("Batch-added \(added, privacy: .public) action items to Reminders")
-        return added
+        return fetched.map { ($0, $0.calendar?.title ?? "Reminders") }
     }
 }
