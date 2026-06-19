@@ -15,8 +15,8 @@ struct MeetingTemplatePickerView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Built-in templates surfaced as quick-pick chips. Keep ids stable — they may be
-    /// referenced from `RecordingControlBar` and persisted on `Meeting.templateId`.
+    /// Built-in templates surfaced as quick-pick chips. Keep ids stable — they are
+    /// persisted on `Meeting.templateId` and resolved via `label(for:)`/`icon(for:)`.
     static let templates: [(id: String, label: String, icon: String)] = [
         ("standard", "Standard", "doc.text"),
         ("oneOnOne", "1:1", "person.2"),
@@ -124,7 +124,7 @@ struct MeetingTemplatePickerView: View {
     }
 }
 
-// MARK: - Helpers shared with RecordingControlBar
+// MARK: - Template id → label / icon lookup
 
 extension MeetingTemplatePickerView {
     /// Lookup the human label for a template id. Returns nil for unknown ids.
