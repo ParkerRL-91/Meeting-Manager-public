@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import GRDB
 import SwiftUI
 import os
@@ -547,6 +548,11 @@ private struct RecordingStrip: View {
     @State private var pulse = false
     @State private var meeting: Meeting?
 
+    /// Real input devices for the always-visible mic picker. Excludes the
+    /// iPhone/Continuity mic (see `realMics`), refreshed while recording.
+    @State private var availableMics: [AVCaptureDevice] = []
+    private let micEnumerator = AudioSessionManager()
+
     var body: some View {
         HStack(spacing: 10) {
             Circle()
@@ -563,6 +569,11 @@ private struct RecordingStrip: View {
             Text(formatted)
                 .font(.subheadline.monospaced())
                 .foregroundStyle(Color.appTextSecondary)
+
+            // Always-visible mic picker (TASK-111): switch microphones at any time —
+            // critical when auto-detection is stuck cycling. Picking pins the choice
+            // (override + switchMicrophone), which stops the cycle immediately.
+            micPicker
 
             // Inline participant chips — small initial avatars + first names.
             // First three then "+N" overflow so the strip doesn't blow up
@@ -603,8 +614,17 @@ private struct RecordingStrip: View {
         .onAppear {
             startTimer()
             loadMeeting()
+            refreshMics()
         }
         .onChange(of: appState.activeMeeting?.id) { _, _ in loadMeeting() }
+        .task {
+            // Keep the mic list fresh so devices plugged/unplugged mid-recording
+            // appear within a few seconds. Auto-cancelled when the strip disappears.
+            while !Task.isCancelled {
+                refreshMics()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
         .onDisappear {
             timer?.invalidate()
             timer = nil
@@ -657,6 +677,82 @@ private struct RecordingStrip: View {
             let m = try? await appState.meetingRepository.find(id: meetingId)
             await MainActor.run { self.meeting = m }
         }
+    }
+
+    // MARK: - Mic picker (TASK-111)
+
+    /// Real input devices the user can pick. Excludes the iPhone/Continuity mic
+    /// (same filter the auto-cycle uses) — "only other ones".
+    private var realMics: [AVCaptureDevice] {
+        availableMics.filter { !micEnumerator.isUnreliableInput(uid: $0.uniqueID) }
+    }
+
+    /// Short label for the active mic shown on the picker button.
+    private var activeMicLabel: String {
+        let name = appState.micHealth.deviceName
+        return name.isEmpty ? "Microphone" : name
+    }
+
+    private var micPicker: some View {
+        Menu {
+            Button { useAutomaticMic() } label: {
+                if appState.settings.micOverrideEnabled {
+                    Text("Automatic")
+                } else {
+                    Label("Automatic", systemImage: "checkmark")
+                }
+            }
+            Divider()
+            if realMics.isEmpty {
+                Text("No other microphones found")
+            } else {
+                ForEach(realMics, id: \.uniqueID) { mic in
+                    Button { pickMic(mic) } label: {
+                        if appState.settings.micOverrideEnabled,
+                           mic.uniqueID == appState.micHealth.deviceUID {
+                            Label(mic.localizedName, systemImage: "checkmark")
+                        } else {
+                            Text(mic.localizedName)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "mic.fill")
+                    .font(.caption2)
+                Text(activeMicLabel)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 120, alignment: .leading)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(Color.appTextSecondary)
+        }
+        .menuStyle(.borderlessButton)
+        .help("Choose the microphone for this recording. Picking one stops auto-detection; \u{201C}Automatic\u{201D} lets the app choose the best mic.")
+        .accessibilityLabel("Microphone: \(activeMicLabel). Choose a microphone.")
+    }
+
+    /// Pin a specific mic — sets the override and switches immediately, which also
+    /// stops any in-flight auto-cycle/recovery search (AudioCaptureService).
+    private func pickMic(_ device: AVCaptureDevice) {
+        appState.settings.micOverrideEnabled = true
+        appState.settings.micOverrideDeviceID = device.uniqueID
+        Task { await appState.audioCaptureService.switchMicrophone(toUID: device.uniqueID) }
+    }
+
+    /// Return to auto-detection: clear the override and re-resolve the best mic.
+    private func useAutomaticMic() {
+        appState.settings.micOverrideEnabled = false
+        appState.settings.micOverrideDeviceID = ""
+        Task { await appState.audioCaptureService.switchMicrophone(toUID: nil) }
+    }
+
+    private func refreshMics() {
+        availableMics = micEnumerator.availableInputDevices()
     }
 
     private var formatted: String {

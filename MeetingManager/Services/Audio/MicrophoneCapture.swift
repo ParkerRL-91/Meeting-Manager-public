@@ -936,6 +936,21 @@ final class MicrophoneCapture: @unchecked Sendable {
         allInputDeviceIDs().first { deviceTransportType($0) == kAudioDeviceTransportTypeBuiltIn }
     }
 
+    /// Continuity (iPhone/iPad) capture mics hijack the system default and often
+    /// deliver pure silence — and a muted one is wrongly accepted as "healthy" by
+    /// the cycler (`cyclerAcceptsCandidate` treats flat-zero+muted as live), so the
+    /// auto-cycle must never land on one. Mirrors `AudioSessionManager.isUnreliableInput`
+    /// for this CoreAudio path. Transport type is the locale-independent primary
+    /// signal; the name match is the fallback. An explicit user override still
+    /// routes through `switchDevice()`, not this cycle.
+    private func isContinuityInput(_ deviceID: AudioDeviceID) -> Bool {
+        let transport = deviceTransportType(deviceID)
+        if transport == kAudioDeviceTransportTypeContinuityCaptureWired ||
+           transport == kAudioDeviceTransportTypeContinuityCaptureWireless { return true }
+        let name = getDeviceName(deviceID).lowercased()
+        return name.contains("iphone") || name.contains("ipad")
+    }
+
     /// True when ANOTHER process (the meeting/call app) is actively running
     /// IO on this device — i.e. this is the microphone the meeting is using.
     /// Same property the call detector keys on. Read BEFORE we open
@@ -1001,7 +1016,16 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// starts. First success commits `activeDeviceID`; total failure
     /// throws (→ system-only recovery, which re-enters this cycle).
     private func startByCyclingDevices() throws {
-        let all = allInputDeviceIDs()
+        // Exclude Continuity (iPhone/iPad) mics from the discovery set. Every
+        // candidate position in `orderedCandidates` is gated on `all.contains(id)`,
+        // so filtering here keeps the iPhone out of EVERY slot (in-use, preferred,
+        // system-default, and the general scan) — auto-detection never cycles onto it.
+        let allRaw = allInputDeviceIDs()
+        let all = allRaw.filter { !isContinuityInput($0) }
+        let excludedContinuity = allRaw.filter { isContinuityInput($0) }
+        if !excludedContinuity.isEmpty {
+            onDiagnostic?("DIAG:mic_cycle excluding Continuity (iPhone/iPad) mic(s): \(excludedContinuity.map { getDeviceName($0) }.joined(separator: ", "))")
+        }
         let preferredID = preferredInputDeviceID.map { getDeviceIDForUID($0) }
         let inUse = inUseInputDeviceIDs()
         if !inUse.isEmpty {
