@@ -479,6 +479,10 @@ struct KBDocumentDetailView: View {
     @State private var loadedHash: String?           // hash at load (conflict basis)
     @State private var isLoading = true
     @State private var readFailed = false
+    /// True when the selected path no longer resolves on disk — typically a stale
+    /// citation deep-link to a doc that was moved or deleted after the answer was
+    /// generated. Drives the friendly `missingDocState`.
+    @State private var missingFile = false
     @State private var modifiedAt: Date?
 
     @State private var isEditing = false
@@ -577,7 +581,7 @@ struct KBDocumentDetailView: View {
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
         } else {
-            if isEditable && !readFailed {
+            if isEditable && !readFailed && !missingFile {
                 Button {
                     isEditing = true
                 } label: {
@@ -587,20 +591,22 @@ struct KBDocumentDetailView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            Menu {
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([fileURL])
-                } label: { Label("Reveal in Finder", systemImage: "magnifyingglass") }
-                if isEditable {
-                    Button(role: .destructive) {
-                        showDeleteConfirm = true
-                    } label: { Label("Delete…", systemImage: "trash") }
+            if !missingFile {
+                Menu {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                    } label: { Label("Reveal in Finder", systemImage: "magnifyingglass") }
+                    if isEditable {
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: { Label("Delete…", systemImage: "trash") }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
-            } label: {
-                Image(systemName: "ellipsis.circle")
+                .menuStyle(.borderlessButton)
+                .frame(width: 28)
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 28)
         }
     }
 
@@ -624,6 +630,8 @@ struct KBDocumentDetailView: View {
     private var mainContent: some View {
         if isLoading {
             ProgressView().controlSize(.small)
+        } else if missingFile {
+            missingDocState
         } else if isTextEditable {
             if readFailed {
                 unreadableState
@@ -758,12 +766,32 @@ struct KBDocumentDetailView: View {
         )
     }
 
+    /// Shown when a citation deep-link points at a doc that no longer exists on
+    /// disk (moved or deleted after the answer was generated).
+    private var missingDocState: some View {
+        EmptyStateView(
+            icon: "doc.questionmark",
+            title: "This document is no longer here",
+            subtitle: "It has moved or been deleted since this answer was generated."
+        )
+    }
+
     // MARK: - Load / dirty
 
     private func load() async {
         isLoading = true
         isEditing = false
         saveError = nil
+        missingFile = !FileManager.default.fileExists(atPath: fileURL.path)
+        if missingFile {
+            content = ""
+            loadedContent = ""
+            loadedHash = nil
+            modifiedAt = nil
+            isDirty = false
+            isLoading = false
+            return
+        }
         modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if isEditable {
             if let text = await KnowledgeBaseService.shared.readTextFile(at: fileURL) {

@@ -460,6 +460,16 @@ struct DailyBriefView: View {
                 .padding(16)
                 .background(Color.appSurface)
 
+            // PRJ-014: KB documents fed to the model as background for this brief.
+            if !appState.dailyBriefKBSources.isEmpty {
+                Divider().background(Color.appSeparator)
+                KBReferencesView(kbSources: appState.dailyBriefKBSources)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.appSurface)
+            }
+
             if appState.dailyBriefGeneratedAt != nil || appState.dailyBriefModel != nil {
                 Divider().background(Color.appSeparator)
                 HStack(spacing: 6) {

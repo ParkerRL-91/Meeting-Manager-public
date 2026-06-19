@@ -474,6 +474,13 @@ struct SummaryView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(.bottom, 8)
+
+                    // PRJ-014: KB documents fed to the model as background for this
+                    // summary. Renders only when non-empty.
+                    if !summary.kbSources.isEmpty {
+                        KBReferencesView(kbSources: summary.kbSources)
+                            .padding(.top, 8)
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.vertical, 20)

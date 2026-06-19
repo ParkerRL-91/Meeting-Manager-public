@@ -490,22 +490,29 @@ struct GlobalChatBubble: View {
                     } else {
                         MarkdownRenderer(text: message.content, baseFontSize: 14)
                     }
-                    if !message.sources.isEmpty {
-                        FlowLayout(spacing: 4) {
-                            ForEach(Array(message.sources.enumerated()), id: \.element.id) { idx, src in
-                                Button {
-                                    appState.sidebarDestination = .meetings
-                                    appState.selectedMeetingId = src.meetingId
-                                } label: {
-                                    Text("[\(idx + 1)] \(src.title)")
-                                        .font(.caption2)
-                                        .lineLimit(1)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.appAccentSubtle)
-                                        .clipShape(Capsule())
+                    // PRJ-014: unified Sources panel — the existing meeting chips
+                    // (unchanged) plus a labeled "Context from your Knowledge Base"
+                    // group when KB chunks grounded the answer.
+                    if !message.sources.isEmpty || !message.kbSources.isEmpty {
+                        KBReferencesView(kbSources: message.kbSources) {
+                            if !message.sources.isEmpty {
+                                FlowLayout(spacing: 4) {
+                                    ForEach(Array(message.sources.enumerated()), id: \.element.id) { idx, src in
+                                        Button {
+                                            appState.sidebarDestination = .meetings
+                                            appState.selectedMeetingId = src.meetingId
+                                        } label: {
+                                            Text("[\(idx + 1)] \(src.title)")
+                                                .font(.caption2)
+                                                .lineLimit(1)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.appAccentSubtle)
+                                                .clipShape(Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }

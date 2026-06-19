@@ -182,6 +182,11 @@ final class AppState {
     /// Model that produced the current text — surfaced as a small footer hint.
     var dailyBriefModel: String?
 
+    /// PRJ-014: KB documents fed to the model as background for the current brief,
+    /// threaded from `DailyBriefCache.Entry.kbSources`. The View renders these under
+    /// "Context from your Knowledge Base"; old cache entries decode as nil → empty.
+    var dailyBriefKBSources: [KBSourceRef] = []
+
     /// True while a background generation is in flight. Drives the spinner /
     /// "Generating…" label in DailyBriefView.
     var isGeneratingDailyBrief: Bool = false
@@ -6025,12 +6030,14 @@ final class AppState {
             self.dailyBriefAIText = nil
             self.dailyBriefGeneratedAt = nil
             self.dailyBriefModel = nil
+            self.dailyBriefKBSources = []
             self.currentDailyBriefSignature = nil
             return
         }
         self.dailyBriefAIText = entry.text
         self.dailyBriefGeneratedAt = entry.generatedAt
         self.dailyBriefModel = entry.model
+        self.dailyBriefKBSources = entry.kbSources ?? []
         self.currentDailyBriefSignature = entry.signature
     }
 
@@ -6061,6 +6068,7 @@ final class AppState {
             self.dailyBriefAIText = nil
             self.dailyBriefGeneratedAt = nil
             self.dailyBriefModel = nil
+            self.dailyBriefKBSources = []
             self.currentDailyBriefSignature = nil
             DailyBriefCache.clear(date: Date())
             return
@@ -6117,6 +6125,7 @@ final class AppState {
                     self.dailyBriefAIText = entry.text
                     self.dailyBriefGeneratedAt = entry.generatedAt
                     self.dailyBriefModel = entry.model
+                    self.dailyBriefKBSources = entry.kbSources ?? []
                     self.currentDailyBriefSignature = entry.signature
                     self.isGeneratingDailyBrief = false
                     self.dailyBriefError = nil

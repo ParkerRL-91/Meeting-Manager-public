@@ -176,6 +176,14 @@ struct MeetingChatView: View {
                         : Color.appSurface
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                // PRJ-014: KB documents fed to the model as background for this
+                // answer. Renders only when non-empty.
+                if message.isAssistant, !message.kbSources.isEmpty {
+                    KBReferencesView(kbSources: message.kbSources)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 2)
+                }
             }
 
             if message.isAssistant { Spacer(minLength: 40) }
