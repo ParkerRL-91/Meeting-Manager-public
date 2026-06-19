@@ -6646,6 +6646,7 @@ enum SidebarDestination: Hashable {
     case chat
     case people
     case tasks
+    case taskBoard       // PRJ-013: user task manager (distinct from .tasks = background-job Activity)
     case search
     case meetings
     case analytics

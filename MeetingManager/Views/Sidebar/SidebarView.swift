@@ -97,6 +97,16 @@ struct SidebarView: View {
                     }
 
                     NavItem(
+                        icon: "tray.full",
+                        label: "Tasks",
+                        destination: .taskBoard,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .taskBoard
+                        appState.selectedMeetingId = nil
+                    }
+
+                    NavItem(
                         icon: "quote.bubble",
                         label: "Key Quotes",
                         destination: .keyQuotes,

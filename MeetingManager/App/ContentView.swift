@@ -50,6 +50,9 @@ struct ContentView: View {
         case .tasks:
             TaskQueueView()
 
+        case .taskBoard:
+            TaskManagerRootView()
+
         case .search:
             MeetingSearchView()
 
