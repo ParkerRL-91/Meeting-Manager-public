@@ -52,9 +52,13 @@ struct SettingsView: View {
                 .tabItem { Label("Integrations", systemImage: "puzzlepiece.extension") }
                 .tag(10)
 
+            TaskStagesSettingsView()
+                .tabItem { Label("Task Stages", systemImage: "rectangle.split.3x1") }
+                .tag(11)
+
             AboutSettingsView()
                 .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(11)
+                .tag(12)
         }
         // Default to a comfortably wide window. Settings tabs vary in
         // density: Prompts has a 3-pane layout (list / editor / reference)

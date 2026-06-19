@@ -89,10 +89,10 @@ struct SidebarView: View {
                         icon: "checklist",
                         label: "Activity",
                         badge: appState.taskQueueManager.pendingCount,
-                        destination: .tasks,
+                        destination: .activity,
                         current: appState.sidebarDestination
                     ) {
-                        appState.sidebarDestination = .tasks
+                        appState.sidebarDestination = .activity
                         appState.selectedMeetingId = nil
                     }
 

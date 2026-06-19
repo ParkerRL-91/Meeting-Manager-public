@@ -137,4 +137,13 @@ extension Color {
             opacity: opacity
         )
     }
+
+    /// Creates a color from a stored hex string ("4F6CEF" or "#4F6CEF"). Returns
+    /// nil for malformed input. Used by configurable task stages (PRJ-013).
+    init?(hex string: String) {
+        var s = string.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt(s, radix: 16) else { return nil }
+        self = Color.hex(value)
+    }
 }

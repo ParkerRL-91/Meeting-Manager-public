@@ -47,7 +47,7 @@ struct ContentView: View {
         case .people:
             PeopleView()
 
-        case .tasks:
+        case .activity:
             TaskQueueView()
 
         case .taskBoard:

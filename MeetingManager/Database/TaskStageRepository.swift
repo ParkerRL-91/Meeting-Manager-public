@@ -66,4 +66,37 @@ final class TaskStageRepository {
             )
         }
     }
+
+    /// Makes exactly one stage terminal (completing a task lands it here). Keeps
+    /// the at-least-one-terminal invariant by making the target the *only*
+    /// terminal stage in a single statement.
+    func setTerminal(id: Int64) async throws {
+        try await database.writer.write { db in
+            try db.execute(
+                sql: "UPDATE taskStage SET isTerminal = (id = ?), updatedAt = ?",
+                arguments: [id, Date()]
+            )
+        }
+    }
+
+    /// Appends a new stage at the end of the order. Never default/terminal (those
+    /// are explicit single-owner choices set via `setDefault`/`setTerminal`).
+    @discardableResult
+    func create(name: String, colorHex: String? = nil) async throws -> TaskStage {
+        var stage = TaskStage(
+            name: name,
+            sortOrder: 0,
+            colorHex: colorHex,
+            isTerminal: false,
+            isDefault: false
+        )
+        try await database.writer.write { db in
+            let maxOrder = try Double.fetchOne(
+                db, sql: "SELECT COALESCE(MAX(sortOrder), -1) FROM taskStage"
+            ) ?? -1
+            stage.sortOrder = maxOrder + 1
+            try stage.insert(db)
+        }
+        return stage
+    }
 }

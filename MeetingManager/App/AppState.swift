@@ -39,6 +39,11 @@ final class AppState {
             }
         }
     }
+
+    /// PRJ-013: deep-link target for the task manager. When set, the task board
+    /// shell focuses this task's detail. Notification "Open Task" actions and
+    /// per-task alerts (Phase 5) route through this alongside `.taskBoard`.
+    var selectedTaskId: Int64?
     var isRecording = false
     var activeMeeting: Meeting?
 
@@ -6645,8 +6650,8 @@ enum SidebarDestination: Hashable {
     case dailyBrief
     case chat
     case people
-    case tasks
-    case taskBoard       // PRJ-013: user task manager (distinct from .tasks = background-job Activity)
+    case activity        // background-job queue (TaskQueueManager) — renamed from .tasks (PRJ-013)
+    case taskBoard       // PRJ-013: user task manager (distinct from .activity = background-job Activity)
     case search
     case meetings
     case analytics
