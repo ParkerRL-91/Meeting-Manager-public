@@ -1479,5 +1479,16 @@ enum Migrations {
             }
             try db.create(index: "idx_taskAttachment_taskId", on: "taskAttachment", columns: ["taskId"])
         }
+
+        // PRJ-013 Phase 5 — per-task due alerts setting. Named to sort after
+        // v61 and before the Phase 7 `v62-task-projects-dependencies` migration;
+        // GRDB orders by registration order, so registering this here keeps it
+        // ahead of Phase 7's block. A new non-null Codable column requires a
+        // migration — a missing column is a runtime decode failure on AppSettings.
+        migrator.registerMigration("v61b-task-due-alerts-setting") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "taskDueAlertsEnabled", .boolean).notNull().defaults(to: true)
+            }
+        }
     }
 }

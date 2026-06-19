@@ -68,6 +68,11 @@ struct AppSettings: Codable, Equatable {
     /// Minute (0-59) for the morning briefing notification.
     var morningBriefMinute: Int = 30
 
+    /// When true, a live task with a due date (or explicit reminder time) fires a
+    /// single local "task is due" notification at that moment (PRJ-013 Phase 5).
+    /// Off cancels all pending per-task alerts. The morning digest is independent.
+    var taskDueAlertsEnabled: Bool = true
+
     /// When true, automatically write meeting summaries and transcripts back to
     /// the Knowledge Base folder after a summary is generated.
     /// Files are written as Markdown under <KB root>/Meeting Notes/YYYY/MM-Month/DD/Title.md
@@ -148,6 +153,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case autoGenerateSummary, defaultRecipeId
         case autoFollowUpEmail
         case morningBriefEnabled, morningBriefHour, morningBriefMinute
+        case taskDueAlertsEnabled
         case kbWriteBack
         case selectedGoogleCalendarIds, selectedAppleCalendarIds
         case contactsImportEnabled

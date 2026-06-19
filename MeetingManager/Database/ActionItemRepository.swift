@@ -27,6 +27,7 @@ final class ActionItemRepository {
             try copy.save(db)
             return copy
         }
+        announceChange()
     }
 
     func saveBatch(_ items: [ActionItem]) async throws {
@@ -35,6 +36,7 @@ final class ActionItemRepository {
                 try item.save(db)
             }
         }
+        announceChange()
     }
 
     /// Inserts imported tasks (PRJ-013 Phase 2). Each pair carries the source
@@ -53,6 +55,7 @@ final class ActionItemRepository {
                 try item.insert(db)
             }
         }
+        announceChange()
     }
 
     // MARK: - Per-meeting reads
@@ -222,6 +225,43 @@ final class ActionItemRepository {
         }
     }
 
+    // MARK: - Notification candidates (PRJ-013 Phase 5)
+
+    /// Live (accepted, incomplete, not deleted, not archived) tasks that carry a
+    /// `reminderAt` OR a `dueDate` — the exact set eligible for a per-task due
+    /// alert. No-date tasks are excluded by design (they never fire). Backs the
+    /// `NotificationService` reconcile.
+    func notificationCandidates() async throws -> [ActionItem] {
+        try await liveIncomplete { query in
+            query.filter(ActionItem.Columns.reminderAt != nil || ActionItem.Columns.dueDate != nil)
+        }
+    }
+
+    /// Counts for the merged morning brief: overdue (due before today) and
+    /// due-today live incomplete tasks.
+    func overdueAndDueTodayCounts() async throws -> (overdue: Int, dueToday: Int) {
+        let overdue = try await overdueItems().count
+        let dueToday = try await dueTodayItems().count
+        return (overdue, dueToday)
+    }
+
+    /// Push a task's reminder forward by `days` (notification Snooze). Sets
+    /// `reminderAt` relative to its current reminder/due time, or `now` if it had
+    /// neither. Returns the updated task so the caller can reschedule its alert.
+    @discardableResult
+    func snoozeReminder(id: Int64, byDays days: Int) async throws -> ActionItem? {
+        let updated = try await database.writer.write { db -> ActionItem? in
+            guard var item = try ActionItem.fetchOne(db, key: id) else { return nil }
+            let base = item.reminderAt ?? item.dueDate ?? Date()
+            item.reminderAt = Calendar.current.date(byAdding: .day, value: days, to: base) ?? base
+            item.updatedAt = Date()
+            try item.update(db)
+            return item
+        }
+        announceChange()
+        return updated
+    }
+
     private func liveIncomplete(
         _ refine: @escaping @Sendable (QueryInterfaceRequest<ActionItem>) -> QueryInterfaceRequest<ActionItem>
     ) async throws -> [ActionItem] {
@@ -249,6 +289,7 @@ final class ActionItemRepository {
             item.updatedAt = Date()
             try item.update(db)
         }
+        announceChange()
     }
 
     /// Shared completion/stage logic — used by `setCompleted` and by the one-time
@@ -293,6 +334,7 @@ final class ActionItemRepository {
             item.updatedAt = Date()
             try item.update(db)
         }
+        announceChange()
     }
 
     func reorder(id: Int64, sortOrder: Double) async throws {
@@ -314,6 +356,7 @@ final class ActionItemRepository {
             item.updatedAt = Date()
             try item.update(db)
         }
+        announceChange()
     }
 
     func dismiss(id: Int64) async throws { try await setTriage(id: id, .dismissed) }
@@ -326,6 +369,7 @@ final class ActionItemRepository {
             item.updatedAt = Date()
             try item.update(db)
         }
+        announceChange()
     }
 
     // MARK: - Archive / soft-delete
@@ -337,6 +381,7 @@ final class ActionItemRepository {
             item.updatedAt = Date()
             try item.update(db)
         }
+        announceChange()
     }
 
     /// Soft delete: marks `deletedAt` (and cascades to subtasks in app code, since
@@ -355,6 +400,7 @@ final class ActionItemRepository {
             item.updatedAt = now
             try item.update(db)
         }
+        announceChange()
     }
 
     func undoDelete(id: Int64) async throws {
@@ -367,6 +413,7 @@ final class ActionItemRepository {
             item.deletedAt = nil
             try item.update(db)
         }
+        announceChange()
     }
 
     /// Hard-deletes tasks soft-deleted before `cutoff` and returns the relative
@@ -396,6 +443,7 @@ final class ActionItemRepository {
         try await database.writer.write { db in
             _ = try item.delete(db)
         }
+        announceChange()
     }
 
     // MARK: - Stage helpers
@@ -410,4 +458,20 @@ final class ActionItemRepository {
             .order(TaskStage.Columns.sortOrder.asc)
             .fetchOne(db)?.id
     }
+
+    // MARK: - Change broadcast (PRJ-013 Phase 5)
+
+    /// Announce that task data changed so observers (AppState → the per-task
+    /// notification reconcile) can react. Posted after every mutation that can
+    /// affect due-alert eligibility. Decoupled via NotificationCenter so the
+    /// repository stays UI-agnostic; the single observer debounces.
+    private func announceChange() {
+        NotificationCenter.default.post(name: .taskDataDidChange, object: nil)
+    }
+}
+
+extension Notification.Name {
+    /// Posted by `ActionItemRepository` after any task mutation. AppState observes
+    /// it to reconcile per-task due notifications (PRJ-013 Phase 5).
+    static let taskDataDidChange = Notification.Name("taskDataDidChange")
 }

@@ -237,6 +237,9 @@ final class AppState {
     let noteRepository: NoteRepository
     let summaryRepository: SummaryRepository
     let enhancedNoteRepository: EnhancedNoteRepository
+    /// Unified task model repository (PRJ-013). Held so the AppDelegate and the
+    /// per-task notification reconcile can reach it via `AppState.shared`.
+    let taskRepository: ActionItemRepository
     let audioCaptureService: AudioCaptureService
     let transcriptionService: TranscriptionService
     let appleSpeechTranscriber: AppleSpeechTranscriber
@@ -330,6 +333,7 @@ final class AppState {
             self.noteRepository = existing.noteRepository
             self.summaryRepository = existing.summaryRepository
             self.enhancedNoteRepository = existing.enhancedNoteRepository
+            self.taskRepository = existing.taskRepository
             self.audioCaptureService = existing.audioCaptureService
             self.transcriptionService = existing.transcriptionService
             self.appleSpeechTranscriber = existing.appleSpeechTranscriber
@@ -373,6 +377,7 @@ final class AppState {
         self.noteRepository = NoteRepository(database: database)
         self.summaryRepository = SummaryRepository(database: database)
         self.enhancedNoteRepository = EnhancedNoteRepository(database: database)
+        self.taskRepository = ActionItemRepository(database: database)
         self.audioCaptureService = AudioCaptureService()
 
         let txService = TranscriptionService()
@@ -498,6 +503,11 @@ final class AppState {
         // at launch so nothing is silently stranded. Background — never blocks
         // launch, and a no-op (empty sheet never shown) on a clean shutdown.
         Task { await self.scanForRecoverableDrafts() }
+
+        // PRJ-013 Phase 5: reconcile per-task due alerts at launch so pending
+        // notifications survive relaunch (and stale ones for now-complete tasks
+        // get cleared).
+        Task { await self.refreshTaskNotifications() }
 
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
@@ -6334,6 +6344,18 @@ final class AppState {
         }
     }
 
+    // MARK: - Task Notifications (PRJ-013 Phase 5)
+
+    /// Reconcile per-task due alerts against the current live, dated, incomplete
+    /// task set. Honors the "Alert me when a task is due" setting — when off, all
+    /// pending per-task alerts are cancelled. Driven by `.taskDataDidChange` and
+    /// run once at launch.
+    func refreshTaskNotifications() async {
+        let enabled = settings.taskDueAlertsEnabled
+        let candidates = (try? await taskRepository.notificationCandidates()) ?? []
+        await notificationService.rescheduleAllTaskNotificationsAsync(tasks: candidates, enabled: enabled)
+    }
+
     // MARK: - Notification Observers
 
     private func observeNotifications() {
@@ -6343,6 +6365,17 @@ final class AppState {
             .sink { [weak self] _ in
                 Task { @MainActor in
                     self?.startNewMeeting()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Task data changed (PRJ-013 Phase 5) — reconcile per-task due alerts.
+        // Debounced so a bulk operation (e.g. accept-all) triggers one reconcile.
+        NotificationCenter.default.publisher(for: .taskDataDidChange)
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    await self?.refreshTaskNotifications()
                 }
             }
             .store(in: &cancellables)

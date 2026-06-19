@@ -183,18 +183,40 @@ final class NotificationService: NSObject {
     ///
     /// The notification repeats every day at the same hour/minute. It is idempotent —
     /// calling this multiple times replaces any existing morning brief notification.
-    func scheduleMorningBrief(meetingCount: Int, openItemCount: Int, hour: Int = 8, minute: Int = 30) {
+    func scheduleMorningBrief(
+        meetingCount: Int,
+        openItemCount: Int,
+        overdueTaskCount: Int = 0,
+        dueTodayTaskCount: Int = 0,
+        hour: Int = 8,
+        minute: Int = 30
+    ) {
         let content = UNMutableNotificationContent()
         content.title = "Good morning! Your daily brief is ready."
 
         let meetingWord = meetingCount == 1 ? "meeting" : "meetings"
+        var sentences: [String] = []
+        if meetingCount > 0 {
+            sentences.append("You have \(meetingCount) \(meetingWord) today.")
+        }
         if openItemCount > 0 {
             let itemWord = openItemCount == 1 ? "open item" : "open items"
-            content.body = "You have \(meetingCount) \(meetingWord) today. \(openItemCount) \(itemWord) to follow up on."
-        } else if meetingCount > 0 {
-            content.body = "You have \(meetingCount) \(meetingWord) today."
-        } else {
+            sentences.append("\(openItemCount) \(itemWord) to follow up on.")
+        }
+        // Merge task counts into the single daily digest (PRJ-013 Phase 5) —
+        // not a second notification.
+        var taskParts: [String] = []
+        if overdueTaskCount > 0 { taskParts.append("\(overdueTaskCount) overdue") }
+        if dueTodayTaskCount > 0 { taskParts.append("\(dueTodayTaskCount) due today") }
+        if !taskParts.isEmpty {
+            let taskWord = (overdueTaskCount + dueTodayTaskCount) == 1 ? "task" : "tasks"
+            sentences.append("\(taskParts.joined(separator: ", ")) \(taskWord).")
+        }
+
+        if sentences.isEmpty {
             content.body = "No meetings scheduled today. Enjoy your free time!"
+        } else {
+            content.body = sentences.joined(separator: " ")
         }
 
         content.sound = .default

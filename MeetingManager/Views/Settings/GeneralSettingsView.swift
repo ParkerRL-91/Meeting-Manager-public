@@ -19,6 +19,7 @@ struct GeneralSettingsView: View {
     @State private var morningBriefEnabled: Bool = false
     @State private var morningBriefHour: Int = 8
     @State private var morningBriefMinute: Int = 30
+    @State private var taskDueAlertsEnabled: Bool = AppSettings.default.taskDueAlertsEnabled
 
     // One-time Apple Reminders import (PRJ-013 Phase 2). The outbound push was removed.
     @State private var isImporting = false
@@ -59,6 +60,7 @@ struct GeneralSettingsView: View {
             morningBriefEnabled = appState.settings.morningBriefEnabled
             morningBriefHour = appState.settings.morningBriefHour
             morningBriefMinute = appState.settings.morningBriefMinute
+            taskDueAlertsEnabled = appState.settings.taskDueAlertsEnabled
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
             Logger.ui.info("[GeneralSettingsView] hydrated; theme=\(selectedTheme, privacy: .public)")
@@ -207,10 +209,17 @@ struct GeneralSettingsView: View {
                     }
                 }
             }
+
+            Toggle("Alert me when a task is due", isOn: $taskDueAlertsEnabled)
+                .onChange(of: taskDueAlertsEnabled) { _, enabled in
+                    persistSetting { $0.taskDueAlertsEnabled = enabled }
+                    appState.settings.taskDueAlertsEnabled = enabled
+                    Task { await appState.refreshTaskNotifications() }
+                }
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Set how many minutes before a meeting to be notified. Enable the Morning Brief to receive a daily summary of your meetings and open items at the configured time.")
+            Text("Set how many minutes before a meeting to be notified. Enable the Morning Brief to receive a daily summary of your meetings, open items, and due tasks at the configured time. Task alerts fire a single reminder at each task's due or reminder time.")
         }
     }
 
@@ -423,16 +432,26 @@ struct GeneralSettingsView: View {
     }
 
     private func updateMorningBriefNotification(enabled: Bool) {
-        let service = NotificationService()
-        if enabled {
+        let service = appState.notificationService
+        guard enabled else {
+            service.cancelMorningBrief()
+            return
+        }
+        // Fold current overdue / due-today task counts into the single daily
+        // digest (PRJ-013 Phase 5). Counts reflect the moment of scheduling —
+        // the digest is one recurring summary, not a per-item ping.
+        let hour = morningBriefHour
+        let minute = morningBriefMinute
+        Task {
+            let counts = (try? await appState.taskRepository.overdueAndDueTodayCounts()) ?? (overdue: 0, dueToday: 0)
             service.scheduleMorningBrief(
                 meetingCount: 0,
                 openItemCount: 0,
-                hour: morningBriefHour,
-                minute: morningBriefMinute
+                overdueTaskCount: counts.overdue,
+                dueTodayTaskCount: counts.dueToday,
+                hour: hour,
+                minute: minute
             )
-        } else {
-            service.cancelMorningBrief()
         }
     }
 }

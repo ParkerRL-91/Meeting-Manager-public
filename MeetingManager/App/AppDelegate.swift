@@ -410,6 +410,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     ) {
         let meetingId = response.notification.request.content.userInfo["meetingId"] as? String
         let meetLink = response.notification.request.content.userInfo["meetLink"] as? String
+        let taskIdString = response.notification.request.content.userInfo["taskId"] as? String
+        let taskId = taskIdString.flatMap { Int64($0) }
         let categoryId = response.notification.request.content.categoryIdentifier
         let identifier = response.notification.request.identifier
         Logger.notifications.info("[didReceive] action=\(response.actionIdentifier, privacy: .public) category=\(categoryId, privacy: .public) id=\(identifier, privacy: .public) meetingId=\(meetingId ?? "nil", privacy: .public) hasLink=\(meetLink != nil)")
@@ -461,10 +463,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let meetingId {
                 AppState.shared?.selectedMeetingId = meetingId
             }
+        case NotificationActions.markTaskDone:
+            Logger.notifications.info("[didReceive] markTaskDone tapped task=\(taskId.map(String.init) ?? "nil", privacy: .public)")
+            if let taskId {
+                Task { @MainActor in
+                    try? await AppState.shared?.taskRepository.setCompleted(id: taskId, true)
+                }
+            }
+        case NotificationActions.snoozeTask:
+            Logger.notifications.info("[didReceive] snoozeTask tapped task=\(taskId.map(String.init) ?? "nil", privacy: .public)")
+            if let taskId {
+                Task { @MainActor in
+                    if let updated = try? await AppState.shared?.taskRepository.snoozeReminder(id: taskId, byDays: 1) {
+                        await AppState.shared?.notificationService.scheduleTaskDueNotification(for: updated)
+                    }
+                }
+            }
+        case NotificationActions.openTask:
+            Logger.notifications.info("[didReceive] openTask tapped task=\(taskId.map(String.init) ?? "nil", privacy: .public)")
+            if let taskId {
+                AppState.shared?.selectedTaskId = taskId
+                AppState.shared?.sidebarDestination = .taskBoard
+            }
         case UNNotificationDefaultActionIdentifier:
             Logger.notifications.info("[didReceive] banner tapped (default action) category=\(categoryId, privacy: .public)")
             if categoryId == NotificationActions.summaryReadyCategory, let meetingId {
                 AppState.shared?.selectedMeetingId = meetingId
+            } else if categoryId == NotificationActions.overdueTaskCategory, let taskId {
+                AppState.shared?.selectedTaskId = taskId
+                AppState.shared?.sidebarDestination = .taskBoard
             }
         case UNNotificationDismissActionIdentifier:
             Logger.notifications.info("[didReceive] notification dismissed by user")

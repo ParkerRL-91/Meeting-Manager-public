@@ -33,6 +33,22 @@ enum NotificationActions {
     /// Category for auto-detected meeting invites (call app / browser meet).
     static let meetingDetectedCategory = "MEETING_DETECTED"
 
+    // MARK: - Task alerts (PRJ-013 Phase 5)
+
+    /// Category for per-task due / overdue alerts. Distinct from the meeting
+    /// categories so its action identifiers can never collide with the meeting
+    /// snooze in the AppDelegate switch.
+    static let overdueTaskCategory = "OVERDUE_TASK"
+
+    /// Mark the task done from the notification.
+    static let markTaskDone = "MARK_TASK_DONE"
+
+    /// Snooze the task by one day (sets `reminderAt = +1 day`).
+    static let snoozeTask = "SNOOZE_TASK"
+
+    /// Open the task's detail in the task board.
+    static let openTask = "OPEN_TASK"
+
     // MARK: - Registration
 
     /// Register all notification categories with their associated actions.
@@ -97,7 +113,30 @@ enum NotificationActions {
             options: []
         )
 
-        UNUserNotificationCenter.current().setNotificationCategories([meetingCategory, detectedCategory, summaryReadyCat])
+        // Per-task due / overdue alert — Mark Done first (most common action).
+        let markDoneAction = UNNotificationAction(
+            identifier: markTaskDone,
+            title: "Mark Done",
+            options: []
+        )
+        let snoozeTaskAction = UNNotificationAction(
+            identifier: snoozeTask,
+            title: "Snooze 1 day",
+            options: []
+        )
+        let openTaskAction = UNNotificationAction(
+            identifier: openTask,
+            title: "Open",
+            options: [.foreground]
+        )
+        let overdueTaskCat = UNNotificationCategory(
+            identifier: overdueTaskCategory,
+            actions: [markDoneAction, snoozeTaskAction, openTaskAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        UNUserNotificationCenter.current().setNotificationCategories([meetingCategory, detectedCategory, summaryReadyCat, overdueTaskCat])
         Logger.general.info("Registered notification categories")
     }
 }
