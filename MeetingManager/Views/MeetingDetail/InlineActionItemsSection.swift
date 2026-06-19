@@ -8,13 +8,13 @@ struct InlineActionItemsSection: View {
     let meetingId: String
 
     @Environment(AppState.self) private var appState
-    @State private var items: [ActionItem] = []
+    @State private var items: [TaskItem] = []
     @State private var isAddingNew = false
     @State private var newItemTitle = ""
     @State private var errorMessage: String?
     @FocusState private var newItemFocused: Bool
 
-    private let repo = ActionItemRepository()
+    private let repo = TaskRepository()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -80,7 +80,7 @@ struct InlineActionItemsSection: View {
     // MARK: - Row
 
     @ViewBuilder
-    private func row(_ item: ActionItem) -> some View {
+    private func row(_ item: TaskItem) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Button {
                 guard let id = item.id else { return }
@@ -168,7 +168,7 @@ struct InlineActionItemsSection: View {
             isAddingNew = false
             return
         }
-        var item = ActionItem(meetingId: meetingId, title: trimmed)
+        var item = TaskItem(meetingId: meetingId, title: trimmed)
         Task {
             do {
                 try await repo.save(&item)

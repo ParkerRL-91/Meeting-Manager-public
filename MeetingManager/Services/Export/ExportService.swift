@@ -143,7 +143,7 @@ final class ExportService {
         summary: MeetingSummary?,
         transcripts: [Transcript],
         notes: [MeetingNote],
-        actionItems: [ActionItem]
+        actionItems: [TaskItem]
     ) -> String {
         let title = htmlEscape(meeting.title)
         let dateLine = htmlEscape(DateFormatting.fullDateTime(from: meeting.effectiveDate))
@@ -393,7 +393,7 @@ final class ExportService {
         summary: MeetingSummary?,
         transcripts: [Transcript],
         notes: [MeetingNote],
-        actionItems: [ActionItem]
+        actionItems: [TaskItem]
     ) throws -> URL {
         let html = generateHTML(
             meeting: meeting,

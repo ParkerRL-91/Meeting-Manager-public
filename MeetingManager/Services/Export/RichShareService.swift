@@ -18,7 +18,7 @@ final class RichShareService {
     func copyAsRichText(
         meeting: Meeting,
         summary: MeetingSummary,
-        actionItems: [ActionItem]
+        actionItems: [TaskItem]
     ) -> Bool {
         #if canImport(AppKit)
         let attributed = buildAttributedString(
@@ -62,7 +62,7 @@ final class RichShareService {
     private func buildAttributedString(
         meeting: Meeting,
         summary: MeetingSummary,
-        actionItems: [ActionItem]
+        actionItems: [TaskItem]
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
 
@@ -132,7 +132,7 @@ final class RichShareService {
     private func buildPlainText(
         meeting: Meeting,
         summary: MeetingSummary,
-        actionItems: [ActionItem]
+        actionItems: [TaskItem]
     ) -> String {
         var lines: [String] = []
         lines.append(meeting.title)

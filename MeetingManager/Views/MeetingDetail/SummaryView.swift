@@ -652,7 +652,7 @@ struct SummaryView: View {
     private func copyAsRichText(_ summary: MeetingSummary) {
         guard let meeting else { return }
         Task {
-            let actionRepo = ActionItemRepository(database: appState.database)
+            let actionRepo = TaskRepository(database: appState.database)
             let items = (try? await actionRepo.itemsForMeeting(meetingId)) ?? []
 
             // Build a transient summary with the live edited text so what the
@@ -680,7 +680,7 @@ struct SummaryView: View {
         guard let meeting else { return }
         let transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
         let notes = (try? await appState.noteRepository.notesForMeeting(meetingId)) ?? []
-        let actionRepo = ActionItemRepository(database: appState.database)
+        let actionRepo = TaskRepository(database: appState.database)
         let items = (try? await actionRepo.itemsForMeeting(meetingId)) ?? []
         do {
             // Use the live edited summary so what the browser shows matches.

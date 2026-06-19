@@ -10,7 +10,7 @@ final class SummaryRepository {
 
     func save(_ summary: inout MeetingSummary) async throws {
         // Return the saved record so the auto-assigned rowid propagates back
-        // (see ActionItemRepository.save).
+        // (see TaskRepository.save).
         let input = summary
         summary = try await database.writer.write { db in
             var copy = input

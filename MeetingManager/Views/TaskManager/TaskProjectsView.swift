@@ -16,7 +16,7 @@ struct TaskProjectsView: View {
     @State private var pendingDelete: TaskProject?
 
     private let repo = TaskProjectRepository(database: .shared)
-    private let taskRepo = ActionItemRepository(database: .shared)
+    private let taskRepo = TaskRepository(database: .shared)
 
     private static let palette: [(name: String, hex: String)] = [
         ("Blue", "4F6CEF"), ("Green", "22C55E"), ("Amber", "F5B942"),

@@ -10,7 +10,7 @@ final class RecipeResultRepository {
 
     func save(_ result: inout RecipeResult) async throws {
         // Return the saved record so the auto-assigned rowid propagates back
-        // (see ActionItemRepository.save).
+        // (see TaskRepository.save).
         let input = result
         result = try await database.writer.write { db in
             var copy = input

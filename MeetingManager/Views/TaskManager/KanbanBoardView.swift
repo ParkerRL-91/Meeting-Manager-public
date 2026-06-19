@@ -1,27 +1,27 @@
 import SwiftUI
 
 /// The Kanban board (PRJ-013 Phase 3). Columns come from
-/// `TaskStageRepository.allStages`; cards from `ActionItemRepository.boardTasks`
+/// `TaskStageRepository.allStages`; cards from `TaskRepository.boardTasks`
 /// grouped by `stageId`. A synthetic leading "No stage" column shows only when
 /// stage-less accepted tasks exist. Cards move by drag, context menu, ⌃⌘←/→, and
-/// VoiceOver actions — all through `ActionItemRepository.moveToStage`. WIP limits
+/// VoiceOver actions — all through `TaskRepository.moveToStage`. WIP limits
 /// are soft (warn + highlight, never block). Multi-select enables bulk move /
 /// complete.
 struct KanbanBoardView: View {
     /// When set, only tasks in this project are shown (PRJ-013 Phase 7).
     var projectFilter: Int64? = nil
-    let onOpenTask: (ActionItem) -> Void
+    let onOpenTask: (TaskItem) -> Void
 
     @State private var stages: [TaskStage] = []
-    @State private var itemsByStage: [Int64: [ActionItem]] = [:]
-    @State private var noStageItems: [ActionItem] = []
+    @State private var itemsByStage: [Int64: [TaskItem]] = [:]
+    @State private var noStageItems: [TaskItem] = []
     @State private var blockedIds: Set<Int64> = []
     @State private var selectedIds: Set<Int64> = []
     /// The card that keyboard shortcuts act on (last tapped/selected).
-    @State private var focusedItem: ActionItem?
+    @State private var focusedItem: TaskItem?
     @State private var isLoading = false
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
     private let stageRepo = TaskStageRepository(database: .shared)
     private let dependencyRepo = TaskDependencyRepository(database: .shared)
 
@@ -87,7 +87,7 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func column(for stage: TaskStage?, items: [ActionItem]) -> some View {
+    private func column(for stage: TaskStage?, items: [TaskItem]) -> some View {
         KanbanColumnView(
             stage: stage,
             allStages: stages,
@@ -118,7 +118,7 @@ struct KanbanBoardView: View {
 
     // MARK: - Mutations (all through the repository owners)
 
-    private func move(item: ActionItem, to stageId: Int64?) async {
+    private func move(item: TaskItem, to stageId: Int64?) async {
         guard let id = item.id else { return }
         await move(taskId: id, to: stageId)
     }
@@ -128,7 +128,7 @@ struct KanbanBoardView: View {
         await load()
     }
 
-    private func shift(_ item: ActionItem, by delta: Int) async {
+    private func shift(_ item: TaskItem, by delta: Int) async {
         guard !stages.isEmpty else { return }
         // Treat the "No stage" bucket as index -1 so a forward shift lands it on
         // the first real stage.
@@ -138,14 +138,14 @@ struct KanbanBoardView: View {
         await move(item: item, to: stages[target].id)
     }
 
-    private func complete(_ item: ActionItem) async {
+    private func complete(_ item: TaskItem) async {
         guard let id = item.id else { return }
         try? await repo.setCompleted(id: id, !item.isCompleted)
         await load()
     }
 
     private func quickAdd(_ title: String, to stageId: Int64?) async {
-        var item = ActionItem(
+        var item = TaskItem(
             stageId: stageId,
             title: title,
             triageState: .accepted,
@@ -155,7 +155,7 @@ struct KanbanBoardView: View {
         await load()
     }
 
-    private func toggleSelect(_ item: ActionItem) {
+    private func toggleSelect(_ item: TaskItem) {
         guard let id = item.id else { return }
         if selectedIds.contains(id) { selectedIds.remove(id) } else { selectedIds.insert(id) }
     }
@@ -182,8 +182,8 @@ struct KanbanBoardView: View {
         if let projectFilter {
             tasks = tasks.filter { $0.projectId == projectFilter }
         }
-        var grouped: [Int64: [ActionItem]] = [:]
-        var noStage: [ActionItem] = []
+        var grouped: [Int64: [TaskItem]] = [:]
+        var noStage: [TaskItem] = []
         for task in tasks {
             if let sid = task.stageId, loadedStages.contains(where: { $0.id == sid }) {
                 grouped[sid, default: []].append(task)

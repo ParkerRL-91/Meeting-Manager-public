@@ -9,7 +9,7 @@ import SwiftUI
 struct TaskListView: View {
     /// When set, only tasks in this project are shown (PRJ-013 Phase 7).
     var projectFilter: Int64? = nil
-    let onOpenTask: (ActionItem) -> Void
+    let onOpenTask: (TaskItem) -> Void
 
     enum Scope: String, CaseIterable, Identifiable {
         case active = "Active"
@@ -29,7 +29,7 @@ struct TaskListView: View {
         var id: String { rawValue }
     }
 
-    @State private var items: [ActionItem] = []
+    @State private var items: [TaskItem] = []
     @State private var stages: [TaskStage] = []
     @State private var query = ""
     @State private var scope: Scope = .active
@@ -41,7 +41,7 @@ struct TaskListView: View {
     @State private var isLoading = false
     @State private var isPurging = false
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
     private let stageRepo = TaskStageRepository(database: .shared)
 
     private var availableTags: [String] {
@@ -57,7 +57,7 @@ struct TaskListView: View {
             || assigneeFilter != nil || dueFilter != .any
     }
 
-    private var filtered: [ActionItem] {
+    private var filtered: [TaskItem] {
         var result = items
         if let projectFilter { result = result.filter { $0.projectId == projectFilter } }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -78,7 +78,7 @@ struct TaskListView: View {
         return result
     }
 
-    private func applyDueRange(_ list: [ActionItem]) -> [ActionItem] {
+    private func applyDueRange(_ list: [TaskItem]) -> [TaskItem] {
         let cal = Calendar.current
         let start = cal.startOfDay(for: Date())
         let tomorrow = cal.date(byAdding: .day, value: 1, to: start) ?? start
@@ -307,7 +307,7 @@ struct TaskListView: View {
 
     // MARK: - Actions
 
-    private func complete(_ item: ActionItem) async {
+    private func complete(_ item: TaskItem) async {
         guard let id = item.id else { return }
         try? await repo.setCompleted(id: id, !item.isCompleted)
         await load()

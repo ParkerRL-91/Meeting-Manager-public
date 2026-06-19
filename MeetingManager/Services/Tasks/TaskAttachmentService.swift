@@ -133,7 +133,7 @@ final class TaskAttachmentService {
     /// the single wiring point the plan specifies for meeting-driven cleanup.
     func purgeDeletedTasks(
         olderThan cutoff: Date,
-        repository taskRepo: ActionItemRepository = ActionItemRepository()
+        repository taskRepo: TaskRepository = TaskRepository()
     ) async throws {
         let paths = try await taskRepo.purgeDeleted(olderThan: cutoff)
         for path in paths {

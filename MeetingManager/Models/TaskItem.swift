@@ -10,11 +10,11 @@ enum TaskTriageState: String, Codable, CaseIterable {
     case dismissed
 }
 
-/// The unified task record. Backed by the `actionItem` table (name kept for
-/// migration safety; the Swift type rename to `TaskItem` is deferred to a later
-/// cleanup — see PRJ-013). An action item IS a task: extracted from a meeting or
-/// created by hand, optionally a subtask of another, living in a Kanban stage.
-struct ActionItem: Identifiable, Codable, Equatable {
+/// The unified task record. Backed by the `actionItem` table — the DB table name
+/// is kept for append-only migration safety even though the Swift type is now
+/// `TaskItem` (see ADR-018). A task is extracted from a meeting or created by
+/// hand, optionally a subtask of another, living in a Kanban stage.
+struct TaskItem: Identifiable, Codable, Equatable {
     var id: Int64?
     /// Source meeting. Optional: manually-created/standalone tasks have none, and
     /// deleting a meeting nulls this (FK ON DELETE SET NULL) rather than deleting
@@ -128,7 +128,7 @@ struct ActionItem: Identifiable, Codable, Equatable {
 
 // MARK: - GRDB
 
-extension ActionItem: FetchableRecord, MutablePersistableRecord {
+extension TaskItem: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "actionItem"
 
     enum Columns: String, ColumnExpression {

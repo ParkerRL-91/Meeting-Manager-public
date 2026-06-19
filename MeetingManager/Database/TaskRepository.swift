@@ -5,9 +5,9 @@ import GRDB
 /// PRJ-013). Owns the single completion path (`setCompleted`), triage
 /// transitions, the Kanban/board reads, smart lists, and soft-delete.
 ///
-/// Naming note: the type keeps the `ActionItemRepository` name for now; the
+/// Naming note: the type keeps the `TaskRepository` name for now; the
 /// `TaskRepository` rename is a deferred, isolated cleanup (PRJ-013 Phase 8).
-final class ActionItemRepository {
+final class TaskRepository {
     private let database: AppDatabase
 
     init(database: AppDatabase = .shared) {
@@ -16,7 +16,7 @@ final class ActionItemRepository {
 
     // MARK: - Writes
 
-    func save(_ item: inout ActionItem) async throws {
+    func save(_ item: inout TaskItem) async throws {
         // Flow the saved record (with its auto-assigned rowid) back via the write
         // closure's RETURN VALUE — mutating a captured `var` inside GRDB's
         // @Sendable async write does NOT propagate to the caller.
@@ -30,7 +30,7 @@ final class ActionItemRepository {
         announceChange()
     }
 
-    func saveBatch(_ items: [ActionItem]) async throws {
+    func saveBatch(_ items: [TaskItem]) async throws {
         try await database.writer.write { db in
             for var item in items {
                 try item.save(db)
@@ -45,7 +45,7 @@ final class ActionItemRepository {
     /// stage and completed items land in the terminal stage with `completedAt` —
     /// never a raw `isCompleted` write. Items default to the default stage first
     /// so an incomplete import gets a board home immediately.
-    func insertImported(_ items: [(item: ActionItem, completed: Bool)]) async throws {
+    func insertImported(_ items: [(item: TaskItem, completed: Bool)]) async throws {
         guard !items.isEmpty else { return }
         try await database.writer.write { db in
             let defaultStage = try Self.defaultStageId(db)
@@ -63,11 +63,11 @@ final class ActionItemRepository {
     /// ALL rows for a meeting, regardless of triage state. Backs per-meeting
     /// display views AND the re-extraction dedupe guard — must stay UNFILTERED so
     /// re-extraction stays idempotent across inbox + accepted rows.
-    func itemsForMeeting(_ meetingId: String) async throws -> [ActionItem] {
+    func itemsForMeeting(_ meetingId: String) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.meetingId == meetingId)
-                .order(ActionItem.Columns.extractedAt.asc)
+            try TaskItem
+                .filter(TaskItem.Columns.meetingId == meetingId)
+                .order(TaskItem.Columns.extractedAt.asc)
                 .fetchAll(db)
         }
     }
@@ -75,26 +75,26 @@ final class ActionItemRepository {
     /// Only ACCEPTED, non-deleted items for a meeting — the "real tasks" view used
     /// by cross-meeting rollups / series carry-forward so inbox suggestions don't
     /// leak into prompts.
-    func acceptedItemsForMeeting(_ meetingId: String) async throws -> [ActionItem] {
+    func acceptedItemsForMeeting(_ meetingId: String) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.meetingId == meetingId)
-                .filter(ActionItem.Columns.triageState == TaskTriageState.accepted.rawValue)
-                .filter(ActionItem.Columns.deletedAt == nil)
-                .order(ActionItem.Columns.extractedAt.asc)
+            try TaskItem
+                .filter(TaskItem.Columns.meetingId == meetingId)
+                .filter(TaskItem.Columns.triageState == TaskTriageState.accepted.rawValue)
+                .filter(TaskItem.Columns.deletedAt == nil)
+                .order(TaskItem.Columns.extractedAt.asc)
                 .fetchAll(db)
         }
     }
 
     // MARK: - Global "real task" reads (gated to accepted + not-deleted)
 
-    func allOpenItems(limit: Int = 100) async throws -> [ActionItem] {
+    func allOpenItems(limit: Int = 100) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.triageState == TaskTriageState.accepted.rawValue)
-                .filter(ActionItem.Columns.deletedAt == nil)
-                .filter(ActionItem.Columns.isCompleted == false)
-                .order(ActionItem.Columns.extractedAt.asc)
+            try TaskItem
+                .filter(TaskItem.Columns.triageState == TaskTriageState.accepted.rawValue)
+                .filter(TaskItem.Columns.deletedAt == nil)
+                .filter(TaskItem.Columns.isCompleted == false)
+                .order(TaskItem.Columns.extractedAt.asc)
                 .limit(limit)
                 .fetchAll(db)
         }
@@ -103,7 +103,7 @@ final class ActionItemRepository {
     /// Returns open action items where the assignee fuzzy-matches any name in the
     /// participant list. Builds on `allOpenItems`, so the accepted/not-deleted gate
     /// is inherited.
-    func openItemsForParticipants(_ participants: [String]) async throws -> [ActionItem] {
+    func openItemsForParticipants(_ participants: [String]) async throws -> [TaskItem] {
         guard !participants.isEmpty else { return [] }
 
         let allOpen = try await allOpenItems(limit: 500)
@@ -131,58 +131,58 @@ final class ActionItemRepository {
 
     /// Accepted, non-deleted, non-archived top-level tasks for the Kanban board,
     /// ordered for stacking within a column.
-    func boardTasks() async throws -> [ActionItem] {
+    func boardTasks() async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.triageState == TaskTriageState.accepted.rawValue)
-                .filter(ActionItem.Columns.deletedAt == nil)
-                .filter(ActionItem.Columns.archivedAt == nil)
-                .filter(ActionItem.Columns.parentTaskId == nil)
-                .order(ActionItem.Columns.sortOrder.asc, ActionItem.Columns.createdAt.asc)
+            try TaskItem
+                .filter(TaskItem.Columns.triageState == TaskTriageState.accepted.rawValue)
+                .filter(TaskItem.Columns.deletedAt == nil)
+                .filter(TaskItem.Columns.archivedAt == nil)
+                .filter(TaskItem.Columns.parentTaskId == nil)
+                .order(TaskItem.Columns.sortOrder.asc, TaskItem.Columns.createdAt.asc)
                 .fetchAll(db)
         }
     }
 
     /// The review queue: AI-identified items awaiting accept/dismiss.
-    func inboxItems() async throws -> [ActionItem] {
+    func inboxItems() async throws -> [TaskItem] {
         try await fetchByTriage(.inbox)
     }
 
-    func dismissedItems() async throws -> [ActionItem] {
+    func dismissedItems() async throws -> [TaskItem] {
         try await fetchByTriage(.dismissed)
     }
 
-    private func fetchByTriage(_ state: TaskTriageState) async throws -> [ActionItem] {
+    private func fetchByTriage(_ state: TaskTriageState) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.triageState == state.rawValue)
-                .filter(ActionItem.Columns.deletedAt == nil)
-                .order(ActionItem.Columns.createdAt.desc)
+            try TaskItem
+                .filter(TaskItem.Columns.triageState == state.rawValue)
+                .filter(TaskItem.Columns.deletedAt == nil)
+                .order(TaskItem.Columns.createdAt.desc)
                 .fetchAll(db)
         }
     }
 
-    func subtasks(of parentId: Int64) async throws -> [ActionItem] {
+    func subtasks(of parentId: Int64) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.parentTaskId == parentId)
-                .filter(ActionItem.Columns.deletedAt == nil)
-                .order(ActionItem.Columns.sortOrder.asc, ActionItem.Columns.createdAt.asc)
+            try TaskItem
+                .filter(TaskItem.Columns.parentTaskId == parentId)
+                .filter(TaskItem.Columns.deletedAt == nil)
+                .order(TaskItem.Columns.sortOrder.asc, TaskItem.Columns.createdAt.asc)
                 .fetchAll(db)
         }
     }
 
-    func find(id: Int64) async throws -> ActionItem? {
-        try await database.writer.read { db in try ActionItem.fetchOne(db, key: id) }
+    func find(id: Int64) async throws -> TaskItem? {
+        try await database.writer.read { db in try TaskItem.fetchOne(db, key: id) }
     }
 
     /// All non-deleted items from a given origin (e.g. "import"). Backs the
     /// one-time importer's de-dupe so a re-run stays idempotent.
-    func itemsBySource(_ source: String) async throws -> [ActionItem] {
+    func itemsBySource(_ source: String) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            try ActionItem
-                .filter(ActionItem.Columns.source == source)
-                .filter(ActionItem.Columns.deletedAt == nil)
+            try TaskItem
+                .filter(TaskItem.Columns.source == source)
+                .filter(TaskItem.Columns.deletedAt == nil)
                 .fetchAll(db)
         }
     }
@@ -190,38 +190,38 @@ final class ActionItemRepository {
     // MARK: - Smart lists (accepted, live, incomplete)
 
     /// Overdue: due before the start of today and not completed.
-    func overdueItems() async throws -> [ActionItem] {
+    func overdueItems() async throws -> [TaskItem] {
         let startOfToday = Calendar.current.startOfDay(for: Date())
         return try await liveIncomplete { query in
-            query.filter(ActionItem.Columns.dueDate != nil)
-                 .filter(ActionItem.Columns.dueDate < startOfToday)
+            query.filter(TaskItem.Columns.dueDate != nil)
+                 .filter(TaskItem.Columns.dueDate < startOfToday)
         }
     }
 
     /// Due today.
-    func dueTodayItems() async throws -> [ActionItem] {
+    func dueTodayItems() async throws -> [TaskItem] {
         let cal = Calendar.current
         let start = cal.startOfDay(for: Date())
         let end = cal.date(byAdding: .day, value: 1, to: start) ?? start
         return try await liveIncomplete { query in
-            query.filter(ActionItem.Columns.dueDate >= start)
-                 .filter(ActionItem.Columns.dueDate < end)
+            query.filter(TaskItem.Columns.dueDate >= start)
+                 .filter(TaskItem.Columns.dueDate < end)
         }
     }
 
     /// Due after today.
-    func upcomingItems() async throws -> [ActionItem] {
+    func upcomingItems() async throws -> [TaskItem] {
         let cal = Calendar.current
         let end = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date())) ?? Date()
         return try await liveIncomplete { query in
-            query.filter(ActionItem.Columns.dueDate >= end)
+            query.filter(TaskItem.Columns.dueDate >= end)
         }
     }
 
     /// Live, incomplete tasks with no due date (Someday).
-    func noDateItems() async throws -> [ActionItem] {
+    func noDateItems() async throws -> [TaskItem] {
         try await liveIncomplete { query in
-            query.filter(ActionItem.Columns.dueDate == nil)
+            query.filter(TaskItem.Columns.dueDate == nil)
         }
     }
 
@@ -234,31 +234,31 @@ final class ActionItemRepository {
     /// returns accepted, completed, live (not deleted/archived) tasks; `archived`
     /// returns archived (not deleted) tasks; `dismissed` returns dismissed (not
     /// deleted) suggestions; `trash` returns soft-deleted rows awaiting purge.
-    func historyItems(_ scope: HistoryScope) async throws -> [ActionItem] {
+    func historyItems(_ scope: HistoryScope) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            let request: QueryInterfaceRequest<ActionItem>
+            let request: QueryInterfaceRequest<TaskItem>
             switch scope {
             case .completed:
-                request = ActionItem
-                    .filter(ActionItem.Columns.triageState == TaskTriageState.accepted.rawValue)
-                    .filter(ActionItem.Columns.deletedAt == nil)
-                    .filter(ActionItem.Columns.archivedAt == nil)
-                    .filter(ActionItem.Columns.isCompleted == true)
-                    .order(ActionItem.Columns.completedAt.desc)
+                request = TaskItem
+                    .filter(TaskItem.Columns.triageState == TaskTriageState.accepted.rawValue)
+                    .filter(TaskItem.Columns.deletedAt == nil)
+                    .filter(TaskItem.Columns.archivedAt == nil)
+                    .filter(TaskItem.Columns.isCompleted == true)
+                    .order(TaskItem.Columns.completedAt.desc)
             case .archived:
-                request = ActionItem
-                    .filter(ActionItem.Columns.archivedAt != nil)
-                    .filter(ActionItem.Columns.deletedAt == nil)
-                    .order(ActionItem.Columns.archivedAt.desc)
+                request = TaskItem
+                    .filter(TaskItem.Columns.archivedAt != nil)
+                    .filter(TaskItem.Columns.deletedAt == nil)
+                    .order(TaskItem.Columns.archivedAt.desc)
             case .dismissed:
-                request = ActionItem
-                    .filter(ActionItem.Columns.triageState == TaskTriageState.dismissed.rawValue)
-                    .filter(ActionItem.Columns.deletedAt == nil)
-                    .order(ActionItem.Columns.updatedAt.desc)
+                request = TaskItem
+                    .filter(TaskItem.Columns.triageState == TaskTriageState.dismissed.rawValue)
+                    .filter(TaskItem.Columns.deletedAt == nil)
+                    .order(TaskItem.Columns.updatedAt.desc)
             case .trash:
-                request = ActionItem
-                    .filter(ActionItem.Columns.deletedAt != nil)
-                    .order(ActionItem.Columns.deletedAt.desc)
+                request = TaskItem
+                    .filter(TaskItem.Columns.deletedAt != nil)
+                    .order(TaskItem.Columns.deletedAt.desc)
             }
             return try request.fetchAll(db)
         }
@@ -270,7 +270,7 @@ final class ActionItemRepository {
     /// editor. Announces a change so the notification reconcile reschedules.
     func setDueDate(id: Int64, _ date: Date?) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.dueDate = date
             item.reminderAt = nil
             item.updatedAt = Date()
@@ -285,9 +285,9 @@ final class ActionItemRepository {
     /// `reminderAt` OR a `dueDate` — the exact set eligible for a per-task due
     /// alert. No-date tasks are excluded by design (they never fire). Backs the
     /// `NotificationService` reconcile.
-    func notificationCandidates() async throws -> [ActionItem] {
+    func notificationCandidates() async throws -> [TaskItem] {
         try await liveIncomplete { query in
-            query.filter(ActionItem.Columns.reminderAt != nil || ActionItem.Columns.dueDate != nil)
+            query.filter(TaskItem.Columns.reminderAt != nil || TaskItem.Columns.dueDate != nil)
         }
     }
 
@@ -303,9 +303,9 @@ final class ActionItemRepository {
     /// `reminderAt` relative to its current reminder/due time, or `now` if it had
     /// neither. Returns the updated task so the caller can reschedule its alert.
     @discardableResult
-    func snoozeReminder(id: Int64, byDays days: Int) async throws -> ActionItem? {
-        let updated = try await database.writer.write { db -> ActionItem? in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return nil }
+    func snoozeReminder(id: Int64, byDays days: Int) async throws -> TaskItem? {
+        let updated = try await database.writer.write { db -> TaskItem? in
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return nil }
             let base = item.reminderAt ?? item.dueDate ?? Date()
             item.reminderAt = Calendar.current.date(byAdding: .day, value: days, to: base) ?? base
             item.updatedAt = Date()
@@ -317,16 +317,16 @@ final class ActionItemRepository {
     }
 
     private func liveIncomplete(
-        _ refine: @escaping @Sendable (QueryInterfaceRequest<ActionItem>) -> QueryInterfaceRequest<ActionItem>
-    ) async throws -> [ActionItem] {
+        _ refine: @escaping @Sendable (QueryInterfaceRequest<TaskItem>) -> QueryInterfaceRequest<TaskItem>
+    ) async throws -> [TaskItem] {
         try await database.writer.read { db in
-            let base = ActionItem
-                .filter(ActionItem.Columns.triageState == TaskTriageState.accepted.rawValue)
-                .filter(ActionItem.Columns.deletedAt == nil)
-                .filter(ActionItem.Columns.archivedAt == nil)
-                .filter(ActionItem.Columns.isCompleted == false)
+            let base = TaskItem
+                .filter(TaskItem.Columns.triageState == TaskTriageState.accepted.rawValue)
+                .filter(TaskItem.Columns.deletedAt == nil)
+                .filter(TaskItem.Columns.archivedAt == nil)
+                .filter(TaskItem.Columns.isCompleted == false)
             return try refine(base)
-                .order(ActionItem.Columns.dueDate.asc, ActionItem.Columns.priority.desc)
+                .order(TaskItem.Columns.dueDate.asc, TaskItem.Columns.priority.desc)
                 .fetchAll(db)
         }
     }
@@ -338,7 +338,7 @@ final class ActionItemRepository {
     /// the isCompleted⇄terminal-stage invariant can never diverge.
     func setCompleted(id: Int64, _ completed: Bool) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             try Self.applyCompletion(&item, completed: completed, db: db)
             item.updatedAt = Date()
             try item.update(db)
@@ -351,7 +351,7 @@ final class ActionItemRepository {
     /// every completion converges on one rule rather than a raw `isCompleted` write.
     /// On the incomplete → complete transition it spawns the next occurrence of a
     /// recurring task exactly once (PRJ-013 Phase 7) — inside this same transaction.
-    static func applyCompletion(_ item: inout ActionItem, completed: Bool, db: Database) throws {
+    static func applyCompletion(_ item: inout TaskItem, completed: Bool, db: Database) throws {
         let wasCompleted = item.isCompleted
         if completed {
             item.isCompleted = true
@@ -377,7 +377,7 @@ final class ActionItemRepository {
 
     func moveToStage(id: Int64, stageId: Int64?, sortOrder: Double? = nil) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             if let sortOrder { item.sortOrder = sortOrder }
             if let stageId, let stage = try TaskStage.fetchOne(db, key: stageId) {
                 // Terminal/non-terminal completion converges through applyCompletion
@@ -404,7 +404,7 @@ final class ActionItemRepository {
     /// Assigns (or clears) a task's project (PRJ-013 Phase 7).
     func setProject(id: Int64, projectId: Int64?) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.projectId = projectId
             item.updatedAt = Date()
             try item.update(db)
@@ -414,7 +414,7 @@ final class ActionItemRepository {
 
     func reorder(id: Int64, sortOrder: Double) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.sortOrder = sortOrder
             item.updatedAt = Date()
             try item.update(db)
@@ -425,7 +425,7 @@ final class ActionItemRepository {
 
     func accept(id: Int64, stageId: Int64? = nil) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.triageState = .accepted
             item.stageId = try stageId ?? Self.defaultStageId(db)
             item.updatedAt = Date()
@@ -439,7 +439,7 @@ final class ActionItemRepository {
 
     private func setTriage(id: Int64, _ state: TaskTriageState) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.triageState = state
             item.updatedAt = Date()
             try item.update(db)
@@ -451,7 +451,7 @@ final class ActionItemRepository {
 
     func setArchived(id: Int64, _ archived: Bool) async throws {
         try await database.writer.write { db in
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.archivedAt = archived ? Date() : nil
             item.updatedAt = Date()
             try item.update(db)
@@ -465,12 +465,12 @@ final class ActionItemRepository {
     func softDelete(id: Int64) async throws {
         try await database.writer.write { db in
             let now = Date()
-            for var item in try ActionItem.filter(ActionItem.Columns.parentTaskId == id).fetchAll(db) {
+            for var item in try TaskItem.filter(TaskItem.Columns.parentTaskId == id).fetchAll(db) {
                 item.deletedAt = now
                 item.updatedAt = now
                 try item.update(db)
             }
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.deletedAt = now
             item.updatedAt = now
             try item.update(db)
@@ -480,11 +480,11 @@ final class ActionItemRepository {
 
     func undoDelete(id: Int64) async throws {
         try await database.writer.write { db in
-            for var item in try ActionItem.filter(ActionItem.Columns.parentTaskId == id).fetchAll(db) {
+            for var item in try TaskItem.filter(TaskItem.Columns.parentTaskId == id).fetchAll(db) {
                 item.deletedAt = nil
                 try item.update(db)
             }
-            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            guard var item = try TaskItem.fetchOne(db, key: id) else { return }
             item.deletedAt = nil
             try item.update(db)
         }
@@ -499,9 +499,9 @@ final class ActionItemRepository {
     @discardableResult
     func purgeDeleted(olderThan cutoff: Date) async throws -> [String] {
         try await database.writer.write { db in
-            let doomed = try ActionItem
-                .filter(ActionItem.Columns.deletedAt != nil)
-                .filter(ActionItem.Columns.deletedAt < cutoff)
+            let doomed = try TaskItem
+                .filter(TaskItem.Columns.deletedAt != nil)
+                .filter(TaskItem.Columns.deletedAt < cutoff)
                 .fetchAll(db)
             guard !doomed.isEmpty else { return [] }
             let ids = doomed.compactMap(\.id)
@@ -509,12 +509,12 @@ final class ActionItemRepository {
                 .filter(ids.contains(TaskAttachment.Columns.taskId))
                 .fetchAll(db)
                 .map(\.relativePath)
-            _ = try ActionItem.filter(keys: ids).deleteAll(db)
+            _ = try TaskItem.filter(keys: ids).deleteAll(db)
             return paths
         }
     }
 
-    func delete(_ item: ActionItem) async throws {
+    func delete(_ item: TaskItem) async throws {
         try await database.writer.write { db in
             _ = try item.delete(db)
         }
@@ -546,7 +546,7 @@ final class ActionItemRepository {
 }
 
 extension Notification.Name {
-    /// Posted by `ActionItemRepository` after any task mutation. AppState observes
+    /// Posted by `TaskRepository` after any task mutation. AppState observes
     /// it to reconcile per-task due notifications (PRJ-013 Phase 5).
     static let taskDataDidChange = Notification.Name("taskDataDidChange")
 }

@@ -12,7 +12,7 @@ struct CompanyDetailView: View {
 
     @Environment(AppState.self) private var appState
 
-    @State private var openItems: [(meeting: Meeting, items: [ActionItem])] = []
+    @State private var openItems: [(meeting: Meeting, items: [TaskItem])] = []
     @State private var recentSummaries: [(meeting: Meeting, summary: MeetingSummary)] = []
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false

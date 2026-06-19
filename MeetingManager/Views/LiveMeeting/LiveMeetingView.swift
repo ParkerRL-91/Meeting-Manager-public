@@ -20,7 +20,7 @@ struct LiveMeetingView: View {
     @State private var catchUpLoading = false
 
     @State private var showContextBrief = true
-    @State private var carriedItems: [ActionItem] = []
+    @State private var carriedItems: [TaskItem] = []
     @State private var showOpenItems = true
     @State private var notepadInitialText: String = ""
     @State private var capturedItemCount = 0
@@ -394,7 +394,7 @@ struct LiveMeetingView: View {
         guard !participants.isEmpty else { return }
 
         do {
-            let items = try await ActionItemRepository().openItemsForParticipants(participants)
+            let items = try await TaskRepository().openItemsForParticipants(participants)
             await MainActor.run {
                 carriedItems = items
                 showOpenItems = !items.isEmpty
@@ -408,14 +408,14 @@ struct LiveMeetingView: View {
     }
 
     private func loadCapturedItemCount() async {
-        let items = (try? await ActionItemRepository().itemsForMeeting(meetingId)) ?? []
+        let items = (try? await TaskRepository().itemsForMeeting(meetingId)) ?? []
         await MainActor.run {
             capturedItemCount = items.count
         }
     }
 
     /// Builds the pre-population text for the notepad from carried-forward action items.
-    private func buildNotepadPrelude(from items: [ActionItem]) -> String {
+    private func buildNotepadPrelude(from items: [TaskItem]) -> String {
         var lines = ["Follow-ups from previous meetings:"]
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -438,7 +438,7 @@ struct LiveMeetingView: View {
 // MARK: - Open Items Panel (T-022)
 
 private struct OpenItemsPanel: View {
-    @Binding var items: [ActionItem]
+    @Binding var items: [TaskItem]
     @Binding var isExpanded: Bool
 
     var body: some View {
@@ -492,15 +492,15 @@ private struct OpenItemsPanel: View {
 }
 
 private struct OpenItemRow: View {
-    let item: ActionItem
-    var onToggle: (ActionItem) -> Void
+    let item: TaskItem
+    var onToggle: (TaskItem) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Button {
                 guard let id = item.id else { return }
                 Task {
-                    try? await ActionItemRepository().toggleComplete(id: id)
+                    try? await TaskRepository().toggleComplete(id: id)
                     var updated = item
                     updated.isCompleted.toggle()
                     onToggle(updated)

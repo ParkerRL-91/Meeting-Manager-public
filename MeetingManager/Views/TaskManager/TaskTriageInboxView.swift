@@ -6,12 +6,12 @@ import SwiftUI
 struct TaskTriageInboxView: View {
     @Environment(AppState.self) private var appState
 
-    @State private var items: [ActionItem] = []
+    @State private var items: [TaskItem] = []
     @State private var meetingTitles: [String: String] = [:]
     @State private var isLoading = false
     @State private var undo: UndoAction?
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
 
     private struct UndoAction: Identifiable {
         let id = UUID()
@@ -80,7 +80,7 @@ struct TaskTriageInboxView: View {
         }
     }
 
-    private func row(_ item: ActionItem) -> some View {
+    private func row(_ item: TaskItem) -> some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(item.title)
@@ -151,14 +151,14 @@ struct TaskTriageInboxView: View {
         meetingTitles = titles
     }
 
-    private func accept(_ item: ActionItem) async {
+    private func accept(_ item: TaskItem) async {
         guard let id = item.id else { return }
         try? await repo.accept(id: id)
         undo = UndoAction(label: "Accepted “\(item.title)”") { try? await repo.restoreToInbox(id: id) }
         await load()
     }
 
-    private func dismissItem(_ item: ActionItem) async {
+    private func dismissItem(_ item: TaskItem) async {
         guard let id = item.id else { return }
         try? await repo.dismiss(id: id)
         undo = UndoAction(label: "Dismissed “\(item.title)”") { try? await repo.restoreToInbox(id: id) }

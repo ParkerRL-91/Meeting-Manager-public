@@ -4,12 +4,12 @@ struct ActionItemsView: View {
     let meetingId: String
 
     @Environment(AppState.self) private var appState
-    @State private var items: [ActionItem] = []
+    @State private var items: [TaskItem] = []
     @State private var isLoading = true
     @State private var extractor = ActionItemExtractor()
     @State private var extractTask: Task<Void, Never>?
 
-    private let actionItemRepo = ActionItemRepository()
+    private let actionItemRepo = TaskRepository()
 
     var body: some View {
         Group {
@@ -114,7 +114,7 @@ struct ActionItemsView: View {
     // MARK: - Row
 
     @ViewBuilder
-    private func actionItemRow(_ item: ActionItem) -> some View {
+    private func actionItemRow(_ item: TaskItem) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Button {
                 guard let itemId = item.id else { return }

@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-/// A configurable Kanban column. Tasks (`ActionItem.stageId`) reference a stage.
+/// A configurable Kanban column. Tasks (`TaskItem.stageId`) reference a stage.
 /// Invariants (enforced in `TaskStageRepository`): exactly one `isDefault` (where
 /// newly-accepted tasks land) and at least one `isTerminal` (completing a task
 /// moves it here).

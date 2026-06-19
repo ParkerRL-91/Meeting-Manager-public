@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 
 /// Recurrence rule for a task (PRJ-013 Phase 7). Stored as JSON in
-/// `ActionItem.recurrenceRuleJSON`. A nil rule means the task is one-off.
+/// `TaskItem.recurrenceRuleJSON`. A nil rule means the task is one-off.
 struct TaskRecurrenceRule: Codable, Equatable {
     enum Frequency: String, Codable, CaseIterable, Identifiable {
         case daily, weekly, monthly, yearly
@@ -61,7 +61,7 @@ struct TaskRecurrenceRule: Codable, Equatable {
 
 /// Spawns the next occurrence of a recurring task exactly once, on the
 /// completion transition (PRJ-013 Phase 7). Invoked synchronously inside the
-/// completion write transaction (`ActionItemRepository.applyCompletion`) so the
+/// completion write transaction (`TaskRepository.applyCompletion`) so the
 /// single-spawn guard and the completion write share one atomic context.
 ///
 /// Single-spawn guarantee: only fires when a task moves incomplete → complete
@@ -74,7 +74,7 @@ enum TaskRecurrenceService {
     /// completed. If the task carries a recurrence rule and the rule has not ended,
     /// inserts the next occurrence as a fresh incomplete task in the default stage.
     static func spawnNextIfNeeded(
-        for completed: ActionItem,
+        for completed: TaskItem,
         wasCompleted: Bool,
         db: Database,
         calendar: Calendar = .current
@@ -92,7 +92,7 @@ enum TaskRecurrenceService {
             .fetchOne(db)?.id
 
         let now = Date()
-        var next = ActionItem(
+        var next = TaskItem(
             meetingId: completed.meetingId,
             stageId: defaultStage,
             projectId: completed.projectId,

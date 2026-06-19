@@ -451,7 +451,7 @@ private struct PersonDetailView: View {
     @State private var showManage = false
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false
-    @State private var personOpenItems: [ActionItem] = []
+    @State private var personOpenItems: [TaskItem] = []
     @State private var dossierFacts: [EntityFact] = []
     @State private var factConflicts: [FactLinkDescriptor] = []
     @State private var healthSignals: [RelationshipHealth.Signal] = []

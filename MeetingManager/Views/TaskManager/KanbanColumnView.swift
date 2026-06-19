@@ -8,17 +8,17 @@ struct KanbanColumnView: View {
     /// nil = the synthetic leading "No stage" bucket (shown only when non-empty).
     let stage: TaskStage?
     let allStages: [TaskStage]
-    let items: [ActionItem]
+    let items: [TaskItem]
     let selectedIds: Set<Int64>
     /// Task ids with an incomplete blocker (PRJ-013 Phase 7) — drives the badge.
     var blockedIds: Set<Int64> = []
 
     let onDropTask: (Int64) -> Void          // a card was dropped here
-    let onMoveItem: (ActionItem, Int64?) -> Void
-    let onCompleteItem: (ActionItem) -> Void
-    let onShiftItem: (ActionItem, Int) -> Void
-    let onTapItem: (ActionItem) -> Void
-    let onToggleSelect: (ActionItem) -> Void
+    let onMoveItem: (TaskItem, Int64?) -> Void
+    let onCompleteItem: (TaskItem) -> Void
+    let onShiftItem: (TaskItem, Int) -> Void
+    let onTapItem: (TaskItem) -> Void
+    let onToggleSelect: (TaskItem) -> Void
     let onQuickAdd: (String) -> Void
 
     @State private var isDropTargeted = false

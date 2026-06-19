@@ -8,7 +8,7 @@ struct FolderDetailView: View {
 
     enum Tab { case notes, people, chat, thread }
     @State private var selectedTab: Tab = .notes
-    @State private var openItems: [ActionItem] = []
+    @State private var openItems: [TaskItem] = []
     @State private var thread: SeriesThread?
     @State private var conflicts: [FactLinkDescriptor] = []
     @State private var roiStats: MeetingROI.FolderStats?
@@ -43,7 +43,7 @@ struct FolderDetailView: View {
     }
 
     private func loadOpenItems() async {
-        let repo = ActionItemRepository(database: AppDatabase.shared)
+        let repo = TaskRepository(database: AppDatabase.shared)
         let ids = Set(folder.meetings.map(\.id))
         let all = (try? await repo.allOpenItems(limit: 200)) ?? []
         openItems = all.filter { $0.meetingId.map { ids.contains($0) } ?? false }

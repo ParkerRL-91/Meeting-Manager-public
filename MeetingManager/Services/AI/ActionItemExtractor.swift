@@ -32,9 +32,9 @@ final class ActionItemExtractor {
     func extractActionItems(
         for meeting: Meeting,
         transcriptRepo: TranscriptRepository,
-        actionItemRepo: ActionItemRepository,
+        actionItemRepo: TaskRepository,
         textGenerator: (String, String) async throws -> String
-    ) async throws -> [ActionItem] {
+    ) async throws -> [TaskItem] {
         isProcessing = true
         lastError = nil
         defer { isProcessing = false }
@@ -84,7 +84,7 @@ final class ActionItemExtractor {
         let dueDate: String?
     }
 
-    private func parseActionItems(from text: String, meetingId: String) throws -> [ActionItem] {
+    private func parseActionItems(from text: String, meetingId: String) throws -> [TaskItem] {
         // Strip markdown code fences if present
         let cleaned = text
             .replacingOccurrences(of: "```json", with: "")
@@ -112,7 +112,7 @@ final class ActionItemExtractor {
 
         let now = Date()
         return rawItems.map { raw in
-            ActionItem(
+            TaskItem(
                 meetingId: meetingId,
                 title: raw.title,
                 assignee: raw.assignee,

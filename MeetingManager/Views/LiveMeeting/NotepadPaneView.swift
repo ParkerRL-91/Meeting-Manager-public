@@ -332,7 +332,7 @@ struct NotepadPaneView: View {
         }
 
         // Save the action item
-        var item = ActionItem(
+        var item = TaskItem(
             meetingId: meetingId,
             title: parsed.title,
             assignee: parsed.assignee,
@@ -341,7 +341,7 @@ struct NotepadPaneView: View {
 
         Task {
             do {
-                try await ActionItemRepository().save(&item)
+                try await TaskRepository().save(&item)
                 await MainActor.run {
                     onActionCaptured?()
                 }

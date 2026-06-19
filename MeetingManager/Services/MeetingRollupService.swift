@@ -4,11 +4,11 @@ import Foundation
 /// design: bounded reads, no LLM, no network (see ADR-014). Used by the
 /// People/Companies detail panes.
 struct MeetingRollupService {
-    private let actionItemRepo: ActionItemRepository
+    private let actionItemRepo: TaskRepository
     private let summaryRepo: SummaryRepository
 
     init(
-        actionItemRepo: ActionItemRepository = ActionItemRepository(),
+        actionItemRepo: TaskRepository = TaskRepository(),
         summaryRepo: SummaryRepository = SummaryRepository(database: .shared)
     ) {
         self.actionItemRepo = actionItemRepo
@@ -17,7 +17,7 @@ struct MeetingRollupService {
 
     /// Open action items assigned to any of these participant names. One query
     /// with fuzzy assignee matching — best for a single person's profile.
-    func openActionItems(forParticipants participants: [String]) async -> [ActionItem] {
+    func openActionItems(forParticipants participants: [String]) async -> [TaskItem] {
         (try? await actionItemRepo.openItemsForParticipants(participants)) ?? []
     }
 
@@ -27,9 +27,9 @@ struct MeetingRollupService {
     func openActionItems(
         forMeetings meetings: [Meeting],
         cap: Int = 40
-    ) async -> [(meeting: Meeting, items: [ActionItem])] {
+    ) async -> [(meeting: Meeting, items: [TaskItem])] {
         let recent = meetings.sorted { $0.effectiveDate > $1.effectiveDate }.prefix(cap)
-        var out: [(meeting: Meeting, items: [ActionItem])] = []
+        var out: [(meeting: Meeting, items: [TaskItem])] = []
         for meeting in recent {
             let open = ((try? await actionItemRepo.acceptedItemsForMeeting(meeting.id)) ?? [])
                 .filter { !$0.isCompleted }

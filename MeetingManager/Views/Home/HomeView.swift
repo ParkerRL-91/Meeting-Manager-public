@@ -16,7 +16,7 @@ struct HomeView: View {
     @State private var prepBriefDebounce: DispatchWorkItem?
     @State private var authManager = GoogleAuthManager()
     @AppStorage("home.calendarBannerDismissed") private var calendarBannerDismissed: Bool = false
-    @State private var openActionItems: [ActionItem] = []
+    @State private var openActionItems: [TaskItem] = []
     @State private var latestDigest: WeeklyDigestRecord?
     @State private var digestExpanded = false
     @State private var actionItemMeetingTitles: [String: String] = [:]
@@ -147,7 +147,7 @@ struct HomeView: View {
                                 onToggle: {
                                     guard let id = item.id else { return }
                                     Task {
-                                        try? await ActionItemRepository(database: AppDatabase.shared).toggleComplete(id: id)
+                                        try? await TaskRepository(database: AppDatabase.shared).toggleComplete(id: id)
                                         await loadOpenActionItems()
                                     }
                                 },
@@ -267,7 +267,7 @@ struct HomeView: View {
     // MARK: - Cache
 
     private func loadOpenActionItems() async {
-        let repo = ActionItemRepository(database: AppDatabase.shared)
+        let repo = TaskRepository(database: AppDatabase.shared)
         let items = (try? await repo.allOpenItems(limit: 10)) ?? []
         var titles: [String: String] = [:]
         for id in Set(items.compactMap(\.meetingId)) {
@@ -518,7 +518,7 @@ private struct RecentMeetingRow: View {
 // MARK: - Home Action Item Row (TASK-042)
 
 private struct HomeActionItemRow: View {
-    let item: ActionItem
+    let item: TaskItem
     let meetingTitle: String?
     let onToggle: () -> Void
     let onOpenMeeting: () -> Void

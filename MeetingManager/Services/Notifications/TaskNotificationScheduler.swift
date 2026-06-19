@@ -19,7 +19,7 @@ extension NotificationService {
     }
 
     /// The moment a task should ping: explicit `reminderAt` wins over `dueDate`.
-    static func fireDate(for task: ActionItem) -> Date? {
+    static func fireDate(for task: TaskItem) -> Date? {
         task.reminderAt ?? task.dueDate
     }
 
@@ -28,7 +28,7 @@ extension NotificationService {
     /// Schedule (or replace) the single due alert for one task. No-ops when the
     /// task has no fire date or the fire date is in the past.
     @discardableResult
-    func scheduleTaskDueNotification(for task: ActionItem) async -> Bool {
+    func scheduleTaskDueNotification(for task: TaskItem) async -> Bool {
         guard let id = task.id else { return false }
         guard let fire = Self.fireDate(for: task) else { return false }
 
@@ -90,7 +90,7 @@ extension NotificationService {
     /// `tasks` is the live dated-and-incomplete candidate set. When `enabled` is
     /// false every per-task alert is cancelled (the Settings toggle is off).
     @discardableResult
-    func rescheduleAllTaskNotificationsAsync(tasks: [ActionItem], enabled: Bool) async -> (added: Int, kept: Int, removed: Int) {
+    func rescheduleAllTaskNotificationsAsync(tasks: [TaskItem], enabled: Bool) async -> (added: Int, kept: Int, removed: Int) {
         guard enabled else {
             await cancelAllTaskNotifications()
             return (0, 0, 0)
@@ -100,7 +100,7 @@ extension NotificationService {
 
         // Desired set keyed by identifier.
         var desired: [String: Date] = [:]
-        var taskByIdentifier: [String: ActionItem] = [:]
+        var taskByIdentifier: [String: TaskItem] = [:]
         for task in tasks {
             guard let id = task.id, let fire = Self.fireDate(for: task) else { continue }
             guard fire.timeIntervalSinceNow >= 1 else { continue }
@@ -151,7 +151,7 @@ extension NotificationService {
         }
     }
 
-    private static func taskBody(for task: ActionItem) -> String {
+    private static func taskBody(for task: TaskItem) -> String {
         if let assignee = task.assignee, !assignee.isEmpty {
             return "\(task.title) — \(assignee)"
         }

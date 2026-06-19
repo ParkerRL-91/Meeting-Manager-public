@@ -29,6 +29,13 @@ final class TaskStageRepository {
 
     /// Deletes a stage after moving its tasks to `reassignTo` (or, if nil, the
     /// default stage, or any other stage). Refuses to delete the last stage.
+    ///
+    /// Guarantees the stage invariants survive the deletion even when the deleted
+    /// stage was the sole default/terminal: if the survivor set has no `isDefault`,
+    /// the left-most survivor is promoted to default; if it has no `isTerminal`,
+    /// the right-most survivor is promoted to terminal — in the same transaction.
+    /// Enforcing against the survivor set (not the deleted stage's flags) also
+    /// self-heals a board that was already skewed.
     func delete(id: Int64, reassignTo: Int64? = nil) async throws {
         try await database.writer.write { db in
             let remaining = try TaskStage.filter(TaskStage.Columns.id != id)
@@ -42,6 +49,20 @@ final class TaskStageRepository {
                 arguments: [fallback, Date(), id]
             )
             _ = try TaskStage.deleteOne(db, key: id)
+
+            let now = Date()
+            if !remaining.contains(where: { $0.isDefault }), let promote = remaining.first?.id {
+                try db.execute(
+                    sql: "UPDATE taskStage SET isDefault = (id = ?), updatedAt = ?",
+                    arguments: [promote, now]
+                )
+            }
+            if !remaining.contains(where: { $0.isTerminal }), let promote = remaining.last?.id {
+                try db.execute(
+                    sql: "UPDATE taskStage SET isTerminal = 1, updatedAt = ? WHERE id = ?",
+                    arguments: [now, promote]
+                )
+            }
         }
     }
 

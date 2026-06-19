@@ -239,7 +239,7 @@ final class AppState {
     let enhancedNoteRepository: EnhancedNoteRepository
     /// Unified task model repository (PRJ-013). Held so the AppDelegate and the
     /// per-task notification reconcile can reach it via `AppState.shared`.
-    let taskRepository: ActionItemRepository
+    let taskRepository: TaskRepository
     let audioCaptureService: AudioCaptureService
     let transcriptionService: TranscriptionService
     let appleSpeechTranscriber: AppleSpeechTranscriber
@@ -377,7 +377,7 @@ final class AppState {
         self.noteRepository = NoteRepository(database: database)
         self.summaryRepository = SummaryRepository(database: database)
         self.enhancedNoteRepository = EnhancedNoteRepository(database: database)
-        self.taskRepository = ActionItemRepository(database: database)
+        self.taskRepository = TaskRepository(database: database)
         self.audioCaptureService = AudioCaptureService()
 
         let txService = TranscriptionService()
@@ -751,7 +751,7 @@ final class AppState {
         let ids = meetings.map(\.id)
         let facts = (try? await EntityFactRepository(database: database)
             .factsForMeetings(ids)) ?? []
-        let openItems = (try? await ActionItemRepository(database: database).allOpenItems(limit: 50)) ?? []
+        let openItems = (try? await TaskRepository(database: database).allOpenItems(limit: 50)) ?? []
 
         var data: [String] = []
         data.append("Meetings (\(meetings.count)):")
@@ -1259,7 +1259,7 @@ final class AppState {
     private func extractActionItemsBestEffort(meetingId: String) async {
         do {
             guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
-            let repo = ActionItemRepository(database: database)
+            let repo = TaskRepository(database: database)
             let existing = try await repo.itemsForMeeting(meetingId)
             guard existing.isEmpty else { return }
             guard let textGen = await makeTextGenerator(
@@ -2563,9 +2563,9 @@ final class AppState {
 
     /// P5-T02: Loads open action items for a set of prior meetings, preserving order.
     /// Used by the summary prompt to carry forward unfinished items across a series.
-    private func fetchOpenActionItems(for meetings: [Meeting]) async -> [(Meeting, [ActionItem])] {
-        let repo = ActionItemRepository(database: database)
-        var result: [(Meeting, [ActionItem])] = []
+    private func fetchOpenActionItems(for meetings: [Meeting]) async -> [(Meeting, [TaskItem])] {
+        let repo = TaskRepository(database: database)
+        var result: [(Meeting, [TaskItem])] = []
         for m in meetings {
             // Gated to accepted, non-deleted items so inbox suggestions never
             // leak into the series carry-forward prompt (PRJ-013).

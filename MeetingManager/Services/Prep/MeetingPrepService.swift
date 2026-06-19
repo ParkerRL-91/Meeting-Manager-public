@@ -9,7 +9,7 @@ import os
 struct MeetingPrepBrief: Sendable {
     let meetingId: String
     let participants: [String]
-    let openActionItems: [ActionItem]
+    let openActionItems: [TaskItem]
     let relatedMeetings: [RelevantMeeting]
     let lastSummaryExcerpt: String?
     let meetLink: String?
@@ -69,7 +69,7 @@ enum SinceLastMetBuilder {
     static func build(person: String, upcomingMeeting: Meeting,
                       allMeetings: [Meeting], database: AppDatabase,
                       transcriptRepo: TranscriptRepository,
-                      actionItemRepo: ActionItemRepository) async -> SinceLastMet? {
+                      actionItemRepo: TaskRepository) async -> SinceLastMet? {
         let personKey = VocativeMiningService.canonicalKey(for: person)
         guard !personKey.isEmpty,
               let last = lastMeeting(with: personKey, before: Date(),
@@ -127,17 +127,17 @@ struct PreviousSessionInfo: Sendable {
 // MARK: - Meeting Prep Service
 
 /// Produces a `MeetingPrepBrief` for any meeting by aggregating data from
-/// `RelevantMeetingService`, `ActionItemRepository`, and `SummaryRepository`.
+/// `RelevantMeetingService`, `TaskRepository`, and `SummaryRepository`.
 /// This is the foundation service for the "Always Prepared" feature set —
 /// used by prep cards, "Up Next" banners, smart notifications, and daily briefs.
 final class MeetingPrepService {
     private let database: AppDatabase
-    private let actionItemRepo: ActionItemRepository
+    private let actionItemRepo: TaskRepository
     private let summaryRepo: SummaryRepository
 
     init(database: AppDatabase = .shared) {
         self.database = database
-        self.actionItemRepo = ActionItemRepository(database: database)
+        self.actionItemRepo = TaskRepository(database: database)
         self.summaryRepo = SummaryRepository(database: database)
     }
 

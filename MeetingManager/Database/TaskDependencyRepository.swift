@@ -34,8 +34,8 @@ final class TaskDependencyRepository {
         }
     }
 
-    /// The blocker `ActionItem`s for a task, in dependency order.
-    func blockers(of taskId: Int64) async throws -> [ActionItem] {
+    /// The blocker `TaskItem`s for a task, in dependency order.
+    func blockers(of taskId: Int64) async throws -> [TaskItem] {
         try await database.writer.read { db in
             let ids = try TaskDependency
                 .filter(TaskDependency.Columns.taskId == taskId)
@@ -43,9 +43,9 @@ final class TaskDependencyRepository {
                 .fetchAll(db)
                 .map(\.dependsOnTaskId)
             guard !ids.isEmpty else { return [] }
-            let rows = try ActionItem
-                .filter(ids.contains(ActionItem.Columns.id))
-                .filter(ActionItem.Columns.deletedAt == nil)
+            let rows = try TaskItem
+                .filter(ids.contains(TaskItem.Columns.id))
+                .filter(TaskItem.Columns.deletedAt == nil)
                 .fetchAll(db)
             // Preserve dependency-edge order.
             let byId = Dictionary(uniqueKeysWithValues: rows.compactMap { item in item.id.map { ($0, item) } })
@@ -80,10 +80,10 @@ final class TaskDependencyRepository {
             .fetchAll(db)
             .map(\.dependsOnTaskId)
         guard !blockerIds.isEmpty else { return false }
-        let incomplete = try ActionItem
-            .filter(blockerIds.contains(ActionItem.Columns.id))
-            .filter(ActionItem.Columns.deletedAt == nil)
-            .filter(ActionItem.Columns.isCompleted == false)
+        let incomplete = try TaskItem
+            .filter(blockerIds.contains(TaskItem.Columns.id))
+            .filter(TaskItem.Columns.deletedAt == nil)
+            .filter(TaskItem.Columns.isCompleted == false)
             .fetchCount(db)
         return incomplete > 0
     }

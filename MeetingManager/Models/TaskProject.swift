@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-/// A project groups tasks (`ActionItem.projectId`). Created in v62 (PRJ-013
+/// A project groups tasks (`TaskItem.projectId`). Created in v62 (PRJ-013
 /// Phase 7). Deleting a project clears `projectId` on its tasks in app code — the
 /// ALTER-added column carries no DB cascade.
 struct TaskProject: Identifiable, Codable, Equatable, Hashable {

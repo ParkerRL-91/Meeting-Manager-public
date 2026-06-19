@@ -129,7 +129,7 @@ final class RelevantMeetingService {
     private func gatherOpenActionItems(for meeting: Meeting) async -> String {
         let participants = meeting.participantList
         guard !participants.isEmpty else { return "" }
-        let repo = ActionItemRepository(database: database)
+        let repo = TaskRepository(database: database)
         let items = (try? await repo.openItemsForParticipants(participants)) ?? []
         guard !items.isEmpty else { return "" }
         return items.prefix(20).map { item in

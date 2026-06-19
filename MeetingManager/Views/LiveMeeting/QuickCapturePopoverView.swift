@@ -150,7 +150,7 @@ struct QuickCapturePopoverView: View {
         let parsedDate = NaturalLanguageDateParser.parse(dueDateText)
         let trimmedAssignee = assigneeText.trimmingCharacters(in: .whitespaces)
 
-        var item = ActionItem(
+        var item = TaskItem(
             meetingId: meetingId,
             title: trimmedTitle,
             assignee: trimmedAssignee.isEmpty ? nil : trimmedAssignee,
@@ -159,7 +159,7 @@ struct QuickCapturePopoverView: View {
 
         Task {
             do {
-                try await ActionItemRepository().save(&item)
+                try await TaskRepository().save(&item)
                 await MainActor.run {
                     isSaving = false
                     onSave()

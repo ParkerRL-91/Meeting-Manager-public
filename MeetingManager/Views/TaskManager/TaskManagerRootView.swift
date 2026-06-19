@@ -30,7 +30,7 @@ struct TaskManagerRootView: View {
     /// One-shot flag: the first-run task tour is shown once per install.
     @AppStorage("tasks.hasSeenTour") private var hasSeenTour = false
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
 
     var body: some View {
         HSplitView {
@@ -151,7 +151,7 @@ struct TaskManagerRootView: View {
         .id("\(tab.id)-\(refreshToken)-\(projectFilter.map(String.init) ?? "all")")
     }
 
-    private func openTask(_ item: ActionItem) {
+    private func openTask(_ item: TaskItem) {
         appState.selectedTaskId = item.id
     }
 

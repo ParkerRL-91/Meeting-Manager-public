@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// files/images (pick, drop, paste) with inline thumbnails and open-in-Finder.
 ///
 /// All persistence routes through the single owners: edits via
-/// `ActionItemRepository.save`, completion via `setCompleted`, stage via
+/// `TaskRepository.save`, completion via `setCompleted`, stage via
 /// `moveToStage`. Completing every subtask does NOT auto-complete the parent.
 ///
 /// PRJ-013 Phase 7 adds a project picker, a dependencies (blocked-by) picker with a
@@ -22,13 +22,13 @@ struct TaskDetailView: View {
 
     @Environment(AppState.self) private var appState
 
-    @State private var item: ActionItem?
+    @State private var item: TaskItem?
     @State private var stages: [TaskStage] = []
     @State private var projects: [TaskProject] = []
-    @State private var subtasks: [ActionItem] = []
+    @State private var subtasks: [TaskItem] = []
     @State private var attachments: [TaskAttachment] = []
-    @State private var blockers: [ActionItem] = []
-    @State private var candidateBlockers: [ActionItem] = []
+    @State private var blockers: [TaskItem] = []
+    @State private var candidateBlockers: [TaskItem] = []
     @State private var meetingTitle: String?
     @State private var isLoading = true
     @State private var errorMessage: String?
@@ -52,7 +52,7 @@ struct TaskDetailView: View {
     @State private var hasReminder = false
     @State private var reminderAt = Date()
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
     private let stageRepo = TaskStageRepository(database: .shared)
     private let projectRepo = TaskProjectRepository(database: .shared)
     private let dependencyRepo = TaskDependencyRepository(database: .shared)
@@ -285,7 +285,7 @@ struct TaskDetailView: View {
         }
     }
 
-    private func blockerRow(_ blocker: ActionItem) -> some View {
+    private func blockerRow(_ blocker: TaskItem) -> some View {
         HStack(spacing: 8) {
             Image(systemName: blocker.isCompleted ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 13))
@@ -346,7 +346,7 @@ struct TaskDetailView: View {
         }
     }
 
-    private func subtaskRow(_ sub: ActionItem, index: Int) -> some View {
+    private func subtaskRow(_ sub: TaskItem, index: Int) -> some View {
         HStack(spacing: 8) {
             Button { Task { await completeSubtask(sub) } } label: {
                 Image(systemName: sub.isCompleted ? "checkmark.circle.fill" : "circle")
@@ -627,7 +627,7 @@ struct TaskDetailView: View {
 
     // MARK: - Recurrence (PRJ-013 Phase 7)
 
-    private func seedRecurrence(from fetched: ActionItem) {
+    private func seedRecurrence(from fetched: TaskItem) {
         if let rule = TaskRecurrenceRule.decode(fetched.recurrenceRuleJSON) {
             isRecurring = true
             recurrenceFrequency = rule.frequency
@@ -670,7 +670,7 @@ struct TaskDetailView: View {
         }
     }
 
-    private func addBlocker(_ blocker: ActionItem) async {
+    private func addBlocker(_ blocker: TaskItem) async {
         guard let blockerId = blocker.id else { return }
         do {
             try await dependencyRepo.add(taskId: taskId, dependsOnTaskId: blockerId)
@@ -682,7 +682,7 @@ struct TaskDetailView: View {
         onChange()
     }
 
-    private func removeBlocker(_ blocker: ActionItem) async {
+    private func removeBlocker(_ blocker: TaskItem) async {
         guard let blockerId = blocker.id else { return }
         try? await dependencyRepo.remove(taskId: taskId, dependsOnTaskId: blockerId)
         blockers = (try? await dependencyRepo.blockers(of: taskId)) ?? []
@@ -708,7 +708,7 @@ struct TaskDetailView: View {
     private func addSubtask() async {
         let trimmed = newSubtaskTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        var sub = ActionItem(
+        var sub = TaskItem(
             parentTaskId: taskId,
             title: trimmed,
             triageState: .accepted,
@@ -719,14 +719,14 @@ struct TaskDetailView: View {
         subtasks = (try? await repo.subtasks(of: taskId)) ?? []
     }
 
-    private func completeSubtask(_ sub: ActionItem) async {
+    private func completeSubtask(_ sub: TaskItem) async {
         guard let id = sub.id else { return }
         // Completing every subtask must NOT auto-complete the parent (manual only).
         try? await repo.setCompleted(id: id, !sub.isCompleted)
         subtasks = (try? await repo.subtasks(of: taskId)) ?? []
     }
 
-    private func deleteSubtask(_ sub: ActionItem) async {
+    private func deleteSubtask(_ sub: TaskItem) async {
         guard let id = sub.id else { return }
         try? await repo.softDelete(id: id)
         subtasks = (try? await repo.subtasks(of: taskId)) ?? []

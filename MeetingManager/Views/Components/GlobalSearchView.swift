@@ -12,7 +12,7 @@ struct GlobalSearchView: View {
     @State private var titleHits: [Meeting] = []
     @State private var transcriptHits: [(meeting: Meeting, snippet: String)] = []
     @State private var peopleHits: [Person] = []
-    @State private var itemHits: [(item: ActionItem, meetingTitle: String?)] = []
+    @State private var itemHits: [(item: TaskItem, meetingTitle: String?)] = []
     @State private var discussedBy: [PersonTopicAffinity.Ranked] = []
     @State private var glossaryHits: [GlossaryTerm] = []
     @State private var slideHits: [(slide: MeetingSlide, meetingTitle: String?)] = []
@@ -358,7 +358,7 @@ struct GlobalSearchView: View {
                    || $0.aliases.contains { $0.lowercased().contains(lowered) } }
             .prefix(5)
 
-        let openItems = ((try? await ActionItemRepository(database: AppDatabase.shared).allOpenItems(limit: 100)) ?? [])
+        let openItems = ((try? await TaskRepository(database: AppDatabase.shared).allOpenItems(limit: 100)) ?? [])
             .filter { $0.title.lowercased().contains(lowered)
                    || ($0.assignee?.lowercased().contains(lowered) ?? false) }
             .prefix(5)

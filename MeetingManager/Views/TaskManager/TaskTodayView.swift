@@ -8,15 +8,15 @@ import SwiftUI
 struct TaskTodayView: View {
     /// When set, only tasks in this project are shown (PRJ-013 Phase 7).
     var projectFilter: Int64? = nil
-    let onOpenTask: (ActionItem) -> Void
+    let onOpenTask: (TaskItem) -> Void
 
-    @State private var overdue: [ActionItem] = []
-    @State private var dueToday: [ActionItem] = []
-    @State private var upcoming: [ActionItem] = []
-    @State private var noDate: [ActionItem] = []
+    @State private var overdue: [TaskItem] = []
+    @State private var dueToday: [TaskItem] = []
+    @State private var upcoming: [TaskItem] = []
+    @State private var noDate: [TaskItem] = []
     @State private var isLoading = false
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
 
     private var isEmpty: Bool {
         overdue.isEmpty && dueToday.isEmpty && upcoming.isEmpty && noDate.isEmpty
@@ -50,7 +50,7 @@ struct TaskTodayView: View {
     }
 
     @ViewBuilder
-    private func section(_ title: String, _ items: [ActionItem], tint: Color) -> some View {
+    private func section(_ title: String, _ items: [TaskItem], tint: Color) -> some View {
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
@@ -75,14 +75,14 @@ struct TaskTodayView: View {
         }
     }
 
-    private func complete(_ item: ActionItem) async {
+    private func complete(_ item: TaskItem) async {
         guard let id = item.id else { return }
         try? await repo.setCompleted(id: id, !item.isCompleted)
         await load()
     }
 
     /// "+1 day" from the task's current due date (or today if it had none).
-    private func snooze(_ item: ActionItem, days: Int) async {
+    private func snooze(_ item: TaskItem, days: Int) async {
         guard let id = item.id else { return }
         let base = item.dueDate ?? Calendar.current.startOfDay(for: Date())
         let next = Calendar.current.date(byAdding: .day, value: days, to: base) ?? base
@@ -91,7 +91,7 @@ struct TaskTodayView: View {
     }
 
     /// "This weekend" — the upcoming Saturday.
-    private func snoozeToWeekend(_ item: ActionItem) async {
+    private func snoozeToWeekend(_ item: TaskItem) async {
         guard let id = item.id else { return }
         let start = Calendar.current.startOfDay(for: Date())
         var target = start
@@ -120,7 +120,7 @@ struct TaskTodayView: View {
     }
 
     /// Applies the active project filter (PRJ-013 Phase 7).
-    private func projected(_ items: [ActionItem]) -> [ActionItem] {
+    private func projected(_ items: [TaskItem]) -> [TaskItem] {
         guard let projectFilter else { return items }
         return items.filter { $0.projectId == projectFilter }
     }
@@ -129,7 +129,7 @@ struct TaskTodayView: View {
 /// Shared flat row used by Today / All lists. The snooze callbacks are optional so
 /// the All list can reuse the row without offering defer verbs.
 struct TaskRowView: View {
-    let item: ActionItem
+    let item: TaskItem
     let onComplete: () -> Void
     let onTap: () -> Void
     var onSnoozeOneDay: (() -> Void)? = nil

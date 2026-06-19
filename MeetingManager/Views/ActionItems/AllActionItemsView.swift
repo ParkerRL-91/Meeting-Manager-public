@@ -3,11 +3,11 @@ import SwiftUI
 struct AllActionItemsView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
-    @State private var openItems: [ActionItem] = []
+    @State private var openItems: [TaskItem] = []
     @State private var meetings: [String: Meeting] = [:]
     @State private var isLoading = true
 
-    private let actionItemRepo = ActionItemRepository()
+    private let actionItemRepo = TaskRepository()
 
     var body: some View {
         Group {
@@ -55,7 +55,7 @@ struct AllActionItemsView: View {
 
     // MARK: - Grouped List
 
-    private var groupedItems: [(Meeting?, [ActionItem])] {
+    private var groupedItems: [(Meeting?, [TaskItem])] {
         let grouped = Dictionary(grouping: openItems) { $0.meetingId ?? "" }
         return grouped.map { meetingId, items in
             (meetings[meetingId], items)
@@ -100,7 +100,7 @@ struct AllActionItemsView: View {
     // MARK: - Row
 
     @ViewBuilder
-    private func actionItemRow(_ item: ActionItem) -> some View {
+    private func actionItemRow(_ item: TaskItem) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Button {
                 guard let itemId = item.id else { return }

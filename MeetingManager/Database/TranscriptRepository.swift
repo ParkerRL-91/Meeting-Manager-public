@@ -11,7 +11,7 @@ final class TranscriptRepository {
 
     func save(_ transcript: inout Transcript) async throws {
         // Return the saved record so the auto-assigned rowid propagates back
-        // (see ActionItemRepository.save).
+        // (see TaskRepository.save).
         let input = transcript
         transcript = try await database.writer.write { db in
             var copy = input

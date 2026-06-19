@@ -4,9 +4,9 @@ import SwiftUI
 /// (drag), keyboard (the board owns ⌃⌘←/→ shortcuts and routes to the selected
 /// card), context menu ("Move to stage ▸"), and VoiceOver (`accessibilityActions`
 /// mirroring the move verbs). Every move funnels through the board's `onMove`,
-/// which calls `ActionItemRepository.moveToStage`.
+/// which calls `TaskRepository.moveToStage`.
 struct TaskCardView: View {
-    let item: ActionItem
+    let item: TaskItem
     let stages: [TaskStage]
     let isSelected: Bool
     /// True when an incomplete blocker exists (PRJ-013 Phase 7) — shows a badge.

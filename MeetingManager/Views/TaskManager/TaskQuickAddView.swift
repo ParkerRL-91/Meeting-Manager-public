@@ -11,7 +11,7 @@ import SwiftUI
 /// TaskQueueManager job.
 struct TaskQuickAddView: View {
     /// Called after a successful add so a host (e.g. the board) can refresh.
-    var onAdded: ((ActionItem) -> Void)? = nil
+    var onAdded: ((TaskItem) -> Void)? = nil
     /// Called when the user asks to open the just-added task (deep-link).
     var onOpenTask: ((Int64) -> Void)? = nil
 
@@ -22,7 +22,7 @@ struct TaskQuickAddView: View {
     @State private var isParsing = false
     @FocusState private var fieldFocused: Bool
 
-    private let repo = ActionItemRepository(database: .shared)
+    private let repo = TaskRepository(database: .shared)
 
     private struct Confirmation: Identifiable {
         let id = UUID()
@@ -134,7 +134,7 @@ struct TaskQuickAddView: View {
         parsed = await parser.aiEnhance(raw: raw, base: parsed, textGenerator: textGen)
         isParsing = false
 
-        var item = ActionItem(
+        var item = TaskItem(
             title: parsed.title,
             dueDate: parsed.dueDate,
             triageState: .accepted,

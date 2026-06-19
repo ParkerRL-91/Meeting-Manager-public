@@ -9,7 +9,7 @@ import os
 ///
 /// Imported items are `triageState=.accepted` (they are real tasks, not AI
 /// suggestions, so they must not drown the triage inbox) and `source="import"`.
-/// Completion/stage routes through `ActionItemRepository.applyCompletion` (via
+/// Completion/stage routes through `TaskRepository.applyCompletion` (via
 /// `insertImported`) — never a raw `isCompleted` write.
 @MainActor
 final class TaskImportService {
@@ -24,7 +24,7 @@ final class TaskImportService {
     }
 
     private let reminders = RemindersService.shared
-    private let repo = ActionItemRepository()
+    private let repo = TaskRepository()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager", category: "task-import")
 
     /// Requests access, reads every reminder, and creates accepted tasks for the
@@ -44,7 +44,7 @@ final class TaskImportService {
         var seen = Set(existing.map { dedupeKey(title: $0.title, dueDate: $0.dueDate) })
 
         let cal = Calendar.current
-        var toInsert: [(item: ActionItem, completed: Bool)] = []
+        var toInsert: [(item: TaskItem, completed: Bool)] = []
 
         for (reminder, listTitle) in fetched {
             let title = (reminder.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -55,7 +55,7 @@ final class TaskImportService {
             guard !seen.contains(key) else { continue }
             seen.insert(key)
 
-            var item = ActionItem(
+            var item = TaskItem(
                 title: title,
                 dueDate: dueDate,
                 triageState: .accepted,
