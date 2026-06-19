@@ -2810,7 +2810,10 @@ final class AppState {
     /// Serialization flag — prevents concurrent meeting-start attempts from racing.
     /// The state machine's `currentMeeting == nil` guard is necessary but not sufficient
     /// because multiple async Tasks can read it as nil before any of them set it.
-    private var isStartingMeeting = false
+    /// `private(set)` so the sidebar can show a "Starting recording…" banner while a
+    /// start is in flight; the audio stack takes 1–3 s to come up and otherwise the
+    /// recording UI appears with no preceding feedback.
+    private(set) var isStartingMeeting = false
 
     /// Mirror of `isStartingMeeting` for the stop side — user Stop, silence
     /// auto-stop, and the ⌘-shortcut notification can race.

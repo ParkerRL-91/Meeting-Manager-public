@@ -25,6 +25,7 @@ struct TaskManagerRootView: View {
     /// Bumped after a detail edit so the active surface reloads.
     @State private var refreshToken = 0
     @State private var showQuickAdd = false
+    @State private var showAICompose = false
     @State private var showTour = false
     /// Transient "Deleted · Undo" snackbar shown after a soft-delete in the detail
     /// pane (which unmounts on delete, so the snackbar lives here, above it).
@@ -79,6 +80,17 @@ struct TaskManagerRootView: View {
                 }
             )
         }
+        .sheet(isPresented: $showAICompose) {
+            TaskAIComposeView(
+                onAdded: { _ in
+                    refreshToken += 1
+                    Task { await refreshInboxCount() }
+                },
+                onOpenTask: { id in
+                    appState.selectedTaskId = id
+                }
+            )
+        }
         .task {
             await refreshInboxCount()
             if !hasSeenTour { showTour = true }
@@ -90,6 +102,14 @@ struct TaskManagerRootView: View {
         HStack(spacing: 12) {
             picker
             Spacer()
+            Button {
+                showAICompose = true
+            } label: {
+                Label("Create with AI", systemImage: "sparkles")
+            }
+            .buttonStyle(.borderless)
+            .help("Describe a task in plain language; AI fills in the date, recurrence, and details")
+            .keyboardShortcut("n", modifiers: [.command, .option])
             Button {
                 showQuickAdd = true
             } label: {

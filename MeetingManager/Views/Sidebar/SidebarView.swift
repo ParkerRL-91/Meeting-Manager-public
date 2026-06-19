@@ -223,7 +223,10 @@ struct SidebarView: View {
             // Status banners (recording bar / call-detected) sit just above
             // the model-download footer, still inside the pinned region so
             // a long folder list never hides the active-recording indicator.
-            if appState.isRecording, let meeting = appState.activeMeeting {
+            if appState.isStartingMeeting && !appState.isRecording {
+                SidebarStartingBar()
+                Divider()
+            } else if appState.isRecording, let meeting = appState.activeMeeting {
                 SidebarRecordingBar(meeting: meeting, capture: appState.audioCaptureService)
                 if let prompt = appState.departurePrompt {
                     DepartureConfirmBar(prompt: prompt)
@@ -413,6 +416,40 @@ private struct NavItem: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Sidebar Starting Bar
+
+/// Shown in the sidebar from the instant a start is requested until audio is
+/// actually live (`isStartingMeeting && !isRecording`). The audio stack —
+/// ScreenCaptureKit then mic acquisition — takes 1–3 s to come up; without this
+/// the recording UI would appear out of nowhere with no preceding feedback.
+/// Uses the recording bar's tint so the transition into `SidebarRecordingBar`
+/// is seamless.
+private struct SidebarStartingBar: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(Color.appRecording)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Starting recording…")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appRecording)
+                Text("Setting up audio…")
+                    .font(.caption2)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.appRecording.opacity(0.08))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Starting recording, setting up audio")
     }
 }
 
