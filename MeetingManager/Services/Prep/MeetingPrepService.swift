@@ -92,7 +92,7 @@ enum SinceLastMetBuilder {
         let open = (try? await actionItemRepo.openItemsForParticipants([person])) ?? []
         for item in open.prefix(2) {
             items.append(.init(kind: "actionItem", text: item.title,
-                               meetingId: item.meetingId, meetingTitle: titles[item.meetingId]))
+                               meetingId: item.meetingId, meetingTitle: item.meetingId.flatMap { titles[$0] }))
         }
 
         // Mentions in meetings they did NOT attend (first name, window-bound).

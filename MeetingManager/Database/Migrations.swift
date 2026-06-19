@@ -1367,5 +1367,117 @@ enum Migrations {
                 t.add(column: "firstDeferredAt", .datetime)
             }
         }
+
+        // PRJ-013 TASK-096: Task Management foundation. Evolves the minimal
+        // `actionItem` table into the unified task model and adds the Kanban
+        // stage + attachment tables. The recreate is required because SQLite
+        // cannot relax `meetingId`'s NOT NULL or change its FK action via ALTER —
+        // we need `meetingId` nullable (manual/standalone tasks) with ON DELETE
+        // SET NULL so deleting a meeting no longer deletes accepted tasks.
+        // GRDB's migrator runs this with deferred FK checks automatically (it
+        // sets PRAGMA foreign_keys=OFF and calls checkForeignKeys() before
+        // commit) — do NOT toggle FK checks here. Precedent: v51-taskqueue-sentinels.
+        migrator.registerMigration("v61-task-system-core") { db in
+            // 1) Kanban stages — created first so the actionItem backfill can
+            //    reference the seeded stage ids.
+            try db.create(table: "taskStage") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("sortOrder", .double).notNull().defaults(to: 0)
+                t.column("colorHex", .text)
+                t.column("isTerminal", .boolean).notNull().defaults(to: false)
+                t.column("wipLimit", .integer)
+                t.column("isDefault", .boolean).notNull().defaults(to: false)
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("updatedAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.execute(sql: """
+                INSERT INTO taskStage (name, sortOrder, isTerminal, isDefault) VALUES
+                    ('To Do', 0, 0, 1),
+                    ('In Progress', 1, 0, 0),
+                    ('Blocked', 2, 0, 0),
+                    ('Done', 3, 1, 0)
+                """)
+
+            // 2) Recreate `actionItem` with the expanded task schema.
+            let sourceCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM actionItem") ?? 0
+            try db.create(table: "actionItem_new") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).references("meeting", onDelete: .setNull)
+                t.column("parentTaskId", .integer)   // self-ref enforced in app code
+                t.column("stageId", .integer).references("taskStage", onDelete: .setNull)
+                t.column("title", .text).notNull()
+                t.column("assignee", .text)
+                t.column("assigneePersonId", .text)
+                t.column("dueDate", .datetime)
+                t.column("reminderAt", .datetime)
+                t.column("isCompleted", .boolean).notNull().defaults(to: false)
+                t.column("completedAt", .datetime)
+                t.column("triageState", .text).notNull().defaults(to: "accepted")
+                t.column("priority", .integer).notNull().defaults(to: 0)
+                t.column("notes", .text)
+                t.column("tagsJSON", .text)
+                t.column("sortOrder", .double).notNull().defaults(to: 0)
+                t.column("recurrenceRuleJSON", .text)
+                t.column("source", .text)
+                t.column("extractedAt", .datetime).notNull()
+                t.column("createdAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("updatedAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+                t.column("archivedAt", .datetime)
+                t.column("deletedAt", .datetime)
+            }
+            // Existing rows are real (pre-queue) action items → 'accepted'. Set
+            // completedAt for already-completed rows so the isCompleted⇄completedAt
+            // invariant holds. createdAt/updatedAt seed from extractedAt.
+            try db.execute(sql: """
+                INSERT INTO actionItem_new
+                    (id, meetingId, title, assignee, dueDate, isCompleted, extractedAt,
+                     triageState, priority, sortOrder, source, createdAt, updatedAt, completedAt)
+                SELECT id, meetingId, title, assignee, dueDate, isCompleted, extractedAt,
+                       'accepted', 0, 0, 'meeting', extractedAt, extractedAt,
+                       CASE WHEN isCompleted = 1 THEN extractedAt ELSE NULL END
+                FROM actionItem
+                """)
+            let copiedCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM actionItem_new") ?? -1
+            guard copiedCount == sourceCount else {
+                throw DatabaseError(message: "v61 actionItem recreate row mismatch: source=\(sourceCount) copied=\(copiedCount)")
+            }
+            try db.drop(table: "actionItem")
+            try db.rename(table: "actionItem_new", to: "actionItem")
+
+            // Backfill stageId from completion state (stages exist now).
+            try db.execute(sql: """
+                UPDATE actionItem
+                SET stageId = (SELECT id FROM taskStage WHERE isDefault = 1 LIMIT 1)
+                WHERE isCompleted = 0
+                """)
+            try db.execute(sql: """
+                UPDATE actionItem
+                SET stageId = (SELECT id FROM taskStage WHERE isTerminal = 1 LIMIT 1)
+                WHERE isCompleted = 1
+                """)
+
+            // Recreate the two prior indexes by name + add new ones.
+            try db.create(index: "idx_actionItem_meeting", on: "actionItem", columns: ["meetingId"])
+            try db.create(index: "idx_actionItem_meeting_extracted", on: "actionItem", columns: ["meetingId", "extractedAt"])
+            try db.create(index: "idx_actionItem_triageState", on: "actionItem", columns: ["triageState"])
+            try db.create(index: "idx_actionItem_stageId", on: "actionItem", columns: ["stageId"])
+            try db.create(index: "idx_actionItem_parentTaskId", on: "actionItem", columns: ["parentTaskId"])
+            try db.create(index: "idx_actionItem_dueDate", on: "actionItem", columns: ["dueDate"])
+            try db.create(index: "idx_actionItem_deletedAt", on: "actionItem", columns: ["deletedAt"])
+
+            // 3) Attachments — created after `actionItem` is final so the FK
+            //    targets the renamed table. On-disk files are cleaned in app code.
+            try db.create(table: "taskAttachment") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("taskId", .integer).notNull().references("actionItem", onDelete: .cascade)
+                t.column("kind", .text).notNull()
+                t.column("originalName", .text).notNull()
+                t.column("relativePath", .text).notNull()
+                t.column("byteSize", .integer).notNull().defaults(to: 0)
+                t.column("addedAt", .datetime).notNull().defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.create(index: "idx_taskAttachment_taskId", on: "taskAttachment", columns: ["taskId"])
+        }
     }
 }

@@ -151,7 +151,7 @@ struct GlobalSearchView: View {
                             ForEach(itemHits, id: \.item.id) { hit in
                                 resultRow(icon: "checklist", title: hit.item.title,
                                           subtitle: hit.meetingTitle ?? "") {
-                                    open(meetingId: hit.item.meetingId)
+                                    if let mid = hit.item.meetingId { open(meetingId: mid) }
                                 }
                             }
                         }
@@ -367,7 +367,7 @@ struct GlobalSearchView: View {
         titleHits = Array(titles)
         transcriptHits = transcripts.map { (meeting: $0.0, snippet: $0.1) }
         peopleHits = Array(people)
-        itemHits = openItems.map { (item: $0, meetingTitle: titlesById[$0.meetingId]) }
+        itemHits = openItems.map { item in (item: item, meetingTitle: item.meetingId.flatMap { titlesById[$0] }) }
         glossaryHits = ((try? await GlossaryRepository(database: AppDatabase.shared).visibleTerms()) ?? [])
             .filter { $0.term.lowercased().contains(lowered) || $0.definition.lowercased().contains(lowered) }
             .prefix(4).map { $0 }

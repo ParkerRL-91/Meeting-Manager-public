@@ -819,7 +819,7 @@ private struct PersonDetailView: View {
                     Image(systemName: "circle").font(.caption2).foregroundStyle(Color.appTextTertiary).padding(.top, 3)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.title).font(.callout).foregroundStyle(Color.appTextPrimary)
-                        if let title = meetingTitle(item.meetingId) {
+                        if let mid = item.meetingId, let title = meetingTitle(mid) {
                             Text(title).font(.caption).foregroundStyle(Color.appTextTertiary)
                         }
                     }

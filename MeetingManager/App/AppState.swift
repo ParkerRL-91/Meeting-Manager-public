@@ -2552,7 +2552,9 @@ final class AppState {
         let repo = ActionItemRepository(database: database)
         var result: [(Meeting, [ActionItem])] = []
         for m in meetings {
-            let items = (try? await repo.itemsForMeeting(m.id)) ?? []
+            // Gated to accepted, non-deleted items so inbox suggestions never
+            // leak into the series carry-forward prompt (PRJ-013).
+            let items = (try? await repo.acceptedItemsForMeeting(m.id)) ?? []
             let open = items.filter { !$0.isCompleted }
             if !open.isEmpty { result.append((m, open)) }
         }

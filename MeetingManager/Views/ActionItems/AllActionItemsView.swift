@@ -58,7 +58,7 @@ struct AllActionItemsView: View {
     // MARK: - Grouped List
 
     private var groupedItems: [(Meeting?, [ActionItem])] {
-        let grouped = Dictionary(grouping: openItems) { $0.meetingId }
+        let grouped = Dictionary(grouping: openItems) { $0.meetingId ?? "" }
         return grouped.map { meetingId, items in
             (meetings[meetingId], items)
         }
@@ -187,7 +187,7 @@ struct AllActionItemsView: View {
         openItems = (try? await actionItemRepo.allOpenItems()) ?? []
 
         // Fetch meeting details for grouping headers
-        let meetingIds = Set(openItems.map(\.meetingId))
+        let meetingIds = Set(openItems.compactMap(\.meetingId))
         var meetingsMap: [String: Meeting] = [:]
         for meetingId in meetingIds {
             if let meeting = try? await appState.meetingRepository.find(id: meetingId) {

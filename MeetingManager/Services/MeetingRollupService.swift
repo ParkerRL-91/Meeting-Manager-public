@@ -31,7 +31,7 @@ struct MeetingRollupService {
         let recent = meetings.sorted { $0.effectiveDate > $1.effectiveDate }.prefix(cap)
         var out: [(meeting: Meeting, items: [ActionItem])] = []
         for meeting in recent {
-            let open = ((try? await actionItemRepo.itemsForMeeting(meeting.id)) ?? [])
+            let open = ((try? await actionItemRepo.acceptedItemsForMeeting(meeting.id)) ?? [])
                 .filter { !$0.isCompleted }
             if !open.isEmpty { out.append((meeting, open)) }
         }

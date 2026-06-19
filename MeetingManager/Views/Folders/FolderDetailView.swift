@@ -46,7 +46,7 @@ struct FolderDetailView: View {
         let repo = ActionItemRepository(database: AppDatabase.shared)
         let ids = Set(folder.meetings.map(\.id))
         let all = (try? await repo.allOpenItems(limit: 200)) ?? []
-        openItems = all.filter { ids.contains($0.meetingId) }
+        openItems = all.filter { $0.meetingId.map { ids.contains($0) } ?? false }
     }
 
     var body: some View {

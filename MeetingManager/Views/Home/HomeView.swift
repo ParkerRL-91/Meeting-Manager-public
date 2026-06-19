@@ -143,7 +143,7 @@ struct HomeView: View {
                         ForEach(openActionItems.prefix(5)) { item in
                             HomeActionItemRow(
                                 item: item,
-                                meetingTitle: actionItemMeetingTitles[item.meetingId],
+                                meetingTitle: item.meetingId.flatMap { actionItemMeetingTitles[$0] },
                                 onToggle: {
                                     guard let id = item.id else { return }
                                     Task {
@@ -270,7 +270,7 @@ struct HomeView: View {
         let repo = ActionItemRepository(database: AppDatabase.shared)
         let items = (try? await repo.allOpenItems(limit: 10)) ?? []
         var titles: [String: String] = [:]
-        for id in Set(items.map(\.meetingId)) {
+        for id in Set(items.compactMap(\.meetingId)) {
             titles[id] = (try? await appState.meetingRepository.find(id: id))?.title
         }
         openActionItems = items
