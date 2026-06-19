@@ -20,13 +20,18 @@ struct TaskManagerRootView: View {
     @State private var inboxCount = 0
     /// Bumped after a detail edit so the active surface reloads.
     @State private var refreshToken = 0
+    @State private var showQuickAdd = false
+    @State private var showTour = false
+
+    /// One-shot flag: the first-run task tour is shown once per install.
+    @AppStorage("tasks.hasSeenTour") private var hasSeenTour = false
 
     private let repo = ActionItemRepository(database: .shared)
 
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
-                picker
+                topBar
                 Divider().background(Color.appSeparator)
                 content
             }
@@ -38,8 +43,44 @@ struct TaskManagerRootView: View {
             }
         }
         .background(Color.appBackground)
-        .task { await refreshInboxCount() }
+        .overlay {
+            if showTour {
+                TaskTourView { hasSeenTour = true; showTour = false }
+                    .transition(.opacity)
+            }
+        }
+        .popover(isPresented: $showQuickAdd, arrowEdge: .top) {
+            TaskQuickAddView(
+                onAdded: { _ in
+                    refreshToken += 1
+                    Task { await refreshInboxCount() }
+                },
+                onOpenTask: { id in
+                    showQuickAdd = false
+                    appState.selectedTaskId = id
+                }
+            )
+        }
+        .task {
+            await refreshInboxCount()
+            if !hasSeenTour { showTour = true }
+        }
         .onChange(of: tab) { _, _ in Task { await refreshInboxCount() } }
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            picker
+            Spacer()
+            Button {
+                showQuickAdd = true
+            } label: {
+                Label("Quick Add", systemImage: "plus.circle.fill")
+            }
+            .help("Quickly add a task (parses dates, priority, and #tags)")
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .padding(.trailing, 16)
+        }
     }
 
     private func detailPane(_ taskId: Int64) -> some View {

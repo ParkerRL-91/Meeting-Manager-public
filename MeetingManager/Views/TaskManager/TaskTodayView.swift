@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// The Today view (PRJ-013 Phase 3, foundational). Surfaces overdue / due-today /
-/// upcoming / no-date tasks from the repository smart lists. In-app snooze/defer
-/// and notifications come in later phases; this phase delivers the read-only
-/// grouped list with completion, so undated tasks are never invisible.
+/// The Today view (PRJ-013). Surfaces overdue (red) / due-today / upcoming /
+/// no-date tasks from the repository smart lists. Each row and card context menu
+/// offers an in-app snooze/defer ("+1 day", "this weekend") that sets the task's
+/// due date without opening the editor, so undated tasks are never invisible and
+/// dated ones can be repositioned in one click.
 struct TaskTodayView: View {
     let onOpenTask: (ActionItem) -> Void
 
@@ -60,7 +61,13 @@ struct TaskTodayView: View {
                         .monospacedDigit()
                 }
                 ForEach(items) { item in
-                    TaskRowView(item: item, onComplete: { Task { await complete(item) } }, onTap: { onOpenTask(item) })
+                    TaskRowView(
+                        item: item,
+                        onComplete: { Task { await complete(item) } },
+                        onTap: { onOpenTask(item) },
+                        onSnoozeOneDay: { Task { await snooze(item, days: 1) } },
+                        onSnoozeWeekend: { Task { await snoozeToWeekend(item) } }
+                    )
                 }
             }
         }
@@ -69,6 +76,31 @@ struct TaskTodayView: View {
     private func complete(_ item: ActionItem) async {
         guard let id = item.id else { return }
         try? await repo.setCompleted(id: id, !item.isCompleted)
+        await load()
+    }
+
+    /// "+1 day" from the task's current due date (or today if it had none).
+    private func snooze(_ item: ActionItem, days: Int) async {
+        guard let id = item.id else { return }
+        let base = item.dueDate ?? Calendar.current.startOfDay(for: Date())
+        let next = Calendar.current.date(byAdding: .day, value: days, to: base) ?? base
+        try? await repo.setDueDate(id: id, next)
+        await load()
+    }
+
+    /// "This weekend" — the upcoming Saturday.
+    private func snoozeToWeekend(_ item: ActionItem) async {
+        guard let id = item.id else { return }
+        let start = Calendar.current.startOfDay(for: Date())
+        var target = start
+        for offset in 1...7 {
+            if let candidate = Calendar.current.date(byAdding: .day, value: offset, to: start),
+               Calendar.current.component(.weekday, from: candidate) == 7 {
+                target = candidate
+                break
+            }
+        }
+        try? await repo.setDueDate(id: id, target)
         await load()
     }
 
@@ -86,11 +118,14 @@ struct TaskTodayView: View {
     }
 }
 
-/// Shared flat row used by Today / All lists.
+/// Shared flat row used by Today / All lists. The snooze callbacks are optional so
+/// the All list can reuse the row without offering defer verbs.
 struct TaskRowView: View {
     let item: ActionItem
     let onComplete: () -> Void
     let onTap: () -> Void
+    var onSnoozeOneDay: (() -> Void)? = nil
+    var onSnoozeWeekend: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -119,10 +154,33 @@ struct TaskRowView: View {
                 }
             }
             Spacer(minLength: 0)
+            if onSnoozeOneDay != nil || onSnoozeWeekend != nil {
+                snoozeMenu
+            }
         }
         .padding(12)
         .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture(perform: onTap)
+        .contextMenu {
+            if let onSnoozeOneDay { Button("Snooze +1 day", action: onSnoozeOneDay) }
+            if let onSnoozeWeekend { Button("Snooze to this weekend", action: onSnoozeWeekend) }
+        }
+    }
+
+    private var snoozeMenu: some View {
+        Menu {
+            if let onSnoozeOneDay { Button("+1 day", action: onSnoozeOneDay) }
+            if let onSnoozeWeekend { Button("This weekend", action: onSnoozeWeekend) }
+        } label: {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.appTextTertiary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Snooze this task")
+        .accessibilityLabel("Snooze task")
     }
 }

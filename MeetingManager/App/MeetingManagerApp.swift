@@ -101,5 +101,21 @@ struct MeetingManagerApp: App {
                 .environment(appState)
                 .preferredColorScheme(.dark)
         }
+
+        // System-wide task capture (PRJ-013 Phase 6). The menu-bar icon opens
+        // quick-add from anywhere; "Open" deep-links into the task board.
+        MenuBarExtra("Add Task", systemImage: "checklist") {
+            TaskQuickAddView(
+                onOpenTask: { id in
+                    appState.selectedTaskId = id
+                    appState.sidebarDestination = .taskBoard
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            )
+            .environment(appState)
+            .preferredColorScheme(.dark)
+            .frame(width: 360)
+        }
+        .menuBarExtraStyle(.window)
     }
 }

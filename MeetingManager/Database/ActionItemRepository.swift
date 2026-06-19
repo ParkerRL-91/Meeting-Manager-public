@@ -225,6 +225,60 @@ final class ActionItemRepository {
         }
     }
 
+    // MARK: - History (PRJ-013 Phase 6)
+
+    /// Which closed-out set the All view's history filter is showing.
+    enum HistoryScope { case completed, archived, dismissed, trash }
+
+    /// Read-only history lists for the All view's history filter. `completed`
+    /// returns accepted, completed, live (not deleted/archived) tasks; `archived`
+    /// returns archived (not deleted) tasks; `dismissed` returns dismissed (not
+    /// deleted) suggestions; `trash` returns soft-deleted rows awaiting purge.
+    func historyItems(_ scope: HistoryScope) async throws -> [ActionItem] {
+        try await database.writer.read { db in
+            let request: QueryInterfaceRequest<ActionItem>
+            switch scope {
+            case .completed:
+                request = ActionItem
+                    .filter(ActionItem.Columns.triageState == TaskTriageState.accepted.rawValue)
+                    .filter(ActionItem.Columns.deletedAt == nil)
+                    .filter(ActionItem.Columns.archivedAt == nil)
+                    .filter(ActionItem.Columns.isCompleted == true)
+                    .order(ActionItem.Columns.completedAt.desc)
+            case .archived:
+                request = ActionItem
+                    .filter(ActionItem.Columns.archivedAt != nil)
+                    .filter(ActionItem.Columns.deletedAt == nil)
+                    .order(ActionItem.Columns.archivedAt.desc)
+            case .dismissed:
+                request = ActionItem
+                    .filter(ActionItem.Columns.triageState == TaskTriageState.dismissed.rawValue)
+                    .filter(ActionItem.Columns.deletedAt == nil)
+                    .order(ActionItem.Columns.updatedAt.desc)
+            case .trash:
+                request = ActionItem
+                    .filter(ActionItem.Columns.deletedAt != nil)
+                    .order(ActionItem.Columns.deletedAt.desc)
+            }
+            return try request.fetchAll(db)
+        }
+    }
+
+    /// Sets a task's due date (and clears any explicit reminder so the per-task
+    /// alert recomputes from the new due date). Backs the Today view's in-app
+    /// snooze/defer — repositioning a task in the smart lists without opening the
+    /// editor. Announces a change so the notification reconcile reschedules.
+    func setDueDate(id: Int64, _ date: Date?) async throws {
+        try await database.writer.write { db in
+            guard var item = try ActionItem.fetchOne(db, key: id) else { return }
+            item.dueDate = date
+            item.reminderAt = nil
+            item.updatedAt = Date()
+            try item.update(db)
+        }
+        announceChange()
+    }
+
     // MARK: - Notification candidates (PRJ-013 Phase 5)
 
     /// Live (accepted, incomplete, not deleted, not archived) tasks that carry a
