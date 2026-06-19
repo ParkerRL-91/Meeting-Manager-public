@@ -26,6 +26,15 @@ struct TaskManagerRootView: View {
     @State private var refreshToken = 0
     @State private var showQuickAdd = false
     @State private var showTour = false
+    /// Transient "Deleted · Undo" snackbar shown after a soft-delete in the detail
+    /// pane (which unmounts on delete, so the snackbar lives here, above it).
+    @State private var deleteUndo: DeleteUndo?
+
+    private struct DeleteUndo: Identifiable {
+        let id = UUID()
+        let taskId: Int64
+        let title: String
+    }
 
     /// One-shot flag: the first-run task tour is shown once per install.
     @AppStorage("tasks.hasSeenTour") private var hasSeenTour = false
@@ -47,6 +56,11 @@ struct TaskManagerRootView: View {
             }
         }
         .background(Color.appBackground)
+        .overlay(alignment: .bottom) {
+            if let deleteUndo {
+                deleteUndoBar(deleteUndo)
+            }
+        }
         .overlay {
             if showTour {
                 TaskTourView { hasSeenTour = true; showTour = false }
@@ -103,13 +117,47 @@ struct TaskManagerRootView: View {
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
-            TaskDetailView(taskId: taskId) {
-                refreshToken += 1
-                Task { await refreshInboxCount() }
-            }
+            TaskDetailView(
+                taskId: taskId,
+                onChange: {
+                    refreshToken += 1
+                    Task { await refreshInboxCount() }
+                },
+                onDeleted: { id, title in
+                    deleteUndo = DeleteUndo(taskId: id, title: title)
+                }
+            )
             .id(taskId)
         }
         .background(Color.appBackground)
+    }
+
+    private func deleteUndoBar(_ undo: DeleteUndo) -> some View {
+        HStack(spacing: 12) {
+            Text("Deleted “\(undo.title)”")
+                .font(.caption)
+                .foregroundStyle(Color.appTextSecondary)
+                .lineLimit(1)
+            Button("Undo") {
+                Task {
+                    try? await repo.undoDelete(id: undo.taskId)
+                    refreshToken += 1
+                    await refreshInboxCount()
+                    appState.selectedTaskId = undo.taskId
+                }
+                deleteUndo = nil
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.appSurface, in: Capsule())
+        .overlay(Capsule().stroke(Color.appSeparator, lineWidth: 1))
+        .padding(.bottom, 16)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .task(id: undo.id) {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if deleteUndo?.id == undo.id { deleteUndo = nil }
+        }
     }
 
     private var picker: some View {

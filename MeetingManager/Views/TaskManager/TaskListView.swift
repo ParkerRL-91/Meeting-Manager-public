@@ -262,7 +262,8 @@ struct TaskListView: View {
                         TaskRowView(
                             item: item,
                             onComplete: { Task { await complete(item) } },
-                            onTap: { onOpenTask(item) }
+                            onTap: { onOpenTask(item) },
+                            onRestore: scope == .trash ? { Task { await restore(item) } } : nil
                         )
                     }
                 }
@@ -310,6 +311,12 @@ struct TaskListView: View {
     private func complete(_ item: TaskItem) async {
         guard let id = item.id else { return }
         try? await repo.setCompleted(id: id, !item.isCompleted)
+        await load()
+    }
+
+    private func restore(_ item: TaskItem) async {
+        guard let id = item.id else { return }
+        try? await repo.undoDelete(id: id)
         await load()
     }
 

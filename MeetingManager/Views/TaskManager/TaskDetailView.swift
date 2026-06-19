@@ -19,6 +19,10 @@ struct TaskDetailView: View {
     /// Called after a change that the parent shell should reflect (board reload,
     /// inbox count, etc.).
     var onChange: () -> Void = {}
+    /// Called after a soft-delete with the deleted task's id and title, so the
+    /// parent shell can offer a transient "Deleted · Undo" snackbar (the detail
+    /// pane itself unmounts on delete, so the snackbar must live above it).
+    var onDeleted: (Int64, String) -> Void = { _, _ in }
 
     @Environment(AppState.self) private var appState
 
@@ -698,9 +702,11 @@ struct TaskDetailView: View {
     }
 
     private func deleteTask() async {
+        let deletedTitle = item?.title ?? "task"
         try? await repo.softDelete(id: taskId)
         appState.selectedTaskId = nil
         onChange()
+        onDeleted(taskId, deletedTitle)
     }
 
     // MARK: - Subtask mutations

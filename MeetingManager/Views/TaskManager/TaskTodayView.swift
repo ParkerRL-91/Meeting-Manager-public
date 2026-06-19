@@ -134,6 +134,9 @@ struct TaskRowView: View {
     let onTap: () -> Void
     var onSnoozeOneDay: (() -> Void)? = nil
     var onSnoozeWeekend: (() -> Void)? = nil
+    /// When set, the row shows a Restore affordance (used by the All view's Trash
+    /// scope) that lifts the task back out of soft-delete.
+    var onRestore: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -162,6 +165,11 @@ struct TaskRowView: View {
                 }
             }
             Spacer(minLength: 0)
+            if let onRestore {
+                Button("Restore", action: onRestore)
+                    .font(.system(size: 12))
+                    .help("Restore this task from the Trash")
+            }
             if onSnoozeOneDay != nil || onSnoozeWeekend != nil {
                 snoozeMenu
             }
@@ -171,6 +179,7 @@ struct TaskRowView: View {
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture(perform: onTap)
         .contextMenu {
+            if let onRestore { Button("Restore", action: onRestore) }
             if let onSnoozeOneDay { Button("Snooze +1 day", action: onSnoozeOneDay) }
             if let onSnoozeWeekend { Button("Snooze to this weekend", action: onSnoozeWeekend) }
         }
