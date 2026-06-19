@@ -18,6 +18,24 @@ struct TaskQuickAddParser {
         var tags: [String]
     }
 
+    /// Richer result for the AI-primary "Create with AI" compose flow (TASK-111).
+    /// Unlike `Result` (used by the instant quick-add), this also carries recurrence,
+    /// an assignee, a due-time flag, and whether the AI was actually used — so the
+    /// compose preview can show a fully filled-out, editable task and degrade visibly
+    /// to the deterministic parse offline. `assignee` is a name STRING only; Person
+    /// linkage (`assigneePersonId`) is resolved in the view at commit, never here, so
+    /// the parser stays pure and DB-free.
+    struct ComposeResult: Equatable {
+        var title: String
+        var dueDate: Date?
+        var dueHasTime: Bool
+        var priority: Int
+        var tags: [String]
+        var assignee: String?
+        var recurrence: TaskRecurrenceRule?
+        var aiUsed: Bool
+    }
+
     private let calendar: Calendar
     private let now: Date
 
@@ -203,6 +221,241 @@ struct TaskQuickAddParser {
         } catch {
             return base
         }
+    }
+
+    // MARK: - AI-primary compose (PRJ-015 / TASK-111)
+
+    /// Deterministic seed for the compose flow: the existing `parse()` (title / date /
+    /// priority / #tags) plus a minimal recurrence detect, returned as a `ComposeResult`
+    /// with `aiUsed = false`. Also strips a trailing orphan "every" left over when
+    /// `parse()` removes a bare weekday from "…every Monday" — scoped to exactly "every"
+    /// (the only connector `parse()` ever orphans; date prefixes are removed glued to
+    /// their phrase) and gated on a date/recurrence phrase actually being removed, so a
+    /// legitimate trailing word ("follow up on", "presenting at") is never clipped.
+    func composeBase(_ raw: String) -> ComposeResult {
+        let parsed = parse(raw)
+        let recurrence = detectRecurrence(in: raw)
+        var title = parsed.title
+        if parsed.dueDate != nil || recurrence != nil {
+            title = Self.stripTrailingEvery(from: title)
+        }
+        // Sentence-case the first letter so the offline/deterministic preview reads as a
+        // proper task ("Send Joel the document", not "send …"); proper nouns mid-title are
+        // left to the AI path, which capitalizes them.
+        title = Self.sentenceCased(title)
+        return ComposeResult(
+            title: title,
+            dueDate: parsed.dueDate,
+            dueHasTime: false,
+            priority: parsed.priority,
+            tags: parsed.tags,
+            assignee: nil,
+            recurrence: recurrence,
+            aiUsed: false
+        )
+    }
+
+    /// Minimal, pure recurrence detector. Recognises "every N day|week|month|year(s)"
+    /// and the single-word / "every <unit>" forms (daily / weekly / monthly / yearly).
+    /// Never sets an end date — "until …" is left to the AI, which merges field-wise.
+    func detectRecurrence(in raw: String) -> TaskRecurrenceRule? {
+        let lower = raw.lowercased()
+        if let regex = try? NSRegularExpression(pattern: #"every\s+(\d+)\s+(day|week|month|year)s?"#, options: .caseInsensitive) {
+            let range = NSRange(lower.startIndex..., in: lower)
+            if let m = regex.firstMatch(in: lower, range: range),
+               let nRange = Range(m.range(at: 1), in: lower),
+               let unitRange = Range(m.range(at: 2), in: lower),
+               let n = Int(lower[nRange]) {
+                return TaskRecurrenceRule(frequency: Self.frequency(forUnit: String(lower[unitRange])), interval: max(1, n))
+            }
+        }
+        let phrases: [(String, TaskRecurrenceRule.Frequency)] = [
+            ("every day", .daily), ("daily", .daily),
+            ("every week", .weekly), ("weekly", .weekly),
+            ("every month", .monthly), ("monthly", .monthly),
+            ("every year", .yearly), ("yearly", .yearly), ("annually", .yearly)
+        ]
+        for (phrase, freq) in phrases where Self.containsWord(phrase, in: lower) {
+            return TaskRecurrenceRule(frequency: freq, interval: 1)
+        }
+        return nil
+    }
+
+    /// AI-primary compose: extracts the full structured task (title, due date + optional
+    /// time, recurrence, priority, tags, assignee) from a plain-English phrase, seeded by
+    /// `base`. Fill-gaps semantics — the AI never clobbers a confident deterministic value;
+    /// recurrence is merged field-wise (deterministic freq/interval authoritative, AI fills
+    /// a missing end date). Sets `aiUsed = true` on success. ANY failure / no generator /
+    /// timeout / cancellation ⇒ returns `base` (aiUsed = false). Bounded by `timeout` and
+    /// cooperatively cancellable so a cancelled parse never races to commit.
+    ///
+    /// `// EXEMPT: user-initiated/instant` — the compose path is a user-driven modal and
+    /// must not go through TaskQueueManager; it degrades to the deterministic parse offline.
+    func aiCompose(
+        raw: String,
+        base: ComposeResult,
+        textGenerator: ((String, String) async throws -> String)?,
+        timeout: TimeInterval = 14
+    ) async -> ComposeResult {
+        guard let textGenerator else { return base }
+
+        let system = """
+        You extract a SINGLE task from a short natural-language phrase. Reply with ONLY a compact JSON \
+        object and nothing else. Keys: "title" (the task action with date/recurrence/priority words \
+        removed, keep the substance), "dueDate" (ISO-8601 "yyyy-MM-dd" or null), "dueTime" ("HH:mm" \
+        24-hour or null), "priority" (integer 0-4 where 0 none and 4 urgent), "tags" (array of strings, \
+        may be empty), "assignee" (string or null), "recurrence" (object \
+        {"frequency":"daily|weekly|monthly|yearly","interval":integer,"endDate":"yyyy-MM-dd" or null} \
+        or null when the task is one-off). Today is \(Self.isoDay.string(from: now)). Do not invent \
+        values that are not implied, and never return a due date in the past. Only set "assignee" when \
+        the sentence makes ANOTHER person responsible for doing the task (e.g. "ask Dana to…", \
+        "have Sam review…"). If the named person is a recipient or beneficiary (e.g. "send Joel the \
+        doc"), leave "assignee" null — the task belongs to the author.
+        """
+        let user = "Task phrase: \(raw)"
+
+        do {
+            let response = try await withThrowingTimeout(seconds: timeout) {
+                try await textGenerator(system, user)
+            }
+            try Task.checkCancellation()
+            guard let ai = decodeComposeResponse(response) else { return base }
+            var result = base
+            result.aiUsed = true
+            if result.dueDate == nil, let aiDue = ai.dueDate {
+                result.dueDate = aiDue
+                result.dueHasTime = ai.dueHasTime
+            }
+            if result.priority == 0, let p = ai.priority {
+                result.priority = max(0, min(p, 4))
+            }
+            if result.tags.isEmpty, let aiTags = ai.tags, !aiTags.isEmpty {
+                result.tags = aiTags
+            }
+            if result.assignee == nil, let aiAssignee = ai.assignee, !aiAssignee.isEmpty {
+                result.assignee = aiAssignee
+            }
+            // Recurrence: field-wise merge. Keep a deterministic freq/interval (authoritative)
+            // but fill a missing end date from the AI; take the AI rule whole when the seed has none.
+            if let aiRec = ai.recurrence {
+                if var seed = result.recurrence {
+                    if seed.endDate == nil { seed.endDate = aiRec.endDate }
+                    result.recurrence = seed
+                } else {
+                    result.recurrence = aiRec
+                }
+            }
+            // Title: fill-only — keep the deterministic title unless it's empty or the
+            // deterministic pass only echoed the raw phrase (case-insensitive, since the seed
+            // is now sentence-cased). When it echoed raw, the cleaner AI title wins.
+            let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let aiTitle = ai.title, !aiTitle.isEmpty,
+               (result.title.isEmpty || result.title.caseInsensitiveCompare(trimmedRaw) == .orderedSame) {
+                result.title = aiTitle
+            }
+            return result
+        } catch {
+            return base
+        }
+    }
+
+    // MARK: - Compose helpers
+
+    private struct ComposeAIFields {
+        var title: String?
+        var dueDate: Date?
+        var dueHasTime: Bool
+        var priority: Int?
+        var tags: [String]?
+        var assignee: String?
+        var recurrence: TaskRecurrenceRule?
+    }
+
+    /// Instance method (not `static` like `decodeAIResponse`) because it needs `self.calendar`
+    /// and `self.now` to apply a due time and the past-date guard. Reaches the shared date
+    /// formatter as `Self.isoDay` rather than adding a duplicate.
+    private func decodeComposeResponse(_ text: String) -> ComposeAIFields? {
+        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") else { return nil }
+        let json = String(text[start...end])
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        var due: Date?
+        var dueHasTime = false
+        if let s = obj["dueDate"] as? String, !s.isEmpty,
+           let day = Self.isoDay.date(from: String(s.prefix(10))) {
+            due = day
+            if let t = obj["dueTime"] as? String, let withTime = applyTime(t, to: day) {
+                due = withTime
+                dueHasTime = true
+            }
+            // Past-date guard: never auto-create a silently-overdue task.
+            if let d = due, d < calendar.startOfDay(for: now) {
+                due = nil
+                dueHasTime = false
+            }
+        }
+
+        let priority = obj["priority"] as? Int
+        let tags = (obj["tags"] as? [Any])?.compactMap { $0 as? String }
+        let assignee = (obj["assignee"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = (obj["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var recurrence: TaskRecurrenceRule?
+        if let rec = obj["recurrence"] as? [String: Any],
+           let freqStr = rec["frequency"] as? String,
+           let freq = TaskRecurrenceRule.Frequency(rawValue: freqStr.lowercased()) {
+            var endDate: Date?
+            if let e = rec["endDate"] as? String, !e.isEmpty {
+                endDate = Self.isoDay.date(from: String(e.prefix(10)))
+            }
+            recurrence = TaskRecurrenceRule(frequency: freq, interval: max(1, (rec["interval"] as? Int) ?? 1), endDate: endDate)
+        }
+
+        return ComposeAIFields(
+            title: (title?.isEmpty == false) ? title : nil,
+            dueDate: due,
+            dueHasTime: dueHasTime,
+            priority: priority,
+            tags: tags,
+            assignee: (assignee?.isEmpty == false) ? assignee : nil,
+            recurrence: recurrence
+        )
+    }
+
+    private func applyTime(_ hhmm: String, to day: Date) -> Date? {
+        let parts = hhmm.split(separator: ":")
+        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]),
+              (0...23).contains(h), (0...59).contains(m) else { return nil }
+        return calendar.date(bySettingHour: h, minute: m, second: 0, of: day)
+    }
+
+    private static func frequency(forUnit unit: String) -> TaskRecurrenceRule.Frequency {
+        switch unit {
+        case "week": return .weekly
+        case "month": return .monthly
+        case "year": return .yearly
+        default: return .daily
+        }
+    }
+
+    private static func containsWord(_ phrase: String, in text: String) -> Bool {
+        let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: phrase) + #"\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return false }
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    private static func stripTrailingEvery(from title: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\s+every\s*$"#, options: .caseInsensitive) else { return title }
+        let range = NSRange(title.startIndex..., in: title)
+        return regex.stringByReplacingMatches(in: title, range: range, withTemplate: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Uppercases only the first character, leaving the rest untouched.
+    private static func sentenceCased(_ s: String) -> String {
+        guard let first = s.first else { return s }
+        return first.uppercased() + s.dropFirst()
     }
 
     private static let isoDay: DateFormatter = {

@@ -57,6 +57,56 @@ struct TaskRecurrenceRule: Codable, Equatable {
         guard let json, let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(TaskRecurrenceRule.self, from: data)
     }
+
+    // MARK: - Human-readable summary (PRJ-015 / TASK-111)
+
+    /// A plain-English one-liner for the AI-compose preview, e.g.
+    /// "Repeats every 3 days until Sep 1" / "Repeats weekly, starting Mon, Jun 22".
+    /// Built with its own lowercase/pluralized period nouns (not `Frequency.label`,
+    /// which is capitalized) via an exhaustive switch. Start clause only when `dueDate`
+    /// is non-nil; end clause only when `endDate` is non-nil; start before end. `now` /
+    /// `calendar` are injected so the year-omission logic is deterministic in tests.
+    func summary(dueDate: Date?, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let n = max(interval, 1)
+        let period: String
+        if n == 1 {
+            switch frequency {
+            case .daily: period = "daily"
+            case .weekly: period = "weekly"
+            case .monthly: period = "monthly"
+            case .yearly: period = "yearly"
+            }
+        } else {
+            let unit: String
+            switch frequency {
+            case .daily: unit = "day"
+            case .weekly: unit = "week"
+            case .monthly: unit = "month"
+            case .yearly: unit = "year"
+            }
+            period = "every \(n) \(unit)s"
+        }
+        var result = "Repeats \(period)"
+        if let dueDate {
+            result += ", starting \(Self.formatDate(dueDate, now: now, calendar: calendar, weekday: true))"
+        }
+        if let endDate {
+            result += ", until \(Self.formatDate(endDate, now: now, calendar: calendar, weekday: false))"
+        }
+        return result
+    }
+
+    private static func formatDate(_ date: Date, now: Date, calendar: Calendar, weekday: Bool) -> String {
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        if weekday {
+            df.dateFormat = sameYear ? "EEE, MMM d" : "EEE, MMM d, yyyy"
+        } else {
+            df.dateFormat = sameYear ? "MMM d" : "MMM d, yyyy"
+        }
+        return df.string(from: date)
+    }
 }
 
 /// Spawns the next occurrence of a recurring task exactly once, on the
