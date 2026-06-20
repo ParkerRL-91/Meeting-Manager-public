@@ -283,6 +283,11 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// `start()` so the CoreAudio HAL has time to release the input device.
     private var lastStopAt: Date?
     private(set) var preferredInputDeviceID: String?
+    /// True when `preferredInputDeviceID` is an EXPLICIT user pin (mic override on),
+    /// so the cycle tries it FIRST — ahead of the call's in-use mic — and honors it
+    /// even if it's the built-in. Set on the main actor before start()/switchDevice()
+    /// (same set-before-cycle ordering as `preferredInputDeviceID`); read in the cycle.
+    var preferredIsExplicit = false
     /// Diagnostic: callback for logging raw buffer info (set by AudioCaptureService)
     var onDiagnostic: ((String) -> Void)?
     private var rawBufferCount: Int = 0
@@ -973,28 +978,35 @@ final class MicrophoneCapture: @unchecked Sendable {
         allInputDeviceIDs().filter { isDeviceRunningSomewhere($0) }
     }
 
-    /// Ordered, deduped device list the cycle will try. The meeting's
-    /// in-use mic goes FIRST (the user's explicit ask: capture from the
-    /// device the call is using), and the built-in mic goes LAST (dead in
-    /// clamshell). Pure → unit-tested.
+    /// Ordered, deduped device list the cycle will try. An EXPLICIT user pick
+    /// (`preferredIsExplicit`, i.e. the mic override is on) is authoritative and
+    /// goes FIRST. Otherwise the meeting's in-use mic goes first (capture from the
+    /// device the call is using) and the built-in goes LAST (dead in clamshell).
+    /// Pure → unit-tested.
     static func orderedCandidates(inUseByOthers: [AudioDeviceID],
                                   preferred: AudioDeviceID?,
+                                  preferredIsExplicit: Bool,
                                   systemDefault: AudioDeviceID?,
                                   builtIn: AudioDeviceID?,
                                   all: [AudioDeviceID]) -> [AudioDeviceID] {
         var ordered: [AudioDeviceID] = []
-        func add(_ id: AudioDeviceID?) {
+        func add(_ id: AudioDeviceID?, allowBuiltIn: Bool = false) {
             guard let id, id != kAudioObjectUnknown, all.contains(id), !ordered.contains(id) else { return }
-            if id == builtIn { return }   // built-in deferred to the very end
+            if id == builtIn, !allowBuiltIn { return }   // built-in deferred to the very end
             ordered.append(id)
         }
+        // 0. An EXPLICIT pick (override on) wins: tried FIRST — ahead of the call's
+        //    in-use mic — and honored even if it's the built-in. A lid-closed built-in
+        //    is already filtered out of `all`, so this can't resurrect a dead one.
+        if preferredIsExplicit { add(preferred, allowBuiltIn: true) }
         for id in inUseByOthers { add(id) }   // 1. the mic the MEETING is using
-        add(preferred)                        // 2. user's explicit choice
+        add(preferred)                        // 2. preferred (non-explicit / auto path)
         add(systemDefault)                    // 3. macOS default
         for id in all { add(id) }             // 4. other external inputs
         // 5. built-in LAST — only when no external mic could start, because
-        //    lid-closed it captures silence and must not preempt a real mic.
-        if let builtIn, builtIn != kAudioObjectUnknown, all.contains(builtIn) {
+        //    lid-closed it captures silence and must not preempt a real mic
+        //    (unless an explicit pick already placed it at the front).
+        if let builtIn, builtIn != kAudioObjectUnknown, all.contains(builtIn), !ordered.contains(builtIn) {
             ordered.append(builtIn)
         }
         return ordered
@@ -1046,6 +1058,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         let candidates = Self.orderedCandidates(
             inUseByOthers: inUse,
             preferred: preferredID,
+            preferredIsExplicit: preferredIsExplicit,
             systemDefault: getDefaultInputDeviceID(),
             builtIn: builtInInputDeviceID(),
             all: all)

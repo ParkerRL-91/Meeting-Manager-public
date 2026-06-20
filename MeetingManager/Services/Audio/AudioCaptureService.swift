@@ -471,6 +471,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             micCapture.configure(inputDeviceID: "")
             logToFile("Audio: no preferred input device found, will use system default")
         }
+        // An explicit override = the user pinned this device → the cycle tries it
+        // FIRST (ahead of the call's in-use mic) and honors it, even the built-in (TASK-114).
+        micCapture.preferredIsExplicit = (isMicOverrideEnabledProvider?() == true)
 
         do {
             try await startMicrophoneWithRetry(systemTapRunning: systemTapStarted)
@@ -836,6 +839,9 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // switchDevice is stop→configure→start, and a start() landing after
         // the recording's teardown would leave the mic engine running.
         let targetUID = target.uniqueID
+        // A user pick (override on) pins the device — the cycle inside switchDevice
+        // tries it FIRST and honors it even if it's the built-in (TASK-114).
+        micCapture.preferredIsExplicit = (isMicOverrideEnabledProvider?() == true)
         let switchTask = Task.detached(priority: .userInitiated) { [micCapture] in
             micCapture.switchDevice(toUID: targetUID)?.localizedDescription
         }
@@ -850,7 +856,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         consecutiveMicDeadSeconds = 0
         micProblemWarned = false
-        logToFile("Audio: mic switch OK — now on \(target.localizedName) (engine.running=\(micCapture.engine.isRunning))")
+        logToFile("Audio: mic switch OK — now on \(micCapture.currentDeviceName) (requested \(target.localizedName), engine.running=\(micCapture.engine.isRunning))")
         // A successful switch — a user pick from the recovery banner, or an auto
         // resume — ends any in-flight recovery search immediately, so the inline
         // "finding a mic" banner clears right away instead of waiting for the next

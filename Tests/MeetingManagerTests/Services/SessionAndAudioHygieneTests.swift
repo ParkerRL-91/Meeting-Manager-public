@@ -115,7 +115,7 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         // clamshell the lid-closed built-in captures silence.
         let all: [AudioDeviceID] = [121, 81, 86]   // IEM, built-in, AnkerWork
         let order = MicrophoneCapture.orderedCandidates(
-            inUseByOthers: [], preferred: 121, systemDefault: 121, builtIn: 81, all: all)
+            inUseByOthers: [], preferred: 121, preferredIsExplicit: false, systemDefault: 121, builtIn: 81, all: all)
         XCTAssertEqual(order.first, 121, "honor the user's preferred device first")
         XCTAssertEqual(order.last, 81, "built-in is tried LAST (dead in clamshell)")
         XCTAssertEqual(Set(order), Set(all), "every input device is eventually tried")
@@ -130,6 +130,7 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         let order = MicrophoneCapture.orderedCandidates(
             inUseByOthers: [86],       // the call is on the AnkerWork
             preferred: 121,            // stale preferred = the IEM
+            preferredIsExplicit: false,
             systemDefault: 121,
             builtIn: 81, all: all)
         XCTAssertEqual(order.first, 86, "the mic the meeting is using wins")
@@ -141,8 +142,29 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         let all: [AudioDeviceID] = [81]   // only the built-in is actually present
         let order = MicrophoneCapture.orderedCandidates(
             inUseByOthers: [], preferred: 999,   // a saved-but-unplugged USB mic
+            preferredIsExplicit: false,
             systemDefault: kAudioObjectUnknown, builtIn: 81, all: all)
         XCTAssertEqual(order, [81], "absent/unknown devices are dropped; built-in remains as the only option")
+    }
+
+    func testExplicitMicPickWinsOverInUseAndIsHonoredEvenIfBuiltIn() {
+        // TASK-114: an explicit user pick (mic override on) is authoritative — tried
+        // FIRST, ahead of the call's in-use mic, and honored even if it's the built-in
+        // (lid open). The clamshell filter removes a closed-lid built-in from `all`
+        // upstream, so this can never resurrect a dead one.
+        let all: [AudioDeviceID] = [81, 86, 121]   // built-in, AnkerWork(in call), IEM
+        // (a) explicit pick of a normal device beats the in-use mic
+        let pickIEM = MicrophoneCapture.orderedCandidates(
+            inUseByOthers: [86], preferred: 121, preferredIsExplicit: true,
+            systemDefault: 86, builtIn: 81, all: all)
+        XCTAssertEqual(pickIEM.first, 121, "an explicit pick is tried before the call's in-use mic")
+        // (b) explicit pick of the built-in is honored first, not demoted to last
+        let pickBuiltIn = MicrophoneCapture.orderedCandidates(
+            inUseByOthers: [86], preferred: 81, preferredIsExplicit: true,
+            systemDefault: 86, builtIn: 81, all: all)
+        XCTAssertEqual(pickBuiltIn.first, 81, "an explicit built-in pick wins (lid open)")
+        XCTAssertEqual(pickBuiltIn.count, Set(pickBuiltIn).count, "no device tried twice")
+        XCTAssertEqual(Set(pickBuiltIn), Set(all), "all devices still reachable")
     }
 
     func testEngineFormatAgreementCatchesThePhantomDefault() {
