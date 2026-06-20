@@ -1016,15 +1016,27 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// starts. First success commits `activeDeviceID`; total failure
     /// throws (→ system-only recovery, which re-enters this cycle).
     private func startByCyclingDevices() throws {
-        // Exclude Continuity (iPhone/iPad) mics from the discovery set. Every
-        // candidate position in `orderedCandidates` is gated on `all.contains(id)`,
-        // so filtering here keeps the iPhone out of EVERY slot (in-use, preferred,
-        // system-default, and the general scan) — auto-detection never cycles onto it.
+        // Exclude devices that can't actually capture from the discovery set. Every
+        // candidate position in `orderedCandidates` is gated on `all.contains(id)`, so
+        // filtering here keeps them out of EVERY slot (in-use, preferred, system-default,
+        // and the general scan) — auto-detection never lands on them:
+        //   • Continuity (iPhone/iPad) mics — hijack the default and often deliver silence.
+        //   • The built-in mic while the laptop lid is CLOSED (clamshell, the user's normal
+        //     setup): macOS leaves it selectable but it's physically off, so a failed
+        //     external mic must not fall through to a dead built-in that shows as
+        //     "selected" yet records nothing.
         let allRaw = allInputDeviceIDs()
-        let all = allRaw.filter { !isContinuityInput($0) }
-        let excludedContinuity = allRaw.filter { isContinuityInput($0) }
-        if !excludedContinuity.isEmpty {
-            onDiagnostic?("DIAG:mic_cycle excluding Continuity (iPhone/iPad) mic(s): \(excludedContinuity.map { getDeviceName($0) }.joined(separator: ", "))")
+        let lidClosed = AudioSessionManager.lidIsClosed()
+        let builtInID = builtInInputDeviceID()
+        let all = allRaw.filter { id in
+            if isContinuityInput(id) { return false }
+            if lidClosed, let builtInID, id == builtInID { return false }
+            return true
+        }
+        let excluded = allRaw.filter { !all.contains($0) }
+        if !excluded.isEmpty {
+            let reason = lidClosed ? "Continuity + lid-closed built-in" : "Continuity (iPhone/iPad)"
+            onDiagnostic?("DIAG:mic_cycle excluding \(reason) mic(s): \(excluded.map { getDeviceName($0) }.joined(separator: ", "))")
         }
         let preferredID = preferredInputDeviceID.map { getDeviceIDForUID($0) }
         let inUse = inUseInputDeviceIDs()

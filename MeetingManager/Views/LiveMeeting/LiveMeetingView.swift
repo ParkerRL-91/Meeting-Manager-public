@@ -688,10 +688,11 @@ private struct RecordingStrip: View {
 
     // MARK: - Mic picker (TASK-111)
 
-    /// Real input devices the user can pick. Excludes the iPhone/Continuity mic
-    /// (same filter the auto-cycle uses) — "only other ones".
+    /// Real input devices the user can pick. Excludes mics that can't capture right
+    /// now — the iPhone/Continuity phantom and the built-in mic while the lid is
+    /// closed (clamshell, where it's physically off) — same filter the auto-cycle uses.
     private var realMics: [AVCaptureDevice] {
-        availableMics.filter { !micEnumerator.isUnreliableInput(uid: $0.uniqueID) }
+        availableMics.filter { !micEnumerator.isUnavailableInput(uid: $0.uniqueID) }
     }
 
     /// Short label for the active mic shown on the picker button.

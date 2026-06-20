@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreAudio
+import IOKit
 import ScreenCaptureKit
 
 /// Manages audio permissions and device enumeration
@@ -202,6 +203,31 @@ final class AudioSessionManager {
     func isUnreliableInput(uid: String) -> Bool {
         guard let device = availableInputDevices().first(where: { $0.uniqueID == uid }) else { return false }
         return isUnreliableInput(device)
+    }
+
+    /// True when a device shouldn't be OFFERED or AUTO-selected as a working mic
+    /// right now: a Continuity (iPhone/iPad) phantom, OR the built-in mic while the
+    /// laptop lid is closed (clamshell — macOS keeps it selectable but it's physically
+    /// off and records nothing). Used by the recording mic picker so it only lists
+    /// mics that can actually capture. Unknown UIDs are treated as available.
+    func isUnavailableInput(uid: String) -> Bool {
+        guard let device = availableInputDevices().first(where: { $0.uniqueID == uid }) else { return false }
+        if isUnreliableInput(device) { return true }
+        if Self.lidIsClosed(), isBuiltInDevice(device) { return true }
+        return false
+    }
+
+    /// True when the laptop lid is closed (clamshell mode). Reads `AppleClamshellState`
+    /// from `IOPMrootDomain`. Absent on desktop Macs (no lid) → treated as open. The
+    /// built-in mic is off in clamshell, so callers exclude it from auto-selection.
+    static func lidIsClosed() -> Bool {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard service != 0 else { return false }
+        defer { IOObjectRelease(service) }
+        guard let prop = IORegistryEntryCreateCFProperty(
+            service, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0
+        )?.takeRetainedValue() else { return false }
+        return (prop as? Bool) ?? false
     }
 
     /// Number of input channels for a CoreAudio device identified by its UID string.
