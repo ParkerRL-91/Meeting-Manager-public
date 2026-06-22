@@ -45,6 +45,11 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// yielded nothing — a durable signal that survives clearing completed
     /// tasks, unlike the old "does a transcription task row exist?" check.
     var transcriptionAttemptedAt: Date?
+    /// Timestamp the retention sweep deleted this meeting's audio (PRJ-016).
+    /// Non-nil means the WAV(s) were removed to save space; the transcript,
+    /// summary, and notes are kept. Drives the "audio removed" UI caption and
+    /// distinguishes a pruned meeting from one that never recorded.
+    var audioPrunedAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -68,6 +73,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         speakerConfidenceMap: String? = nil,
         attributionFlags: String? = nil,
         transcriptionAttemptedAt: Date? = nil,
+        audioPrunedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -90,6 +96,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.speakerConfidenceMap = speakerConfidenceMap
         self.attributionFlags = attributionFlags
         self.transcriptionAttemptedAt = transcriptionAttemptedAt
+        self.audioPrunedAt = audioPrunedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -282,7 +289,7 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, attributionFlags, transcriptionAttemptedAt, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, attributionFlags, transcriptionAttemptedAt, audioPrunedAt, createdAt, updatedAt
     }
 
     mutating func willUpdate(_ db: Database) throws {

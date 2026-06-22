@@ -18,6 +18,8 @@ struct OnboardingView: View {
                     CalendarStepView(onAdvance: onboardingManager.nextStep)
                 case .localModel:
                     LocalModelStepView()
+                case .audioRetention:
+                    AudioRetentionStepView(onContinue: onboardingManager.nextStep)
                 case .knowledgeBase:
                     KnowledgeBaseStepView(onSkip: onboardingManager.nextStep)
                 case .ready:
@@ -103,7 +105,7 @@ struct OnboardingView: View {
             switch onboardingManager.currentStep {
             case .welcome, .ready:
                 Spacer().frame(width: 80)
-            case .calendar, .localModel, .knowledgeBase:
+            case .calendar, .localModel, .audioRetention, .knowledgeBase:
                 Button(action: onboardingManager.nextStep) {
                     Label("Next", systemImage: "chevron.right")
                         .labelStyle(TrailingIconLabelStyle())

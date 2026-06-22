@@ -34,6 +34,7 @@ final class OnboardingManager {
         case knowledgeBase = 2
         case ready = 3
         case localModel = 4
+        case audioRetention = 5
 
         var title: String {
             switch self {
@@ -42,6 +43,7 @@ final class OnboardingManager {
             case .knowledgeBase: return "Knowledge Base"
             case .ready: return "Ready"
             case .localModel: return "On-Device AI"
+            case .audioRetention: return "Audio"
             }
         }
     }
@@ -67,7 +69,7 @@ final class OnboardingManager {
     /// is legacy-pinned to 4 and must appear before `.ready`, not after it.
     /// `nextStep()/previousStep()` walk this array, so order here governs.
     var visibleSteps: [OnboardingStep] {
-        [.welcome, .calendar, .localModel, .knowledgeBase, .ready]
+        [.welcome, .calendar, .localModel, .audioRetention, .knowledgeBase, .ready]
     }
 
     func nextStep() {

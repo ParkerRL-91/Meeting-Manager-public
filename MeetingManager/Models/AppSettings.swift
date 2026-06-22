@@ -129,6 +129,12 @@ struct AppSettings: Codable, Equatable {
     /// risk; flipping it back to false instantly reverts to SpeakerKit.
     var useFluidAudioDiarization: Bool = false
 
+    /// Days to keep meeting audio (WAV) files. 0 = keep forever (default).
+    /// >0 arms the startup retention sweep, which deletes the audio of meetings
+    /// older than this whose transcription succeeded — opt-in, so existing
+    /// installs (default 0) never delete anything until the user chooses a window.
+    var audioRetentionDays: Int = 0
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -164,6 +170,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case apolloKeyLastValidatedAt
         case micOverrideEnabled, micOverrideDeviceID
         case useFluidAudioDiarization
+        case audioRetentionDays
     }
 }
 

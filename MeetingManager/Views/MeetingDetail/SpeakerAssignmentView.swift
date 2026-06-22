@@ -47,6 +47,10 @@ struct SpeakerAssignmentView: View {
 
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetingmanager.app", category: "ui")
 
+    /// True when this meeting still has audio on disk. Re-analysis (re-diarize)
+    /// reads the original audio, so its control is hidden once audio is pruned.
+    private var hasAudio: Bool { !(meeting?.audioFilePaths.isEmpty ?? true) }
+
     var body: some View {
         VStack(spacing: 0) {
             // Action bar — always visible (not gated on clusters)
@@ -55,32 +59,34 @@ struct SpeakerAssignmentView: View {
                     .font(.caption)
                     .foregroundStyle(Color.appTextSecondary)
                 HStack(spacing: 12) {
-                    Button {
-                        Task {
-                            isReanalyzing = true
-                            await appState.rerunDiarization(meetingId: meetingId)
-                            // Reload clusters after re-diarization
-                            summaries.removeAll()
-                            SpeakerSummaryCache.clear(meetingId: meetingId)
-                            await load()
-                            isReanalyzing = false
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            if isReanalyzing {
-                                ProgressView().controlSize(.mini)
-                            } else {
-                                Image(systemName: "waveform.badge.magnifyingglass")
-                                    .font(.caption)
+                    if hasAudio {
+                        Button {
+                            Task {
+                                isReanalyzing = true
+                                await appState.rerunDiarization(meetingId: meetingId)
+                                // Reload clusters after re-diarization
+                                summaries.removeAll()
+                                SpeakerSummaryCache.clear(meetingId: meetingId)
+                                await load()
+                                isReanalyzing = false
                             }
-                            Text("Re-analyze speakers")
-                                .font(.caption.weight(.medium))
+                        } label: {
+                            HStack(spacing: 4) {
+                                if isReanalyzing {
+                                    ProgressView().controlSize(.mini)
+                                } else {
+                                    Image(systemName: "waveform.badge.magnifyingglass")
+                                        .font(.caption)
+                                }
+                                Text("Re-analyze speakers")
+                                    .font(.caption.weight(.medium))
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.appAccent)
+                        .disabled(isLoading || isReanalyzing)
+                        .help("Re-run voice diarization on the system audio and reassign speaker labels")
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.appAccent)
-                    .disabled(isLoading || isReanalyzing)
-                    .help("Re-run voice diarization on the system audio and reassign speaker labels")
 
                     Button {
                         Task { await reload() }
@@ -98,6 +104,11 @@ struct SpeakerAssignmentView: View {
                     .help("Clear cached summaries and regenerate with AI")
 
                     Spacer()
+                }
+                if !hasAudio, meeting?.audioPrunedAt != nil {
+                    Text("Re-analyzing voices needs the original audio, which was removed to save space.")
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextSecondary)
                 }
             }
             .padding(.horizontal, 16)

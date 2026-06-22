@@ -145,6 +145,34 @@ struct KnowledgeBaseSettingsView: View {
                     Text("Select a Knowledge Base folder above to enable write-back.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button {
+                            appState.startKnowledgeBaseBackfill()
+                        } label: {
+                            Label("Export existing meetings to Knowledge Base", systemImage: "square.and.arrow.up.on.square")
+                        }
+                        .disabled(appState.kbBackfillProgress != nil)
+
+                        if let progress = appState.kbBackfillProgress {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Exporting \(progress.done) of \(progress.total)…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if let result = appState.kbBackfillResult {
+                            Text(result)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("Write-back only saves meetings summarized after you turned it on. This exports your earlier meetings too, and is safe to run more than once.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             }
 

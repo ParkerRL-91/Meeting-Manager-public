@@ -107,6 +107,19 @@ final class MeetingRepository {
         }
     }
 
+    /// Every meeting that has at least one summary — the candidate set for the
+    /// one-time Knowledge Base backfill (TASK-115). No status filter: the user's
+    /// whole summarized back-catalogue is eligible. Ordered most-recent first so
+    /// their latest meetings populate the KB first.
+    func allWithSummaries() async throws -> [Meeting] {
+        try await database.writer.read { db in
+            try Meeting
+                .filter(sql: "id IN (SELECT DISTINCT meetingId FROM meetingSummary)")
+                .order(sql: "COALESCE(endDate, startDate, scheduledStartDate, createdAt) DESC")
+                .fetchAll(db)
+        }
+    }
+
     func pastMeetings(limit: Int = 50, offset: Int = 0) async throws -> [Meeting] {
         try await database.writer.read { db in
             try Meeting

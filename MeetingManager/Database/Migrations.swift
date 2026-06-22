@@ -1537,5 +1537,20 @@ enum Migrations {
                 t.add(column: "kbSourcesJSON", .text)
             }
         }
+
+        // PRJ-016: opt-in audio retention. `appSettings.audioRetentionDays`
+        // (0 = keep forever; >0 = days to keep) gates the startup prune.
+        // `meeting.audioPrunedAt` records when the sweep removed a meeting's
+        // audio so the UI can show an "audio removed" caption and tell pruned
+        // apart from never-recorded. Default 0 → existing installs change
+        // nothing until the user opts in. Nullable/defaulted: no backfill.
+        migrator.registerMigration("v64-audio-retention") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "audioRetentionDays", .integer).notNull().defaults(to: 0)
+            }
+            try db.alter(table: "meeting") { t in
+                t.add(column: "audioPrunedAt", .datetime)
+            }
+        }
     }
 }

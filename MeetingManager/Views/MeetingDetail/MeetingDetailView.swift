@@ -106,6 +106,17 @@ struct MeetingDetailView: View {
         // Transcript-synced playback transport (TASK-077). Hides itself
         // when the meeting has no audio.
         MeetingPlaybackBar()
+
+        // PRJ-016: explain the absent player when the retention policy removed
+        // this meeting's audio, so it doesn't read as data loss.
+        if let prunedAt = meeting.audioPrunedAt, meeting.audioFilePaths.isEmpty {
+            Text("Audio for this meeting was removed on \(prunedAt.formatted(date: .abbreviated, time: .omitted)) to save space. The transcript and summary are kept.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+        }
     }
 
     @ViewBuilder

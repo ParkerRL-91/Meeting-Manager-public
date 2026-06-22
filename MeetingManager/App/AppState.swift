@@ -1166,6 +1166,95 @@ final class AppState {
         fileLog("TopicTrackers: scanned \(processed) meeting(s) for \(trackers.count) tracker(s)")
     }
 
+    // MARK: - Knowledge Base Backfill (TASK-115 / PRJ-016)
+
+    /// Progress of the one-time "Export existing meetings to Knowledge Base"
+    /// backfill, surfaced inline in KB Settings. nil when not running.
+    var kbBackfillProgress: (done: Int, total: Int)?
+
+    /// Result line shown after the backfill finishes (until another run starts).
+    /// nil when it hasn't run this launch.
+    var kbBackfillResult: String?
+
+    /// In-flight guard. A disabled button alone doesn't survive a Settings view
+    /// rebuild, so reentrancy is gated here rather than on view state.
+    private var kbBackfillTask: Task<Void, Never>?
+
+    /// Export every summarized meeting to the Knowledge Base. Forward-only
+    /// write-back (`summaryCompletedHandler`) only writes meetings summarized
+    /// after the toggle was turned on, so the back-catalogue was never exported.
+    /// File-only work (no AI, no network) → a tracked standalone Task with its
+    /// own progress, NOT the TaskQueue. Idempotent: `writeMeeting` overwrites its
+    /// own prior output and writes a dated addendum for any note the user
+    /// hand-edited, so re-running is safe.
+    func startKnowledgeBaseBackfill() {
+        guard kbBackfillTask == nil else { return }
+        guard KnowledgeBaseService.shared.rootURL != nil else { return }
+        kbBackfillResult = nil
+        kbBackfillTask = Task { [weak self] in
+            await self?.runKnowledgeBaseBackfill()
+            self?.kbBackfillTask = nil
+        }
+    }
+
+    private func runKnowledgeBaseBackfill() async {
+        let meetings = (try? await meetingRepository.allWithSummaries()) ?? []
+        guard !meetings.isEmpty else {
+            kbBackfillResult = "No meetings with a summary to export."
+            return
+        }
+        // Meetings already in kbExport before this run, so the completion line
+        // can honestly split "newly exported" from "already up to date" without
+        // trusting writeMeeting's (Void) return.
+        let priorExportIds: Set<String> = (try? await database.writer.read { db in
+            try String.fetchSet(db, sql: "SELECT meetingId FROM kbExport")
+        }) ?? []
+
+        kbBackfillProgress = (0, meetings.count)
+        var newlyExported = 0
+        var alreadyCurrent = 0
+        for (index, meeting) in meetings.enumerated() {
+            if Task.isCancelled { break }
+            // allWithSummaries guarantees a summary row exists; skip the rare
+            // empty/raced one rather than writing a blank-summary note.
+            guard let summary = try? await summaryRepository.latestSummary(meetingId: meeting.id),
+                  !summary.summaryText.isEmpty else {
+                kbBackfillProgress = (index + 1, meetings.count)
+                continue
+            }
+            let segments = (try? await transcriptRepository.transcriptsForMeeting(meeting.id, limit: 5000)) ?? []
+            await KBWriteBackService.shared.writeMeeting(
+                meeting,
+                summary: summary.summaryText,
+                transcript: segments
+            )
+            if priorExportIds.contains(meeting.id) { alreadyCurrent += 1 } else { newlyExported += 1 }
+            kbBackfillProgress = (index + 1, meetings.count)
+        }
+        let stopped = Task.isCancelled
+        kbBackfillProgress = nil
+        kbBackfillResult = stopped
+            ? "Export stopped. \(newlyExported) newly exported, \(alreadyCurrent) already up to date."
+            : "Exported \(newlyExported) meeting(s) to your Knowledge Base. \(alreadyCurrent) were already up to date."
+        fileLog("KB backfill: \(newlyExported) new, \(alreadyCurrent) already current, stopped=\(stopped)")
+    }
+
+    /// Run the audio retention sweep immediately — called when the user confirms
+    /// a shorter window in Settings, so space is reclaimed without waiting for a
+    /// relaunch. Drops a stale player for any just-pruned meeting that's open.
+    /// Returns bytes freed for the confirmation. No-op at 0 (Forever).
+    @discardableResult
+    func runAudioRetentionSweepNow() async -> Int64 {
+        let days = settings.audioRetentionDays
+        guard days > 0 else { return 0 }
+        let result = await AudioRetention.sweep(database: database, retentionDays: days)
+        if let loaded = audioPlayback.loadedMeetingId, result.prunedMeetingIds.contains(loaded) {
+            audioPlayback.unload()
+        }
+        loadMeetings()
+        return result.bytes
+    }
+
     static let sentimentBackfillSentinel = "__sentiment_backfill__"
     static let sentimentBackfillDoneKey = "sentiment.processedMeetingIds"
 
@@ -5912,6 +6001,17 @@ final class AppState {
         Task { [weak self] in
             guard let self else { return }
             await VideoCaptureService.shared.sweepRetention(database: self.database)
+        }
+        // PRJ-016: prune audio past the retention window. No-op at 0 (Forever,
+        // the default), so existing installs delete nothing until the user
+        // opts in. Runs after cleanupStuckMeetings (init) recovered any stuck
+        // recording into a non-prunable status, so in-flight audio is safe.
+        Task { [weak self] in
+            guard let self else { return }
+            let days = self.settings.audioRetentionDays
+            guard days > 0 else { return }
+            _ = await AudioRetention.sweep(database: self.database, retentionDays: days)
+            self.loadMeetings()
         }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land

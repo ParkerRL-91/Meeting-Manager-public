@@ -13,6 +13,13 @@ struct AudioSettingsView: View {
     @State private var hasMicPermission: Bool = false
     @State private var hasScreenRecordingPermission: Bool = false
 
+    // PRJ-016 audio retention
+    @State private var currentUsageBytes: Int64 = 0
+    @State private var proposedRetention: Int = 0
+    @State private var reclaimableBytes: Int64 = 0
+    @State private var showPruneConfirm = false
+    @State private var pruneResultMessage: String?
+
     private let audioManager = AudioSessionManager()
 
     /// The microphone auto-detection would currently pick.
@@ -25,10 +32,29 @@ struct AudioSettingsView: View {
     var body: some View {
         Form {
             inputDeviceSection
+            storageSection
             permissionsSection
         }
         .formStyle(.grouped)
         .onAppear(perform: loadState)
+        .alert("Remove old audio?", isPresented: $showPruneConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button(pruneConfirmButtonTitle) {
+                appState.settings.audioRetentionDays = proposedRetention
+                Task {
+                    let freed = await appState.runAudioRetentionSweepNow()
+                    let usage = await Task.detached { AudioRetention.currentAudioUsageBytes() }.value
+                    await MainActor.run {
+                        currentUsageBytes = usage
+                        pruneResultMessage = freed > 0
+                            ? "Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)) of audio."
+                            : "Automatic cleanup is on. Nothing needed removing yet."
+                    }
+                }
+            }
+        } message: {
+            Text(pruneConfirmMessage)
+        }
     }
 
     // MARK: - Sections
@@ -74,6 +100,78 @@ struct AudioSettingsView: View {
             Text(appState.settings.micOverrideEnabled
                  ? "Recording from the microphone you selected. If it's unplugged or can't capture audio, Meeting Manager falls back to automatic selection so recordings are never silent."
                  : "Meeting Manager automatically selects the best available microphone and adapts when you plug or unplug devices. Turn on the override only if you need to force a specific microphone.")
+        }
+    }
+
+    private var storageSection: some View {
+        Section {
+            Picker("Keep audio for", selection: Binding(
+                get: { appState.settings.audioRetentionDays },
+                set: { handleRetentionChange(to: $0) }
+            )) {
+                Text("Forever").tag(0)
+                Text("30 days").tag(30)
+                Text("60 days").tag(60)
+                Text("90 days").tag(90)
+                Text("180 days").tag(180)
+                Text("1 year").tag(365)
+            }
+
+            if let msg = pruneResultMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Audio storage")
+        } footer: {
+            Text(storageFooterText)
+        }
+    }
+
+    private var storageFooterText: String {
+        let usage = ByteCountFormatter.string(fromByteCount: currentUsageBytes, countStyle: .file)
+        if appState.settings.audioRetentionDays == 0 {
+            return "Recorded audio currently uses \(usage). Audio is kept forever. Choose a shorter window to automatically remove old recordings and reclaim space; transcripts, summaries, and notes are always kept."
+        }
+        return "Recorded audio currently uses \(usage). Recordings older than \(appState.settings.audioRetentionDays) days are removed automatically; transcripts, summaries, and notes are kept."
+    }
+
+    private var pruneConfirmButtonTitle: String {
+        reclaimableBytes > 0
+            ? "Free \(ByteCountFormatter.string(fromByteCount: reclaimableBytes, countStyle: .file)) now"
+            : "Turn on automatic cleanup"
+    }
+
+    private var pruneConfirmMessage: String {
+        let policy = "Meeting Manager will remove audio older than \(proposedRetention) days from now on, including each time the app starts. You can change this anytime here."
+        if reclaimableBytes > 0 {
+            let size = ByteCountFormatter.string(fromByteCount: reclaimableBytes, countStyle: .file)
+            return "This frees about \(size) now. Audio for those meetings can no longer be played back or re-transcribed; their transcripts, summaries, and notes are kept. \(policy)"
+        }
+        return "There is no audio old enough to remove yet. \(policy)"
+    }
+
+    /// Apply a retention change. A longer window or Forever deletes nothing, so
+    /// it applies immediately. A shorter finite window (or leaving Forever for a
+    /// finite one) would prune audio, so confirm with the reclaimable size first
+    /// and only commit + sweep on the user's confirmation.
+    private func handleRetentionChange(to new: Int) {
+        let old = appState.settings.audioRetentionDays
+        guard new != old else { return }
+        let destructive = new != 0 && (old == 0 || new < old)
+        if !destructive {
+            appState.settings.audioRetentionDays = new
+            return
+        }
+        proposedRetention = new
+        pruneResultMessage = nil
+        Task {
+            let bytes = await AudioRetention.reclaimableBytes(database: appState.database, retentionDays: new)
+            await MainActor.run {
+                reclaimableBytes = bytes
+                showPruneConfirm = true
+            }
         }
     }
 
@@ -146,6 +244,11 @@ struct AudioSettingsView: View {
         // Check current mic permission status
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         hasMicPermission = (status == .authorized)
+
+        Task {
+            let usage = await Task.detached { AudioRetention.currentAudioUsageBytes() }.value
+            await MainActor.run { currentUsageBytes = usage }
+        }
     }
 
     private func requestMicPermission() {
