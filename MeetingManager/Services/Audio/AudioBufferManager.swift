@@ -208,9 +208,13 @@ final class AudioBufferManager: @unchecked Sendable {
         // PCM WAV if a given macOS rejects IEEE-float WAV. Either way the file's
         // processingFormat is 16 kHz mono Float32, so the converted buffers
         // still match on write.
-        guard let file = Self.makeAudioFile(at: outputURL, primary: canonicalFormat.settings) else {
+        let made = Self.makeAudioFile(at: outputURL, primary: canonicalFormat.settings)
+        guard let file = made.file else {
+            // Surface the full path and the real OS error — the previous generic
+            // "disk may be full" guess was undiagnosable in the field.
+            let detail = made.error.map { ": \($0.localizedDescription)" } ?? "."
             throw AudioCaptureError.captureSetupFailed(
-                "Couldn't create the recording file at \(outputURL.lastPathComponent). The disk may be full or the location unwritable."
+                "Couldn't create the recording file at \(outputURL.path)\(detail) Change the recording location in Settings → General → Recordings."
             )
         }
         audioFile = file
@@ -218,7 +222,7 @@ final class AudioBufferManager: @unchecked Sendable {
 
         // System-only file is best-effort (used for diarization). Same fallback.
         let systemURL = Self.systemAudioURL(for: outputURL)
-        systemAudioFile = Self.makeAudioFile(at: systemURL, primary: canonicalFormat.settings)
+        systemAudioFile = Self.makeAudioFile(at: systemURL, primary: canonicalFormat.settings).file
         systemFileURL = systemAudioFile != nil ? systemURL : nil
 
         recordingStartHostTime = nil
@@ -232,18 +236,21 @@ final class AudioBufferManager: @unchecked Sendable {
     /// then a maximally-compatible 16-bit PCM WAV fallback. Returns nil only if
     /// both fail (disk/permission). Both produce a 16 kHz mono file whose
     /// processingFormat is Float32, matching the canonical write buffers.
-    private static func makeAudioFile(at url: URL, primary: [String: Any]) -> AVAudioFile? {
-        if let f = try? AVAudioFile(forWriting: url, settings: primary) { return f }
-        let pcm16: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false
-        ]
-        return try? AVAudioFile(forWriting: url, settings: pcm16)
+    private static func makeAudioFile(at url: URL, primary: [String: Any]) -> (file: AVAudioFile?, error: Error?) {
+        do { return (try AVAudioFile(forWriting: url, settings: primary), nil) }
+        catch {
+            let pcm16: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 16000,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false
+            ]
+            do { return (try AVAudioFile(forWriting: url, settings: pcm16), nil) }
+            catch { return (nil, error) }
+        }
     }
 
     /// Returns the system-audio-only WAV URL derived from the mixed audio URL.
@@ -497,7 +504,7 @@ final class AudioBufferManager: @unchecked Sendable {
         }
         let tmpURL = mixedURL.deletingPathExtension().appendingPathExtension("mixing.wav")
         try? FileManager.default.removeItem(at: tmpURL)
-        guard let out = Self.makeAudioFile(at: tmpURL, primary: canonicalFormat.settings) else { return }
+        guard let out = Self.makeAudioFile(at: tmpURL, primary: canonicalFormat.settings).file else { return }
 
         let block = 32_000
         guard let micBuf = AVAudioPCMBuffer(pcmFormat: micIn.processingFormat, frameCapacity: AVAudioFrameCount(block)),

@@ -3295,6 +3295,14 @@ final class AppState {
             }
         }
 
+        // Surface a non-fatal warning when the preferred recording location
+        // wasn't writable and capture fell back to a temporary folder.
+        self.audioCaptureService.onStorageWarning = { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.lastUserError = message
+            }
+        }
+
         // Wire Apple Speech fallback if WhisperKit is unavailable.
         // SFSpeechRecognizer produces nothing until the user grants
         // Speech access, so request it before starting the recognizer.

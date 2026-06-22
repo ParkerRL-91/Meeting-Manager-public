@@ -14,6 +14,8 @@ struct OnboardingView: View {
                 switch onboardingManager.currentStep {
                 case .welcome:
                     WelcomeStepView(onNext: onboardingManager.nextStep)
+                case .storage:
+                    StorageStepView(onContinue: onboardingManager.nextStep)
                 case .calendar:
                     CalendarStepView(onAdvance: onboardingManager.nextStep)
                 case .localModel:
@@ -103,7 +105,7 @@ struct OnboardingView: View {
             // choice is already persisted by the step, and the pull runs via
             // verifyLocalModelsOnStartup (no second download path).
             switch onboardingManager.currentStep {
-            case .welcome, .ready:
+            case .welcome, .ready, .storage:
                 Spacer().frame(width: 80)
             case .calendar, .localModel, .audioRetention, .knowledgeBase:
                 Button(action: onboardingManager.nextStep) {

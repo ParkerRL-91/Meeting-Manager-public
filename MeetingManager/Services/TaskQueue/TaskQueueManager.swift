@@ -126,11 +126,14 @@ final class TaskQueueManager {
     /// and transcription would silently produce zero segments.
     private func reconcileOrphanAudioFiles() async {
         let fm = FileManager.default
-        let audioDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MeetingManager", isDirectory: true)
-            .appendingPathComponent("Audio", isDirectory: true)
-        guard fm.fileExists(atPath: audioDir.path) else { return }
-        guard let entries = try? fm.contentsOfDirectory(at: audioDir, includingPropertiesForKeys: nil) else { return }
+        // Scan every known recording location (custom override, if set, plus the
+        // default), so orphaned WAVs are recovered wherever storage was configured.
+        let entries: [URL] = RecordingStorage.knownAudioDirectories().flatMap { dir -> [URL] in
+            guard fm.fileExists(atPath: dir.path),
+                  let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return [] }
+            return contents
+        }
+        guard !entries.isEmpty else { return }
 
         // Map: meetingId UUID → main wav URLs (skip _system.wav siblings).
         // A meeting can have several main WAVs: the canonical <uuid>.wav plus

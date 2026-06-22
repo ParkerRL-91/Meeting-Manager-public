@@ -32,29 +32,47 @@ BUNDLE_ID="com.meetingmanager.app"
 # Ad-hoc signing (--sign -) changes identity every build, which forces
 # the user to re-grant Screen Recording permission after each rebuild.
 # ──────────────────────────────────────────────────
+# Pinned self-signed identity, by SHA-1. macOS ties Microphone / Screen
+# Recording / Calendar (TCC) grants to the signing identity, so EVERY
+# distributed build must use the SAME certificate or users lose their
+# permissions after updating. We pin by hash (not name) because the name
+# "MeetingManager-Dev" also prefix-matches "MeetingManager-Dev2" — a name match
+# could silently sign with the wrong cert. Rotating this value resets every
+# existing user's permissions, so change it deliberately.
+PINNED_SIGN_SHA="${PINNED_SIGN_SHA:-57A1035B19FC882CF723DB2EFF114D8104E50537}"  # MeetingManager-Dev
+
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+    # Explicit override (power users / CI). Ad-hoc is refused unless forced,
+    # because it changes identity every build and wipes user permissions.
+    if [[ "${SIGN_IDENTITY}" == "-" && "${ALLOW_ADHOC_SIGN:-}" != "1" ]]; then
+        echo "ERROR: Refusing ad-hoc signing (SIGN_IDENTITY=-) for a distributed build."
+        echo "  Ad-hoc identity changes every build and wipes users' Microphone/Screen"
+        echo "  Recording permissions after they update. Local throwaway build only:"
+        echo "    ALLOW_ADHOC_SIGN=1 SIGN_IDENTITY=- ./Scripts/clean-build-dmg.sh"
+        exit 1
+    fi
     echo "Using explicit SIGN_IDENTITY: ${SIGN_IDENTITY}"
 elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
     SIGN_IDENTITY="Developer ID Application"
     echo "Auto-detected Developer ID Application certificate."
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "MeetingManager-Dev"; then
-    SIGN_IDENTITY="MeetingManager-Dev"
-    echo "Auto-detected MeetingManager-Dev certificate."
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "${PINNED_SIGN_SHA}"; then
+    # Sign by hash so we can never grab a wrong same-named cert (e.g. Dev2).
+    SIGN_IDENTITY="${PINNED_SIGN_SHA}"
+    echo "Using pinned self-signed identity ${PINNED_SIGN_SHA} (MeetingManager-Dev)."
 else
     echo ""
-    echo "ERROR: No stable code-signing identity found."
+    echo "ERROR: Pinned signing identity ${PINNED_SIGN_SHA} not found in the keychain."
     echo ""
-    echo "  Ad-hoc signing (--sign -) causes macOS to forget your Screen Recording"
-    echo "  and Microphone permissions every time you rebuild. This is why the app"
-    echo "  keeps asking for permissions."
+    echo "  macOS ties Microphone/Screen Recording permissions to the signing"
+    echo "  identity. Distributed builds MUST use the one pinned certificate, or"
+    echo "  users lose their permissions after they update."
     echo ""
-    echo "  To fix this, run the setup script to create a free self-signed certificate:"
-    echo ""
-    echo "    ./Scripts/setup-signing.sh"
-    echo ""
-    echo "  This is a one-time setup. After that, permissions stick across rebuilds."
-    echo ""
-    echo "  To bypass this check (not recommended): SIGN_IDENTITY=- ./Scripts/clean-build-dmg.sh"
+    echo "  • Release machine: import the MeetingManager-Dev certificate."
+    echo "  • First-time setup creates one: ./Scripts/setup-signing.sh — but a NEW"
+    echo "    cert has a new SHA; update PINNED_SIGN_SHA and expect a one-time"
+    echo "    permission reset for existing users."
+    echo "  • Local throwaway build only:"
+    echo "      ALLOW_ADHOC_SIGN=1 SIGN_IDENTITY=- ./Scripts/clean-build-dmg.sh"
     echo ""
     exit 1
 fi
@@ -211,13 +229,19 @@ codesign --force --options runtime \
     --sign "${SIGN_IDENTITY}" \
     "${APP_BUNDLE}"
 
-# Verify signing identity is stable (not ad-hoc)
+# Verify the embedded signature is the stable identity we intended. An ad-hoc
+# bundle has NO "Authority=" line — catch that and fail the build, since it
+# would silently wipe users' permissions on their next update.
 SIGNED_ID=$(codesign -dvv "${APP_BUNDLE}" 2>&1 | grep "Authority=" | head -1 || true)
-if [[ "${SIGN_IDENTITY}" != "-" ]]; then
-    echo "  Signed with: ${SIGNED_ID}"
-    echo "  ✓ Stable identity — macOS permissions will persist across rebuilds."
+if [[ "${SIGN_IDENTITY}" == "-" ]]; then
+    echo "  ⚠ Ad-hoc signed — permissions will reset on next rebuild (local build only)."
+elif [[ -z "${SIGNED_ID}" ]]; then
+    echo "ERROR: Signed bundle has no code-signing authority — it is effectively ad-hoc."
+    echo "  Aborting so this build does not ship and wipe users' permissions."
+    exit 1
 else
-    echo "  ⚠ Ad-hoc signed — permissions will reset on next rebuild."
+    echo "  Signed with: ${SIGNED_ID}"
+    echo "  ✓ Stable identity — macOS permissions will persist across updates."
 fi
 
 # ──────────────────────────────────────────────────

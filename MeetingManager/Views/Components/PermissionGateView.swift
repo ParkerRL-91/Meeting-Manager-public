@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import ScreenCaptureKit
+import AppKit
 import os
 
 /// Lightweight permission gate shown on every app launch.
@@ -24,6 +25,7 @@ struct PermissionGateView: View {
 
     @State private var micGranted = false
     @State private var screenGranted = false
+    @State private var storageWritable = false
     @State private var checking = true
 
     private let sessionManager = AudioSessionManager()
@@ -81,6 +83,42 @@ struct PermissionGateView: View {
                                 HStack(spacing: 12) {
                                     Button("Open Settings") {
                                         openScreenRecordingSettings()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(Color.appAccent)
+                                    .controlSize(.small)
+
+                                    Button("Check Again") {
+                                        Task { await checkPermissions() }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                    Divider().background(Color.appSeparator)
+
+                    // Recording Storage — not a TCC permission, but a launch
+                    // readiness condition: the app can't record if it can't
+                    // write the WAV. Almost always green (default App Support);
+                    // only demands action when the location is unwritable
+                    // (e.g. a foreign-owned folder after migrating Macs).
+                    permissionRow(
+                        icon: "internaldrive.fill",
+                        title: "Recording Storage",
+                        subtitle: "Save meeting audio to disk",
+                        granted: storageWritable
+                    ) {
+                        if !storageWritable {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("This folder can't be written to. Pick one you own:")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appTextTertiary)
+
+                                HStack(spacing: 12) {
+                                    Button("Choose Folder…") {
+                                        chooseStorageFolder()
                                     }
                                     .buttonStyle(.borderedProminent)
                                     .tint(Color.appAccent)
@@ -184,10 +222,13 @@ struct PermissionGateView: View {
             screenGranted = sessionManager.hasScreenRecordingPermission()
         }
 
+        // Recording storage — probe an actual write (not just dir existence).
+        storageWritable = RecordingStorage.shared.isPreferredWritable()
+
         checking = false
 
-        // Both granted → dismiss the gate
-        if micGranted && screenGranted {
+        // All ready → dismiss the gate
+        if micGranted && screenGranted && storageWritable {
             withAnimation(.easeOut(duration: 0.3)) {
                 permissionsReady = true
             }
@@ -198,7 +239,7 @@ struct PermissionGateView: View {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
                 micGranted = granted
-                if granted && screenGranted {
+                if granted && screenGranted && storageWritable {
                     withAnimation(.easeOut(duration: 0.3)) {
                         permissionsReady = true
                     }
@@ -217,5 +258,18 @@ struct PermissionGateView: View {
                 }
             }
         }
+    }
+
+    private func chooseStorageFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a folder where Meeting Manager can save audio recordings."
+        panel.prompt = "Use This Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        RecordingStorage.shared.customDirectory = url
+        Task { await checkPermissions() }
     }
 }

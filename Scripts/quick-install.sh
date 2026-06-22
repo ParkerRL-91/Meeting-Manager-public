@@ -40,28 +40,20 @@ fi
 cp "$REPO_DIR/MeetingManager/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 cp "$REPO_DIR/MeetingManager/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || true
 
-# 8. Copy Sparkle if not already there
-if [ ! -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" ]; then
-    SPARKLE_SRC="$REPO_DIR/.build/arm64-apple-macosx/release/Sparkle.framework"
-    [ -d "$SPARKLE_SRC" ] && cp -R "$SPARKLE_SRC" "$APP_BUNDLE/Contents/Frameworks/"
+# 8. Sign with the pinned self-signed identity (by SHA-1, same as the release
+#    build) so local installs never reset the developer's own Microphone /
+#    Screen Recording permissions. Signing by hash avoids the
+#    "MeetingManager-Dev" vs "MeetingManager-Dev2" name collision. Sparkle was
+#    removed, so there are no framework components to sign.
+PINNED_SIGN_SHA="${PINNED_SIGN_SHA:-57A1035B19FC882CF723DB2EFF114D8104E50537}"  # MeetingManager-Dev
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$PINNED_SIGN_SHA"; then
+    echo "ERROR: Pinned signing identity $PINNED_SIGN_SHA not found."
+    echo "  Run ./Scripts/setup-signing.sh once to create it. Ad-hoc signing would"
+    echo "  reset your Microphone/Screen Recording permissions on every install."
+    exit 1
 fi
-
-# 9. Sign inside-out with stable certificate (preserves TCC permissions across rebuilds)
-SIGN_ID="MeetingManager-Dev"
-if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
-    echo "WARNING: $SIGN_ID certificate not found — falling back to ad-hoc (permissions will reset)"
-    SIGN_ID="-"
-fi
-FW="$APP_BUNDLE/Contents/Frameworks"
-for xpc in "$FW/Sparkle.framework/Versions/B/XPCServices"/*.xpc; do
-    [ -d "$xpc" ] && codesign --force --sign "$SIGN_ID" "$xpc" 2>/dev/null
-done
-[ -d "$FW/Sparkle.framework/Versions/B/Updater.app" ] && \
-    codesign --force --sign "$SIGN_ID" "$FW/Sparkle.framework/Versions/B/Updater.app" 2>/dev/null
-[ -f "$FW/Sparkle.framework/Versions/B/Autoupdate" ] && \
-    codesign --force --sign "$SIGN_ID" "$FW/Sparkle.framework/Versions/B/Autoupdate" 2>/dev/null
-codesign --force --sign "$SIGN_ID" "$FW/Sparkle.framework" 2>/dev/null
-codesign --force --sign "$SIGN_ID" "$APP_BUNDLE"
+ENTITLEMENTS="$REPO_DIR/MeetingManager/Resources/MeetingManager.entitlements"
+codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$PINNED_SIGN_SHA" "$APP_BUNDLE"
 
 # 10. Launch
 echo "Launching..."

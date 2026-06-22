@@ -49,6 +49,11 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// The error is surfaced to the user via AppState.lastUserError.
     var onWriteError: ((Error) -> Void)?
 
+    /// Called when the preferred recording location wasn't writable and capture
+    /// fell back to a temporary folder. Non-fatal — the recording still happens;
+    /// the message tells the user to fix the location. Surfaced via AppState.
+    var onStorageWarning: ((String) -> Void)?
+
     /// Called when the system-audio tap can't start (almost always missing
     /// Screen Recording permission), so remote participants won't be recorded —
     /// only the local mic. Surfaced to the user with an actionable message,
@@ -294,7 +299,18 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // <meetingId>.wav name; a reopen/resume session gets a unique suffix —
         // AVAudioFile(forWriting:) truncates, so reusing the canonical name
         // would destroy the prior session's audio.
-        let audioDir = try audioDirectory()
+        // Resolve a directory that is verified writable *now*. If the user's
+        // preferred location can't be written (foreign-owned folder, read-only
+        // volume), this routes to a temp fallback so the recording is never
+        // lost, and we warn the user to fix the location.
+        let audioDir: URL
+        switch RecordingStorage.shared.resolveWritableDirectory() {
+        case .ok(let url):
+            audioDir = url
+        case .fellBack(let url, let original, let error):
+            audioDir = url
+            onStorageWarning?("Couldn't write recordings to “\(original.path)” (\(error.localizedDescription)). Recording to a temporary folder for now — pick a working location in Settings → General → Recordings.")
+        }
         var fileURL = audioDir.appendingPathComponent("\(meetingId).wav")
         if FileManager.default.fileExists(atPath: fileURL.path) {
             let stamp = Int(Date().timeIntervalSince1970)
@@ -1387,15 +1403,6 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// Marked nonisolated because it is called from audio callback queues.
     nonisolated private func logToFile(_ message: String) {
         AppFileLogger.shared.log(message)
-    }
-
-    private func audioDirectory() throws -> URL {
-        let url = try FileManager.default
-            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("MeetingManager/Audio", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-        return url
     }
 
     /// Called from audio callback queues — must be nonisolated to avoid MainActor hop.

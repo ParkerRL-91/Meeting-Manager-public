@@ -192,7 +192,11 @@ if [[ -z "${SIGN_IDENTITY:-}" ]]; then
     if [[ "${NOTARIZE}" == "1" ]]; then
         SIGN_IDENTITY="Developer ID Application"
     else
-        SIGN_IDENTITY="MeetingManager-Dev"
+        # Pin by SHA-1, not name. macOS ties TCC grants to the signing identity,
+        # and "MeetingManager-Dev" prefix-matches "MeetingManager-Dev2" — a name
+        # match could sign with the wrong cert and reset every user's
+        # permissions. See ADR-025. Overridable via PINNED_SIGN_SHA.
+        SIGN_IDENTITY="${PINNED_SIGN_SHA:-57A1035B19FC882CF723DB2EFF114D8104E50537}"
     fi
 fi
 ENTITLEMENTS="${REPO_DIR}/MeetingManager/Resources/MeetingManager.entitlements"
@@ -232,6 +236,20 @@ else
 fi
 
 echo "Signed."
+
+# Guard: a self-signed (non-notarized) bundle must still carry a stable
+# Authority. No "Authority=" line means it signed ad-hoc, which would reset
+# every user's TCC permissions on update — abort rather than ship that.
+if [[ "${NOTARIZE}" != "1" ]]; then
+    SIGNED_AUTHORITY="$(codesign -dvv "${APP_BUNDLE}" 2>&1 | grep '^Authority=' | head -1 || true)"
+    if [[ -z "${SIGNED_AUTHORITY}" ]]; then
+        echo "ERROR: signed bundle has no code-signing authority (effectively ad-hoc)."
+        echo "  Aborting before release so this does not wipe users' permissions."
+        plutil -replace CFBundleShortVersionString -string "${ORIGINAL_VERSION}" "${PLIST}"
+        exit 1
+    fi
+    echo "  Signed identity: ${SIGNED_AUTHORITY}"
+fi
 
 # ──────────────────────────────────────────────────
 # Step 5: Notarize (required by default, SKIP_NOTARIZE=1 to override)

@@ -21,6 +21,11 @@ struct GeneralSettingsView: View {
     @State private var morningBriefMinute: Int = 30
     @State private var taskDueAlertsEnabled: Bool = AppSettings.default.taskDueAlertsEnabled
 
+    // Recording storage location (hydrated in .task; refreshed after changes).
+    @State private var recordingPath: String = ""
+    @State private var recordingWritable: Bool = true
+    @State private var recordingIsCustom: Bool = false
+
     // One-time Apple Reminders import (PRJ-013 Phase 2). The outbound push was removed.
     @State private var isImporting = false
     @State private var importSummary: String?
@@ -40,6 +45,7 @@ struct GeneralSettingsView: View {
             }
             appearanceSection
             startupSection
+            recordingsSection
             notificationSection
             summaryAutomationSection
             tasksSection
@@ -61,6 +67,7 @@ struct GeneralSettingsView: View {
             morningBriefHour = appState.settings.morningBriefHour
             morningBriefMinute = appState.settings.morningBriefMinute
             taskDueAlertsEnabled = appState.settings.taskDueAlertsEnabled
+            refreshRecordingStatus()
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
             Logger.ui.info("[GeneralSettingsView] hydrated; theme=\(selectedTheme, privacy: .public)")
@@ -134,6 +141,69 @@ struct GeneralSettingsView: View {
         } footer: {
             Text("Automatically start Meeting Manager when you log in to your Mac.")
         }
+    }
+
+    private var recordingsSection: some View {
+        Section {
+            HStack(spacing: 10) {
+                Image(systemName: recordingWritable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(recordingWritable ? .green : .orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(recordingPath.isEmpty ? "Default location" : recordingPath)
+                        .font(.callout)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(recordingWritable
+                         ? "Audio recordings are saved here."
+                         : "This folder can't be written to — choose another.")
+                        .font(.caption)
+                        .foregroundStyle(recordingWritable ? Color.secondary : Color.orange)
+                }
+                Spacer()
+            }
+            HStack {
+                Button("Change…") { chooseRecordingFolder() }
+                Button("Show in Finder") { revealRecordingFolder() }
+                if recordingIsCustom {
+                    Button("Use Default") { useDefaultRecordingFolder() }
+                }
+                Spacer()
+            }
+        } header: {
+            Text("Recordings")
+        } footer: {
+            Text("Meeting audio is saved here, then transcribed on-device. If a recording ever fails because this location isn't writable, change it here. Choosing a folder also grants Meeting Manager permission to write to it.")
+        }
+    }
+
+    private func refreshRecordingStatus() {
+        recordingPath = RecordingStorage.shared.preferredDirectory().path
+        recordingWritable = RecordingStorage.shared.isPreferredWritable()
+        recordingIsCustom = RecordingStorage.shared.customDirectory != nil
+    }
+
+    private func chooseRecordingFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a folder where Meeting Manager can save audio recordings."
+        panel.prompt = "Use This Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        RecordingStorage.shared.customDirectory = url
+        refreshRecordingStatus()
+    }
+
+    private func useDefaultRecordingFolder() {
+        RecordingStorage.shared.customDirectory = nil
+        refreshRecordingStatus()
+    }
+
+    private func revealRecordingFolder() {
+        let url = RecordingStorage.shared.preferredDirectory()
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private var notificationSection: some View {
