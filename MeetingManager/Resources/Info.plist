@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>4.9.4</string>
+	<string>4.9.5</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -40,7 +40,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>202606201216</string>
+	<string>202606221129</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.4</string>
 	<key>NSAppleEventsUsageDescription</key>
