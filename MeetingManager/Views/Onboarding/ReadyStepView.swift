@@ -33,8 +33,9 @@ struct ReadyStepView: View {
                     skippedText: "Not connected"
                 )
                 setupRow(
-                    granted: (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)).flatMap({ $0 }) != nil,
-                    label: "Claude API key"
+                    granted: (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)).flatMap({ $0 }) != nil
+                        || (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.geminiAPIKey)).flatMap({ $0 }) != nil,
+                    label: "Cloud AI key"
                 )
                 setupRow(
                     granted: appState.transcriptionService.isModelLoaded,

@@ -296,7 +296,7 @@ struct DailyBriefView: View {
             // until a folder is configured, so offer a way in from here.
             if !appState.kbConfigured {
                 Button {
-                    appState.pendingSettingsTab = 9   // Knowledge Base tab
+                    appState.pendingSettingsTab = 10   // Knowledge Base tab
                     NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                     NSApp.activate(ignoringOtherApps: true)
                 } label: {

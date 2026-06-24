@@ -45,7 +45,7 @@ struct ClaudeSettingsView: View {
             connectionSection
 
             Section {
-                Toggle("Redact names, emails, and phone numbers before sending to Claude", isOn: $redactCloudPII)
+                Toggle("Redact names, emails, and phone numbers before sending to a cloud AI provider (Claude or Gemini)", isOn: $redactCloudPII)
                 Text("A reversible, on-device substitution (\u{201C}Person A\u{201D}, \u{201C}person1@redacted.example\u{201D}) applied to summaries, notes, briefs, and chat. Speaker identification is exempt — matching speakers to attendees requires their real names. Heuristic protection, not a guarantee.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

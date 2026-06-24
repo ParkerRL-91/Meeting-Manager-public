@@ -5,6 +5,8 @@ struct AIChoiceStepView: View {
     @Bindable var onboardingManager: OnboardingManager
     @State private var apiKey: String = ""
     @State private var apiKeySaved = false
+    @State private var geminiKey: String = ""
+    @State private var geminiKeySaved = false
     @State private var isTesting = false
     @State private var testResult: String?
 
@@ -37,6 +39,14 @@ struct AIChoiceStepView: View {
                 )
 
                 aiOptionCard(
+                    icon: "sparkles",
+                    title: "Google Gemini",
+                    description: "Cloud-based. Fast, high-quality summaries. Requires a Google Gemini API key.",
+                    choice: .gemini,
+                    isSelected: onboardingManager.aiChoice == .gemini
+                )
+
+                aiOptionCard(
                     icon: "desktopcomputer",
                     title: "On-Device (Ollama)",
                     description: "Fully local. No data leaves your Mac. Requires ~3 GB download.",
@@ -54,7 +64,7 @@ struct AIChoiceStepView: View {
             }
             .frame(maxWidth: 480)
 
-            // Claude API key entry (shown when Claude is selected)
+            // Cloud AI key entry (shown when the respective provider is selected)
             if onboardingManager.aiChoice == .claude {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Anthropic API Key")
@@ -104,6 +114,23 @@ struct AIChoiceStepView: View {
                 .background(Color.appSurface)
                 .cornerRadius(12)
                 .frame(maxWidth: 480)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            if onboardingManager.aiChoice == .gemini {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Google Gemini API Key").font(.headline).foregroundStyle(Color.appTextPrimary)
+                    HStack(spacing: 8) {
+                        SecureField("AIza...", text: $geminiKey).textFieldStyle(.roundedBorder)
+                        Button("Save") { saveGeminiKey() }.disabled(geminiKey.isEmpty)
+                    }
+                    if geminiKeySaved {
+                        Label("Key saved", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(Color.appSuccess)
+                    }
+                    Link("Get your API key at aistudio.google.com →", destination: URL(string: "https://aistudio.google.com/apikey")!)
+                        .font(.caption).foregroundStyle(Color.appAccent)
+                }
+                .padding(16).background(Color.appSurface).cornerRadius(12).frame(maxWidth: 480)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
@@ -162,6 +189,8 @@ struct AIChoiceStepView: View {
             switch choice {
             case .claude:
                 settings.aiProvider = .claude
+            case .gemini:
+                settings.aiProvider = .gemini
             case .local:
                 settings.aiProvider = .local
             case .none:
@@ -181,6 +210,16 @@ struct AIChoiceStepView: View {
             apiKeySaved = true
         } catch {
             Logger.general.error("Failed to save API key: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func saveGeminiKey() {
+        guard !geminiKey.isEmpty else { return }
+        do {
+            try KeychainHelper.save(geminiKey, forKey: KeychainHelper.Key.geminiAPIKey)
+            geminiKeySaved = true
+        } catch {
+            Logger.general.error("Failed to save Gemini key: \(error.localizedDescription, privacy: .public)")
         }
     }
 

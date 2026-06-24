@@ -55,6 +55,7 @@ final class OnboardingManager {
     enum AIChoice: String {
         case local
         case claude
+        case gemini
         case none
     }
 

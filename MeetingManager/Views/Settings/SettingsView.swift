@@ -32,33 +32,37 @@ struct SettingsView: View {
                 .tabItem { Label("AI (Local)", systemImage: "cpu") }
                 .tag(5)
 
+            GeminiSettingsView()
+                .tabItem { Label("AI (Gemini)", systemImage: "sparkles") }
+                .tag(6)
+
             PromptConfigView()
                 .tabItem { Label("Prompts", systemImage: "text.quote") }
-                .tag(6)
+                .tag(7)
 
             TemplateListView()
                 .tabItem { Label("Templates", systemImage: "doc.text.fill") }
-                .tag(7)
+                .tag(8)
 
             VoiceProfilesSettingsView()
                 .tabItem { Label("Voices", systemImage: "waveform.badge.mic") }
-                .tag(8)
+                .tag(9)
 
             KnowledgeBaseSettingsView()
                 .tabItem { Label("Knowledge Base", systemImage: "books.vertical") }
-                .tag(9)
+                .tag(10)
 
             IntegrationsSettingsView()
                 .tabItem { Label("Integrations", systemImage: "puzzlepiece.extension") }
-                .tag(10)
+                .tag(11)
 
             TaskStagesSettingsView()
                 .tabItem { Label("Task Stages", systemImage: "rectangle.split.3x1") }
-                .tag(11)
+                .tag(12)
 
             AboutSettingsView()
                 .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(12)
+                .tag(13)
         }
         // Default to a comfortably wide window. Settings tabs vary in
         // density: Prompts has a 3-pane layout (list / editor / reference)
