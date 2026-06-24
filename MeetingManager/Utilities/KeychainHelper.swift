@@ -15,6 +15,9 @@ enum KeychainHelper {
         /// title / employment history / LinkedIn link in the meeting view
         /// when the Settings toggle is on.
         static let apolloAPIKey = "apollo-api-key"
+        /// Google Gemini API key. Used by GeminiService for all AI functions
+        /// when Gemini is the selected provider.
+        static let geminiAPIKey = "gemini-api-key"
     }
 
     /// The service identifier written into every keychain item.
