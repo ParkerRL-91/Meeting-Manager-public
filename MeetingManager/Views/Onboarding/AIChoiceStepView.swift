@@ -161,13 +161,11 @@ struct AIChoiceStepView: View {
 
             switch choice {
             case .claude:
-                settings.useLocalLLM = false
-                settings.aiEnabled = true
+                settings.aiProvider = .claude
             case .local:
-                settings.useLocalLLM = true
-                settings.aiEnabled = true
+                settings.aiProvider = .local
             case .none:
-                settings.aiEnabled = false
+                settings.aiProvider = .none
             }
 
             try? await db.write { db in

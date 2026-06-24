@@ -1552,5 +1552,26 @@ enum Migrations {
                 t.add(column: "audioPrunedAt", .datetime)
             }
         }
+
+        // Gemini backend + single active provider. `aiProvider` is the new
+        // source of truth (none/local/claude/gemini); `geminiModel` is the
+        // Gemini model. Backfill from the legacy flags: local toggle wins,
+        // else AI-enabled implies the old Claude path, else none. The legacy
+        // aiEnabled/useLocalLLM columns stay (SQLite append-only) but are now
+        // computed in Swift and no longer written.
+        migrator.registerMigration("v65-ai-provider-selection") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "aiProvider", .text).notNull().defaults(to: "none")
+                t.add(column: "geminiModel", .text).notNull().defaults(to: "gemini-2.5-flash")
+            }
+            try db.execute(sql: """
+                UPDATE appSettings
+                SET aiProvider = CASE
+                    WHEN useLocalLLM = 1 THEN 'local'
+                    WHEN aiEnabled = 1 THEN 'claude'
+                    ELSE 'none'
+                END
+            """)
+        }
     }
 }

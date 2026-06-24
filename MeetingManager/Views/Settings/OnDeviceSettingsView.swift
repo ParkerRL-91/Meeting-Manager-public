@@ -45,9 +45,9 @@ struct OnDeviceSettingsView: View {
         @Bindable var appState = appState
         return Section {
             Toggle("Use On-Device Summarization", isOn: Binding(
-                get: { appState.settings.useLocalLLM },
+                get: { appState.settings.aiProvider == .local },
                 set: { newValue in
-                    appState.settings.useLocalLLM = newValue
+                    appState.settings.aiProvider = newValue ? .local : .none
                     if newValue {
                         Task { await appState.ollamaInstaller.setupIfNeeded(model: appState.settings.ollamaModel) }
                     }

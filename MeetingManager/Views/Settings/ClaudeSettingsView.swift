@@ -38,18 +38,11 @@ struct ClaudeSettingsView: View {
     // MARK: - Body
 
     var body: some View {
-        @Bindable var appState = appState
         Form {
             aiToggleSection
             apiKeySection
-                .disabled(!appState.settings.aiEnabled)
-                .opacity(appState.settings.aiEnabled ? 1 : 0.5)
             modelSection
-                .disabled(!appState.settings.aiEnabled)
-                .opacity(appState.settings.aiEnabled ? 1 : 0.5)
             connectionSection
-                .disabled(!appState.settings.aiEnabled)
-                .opacity(appState.settings.aiEnabled ? 1 : 0.5)
 
             Section {
                 Toggle("Redact names, emails, and phone numbers before sending to Claude", isOn: $redactCloudPII)
@@ -57,8 +50,6 @@ struct ClaudeSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .disabled(!appState.settings.aiEnabled)
-            .opacity(appState.settings.aiEnabled ? 1 : 0.5)
         }
         .formStyle(.grouped)
         .onAppear(perform: loadSettings)
@@ -69,14 +60,17 @@ struct ClaudeSettingsView: View {
     private var aiToggleSection: some View {
         @Bindable var appState = appState
         return Section {
-            Toggle("Enable AI Features", isOn: $appState.settings.aiEnabled)
-            if !appState.settings.aiEnabled {
-                Text("Transcription and meeting storage will still work. AI summaries, action items, and chat require a Claude API key.")
+            Toggle("Use Claude for AI", isOn: Binding(
+                get: { appState.settings.aiProvider == .claude },
+                set: { appState.settings.aiProvider = $0 ? .claude : .none }
+            ))
+            if appState.settings.aiProvider != .claude {
+                Text("Turn this on to use Claude for summaries, action items, and chat. You can keep your key saved without it being active.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("AI Features")
+            Text("Claude")
         }
     }
 

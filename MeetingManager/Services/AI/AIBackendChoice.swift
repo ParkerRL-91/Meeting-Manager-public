@@ -1,14 +1,17 @@
 import Foundation
 
-/// The AI backend the app will use for generative work, resolved from the
-/// user's settings, stored Claude key, and Ollama reachability.
+/// The AI backend the app will use for generative work, resolved purely from
+/// the user's single `aiProvider` selection (plus the stored key for the cloud
+/// providers).
 ///
-/// Single source of truth. This exact predicate used to be copy-pasted in five
-/// places (summary, context brief, global text generator, meeting chat, action
-/// items), which let the behaviour drift. Centralizing it also lets
-/// AI-dependent task enqueues be gated on "is any backend actually usable," so
-/// a user with no AI configured no longer gets a failed summary task — and a
-/// red error banner — after every meeting.
+/// Single source of truth. Resolution used to be a copy-pasted predicate
+/// (`useLocalLLM || (!hasClaudeKey && ollamaReachable)`) across five call sites,
+/// which let the behaviour drift and silently fell back to Ollama whenever no
+/// Claude key was present. Now exactly one provider is selected at a time
+/// (`AIProvider`), so the active backend is a plain switch — no implicit
+/// fallback. Gating AI-dependent task enqueues on "is the selected provider
+/// usable" means a user with no AI configured no longer gets a failed summary
+/// task — and a red error banner — after every meeting.
 enum AIBackendChoice: Equatable, Sendable {
     case ollama(model: String)
     case claude(model: String)
@@ -30,32 +33,37 @@ enum AIBackendChoice: Equatable, Sendable {
 
 @MainActor
 extension AppState {
-    /// Resolve the active backend. Pass `refreshOllama: true` from long-running
-    /// task handlers (does a live reachability probe); leave it false for cheap
-    /// UI checks that can rely on the last cached Ollama status.
-    ///
-    /// Semantics are identical to the old inline predicate:
-    /// `useOllama = useLocalLLM || (!hasClaudeKey && ollamaReachable)`.
+    /// Resolve the active backend from the single `aiProvider` selection.
+    /// Returns `.none` when the selected cloud provider has no key. The local
+    /// case returns `.ollama` regardless of reachability (reachability is
+    /// surfaced at the call site, matching the prior useLocalLLM behaviour).
     func resolveAIBackend(refreshOllama: Bool = false) async -> AIBackendChoice {
-        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-        if refreshOllama { await ollamaService.refreshStatus() }
-        let ollamaReachable = ollamaService.isReachable
-        let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-        if useOllama {
+        switch settings.aiProvider {
+        case .gemini:
+            let hasKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.geminiAPIKey)) ?? "")?.isEmpty == false
+            return hasKey ? .gemini(model: settings.geminiModel) : .none
+        case .claude:
+            let hasKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+            return hasKey ? .claude(model: settings.claudeModel) : .none
+        case .local:
+            if refreshOllama { await ollamaService.refreshStatus() }
             return .ollama(model: settings.ollamaModel)
-        } else if hasClaudeKey {
-            return .claude(model: settings.claudeModel)
+        case .none:
+            return .none
         }
-        return .none
     }
 
-    /// Cheap synchronous check: is any AI backend configured at all? Used to
-    /// gate auto-enqueue of AI-dependent tasks without a live network probe
-    /// (relies on the last cached Ollama status). Equivalent to
-    /// `resolveAIBackend().isAvailable` minus the refresh.
+    /// Cheap synchronous check: is the selected provider usable?
     var isAIWorkConfigured: Bool {
-        let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-        return settings.useLocalLLM || hasClaudeKey || ollamaService.isReachable
+        switch settings.aiProvider {
+        case .gemini:
+            return ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.geminiAPIKey)) ?? "")?.isEmpty == false
+        case .claude:
+            return ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+        case .local:
+            return true
+        case .none:
+            return false
+        }
     }
 }

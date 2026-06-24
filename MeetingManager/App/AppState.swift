@@ -1969,11 +1969,9 @@ final class AppState {
     /// 8–12K tokens of structured outline, and the default 2K/4K caps used
     /// by every other path were silently truncating the outline mid-meeting.
     func runDetailedOutlineGeneration(meetingId: String) async {
+        let backend = await resolveAIBackend(refreshOllama: true)
         let textGen = await makeTextGenerator(maxOutputTokens: 16384)
-        let modelLabel: String = {
-            if settings.useLocalLLM { return "ollama/\(settings.ollamaModel)" }
-            return settings.claudeModel
-        }()
+        let modelLabel = backend.modelIdentifier
         _ = await DetailedOutlineService.shared.generate(
             meetingId: meetingId,
             settings: settings,

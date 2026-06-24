@@ -10,7 +10,19 @@ struct AppSettings: Codable, Equatable {
     var notificationLeadTimeMinutes: Int
     var launchAtLogin: Bool
     var theme: String
-    var aiEnabled: Bool = false
+
+    /// The single active AI provider. Source of truth for resolution; see
+    /// AIProvider. `aiEnabled` and `useLocalLLM` are derived from this.
+    var aiProvider: AIProvider = .none
+
+    /// Gemini model used when `aiProvider == .gemini`.
+    var geminiModel: String = "gemini-2.5-flash"
+
+    /// Derived: AI is on whenever a provider is selected.
+    var aiEnabled: Bool { aiProvider != .none }
+
+    /// Derived: true only when the local Ollama provider is selected.
+    var useLocalLLM: Bool { aiProvider == .local }
 
     /// When true, automatically start recording when a call app or browser meeting is detected.
     var autoRecord: Bool = false
@@ -34,9 +46,6 @@ struct AppSettings: Codable, Equatable {
     /// in Apple Calendar sync. Empty/nil = include all readable calendars.
     /// Apple calendar identifiers are UUIDs and never contain commas.
     var selectedAppleCalendarIds: String? = nil
-
-    /// When true, meeting summaries are generated on-device using a local LLM instead of the Claude API.
-    var useLocalLLM: Bool = false
 
     /// The Ollama model name to use for on-device summarization.
     /// Default `qwen3:4b-instruct` (TASK-082 / ADR-016): the small,
@@ -156,6 +165,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
         case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite, selectedCalendarId
         case useLocalLLM, ollamaModel
+        case aiProvider, geminiModel
         case autoGenerateSummary, defaultRecipeId
         case autoFollowUpEmail
         case morningBriefEnabled, morningBriefHour, morningBriefMinute
