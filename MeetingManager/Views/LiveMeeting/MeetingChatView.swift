@@ -260,7 +260,7 @@ struct MeetingChatView: View {
     /// Builds a textGenerator closure using the app's central AI routing.
     private func buildTextGenerator() async -> ((String, String) async throws -> String)? {
         if let generator = await appState.makeTextGenerator() { return generator }
-        chatService?.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+        chatService?.lastError = "No AI configured. Choose a provider in Settings → AI."
         return nil
     }
 

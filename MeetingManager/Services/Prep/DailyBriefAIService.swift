@@ -25,7 +25,7 @@ struct DailyBriefAIService {
         var errorDescription: String? {
             switch self {
             case .noAIService:
-                return "AI is not configured. Add a Claude API key or enable on-device AI."
+                return "No AI configured. Choose a provider in Settings → AI."
             }
         }
     }
