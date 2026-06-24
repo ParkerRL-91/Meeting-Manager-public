@@ -36,7 +36,10 @@ final class SpeakerAttributionService {
         userFirstName: String?,
         priorAliases: [String: String] = [:],
         ollama: OllamaService,
-        claude: ClaudeService?
+        claude: ClaudeService?,
+        gemini: GeminiService? = nil,
+        geminiCheapModel: String = "gemini-2.5-flash",
+        geminiEscalateModel: String = "gemini-2.5-pro"
     ) async -> AttributionOutcome {
         // Filter transcripts: only the system-stream turns matter (user turns
         // are tagged "mic" — we already know who they are).
@@ -112,15 +115,21 @@ final class SpeakerAttributionService {
                                  priorAliases: priorAliases)
         logger.info("Attributing \(clusters.count) clusters against \(candidates.count) candidates")
 
-        // Two-tier model strategy. Cheap pass first (Claude haiku if available,
-        // else Ollama). If the cheap pass returns empty/all-Unknown AND we
-        // have a Claude key, escalate to a more capable Claude model.
+        // Two-tier model strategy. Cheap pass first (Claude haiku or Gemini
+        // Flash if a cloud key is selected, else Ollama). If the cheap pass
+        // returns empty/all-Unknown AND a cloud provider (Claude or Gemini)
+        // is active, escalate to a more capable model (Claude Sonnet or
+        // Gemini Pro).
         let validClusters = Set(clusters)
         let validNames = Set(candidates)
 
         let cheapResponse: String?
         let cheapReason: AttributionReason
-        if let claude {
+        if let gemini {
+            let result = await callGemini(prompt: prompt, gemini: gemini, model: geminiCheapModel)
+            cheapResponse = result
+            cheapReason = (result == nil) ? .llmCallFailed("Gemini flash call failed") : .ok
+        } else if let claude {
             let result = await callClaude(prompt: prompt, claude: claude, model: "claude-haiku-4-5")
             cheapResponse = result
             cheapReason = (result == nil) ? .llmCallFailed("Claude haiku call failed") : .ok
@@ -139,11 +148,32 @@ final class SpeakerAttributionService {
             validNames: validNames
         )
 
-        // Escalation: if the cheap pass yielded nothing useful AND we have a
-        // Claude key, retry once with a more capable model. Worth the cost —
-        // attribution is a one-shot per-meeting expense and getting names
-        // right is high-leverage.
-        if mapping.isEmpty, let claude {
+        // Escalation: if the cheap pass yielded nothing useful AND a cloud
+        // provider (Claude or Gemini) is active, retry once with a more
+        // capable model. Worth the cost — attribution is a one-shot
+        // per-meeting expense and getting names right is high-leverage.
+        if mapping.isEmpty, let gemini {
+            logger.info("Cheap pass returned 0 mappings; escalating to \(geminiEscalateModel)")
+            let escalated = await callGemini(
+                prompt: prompt,
+                gemini: gemini,
+                model: geminiEscalateModel
+            )
+            mapping = parseIfNonEmpty(
+                response: escalated,
+                validClusters: validClusters,
+                validNames: validNames
+            )
+            if mapping.isEmpty {
+                return AttributionOutcome(
+                    mapping: [:],
+                    reason: .llmReturnedAllUnknown
+                )
+            }
+            // Escalated LLM is more capable → solidly above review threshold
+            let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, Float(0.78)) })
+            return AttributionOutcome(mapping: mapping, reason: .okEscalated, confidenceMap: conf)
+        } else if mapping.isEmpty, let claude {
             logger.info("Cheap pass returned 0 mappings; escalating to claude-sonnet-4-6")
             let escalated = await callClaude(
                 prompt: prompt,
@@ -177,10 +207,10 @@ final class SpeakerAttributionService {
 
         // Cheap pass succeeded — confidence reflects model capability.
         // QA finding #12: tuned so cheap-LLM attributions don't all show an
-        // amber "needs review" dot. Claude haiku is reliable enough to clear
-        // the 0.70 threshold; local Ollama stays below as a deliberate signal
-        // that those attributions warrant a glance.
-        let cheapConfidence: Float = (claude != nil) ? 0.72 : 0.62
+        // amber "needs review" dot. Claude haiku and Gemini Flash both clear
+        // the 0.70 threshold at 0.72; local Ollama stays below at 0.62 as a
+        // deliberate signal that those attributions warrant a glance.
+        let cheapConfidence: Float = (claude != nil || gemini != nil) ? 0.72 : 0.62
         let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, cheapConfidence) })
         return AttributionOutcome(mapping: mapping, reason: .ok, confidenceMap: conf)
     }
@@ -276,6 +306,22 @@ final class SpeakerAttributionService {
             return result
         } catch {
             logger.error("Claude attribution call failed (\(model, privacy: .public)): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func callGemini(prompt: String, gemini: GeminiService, model: String) async -> String? {
+        do {
+            let result = try await gemini.sendMessage(
+                systemPrompt: "You match anonymous speaker clusters to real attendee names. Reply with JSON only.",
+                userPrompt: prompt,
+                model: model,
+                maxTokens: 1024,
+                thinking: false
+            )
+            return result
+        } catch {
+            logger.error("Gemini attribution call failed (\(model, privacy: .public)): \(error.localizedDescription)")
             return nil
         }
     }

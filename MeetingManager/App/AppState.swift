@@ -4145,10 +4145,14 @@ final class AppState {
             uniquingKeysWith: { _, new in new }
         )
 
+        let attributionBackend = await resolveAIBackend(refreshOllama: true)
         let claudeForAttribution: ClaudeService? = {
-            guard let key = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
-                  !key.isEmpty else { return nil }
-            return ClaudeService()
+            if case .claude = attributionBackend { return ClaudeService() }
+            return nil
+        }()
+        let geminiForAttribution: GeminiService? = {
+            if case .gemini = attributionBackend { return GeminiService() }
+            return nil
         }()
 
         // v3.10 #2: aggregate confidence per cluster from every signal.
@@ -4265,7 +4269,8 @@ final class AppState {
             userFirstName: userFirst,
             priorAliases: combinedPriorAliases,
             ollama: ollamaService,
-            claude: claudeForAttribution
+            claude: claudeForAttribution,
+            gemini: geminiForAttribution
         )
 
         // Signal precedence on a per-cluster collision: the gated voice
