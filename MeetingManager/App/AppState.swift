@@ -6725,6 +6725,7 @@ final class AppState {
         activityLabel: String? = nil // Activities-list label (TASK-073)
     ) async -> ((String, String) async throws -> String)? {
         let backend = await resolveAIBackend(refreshOllama: true)
+        fileLog("AI: text generator using \(backend.modelIdentifier)")
 
         // Map the unified output budget to each backend's parameter:
         //   Ollama → num_predict

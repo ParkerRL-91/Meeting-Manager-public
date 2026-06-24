@@ -107,9 +107,14 @@ final class ClaudeService {
     private static let apiVersion = "2023-06-01"
     private let session: URLSession
 
-    /// Client-side rate limiting: minimum interval between consecutive API requests.
-    private var lastRequestTime: Date?
-    private let minimumRequestInterval: TimeInterval = 1.0
+    /// Minimum spacing between consecutive requests to this provider, shared
+    /// across ALL instances. Every call site constructs a fresh service, so a
+    /// per-instance limiter never paced concurrent tasks — a burst of queued AI
+    /// tasks would hammer the API and trip 429s. This static slot reservation
+    /// paces every call to this provider globally. @MainActor isolation makes
+    /// the reserve-before-await read-modify-write atomic.
+    private static let minimumRequestInterval: TimeInterval = 1.0
+    private static var nextAllowedRequestTime: Date = .distantPast
 
     /// Maximum response body size we'll accept before decoding (1 MB).
     private static let maxResponseBytes = 1_048_576
@@ -118,16 +123,16 @@ final class ClaudeService {
         self.session = session
     }
 
-    /// Waits if necessary to enforce the minimum interval between requests,
-    /// preventing the client from hammering the API during rapid-fire operations.
+    /// Reserves a time slot BEFORE any await so concurrent callers queue with
+    /// proper 1-second spacing rather than all reading a stale timestamp.
     private func waitForRateLimit() async {
-        if let last = lastRequestTime {
-            let elapsed = Date().timeIntervalSince(last)
-            if elapsed < minimumRequestInterval {
-                try? await Task.sleep(for: .seconds(minimumRequestInterval - elapsed))
-            }
+        let now = Date()
+        let scheduled = max(now, Self.nextAllowedRequestTime)
+        Self.nextAllowedRequestTime = scheduled.addingTimeInterval(Self.minimumRequestInterval)
+        let delay = scheduled.timeIntervalSince(now)
+        if delay > 0 {
+            try? await Task.sleep(for: .seconds(delay))
         }
-        lastRequestTime = Date()
     }
 
     // MARK: - Public API

@@ -107,8 +107,15 @@ final class GeminiService {
     private static let apiBase = "https://generativelanguage.googleapis.com/v1beta/models"
     private let session: URLSession
 
-    private var lastRequestTime: Date?
-    private let minimumRequestInterval: TimeInterval = 1.0
+    /// Minimum spacing between consecutive requests to this provider, shared
+    /// across ALL instances. Every call site constructs a fresh service, so a
+    /// per-instance limiter never paced concurrent tasks — a burst of queued AI
+    /// tasks would hammer the API and trip 429s. This static slot reservation
+    /// paces every call to this provider globally. @MainActor isolation makes
+    /// the reserve-before-await read-modify-write atomic.
+    private static let minimumRequestInterval: TimeInterval = 1.0
+    private static var nextAllowedRequestTime: Date = .distantPast
+
     private static let maxResponseBytes = 1_048_576
 
     init(session: URLSession = .shared) {
@@ -116,13 +123,13 @@ final class GeminiService {
     }
 
     private func waitForRateLimit() async {
-        if let last = lastRequestTime {
-            let elapsed = Date().timeIntervalSince(last)
-            if elapsed < minimumRequestInterval {
-                try? await Task.sleep(for: .seconds(minimumRequestInterval - elapsed))
-            }
+        let now = Date()
+        let scheduled = max(now, Self.nextAllowedRequestTime)
+        Self.nextAllowedRequestTime = scheduled.addingTimeInterval(Self.minimumRequestInterval)
+        let delay = scheduled.timeIntervalSince(now)
+        if delay > 0 {
+            try? await Task.sleep(for: .seconds(delay))
         }
-        lastRequestTime = Date()
     }
 
     /// Sends a single-turn message and returns the model's text reply.
@@ -244,7 +251,9 @@ final class GeminiService {
                 }
 
                 if let usage = decoded.usageMetadata {
-                    Logger.ai.info("Gemini response: \(usage.promptTokenCount ?? 0) input tokens, \(usage.candidatesTokenCount ?? 0) output tokens")
+                    let outTokens = usage.candidatesTokenCount ?? 0
+                    Logger.ai.info("Gemini response: \(usage.promptTokenCount ?? 0) input tokens, \(outTokens) output tokens")
+                    AppFileLogger.shared.log("Gemini: ok (\(model), \(outTokens) out tokens)")
                 }
 
                 return textOut
@@ -252,6 +261,15 @@ final class GeminiService {
         } catch {
             lastError = error.localizedDescription
             Logger.ai.error("Gemini API error: \(error.localizedDescription)")
+            switch error {
+            case GeminiServiceError.rateLimited(let retryAfter):
+                let hint = retryAfter.map { " (retry after \($0)s)" } ?? ""
+                AppFileLogger.shared.log("Gemini: request failed — HTTP 429 rate limited\(hint)")
+            case GeminiServiceError.httpError(let statusCode, let message):
+                AppFileLogger.shared.log("Gemini: request failed — HTTP \(statusCode): \(message)")
+            default:
+                AppFileLogger.shared.log("Gemini: request failed — \(error.localizedDescription)")
+            }
             throw error
         }
 
