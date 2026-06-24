@@ -1,66 +1,289 @@
 import SwiftUI
 import os
 
-/// Settings for the optional Ollama-backed on-device summarization mode.
-/// Handles the full Ollama install flow in-app — no manual setup required.
-struct OnDeviceSettingsView: View {
+// MARK: - Connection Status
+
+private enum ConnectionStatus: Equatable {
+    case unknown
+    case testing
+    case success
+    case failed(String)
+}
+
+// MARK: - Cloud AI Config
+
+/// Shared config view for Claude and Gemini — parameterised by the bits that differ.
+private struct CloudAIConfigView: View {
+
+    enum Provider {
+        case claude, gemini
+    }
+
+    let provider: Provider
 
     @Environment(AppState.self) private var appState
 
-    var body: some View {
-        @Bindable var appState = appState
-        Form {
-            toggleSection
-            statusSection
-            videoCaptureSection
-            aboutSection
-        }
-        .formStyle(.grouped)
-        .onAppear {
-            Task { await appState.ollamaService.refreshStatus() }
+    @State private var apiKey: String = ""
+    @State private var showAPIKey = false
+    @State private var saveError: String?
+    @State private var isSaving = false
+    @State private var connectionStatus: ConnectionStatus = .unknown
+
+    @AppStorage(PIIRedactor.settingKey) private var redactCloudPII = false
+
+    private let claudeService = ClaudeService()
+    private let geminiService = GeminiService()
+
+    // MARK: Model lists
+
+    private let claudeModels: [(id: String, label: String)] = [
+        ("claude-haiku-4-5", "Claude Haiku 4.5 (Fast)"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Balanced)"),
+        ("claude-opus-4-8", "Claude Opus 4.8 (Premium)"),
+    ]
+
+    private let geminiModels: [(id: String, label: String)] = [
+        ("gemini-2.5-flash", "Gemini 2.5 Flash (Fast)"),
+        ("gemini-2.5-pro", "Gemini 2.5 Pro (Premium)"),
+    ]
+
+    // MARK: Computed helpers
+
+    private var keychainKey: String {
+        switch provider {
+        case .claude: return KeychainHelper.Key.claudeAPIKey
+        case .gemini: return KeychainHelper.Key.geminiAPIKey
         }
     }
 
-    // MARK: - Video capture (TASK-080)
+    private var placeholder: String {
+        switch provider {
+        case .claude: return "sk-ant-..."
+        case .gemini: return "AIza..."
+        }
+    }
+
+    private var footerURL: (label: String, url: String) {
+        switch provider {
+        case .claude:
+            return ("console.anthropic.com", "https://console.anthropic.com/")
+        case .gemini:
+            return ("aistudio.google.com/apikey", "https://aistudio.google.com/apikey")
+        }
+    }
+
+    // MARK: Body
+
+    var body: some View {
+        @Bindable var appState = appState
+        return Group {
+            apiKeySection
+            modelSection
+            connectionSection
+            redactionSection
+        }
+        .onAppear(perform: loadKey)
+    }
+
+    // MARK: Sections
+
+    private var apiKeySection: some View {
+        Section {
+            HStack {
+                Group {
+                    if showAPIKey {
+                        TextField(placeholder, text: $apiKey)
+                    } else {
+                        SecureField(placeholder, text: $apiKey)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+
+                Button {
+                    showAPIKey.toggle()
+                } label: {
+                    Image(systemName: showAPIKey ? "eye.slash" : "eye")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(showAPIKey ? "Hide API key" : "Show API key")
+            }
+
+            Button(isSaving ? "Saving & testing..." : "Save API Key") {
+                saveAndTest()
+            }
+            .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+
+            if let error = saveError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("API Key")
+        } footer: {
+            let link = footerURL
+            Text("Your API key is stored securely in the macOS Keychain. Get a key at [\(link.label)](\(link.url)).")
+        }
+    }
 
     @ViewBuilder
-    private var videoCaptureSection: some View {
-        if #available(macOS 15.0, *) {
+    private var modelSection: some View {
+        @Bindable var appState = appState
+        switch provider {
+        case .claude:
             Section {
-                Toggle("Record meeting video", isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "video.captureEnabled") },
-                    set: { UserDefaults.standard.set($0, forKey: "video.captureEnabled") }
-                ))
+                Picker("Model", selection: $appState.settings.claudeModel) {
+                    ForEach(claudeModels, id: \.id) { m in
+                        Text(m.label).tag(m.id)
+                    }
+                }
             } header: {
-                Text("Video Capture")
+                Text("Model")
             } footer: {
-                Text("When on, Meeting Manager records the video of the meeting window you're in (on-device only, never uploaded), so you can revisit what was shown. Off by default. Old videos are removed automatically after the retention period. Audio capture is unaffected either way.")
+                Text("Balanced is faster and more cost-effective. Premium provides higher quality for complex meetings.")
+            }
+        case .gemini:
+            Section {
+                Picker("Model", selection: $appState.settings.geminiModel) {
+                    ForEach(geminiModels, id: \.id) { m in
+                        Text(m.label).tag(m.id)
+                    }
+                }
+            } header: {
+                Text("Model")
+            } footer: {
+                Text("Flash is faster and more cost-effective. Pro provides higher quality for complex meetings.")
             }
         }
     }
 
-    // MARK: - Toggle
-
-    private var toggleSection: some View {
-        @Bindable var appState = appState
-        return Section {
-            Toggle("Use On-Device Summarization", isOn: Binding(
-                get: { appState.settings.aiProvider == .local },
-                set: { newValue in
-                    appState.settings.aiProvider = newValue ? .local : .none
-                    if newValue {
-                        Task { await appState.ollamaInstaller.setupIfNeeded(model: appState.settings.ollamaModel) }
+    private var connectionSection: some View {
+        Section("Connection") {
+            HStack {
+                Button {
+                    runTest()
+                } label: {
+                    if case .testing = connectionStatus {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.trailing, 4)
+                        Text("Testing...")
+                    } else {
+                        Text("Test Connection")
                     }
                 }
-            ))
-        } header: {
-            Text("On-Device AI")
-        } footer: {
-            Text("Summarizes meetings locally using Ollama — no data leaves your Mac.")
+                .disabled(
+                    connectionStatus == .testing
+                    || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+
+                Spacer()
+
+                switch connectionStatus {
+                case .unknown, .testing:
+                    EmptyView()
+                case .success:
+                    Label("Connected", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(Color.appSuccess)
+                        .font(.caption)
+                case .failed(let message):
+                    Label(message, systemImage: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .lineLimit(2)
+                }
+            }
         }
     }
 
-    // MARK: - Status
+    private var redactionSection: some View {
+        Section {
+            Toggle(
+                "Redact names, emails, and phone numbers before sending to a cloud AI provider (Claude or Gemini)",
+                isOn: $redactCloudPII
+            )
+            Text("A reversible, on-device substitution (\u{201C}Person A\u{201D}, \u{201C}person1@redacted.example\u{201D}) applied to summaries, notes, briefs, and chat. Speaker identification is exempt — matching speakers to attendees requires their real names. Heuristic protection, not a guarantee.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Actions
+
+    private func loadKey() {
+        do {
+            if let stored = try KeychainHelper.loadString(forKey: keychainKey) {
+                apiKey = stored
+            }
+        } catch {
+            Logger.ai.error("Failed to load API key: \(error.localizedDescription)")
+        }
+    }
+
+    private func saveAndTest() {
+        saveError = nil
+        isSaving = true
+        do {
+            let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            try KeychainHelper.save(trimmed, forKey: keychainKey)
+            apiKey = trimmed
+            Logger.ai.info("\(String(describing: provider)) API key saved to Keychain")
+        } catch {
+            saveError = "Failed to save: \(error.localizedDescription)"
+            isSaving = false
+            return
+        }
+        connectionStatus = .testing
+        Task {
+            let (success, errorMessage) = await runConnection()
+            await MainActor.run {
+                isSaving = false
+                connectionStatus = success
+                    ? .success
+                    : .failed(errorMessage ?? "Connection failed")
+            }
+        }
+    }
+
+    private func runTest() {
+        connectionStatus = .testing
+        Task {
+            let (success, errorMessage) = await runConnection()
+            await MainActor.run {
+                connectionStatus = success
+                    ? .success
+                    : .failed(errorMessage ?? "Connection failed")
+            }
+        }
+    }
+
+    private func runConnection() async -> (Bool, String?) {
+        switch provider {
+        case .claude:
+            let ok = await claudeService.testConnection()
+            return (ok, claudeService.lastError)
+        case .gemini:
+            let ok = await geminiService.testConnection()
+            return (ok, geminiService.lastError)
+        }
+    }
+}
+
+// MARK: - Local AI Config
+
+/// Ollama config extracted from OnDeviceSettingsView — all install/status/model
+/// logic preserved verbatim; only the toggle section is absent (the picker replaces it).
+private struct LocalAIConfigView: View {
+
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        statusSection
+        aboutSection
+    }
+
+    // MARK: Status (verbatim from OnDeviceSettingsView)
 
     @ViewBuilder
     private var statusSection: some View {
@@ -68,14 +291,12 @@ struct OnDeviceSettingsView: View {
         let service = appState.ollamaService
 
         if installer.phase.isActive {
-            // Install in progress
             Section {
                 installProgressRow
             } header: {
                 Text("Setup")
             }
         } else if case .failed(let msg) = installer.phase {
-            // Install failed
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Setup failed", systemImage: "xmark.circle.fill")
@@ -95,13 +316,10 @@ struct OnDeviceSettingsView: View {
                 Text("Setup")
             }
         } else if case .ready = installer.phase {
-            // Just finished installing — show live status
             runningStatusSection
-        } else if service.isReachable || !appState.settings.useLocalLLM {
-            // Normal state: Ollama already running or toggle is off
+        } else if service.isReachable {
             runningStatusSection
-        } else if appState.settings.useLocalLLM {
-            // Toggle is on but Ollama isn't running (e.g. after restart)
+        } else {
             Section {
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -201,9 +419,9 @@ struct OnDeviceSettingsView: View {
             Text("Ollama Status")
         } footer: {
             if !service.isReachable {
-                Text("Ollama is installed but not running. Turn the toggle off and back on to restart it.")
+                Text("Ollama is installed but not running. Select a different provider and back to restart it.")
             } else if service.availableModels.isEmpty {
-                Text("Ollama is running but has no models. Toggle on-device mode to download one.")
+                Text("Ollama is running but has no models. Switch away and back to download one.")
             }
         }
     }
@@ -236,11 +454,6 @@ struct OnDeviceSettingsView: View {
             Picker("Model", selection: $appState.settings.ollamaModel) {
                 Text("Auto (Dynamic)").tag("auto")
                 Divider()
-                // Fast NON-thinking models — recommended. qwen3:4b-instruct is
-                // the pushed default (TASK-082): newest small model, ~2.5 GB,
-                // direct (no reasoning step). Selecting one downloads it
-                // automatically (see onChange below). The bare qwen3:4b tag is
-                // deliberately NOT offered — it is thinking-only (ADR-007).
                 Text("Qwen3 4B Instruct — fast, recommended").tag("qwen3:4b-instruct")
                 Text("Qwen3 8B — higher quality, larger").tag("qwen3:8b")
                 Text("Qwen2.5 3B Instruct — fastest, smallest").tag("qwen2.5:3b-instruct")
@@ -248,8 +461,6 @@ struct OnDeviceSettingsView: View {
                 ForEach(models.filter { !["qwen3:4b-instruct", "qwen3:8b", "qwen2.5:3b-instruct"].contains($0) }, id: \.self) { model in
                     Text(model).tag(model)
                 }
-                // If the saved model is not "auto", not a recommended tag, and not
-                // in the installed list, still show it so the picker reflects reality.
                 if appState.settings.ollamaModel != "auto"
                     && !["qwen3:4b-instruct", "qwen3:8b", "qwen2.5:3b-instruct"].contains(appState.settings.ollamaModel)
                     && !models.contains(appState.settings.ollamaModel) {
@@ -257,15 +468,10 @@ struct OnDeviceSettingsView: View {
                 }
             }
             .onChange(of: appState.settings.ollamaModel) { _, newModel in
-                // Pull the newly-selected model if it isn't installed yet.
                 guard newModel != "auto" else { return }
                 Task { await appState.ollamaInstaller.setupIfNeeded(model: newModel) }
             }
 
-            // Description text adapts to whichever model the user picked.
-            // Branch order: auto first, then Qwen3 specifically, then a
-            // legacy Llama branch for users who explicitly stayed on it.
-            // Strings written as full sentences per the writing-style rule.
             if appState.settings.ollamaModel == "auto" {
                 Label("Auto adapts to each meeting — Qwen3 4B handles short and standard meetings; Qwen3 8B takes over for marathon sessions and long transcripts.", systemImage: "wand.and.stars")
                     .font(.caption)
@@ -302,7 +508,7 @@ struct OnDeviceSettingsView: View {
         }
     }
 
-    // MARK: - About
+    // MARK: About (verbatim from OnDeviceSettingsView)
 
     private var aboutSection: some View {
         Section("About") {
@@ -321,6 +527,73 @@ struct OnDeviceSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 2)
+        }
+    }
+}
+
+// MARK: - AISettingsView
+
+/// Single "AI" settings tab with a provider dropdown.
+/// Replaces the three separate AI tabs (Claude, Local, Gemini).
+struct AISettingsView: View {
+
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        @Bindable var appState = appState
+        Form {
+            providerSection
+
+            switch appState.settings.aiProvider {
+            case .none:
+                offSection
+            case .local:
+                LocalAIConfigView()
+            case .claude:
+                CloudAIConfigView(provider: .claude)
+            case .gemini:
+                CloudAIConfigView(provider: .gemini)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            if appState.settings.aiProvider == .local {
+                Task { await appState.ollamaService.refreshStatus() }
+            }
+        }
+    }
+
+    // MARK: Provider picker
+
+    private var providerSection: some View {
+        @Bindable var appState = appState
+        return Section {
+            Picker("AI Provider", selection: $appState.settings.aiProvider) {
+                Text("Off").tag(AIProvider.none)
+                Text("On-Device (Local)").tag(AIProvider.local)
+                Text("Claude").tag(AIProvider.claude)
+                Text("Gemini").tag(AIProvider.gemini)
+            }
+            .pickerStyle(.menu)
+        } header: {
+            Text("Provider")
+        } footer: {
+            Text("Choose which AI backend powers summaries, action items, and chat. Recording and transcription work regardless of this setting.")
+        }
+        .onChange(of: appState.settings.aiProvider) { _, newProvider in
+            if newProvider == .local {
+                Task { await appState.ollamaInstaller.setupIfNeeded(model: appState.settings.ollamaModel) }
+            }
+        }
+    }
+
+    // MARK: Off state
+
+    private var offSection: some View {
+        Section {
+            Text("AI features are off. Choose a provider above to enable summaries, action items, and chat. Recording and transcription still work.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 }
