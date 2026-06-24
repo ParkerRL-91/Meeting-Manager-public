@@ -2588,44 +2588,38 @@ final class AppState {
     /// Ollama, picking the same backend the user's summaries use. Returns nil
     /// when no AI backend is available — the contextEnrichment task will then
     /// just cache the structured related-meetings list without a prose brief.
-    private func makeContextBriefSynthesizer() -> ((String, String) async throws -> String)? {
-        let claudeKey = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? nil
-        let hasClaudeKey = (claudeKey ?? "").isEmpty == false
-        let useLocal = settings.useLocalLLM
-        let claudeModel = settings.claudeModel
-        let ollamaModel = settings.ollamaModel
-        let ollama = ollamaService
-
-        if useLocal || !hasClaudeKey {
-            // Ollama path — only return a synthesizer if we can actually reach it.
-            return { [weak ollama] systemPrompt, userPrompt in
-                guard let ollama else {
-                    throw TaskQueueError.noHandler("Ollama service unavailable")
-                }
-                await ollama.refreshStatus()
-                guard ollama.isReachable else {
-                    throw TaskQueueError.noHandler("Ollama not reachable")
-                }
-                return try await ollama.generate(
-                    systemPrompt: systemPrompt,
-                    userPrompt: userPrompt,
-                    model: ollamaModel
-                )
-            }
-        }
-
-        if hasClaudeKey {
+    private func makeContextBriefSynthesizer() async -> ((String, String) async throws -> String)? {
+        let backend = await resolveAIBackend(refreshOllama: false)
+        switch backend {
+        case .gemini(let model):
             return { systemPrompt, userPrompt in
-                let claude = ClaudeService()
-                return try await claude.sendMessage(
+                try await GeminiService().sendMessage(
                     systemPrompt: systemPrompt,
                     userPrompt: userPrompt,
-                    model: claudeModel
+                    model: model,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [systemPrompt, userPrompt])
                 )
             }
+        case .claude(let model):
+            return { systemPrompt, userPrompt in
+                try await ClaudeService().sendMessage(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: model,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [systemPrompt, userPrompt])
+                )
+            }
+        case .ollama(let model):
+            let ollama = ollamaService
+            return { [weak ollama] systemPrompt, userPrompt in
+                guard let ollama else { throw TaskQueueError.noHandler("Ollama service unavailable") }
+                await ollama.refreshStatus()
+                guard ollama.isReachable else { throw TaskQueueError.noHandler("Ollama not reachable") }
+                return try await ollama.generate(systemPrompt: systemPrompt, userPrompt: userPrompt, model: model)
+            }
+        case .none:
+            return nil
         }
-
-        return nil
     }
 
     /// TASK-070: a STYLE CALIBRATION appendix built from the user's own

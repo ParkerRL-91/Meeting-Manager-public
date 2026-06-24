@@ -196,29 +196,11 @@ struct RecipeResultView: View {
         let noteRepo = appState.noteRepository
         let resultRepo = RecipeResultRepository(database: appState.database)
 
-        // Build textGenerator with same AI routing as SummaryView
-        let textGenerator: (String, String) async throws -> String
+        // Route through the central factory so the active provider and
+        // cloud-PII redaction are applied consistently.
         do {
-            let settings = appState.settings
-            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-            await appState.ollamaService.refreshStatus()
-            let ollamaReachable = appState.ollamaService.isReachable
-            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-            if useOllama {
-                let ollamaService = appState.ollamaService
-                let ollamaModel = settings.ollamaModel
-                textGenerator = { sys, usr in
-                    try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
-                }
-            } else if hasClaudeKey {
-                let claude = ClaudeService()
-                let claudeModel = settings.claudeModel
-                textGenerator = { sys, usr in
-                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
-                }
-            } else {
-                engine.lastError = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+            guard let textGenerator = await appState.makeTextGenerator() else {
+                engine.lastError = "No AI configured. Choose a provider in Settings → AI."
                 return
             }
 

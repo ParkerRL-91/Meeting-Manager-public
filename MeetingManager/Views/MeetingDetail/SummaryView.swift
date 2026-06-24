@@ -724,29 +724,12 @@ struct SummaryView: View {
                 return
             }
 
-            // Build textGenerator the same way RecipeResultView does.
-            let settings = appState.settings
-            let hasClaudeKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
-            await appState.ollamaService.refreshStatus()
-            let ollamaReachable = appState.ollamaService.isReachable
-            let useOllama = settings.useLocalLLM || (!hasClaudeKey && ollamaReachable)
-
-            let textGenerator: (String, String) async throws -> String
-            if useOllama {
-                let ollamaService = appState.ollamaService
-                let ollamaModel = settings.ollamaModel
-                textGenerator = { sys, usr in
-                    try await ollamaService.generate(systemPrompt: sys, userPrompt: usr, model: ollamaModel)
-                }
-            } else if hasClaudeKey {
-                let claude = ClaudeService()
-                let claudeModel = settings.claudeModel
-                textGenerator = { sys, usr in
-                    try await claude.sendMessage(systemPrompt: sys, userPrompt: usr, model: claudeModel)
-                }
-            } else {
+            // Route through the central factory so the active provider
+            // (Local / Claude / Gemini) and cloud-PII redaction are applied
+            // consistently.
+            guard let textGenerator = await appState.makeTextGenerator() else {
                 await MainActor.run {
-                    errorMessage = "No AI configured. Enable On-Device AI in Settings → On-Device, or add a Claude API key in Settings → Claude."
+                    errorMessage = "No AI configured. Choose a provider in Settings → AI."
                 }
                 return
             }
