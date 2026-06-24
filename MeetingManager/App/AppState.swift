@@ -2169,6 +2169,14 @@ final class AppState {
                 model: model,
                 redactor: await cloudRedactorIfEnabled(texts: [finalSystemPrompt, userPrompt])
             )
+        case .gemini(let model):
+            let gemini = GeminiService()
+            summaryText = try await gemini.sendMessage(
+                systemPrompt: finalSystemPrompt,
+                userPrompt: userPrompt,
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [finalSystemPrompt, userPrompt])
+            )
         case .none:
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
         }
@@ -2273,6 +2281,14 @@ final class AppState {
         case .claude(let model):
             let claude = ClaudeService()
             content = try await claude.sendMessage(
+                systemPrompt: prompts.system,
+                userPrompt: prompts.user,
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [prompts.system, prompts.user])
+            )
+        case .gemini(let model):
+            let gemini = GeminiService()
+            content = try await gemini.sendMessage(
                 systemPrompt: prompts.system,
                 userPrompt: prompts.user,
                 model: model,
@@ -6753,6 +6769,21 @@ final class AppState {
                     userPrompt: usr,
                     model: claudeModel,
                     maxTokens: claudeMaxTokens,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [sys, usr])
+                )
+            }
+        case .gemini(let geminiModel):
+            // Mirrors the .claude branch, but threads `think` into Gemini's
+            // thinkingConfig (Gemini 2.5 supports it; Claude has no such param),
+            // so callers that pass think:false get fast non-thinking output.
+            let gemini = GeminiService()
+            return { sys, usr in
+                try await gemini.sendMessage(
+                    systemPrompt: sys,
+                    userPrompt: usr,
+                    model: geminiModel,
+                    maxTokens: claudeMaxTokens,
+                    thinking: think,
                     redactor: await self.cloudRedactorIfEnabled(texts: [sys, usr])
                 )
             }

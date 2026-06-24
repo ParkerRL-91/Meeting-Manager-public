@@ -9,9 +9,10 @@ import Foundation
 /// AI-dependent task enqueues be gated on "is any backend actually usable," so
 /// a user with no AI configured no longer gets a failed summary task — and a
 /// red error banner — after every meeting.
-enum AIBackendChoice: Equatable {
+enum AIBackendChoice: Equatable, Sendable {
     case ollama(model: String)
     case claude(model: String)
+    case gemini(model: String)
     case none
 
     var isAvailable: Bool { self != .none }
@@ -21,6 +22,7 @@ enum AIBackendChoice: Equatable {
         switch self {
         case .ollama(let model): return "ollama/\(model)"
         case .claude(let model): return model
+        case .gemini(let model): return "gemini/\(model)"
         case .none: return "none"
         }
     }
