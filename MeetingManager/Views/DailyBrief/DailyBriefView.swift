@@ -156,18 +156,7 @@ struct DailyBriefView: View {
     /// reachability is verified again at brief-generation time, so a momentary
     /// network blip can't strand the user with a misleading CTA.
     private var isAIConfigured: Bool {
-        if let key = try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey),
-           !key.isEmpty {
-            Logger.ai.debug("DailyBrief.isAIConfigured: true (Claude key present)")
-            return true
-        }
-        if appState.settings.useLocalLLM {
-            Logger.ai.debug("DailyBrief.isAIConfigured: true (settings.useLocalLLM=true)")
-            return true
-        }
-        let reachable = appState.ollamaService.isReachable
-        Logger.ai.debug("DailyBrief.isAIConfigured: \(reachable, privacy: .public) (no Claude key, useLocalLLM=false; Ollama reachable=\(reachable, privacy: .public))")
-        return reachable
+        appState.isAIWorkConfigured
     }
 
     private var generateButton: some View {

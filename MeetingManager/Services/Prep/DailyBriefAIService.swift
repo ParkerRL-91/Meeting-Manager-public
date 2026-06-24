@@ -66,14 +66,11 @@ struct DailyBriefAIService {
 
     // MARK: - Public entry point
 
-    /// Generates a daily brief. Picks Claude if a key is present, else Ollama
-    /// if reachable, else throws `BriefError.noAIService`.
+    /// Generates a daily brief using the resolved AI backend.
     func generate(
         for brief: DailyBrief,
-        claudeAPIKey: String?,
-        claudeModel: String,
+        backend: AIBackendChoice,
         ollama: OllamaService,
-        ollamaModel: String,
         date: Date
     ) async throws -> Result {
         let prepared = Self.buildUserPrompt(for: brief, date: date)
@@ -81,36 +78,35 @@ struct DailyBriefAIService {
         // with no KB background produces byte-identical output to before.
         let system = prepared.citations.isEmpty ? Self.systemPrompt : Self.systemPromptWithKB
 
-        if let key = claudeAPIKey, !key.isEmpty {
-            let claude = ClaudeService()
-            let raw = try await claude.sendMessage(
-                systemPrompt: system,
-                userPrompt: prepared.userPrompt,
-                model: claudeModel
-            )
+        switch backend {
+        case .gemini(let model):
+            let raw = try await GeminiService().sendMessage(systemPrompt: system, userPrompt: prepared.userPrompt, model: model)
             let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
-            return Result(text: verified.text, model: claudeModel, kbSources: verified.sources)
-        }
-
-        // think:true — Qwen3 with think:false still leaks chain-of-thought into
-        // the content field on rule-heavy prompts. With think:true, reasoning
-        // goes into the separate `thinking` field and the actual brief lands
-        // cleanly in `content`. OllamaService.stripThinkBlock handles any
-        // stray dangling </think> if the model ever inlines a tag.
-        if ollama.isReachable {
+            return Result(text: verified.text, model: "gemini/\(model)", kbSources: verified.sources)
+        case .claude(let model):
+            let raw = try await ClaudeService().sendMessage(systemPrompt: system, userPrompt: prepared.userPrompt, model: model)
+            let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
+            return Result(text: verified.text, model: model, kbSources: verified.sources)
+        case .ollama(let model):
+            // think:true — Qwen3 with think:false still leaks chain-of-thought into
+            // the content field on rule-heavy prompts. With think:true, reasoning
+            // goes into the separate `thinking` field and the actual brief lands
+            // cleanly in `content`. OllamaService.stripThinkBlock handles any
+            // stray dangling </think> if the model ever inlines a tag.
+            guard ollama.isReachable else { throw BriefError.noAIService }
             let raw = try await ollama.generate(
                 systemPrompt: system,
                 userPrompt: prepared.userPrompt,
-                model: ollamaModel,
+                model: model,
                 think: true,
                 jsonMode: false,
                 activityLabel: "Creating daily brief"
             )
             let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
-            return Result(text: verified.text, model: ollamaModel, kbSources: verified.sources)
+            return Result(text: verified.text, model: model, kbSources: verified.sources)
+        case .none:
+            throw BriefError.noAIService
         }
-
-        throw BriefError.noAIService
     }
 
     // MARK: - Prompt construction

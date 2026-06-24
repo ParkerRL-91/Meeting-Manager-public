@@ -6204,11 +6204,7 @@ final class AppState {
         }
 
         // Make sure AI is even configured before spinning up a task.
-        let claudeKey = (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? ""
-        let hasClaude = !claudeKey.isEmpty
-        let hasOllama = ollamaService.isReachable
-        guard hasClaude || hasOllama || settings.useLocalLLM else {
-            // No path to a model — leave whatever is on disk and bail.
+        guard isAIWorkConfigured else {
             return
         }
 
@@ -6220,18 +6216,15 @@ final class AppState {
 
         let service = self.dailyBriefAIService
         let ollama = self.ollamaService
-        let ollamaModel = settings.ollamaModel
-        let claudeModel = settings.claudeModel
+        let backend = await resolveAIBackend(refreshOllama: true)
         let date = Date()
 
         dailyBriefGenerationTask = Task { [weak self] in
             do {
                 let result = try await service.generate(
                     for: brief,
-                    claudeAPIKey: hasClaude ? claudeKey : nil,
-                    claudeModel: claudeModel,
+                    backend: backend,
                     ollama: ollama,
-                    ollamaModel: ollamaModel,
                     date: date
                 )
                 guard !Task.isCancelled else { return }
