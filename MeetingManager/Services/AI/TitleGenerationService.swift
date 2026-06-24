@@ -3,11 +3,10 @@ import os
 
 /// Generates short (≤8 word) meeting titles from transcript or summary content.
 ///
-/// `generate(...)` prefers local Ollama — it keeps the transcript on-device — and
-/// falls back to Claude haiku only when Ollama isn't running or returns an
-/// unusable result. Callers should fall back to `extractFromSummary(_:)` if
-/// `generate(...)` returns nil. The Ollama path keeps all content on-device; the
-/// Claude fallback sends the transcript excerpt to Anthropic.
+/// `generate(...)` dispatches to whichever AI backend the user has selected
+/// (Gemini, Claude, or Ollama). Callers should fall back to
+/// `extractFromSummary(_:)` if `generate(...)` returns nil or the selected
+/// backend is unavailable.
 @MainActor
 final class TitleGenerationService {
     static let shared = TitleGenerationService()
@@ -21,25 +20,20 @@ final class TitleGenerationService {
 
     private init() {}
 
-    /// Generate an ≤8-word title from transcript text, preferring local Ollama
-    /// and falling back to Claude haiku.
+    /// Generate an ≤8-word title from transcript text using the selected AI backend.
     ///
     /// - Parameters:
     ///   - text: Full transcript text (any length — only the first ~1500 chars are used).
-    ///   - claudeAPIKey: The Anthropic key, or nil/empty to disable the cloud
-    ///     fallback. Only consulted when Ollama is unreachable or returns an
-    ///     unusable result.
-    ///   - ollama: The app's `OllamaService` instance. Caller must have refreshed status
-    ///     at least once so `isReachable` / `availableModels` are populated; if Ollama
-    ///     is unreachable this method tries the Claude fallback.
+    ///   - backend: The resolved `AIBackendChoice` from `AppState.resolveAIBackend`.
+    ///   - ollama: The app's `OllamaService` instance. Only consulted when
+    ///     `backend` is `.ollama`.
     /// - Returns: A trimmed title (no quotes, no trailing punctuation) or nil on any
     ///   failure. Callers should fall back to `extractFromSummary(_:)`.
     func generate(
         fromTranscript text: String,
-        claudeAPIKey: String?,
+        backend: AIBackendChoice,
         ollama: OllamaService
     ) async -> String? {
-        // Use first ~1500 chars of transcript as input (about 300 tokens)
         let excerpt = String(text.prefix(1500))
         guard !excerpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             logger.debug("generate: empty transcript excerpt — skipping")
@@ -50,7 +44,6 @@ final class TitleGenerationService {
         You generate concise meeting titles. Return ONLY the title — \
         no quotes, no punctuation, no explanation, no prefix like "Title:".
         """
-
         let userPrompt = """
         Generate a concise meeting title (8 words or fewer, no punctuation, \
         no quotes) based on this transcript excerpt. Return ONLY the title, \
@@ -60,43 +53,34 @@ final class TitleGenerationService {
         \(excerpt)
         """
 
-        // Prefer local Ollama: it keeps the transcript on-device. Any failure
-        // (or an unusable result) falls through to the Claude fallback.
-        if ollama.isReachable, !ollama.availableModels.isEmpty {
-            do {
-                let raw = try await ollama.generate(
-                    systemPrompt: systemPrompt,
-                    userPrompt: userPrompt,
-                    model: "auto"
-                )
-                if let title = Self.sanitize(raw, maxLength: maxTitleLength) {
-                    return title
-                }
-                logger.info("generate: Ollama returned an unusable title — trying Claude")
-            } catch {
-                logger.error("generate: Ollama call failed — \(error.localizedDescription, privacy: .public) — trying Claude")
-            }
-        }
-
-        // Cloud fallback, used only when local generation is unavailable. Sends
-        // the transcript excerpt to Anthropic.
-        if let key = claudeAPIKey, !key.isEmpty {
-            do {
-                let raw = try await ClaudeService().sendMessage(
-                    systemPrompt: systemPrompt,
-                    userPrompt: userPrompt,
-                    model: "claude-haiku-4-5",
-                    maxTokens: 64
+        do {
+            switch backend {
+            case .gemini(let model):
+                let raw = try await GeminiService().sendMessage(
+                    systemPrompt: systemPrompt, userPrompt: userPrompt,
+                    model: model, maxTokens: 64, thinking: false
                 )
                 return Self.sanitize(raw, maxLength: maxTitleLength)
-            } catch {
-                logger.error("generate: Claude fallback failed — \(error.localizedDescription, privacy: .public)")
+            case .claude(let model):
+                let raw = try await ClaudeService().sendMessage(
+                    systemPrompt: systemPrompt, userPrompt: userPrompt,
+                    model: model, maxTokens: 64
+                )
+                return Self.sanitize(raw, maxLength: maxTitleLength)
+            case .ollama(let model):
+                guard ollama.isReachable, !ollama.availableModels.isEmpty else {
+                    logger.info("generate: Ollama not reachable — caller should fall back")
+                    return nil
+                }
+                let raw = try await ollama.generate(systemPrompt: systemPrompt, userPrompt: userPrompt, model: model)
+                return Self.sanitize(raw, maxLength: maxTitleLength)
+            case .none:
                 return nil
             }
+        } catch {
+            logger.error("generate: title generation failed — \(error.localizedDescription, privacy: .public)")
+            return nil
         }
-
-        logger.info("generate: no local or cloud provider available — caller should fall back")
-        return nil
     }
 
     /// Fallback: extract first sentence from summary text as title.
