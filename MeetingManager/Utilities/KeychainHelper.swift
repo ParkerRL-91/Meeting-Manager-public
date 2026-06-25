@@ -18,6 +18,10 @@ enum KeychainHelper {
         /// Google Gemini API key. Used by GeminiService for all AI functions
         /// when Gemini is the selected provider.
         static let geminiAPIKey = "gemini-api-key"
+        /// OpenAI API key. Used by OpenAICompatibleService(.openAI).
+        static let openAIAPIKey = "openai-api-key"
+        /// z.ai (Zhipu GLM) API key. Used by OpenAICompatibleService(.zai).
+        static let zaiAPIKey = "zai-api-key"
     }
 
     /// The service identifier written into every keychain item.
