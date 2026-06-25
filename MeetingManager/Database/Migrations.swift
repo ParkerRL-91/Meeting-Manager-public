@@ -1573,5 +1573,14 @@ enum Migrations {
                 END
             """)
         }
+
+        // OpenAI + z.ai providers: their model columns. aiProvider already
+        // exists (v65); these just store the per-provider model choice.
+        migrator.registerMigration("v66-openai-zai-models") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "openaiModel", .text).notNull().defaults(to: "gpt-5.4-mini")
+                t.add(column: "zaiModel", .text).notNull().defaults(to: "glm-5.2")
+            }
+        }
     }
 }

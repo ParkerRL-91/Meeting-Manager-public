@@ -67,6 +67,18 @@ final class TitleGenerationService {
                     model: model, maxTokens: 64
                 )
                 return Self.sanitize(raw, maxLength: maxTitleLength)
+            case .openai(let model):
+                let raw = try await OpenAICompatibleService(provider: .openAI).sendMessage(
+                    systemPrompt: systemPrompt, userPrompt: userPrompt,
+                    model: model, maxTokens: 64
+                )
+                return Self.sanitize(raw, maxLength: maxTitleLength)
+            case .zai(let model):
+                let raw = try await OpenAICompatibleService(provider: .zai).sendMessage(
+                    systemPrompt: systemPrompt, userPrompt: userPrompt,
+                    model: model, maxTokens: 64
+                )
+                return Self.sanitize(raw, maxLength: maxTitleLength)
             case .ollama(let model):
                 guard ollama.isReachable, !ollama.availableModels.isEmpty else {
                     logger.info("generate: Ollama not reachable — caller should fall back")

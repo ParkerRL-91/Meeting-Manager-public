@@ -2175,6 +2175,22 @@ final class AppState {
                 model: model,
                 redactor: await cloudRedactorIfEnabled(texts: [finalSystemPrompt, userPrompt])
             )
+        case .openai(let model):
+            let openai = OpenAICompatibleService(provider: .openAI)
+            summaryText = try await openai.sendMessage(
+                systemPrompt: finalSystemPrompt,
+                userPrompt: userPrompt,
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [finalSystemPrompt, userPrompt])
+            )
+        case .zai(let model):
+            let zai = OpenAICompatibleService(provider: .zai)
+            summaryText = try await zai.sendMessage(
+                systemPrompt: finalSystemPrompt,
+                userPrompt: userPrompt,
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [finalSystemPrompt, userPrompt])
+            )
         case .none:
             throw TaskQueueError.noHandler("No AI backend available (Ollama not running, no Claude key)")
         }
@@ -2287,6 +2303,22 @@ final class AppState {
         case .gemini(let model):
             let gemini = GeminiService()
             content = try await gemini.sendMessage(
+                systemPrompt: prompts.system,
+                userPrompt: prompts.user,
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [prompts.system, prompts.user])
+            )
+        case .openai(let model):
+            let openai = OpenAICompatibleService(provider: .openAI)
+            content = try await openai.sendMessage(
+                systemPrompt: prompts.system,
+                userPrompt: prompts.user,
+                model: model,
+                redactor: await cloudRedactorIfEnabled(texts: [prompts.system, prompts.user])
+            )
+        case .zai(let model):
+            let zai = OpenAICompatibleService(provider: .zai)
+            content = try await zai.sendMessage(
                 systemPrompt: prompts.system,
                 userPrompt: prompts.user,
                 model: model,
@@ -2603,6 +2635,24 @@ final class AppState {
         case .claude(let model):
             return { systemPrompt, userPrompt in
                 try await ClaudeService().sendMessage(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: model,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [systemPrompt, userPrompt])
+                )
+            }
+        case .openai(let model):
+            return { systemPrompt, userPrompt in
+                try await OpenAICompatibleService(provider: .openAI).sendMessage(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    model: model,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [systemPrompt, userPrompt])
+                )
+            }
+        case .zai(let model):
+            return { systemPrompt, userPrompt in
+                try await OpenAICompatibleService(provider: .zai).sendMessage(
                     systemPrompt: systemPrompt,
                     userPrompt: userPrompt,
                     model: model,
@@ -6775,6 +6825,28 @@ final class AppState {
                     model: geminiModel,
                     maxTokens: claudeMaxTokens,
                     thinking: think,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [sys, usr])
+                )
+            }
+        case .openai(let model):
+            let openai = OpenAICompatibleService(provider: .openAI)
+            return { sys, usr in
+                try await openai.sendMessage(
+                    systemPrompt: sys,
+                    userPrompt: usr,
+                    model: model,
+                    maxTokens: claudeMaxTokens,
+                    redactor: await self.cloudRedactorIfEnabled(texts: [sys, usr])
+                )
+            }
+        case .zai(let model):
+            let zai = OpenAICompatibleService(provider: .zai)
+            return { sys, usr in
+                try await zai.sendMessage(
+                    systemPrompt: sys,
+                    userPrompt: usr,
+                    model: model,
+                    maxTokens: claudeMaxTokens,
                     redactor: await self.cloudRedactorIfEnabled(texts: [sys, usr])
                 )
             }

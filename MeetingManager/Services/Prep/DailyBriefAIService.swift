@@ -87,6 +87,14 @@ struct DailyBriefAIService {
             let raw = try await ClaudeService().sendMessage(systemPrompt: system, userPrompt: prepared.userPrompt, model: model)
             let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
             return Result(text: verified.text, model: model, kbSources: verified.sources)
+        case .openai(let model):
+            let raw = try await OpenAICompatibleService(provider: .openAI).sendMessage(systemPrompt: system, userPrompt: prepared.userPrompt, model: model)
+            let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
+            return Result(text: verified.text, model: "openai/\(model)", kbSources: verified.sources)
+        case .zai(let model):
+            let raw = try await OpenAICompatibleService(provider: .zai).sendMessage(systemPrompt: system, userPrompt: prepared.userPrompt, model: model)
+            let verified = Self.verify(text: Self.trimToBrief(raw), citations: prepared.citations)
+            return Result(text: verified.text, model: "zai/\(model)", kbSources: verified.sources)
         case .ollama(let model):
             // think:true — Qwen3 with think:false still leaks chain-of-thought into
             // the content field on rule-heavy prompts. With think:true, reasoning

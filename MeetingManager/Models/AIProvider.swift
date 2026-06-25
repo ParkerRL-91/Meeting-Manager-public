@@ -8,4 +8,6 @@ enum AIProvider: String, Codable, CaseIterable, Sendable {
     case local
     case claude
     case gemini
+    case openai
+    case zai
 }

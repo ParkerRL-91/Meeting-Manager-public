@@ -16,6 +16,8 @@ enum AIBackendChoice: Equatable, Sendable {
     case ollama(model: String)
     case claude(model: String)
     case gemini(model: String)
+    case openai(model: String)
+    case zai(model: String)
     case none
 
     var isAvailable: Bool { self != .none }
@@ -26,6 +28,8 @@ enum AIBackendChoice: Equatable, Sendable {
         case .ollama(let model): return "ollama/\(model)"
         case .claude(let model): return model
         case .gemini(let model): return "gemini/\(model)"
+        case .openai(let model): return "openai/\(model)"
+        case .zai(let model): return "zai/\(model)"
         case .none: return "none"
         }
     }
@@ -45,6 +49,12 @@ extension AppState {
         case .claude:
             let hasKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
             return hasKey ? .claude(model: settings.claudeModel) : .none
+        case .openai:
+            let hasKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.openAIAPIKey)) ?? "")?.isEmpty == false
+            return hasKey ? .openai(model: settings.openaiModel) : .none
+        case .zai:
+            let hasKey = ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.zaiAPIKey)) ?? "")?.isEmpty == false
+            return hasKey ? .zai(model: settings.zaiModel) : .none
         case .local:
             if refreshOllama { await ollamaService.refreshStatus() }
             return .ollama(model: settings.ollamaModel)
@@ -60,6 +70,10 @@ extension AppState {
             return ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.geminiAPIKey)) ?? "")?.isEmpty == false
         case .claude:
             return ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)) ?? "")?.isEmpty == false
+        case .openai:
+            return ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.openAIAPIKey)) ?? "")?.isEmpty == false
+        case .zai:
+            return ((try? KeychainHelper.loadString(forKey: KeychainHelper.Key.zaiAPIKey)) ?? "")?.isEmpty == false
         case .local:
             return true
         case .none:

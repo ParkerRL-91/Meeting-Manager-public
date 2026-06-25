@@ -16,7 +16,7 @@ private enum ConnectionStatus: Equatable {
 private struct CloudAIConfigView: View {
 
     enum Provider {
-        case claude, gemini
+        case claude, gemini, openai, zai
     }
 
     let provider: Provider
@@ -33,6 +33,8 @@ private struct CloudAIConfigView: View {
 
     private let claudeService = ClaudeService()
     private let geminiService = GeminiService()
+    private let openaiService = OpenAICompatibleService(provider: .openAI)
+    private let zaiService = OpenAICompatibleService(provider: .zai)
 
     // MARK: Model lists
 
@@ -47,12 +49,24 @@ private struct CloudAIConfigView: View {
         ("gemini-2.5-pro", "Gemini 2.5 Pro (Premium)"),
     ]
 
+    private let openaiModels: [(id: String, label: String)] = [
+        ("gpt-5.4-mini", "GPT-5.4 mini (Fast)"),
+        ("gpt-5.4", "GPT-5.4 (Premium)"),
+    ]
+
+    private let zaiModels: [(id: String, label: String)] = [
+        ("glm-5.2", "GLM-5.2 (Balanced)"),
+        ("glm-5.2-plus", "GLM-5.2 Plus (Premium)"),
+    ]
+
     // MARK: Computed helpers
 
     private var keychainKey: String {
         switch provider {
         case .claude: return KeychainHelper.Key.claudeAPIKey
         case .gemini: return KeychainHelper.Key.geminiAPIKey
+        case .openai: return KeychainHelper.Key.openAIAPIKey
+        case .zai: return KeychainHelper.Key.zaiAPIKey
         }
     }
 
@@ -60,6 +74,8 @@ private struct CloudAIConfigView: View {
         switch provider {
         case .claude: return "sk-ant-..."
         case .gemini: return "AIza..."
+        case .openai: return "sk-..."
+        case .zai: return "Enter z.ai API key"
         }
     }
 
@@ -69,6 +85,10 @@ private struct CloudAIConfigView: View {
             return ("console.anthropic.com", "https://console.anthropic.com/")
         case .gemini:
             return ("aistudio.google.com/apikey", "https://aistudio.google.com/apikey")
+        case .openai:
+            return ("platform.openai.com/api-keys", "https://platform.openai.com/api-keys")
+        case .zai:
+            return ("z.ai", "https://z.ai")
         }
     }
 
@@ -154,6 +174,30 @@ private struct CloudAIConfigView: View {
                 Text("Model")
             } footer: {
                 Text("Flash is faster and more cost-effective. Pro provides higher quality for complex meetings.")
+            }
+        case .openai:
+            Section {
+                Picker("Model", selection: $appState.settings.openaiModel) {
+                    ForEach(openaiModels, id: \.id) { m in
+                        Text(m.label).tag(m.id)
+                    }
+                }
+            } header: {
+                Text("Model")
+            } footer: {
+                Text("Mini is faster and more cost-effective. The full model provides higher quality for complex meetings.")
+            }
+        case .zai:
+            Section {
+                Picker("Model", selection: $appState.settings.zaiModel) {
+                    ForEach(zaiModels, id: \.id) { m in
+                        Text(m.label).tag(m.id)
+                    }
+                }
+            } header: {
+                Text("Model")
+            } footer: {
+                Text("GLM-5.2 is the balanced default. GLM-5.2 Plus provides higher quality for complex meetings.")
             }
         }
     }
@@ -266,6 +310,12 @@ private struct CloudAIConfigView: View {
         case .gemini:
             let ok = await geminiService.testConnection()
             return (ok, geminiService.lastError)
+        case .openai:
+            let ok = await openaiService.testConnection()
+            return (ok, openaiService.lastError)
+        case .zai:
+            let ok = await zaiService.testConnection()
+            return (ok, zaiService.lastError)
         }
     }
 }
@@ -553,6 +603,10 @@ struct AISettingsView: View {
                 CloudAIConfigView(provider: .claude)
             case .gemini:
                 CloudAIConfigView(provider: .gemini)
+            case .openai:
+                CloudAIConfigView(provider: .openai)
+            case .zai:
+                CloudAIConfigView(provider: .zai)
             }
         }
         .formStyle(.grouped)
@@ -573,6 +627,8 @@ struct AISettingsView: View {
                 Text("On-Device (Local)").tag(AIProvider.local)
                 Text("Claude").tag(AIProvider.claude)
                 Text("Gemini").tag(AIProvider.gemini)
+                Text("OpenAI").tag(AIProvider.openai)
+                Text("z.ai").tag(AIProvider.zai)
             }
             .pickerStyle(.menu)
         } header: {

@@ -18,6 +18,11 @@ struct AppSettings: Codable, Equatable {
     /// Gemini model used when `aiProvider == .gemini`.
     var geminiModel: String = "gemini-2.5-flash"
 
+    /// OpenAI model used when `aiProvider == .openai`.
+    var openaiModel: String = "gpt-5.4-mini"
+    /// z.ai (Zhipu GLM) model used when `aiProvider == .zai`.
+    var zaiModel: String = "glm-5.2"
+
     /// Derived: AI is on whenever a provider is selected.
     var aiEnabled: Bool { aiProvider != .none }
 
@@ -165,7 +170,7 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case calendarSyncIntervalMinutes, notificationLeadTimeMinutes
         case launchAtLogin, theme, aiEnabled, autoRecord, autoInvite, selectedCalendarId
         case useLocalLLM, ollamaModel
-        case aiProvider, geminiModel
+        case aiProvider, geminiModel, openaiModel, zaiModel
         case autoGenerateSummary, defaultRecipeId
         case autoFollowUpEmail
         case morningBriefEnabled, morningBriefHour, morningBriefMinute
