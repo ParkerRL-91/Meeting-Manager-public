@@ -56,6 +56,8 @@ final class OnboardingManager {
         case local
         case claude
         case gemini
+        case openai
+        case zai
         case none
     }
 

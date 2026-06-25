@@ -7,6 +7,10 @@ struct AIChoiceStepView: View {
     @State private var apiKeySaved = false
     @State private var geminiKey: String = ""
     @State private var geminiKeySaved = false
+    @State private var openaiKey: String = ""
+    @State private var openaiKeySaved = false
+    @State private var zaiKey: String = ""
+    @State private var zaiKeySaved = false
     @State private var isTesting = false
     @State private var testResult: String?
 
@@ -44,6 +48,22 @@ struct AIChoiceStepView: View {
                     description: "Cloud-based. Fast, high-quality summaries. Requires a Google Gemini API key.",
                     choice: .gemini,
                     isSelected: onboardingManager.aiChoice == .gemini
+                )
+
+                aiOptionCard(
+                    icon: "bolt.horizontal.circle",
+                    title: "OpenAI",
+                    description: "Cloud-based. GPT models. Requires an OpenAI API key.",
+                    choice: .openai,
+                    isSelected: onboardingManager.aiChoice == .openai
+                )
+
+                aiOptionCard(
+                    icon: "globe.asia.australia",
+                    title: "z.ai (GLM)",
+                    description: "Cloud-based. Zhipu GLM models. Requires a z.ai API key.",
+                    choice: .zai,
+                    isSelected: onboardingManager.aiChoice == .zai
                 )
 
                 aiOptionCard(
@@ -134,6 +154,40 @@ struct AIChoiceStepView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
+            if onboardingManager.aiChoice == .openai {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("OpenAI API Key").font(.headline).foregroundStyle(Color.appTextPrimary)
+                    HStack(spacing: 8) {
+                        SecureField("sk-...", text: $openaiKey).textFieldStyle(.roundedBorder)
+                        Button("Save") { saveOpenAIKey() }.disabled(openaiKey.isEmpty)
+                    }
+                    if openaiKeySaved {
+                        Label("Key saved", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(Color.appSuccess)
+                    }
+                    Link("Get your API key at platform.openai.com →", destination: URL(string: "https://platform.openai.com/api-keys")!)
+                        .font(.caption).foregroundStyle(Color.appAccent)
+                }
+                .padding(16).background(Color.appSurface).cornerRadius(12).frame(maxWidth: 480)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            if onboardingManager.aiChoice == .zai {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("z.ai API Key").font(.headline).foregroundStyle(Color.appTextPrimary)
+                    HStack(spacing: 8) {
+                        SecureField("...", text: $zaiKey).textFieldStyle(.roundedBorder)
+                        Button("Save") { saveZaiKey() }.disabled(zaiKey.isEmpty)
+                    }
+                    if zaiKeySaved {
+                        Label("Key saved", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(Color.appSuccess)
+                    }
+                    Link("Get your API key at z.ai →", destination: URL(string: "https://z.ai")!)
+                        .font(.caption).foregroundStyle(Color.appAccent)
+                }
+                .padding(16).background(Color.appSurface).cornerRadius(12).frame(maxWidth: 480)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -191,6 +245,10 @@ struct AIChoiceStepView: View {
                 settings.aiProvider = .claude
             case .gemini:
                 settings.aiProvider = .gemini
+            case .openai:
+                settings.aiProvider = .openai
+            case .zai:
+                settings.aiProvider = .zai
             case .local:
                 settings.aiProvider = .local
             case .none:
@@ -220,6 +278,26 @@ struct AIChoiceStepView: View {
             geminiKeySaved = true
         } catch {
             Logger.general.error("Failed to save Gemini key: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func saveOpenAIKey() {
+        guard !openaiKey.isEmpty else { return }
+        do {
+            try KeychainHelper.save(openaiKey, forKey: KeychainHelper.Key.openAIAPIKey)
+            openaiKeySaved = true
+        } catch {
+            Logger.general.error("Failed to save OpenAI key: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func saveZaiKey() {
+        guard !zaiKey.isEmpty else { return }
+        do {
+            try KeychainHelper.save(zaiKey, forKey: KeychainHelper.Key.zaiAPIKey)
+            zaiKeySaved = true
+        } catch {
+            Logger.general.error("Failed to save z.ai key: \(error.localizedDescription, privacy: .public)")
         }
     }
 

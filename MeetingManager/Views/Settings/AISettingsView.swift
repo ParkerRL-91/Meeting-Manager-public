@@ -51,12 +51,12 @@ private struct CloudAIConfigView: View {
 
     private let openaiModels: [(id: String, label: String)] = [
         ("gpt-5.4-mini", "GPT-5.4 mini (Fast)"),
-        ("gpt-5.4", "GPT-5.4 (Premium)"),
+        ("gpt-5.5", "GPT-5.5 (Premium)"),
     ]
 
     private let zaiModels: [(id: String, label: String)] = [
         ("glm-5.2", "GLM-5.2 (Balanced)"),
-        ("glm-5.2-plus", "GLM-5.2 Plus (Premium)"),
+        ("glm-4.6", "GLM-4.6"),
     ]
 
     // MARK: Computed helpers
@@ -197,7 +197,7 @@ private struct CloudAIConfigView: View {
             } header: {
                 Text("Model")
             } footer: {
-                Text("GLM-5.2 is the balanced default. GLM-5.2 Plus provides higher quality for complex meetings.")
+                Text("GLM-5.2 is the balanced default. GLM-4.6 is an established, lighter alternative.")
             }
         }
     }
@@ -244,7 +244,7 @@ private struct CloudAIConfigView: View {
     private var redactionSection: some View {
         Section {
             Toggle(
-                "Redact names, emails, and phone numbers before sending to a cloud AI provider (Claude or Gemini)",
+                "Redact names, emails, and phone numbers before sending to a cloud AI provider",
                 isOn: $redactCloudPII
             )
             Text("A reversible, on-device substitution (\u{201C}Person A\u{201D}, \u{201C}person1@redacted.example\u{201D}) applied to summaries, notes, briefs, and chat. Speaker identification is exempt — matching speakers to attendees requires their real names. Heuristic protection, not a guarantee.")

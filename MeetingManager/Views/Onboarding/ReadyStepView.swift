@@ -34,7 +34,9 @@ struct ReadyStepView: View {
                 )
                 setupRow(
                     granted: (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.claudeAPIKey)).flatMap({ $0 }) != nil
-                        || (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.geminiAPIKey)).flatMap({ $0 }) != nil,
+                        || (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.geminiAPIKey)).flatMap({ $0 }) != nil
+                        || (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.openAIAPIKey)).flatMap({ $0 }) != nil
+                        || (try? KeychainHelper.loadString(forKey: KeychainHelper.Key.zaiAPIKey)).flatMap({ $0 }) != nil,
                     label: "Cloud AI key"
                 )
                 setupRow(
