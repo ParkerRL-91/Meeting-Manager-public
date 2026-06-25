@@ -4204,6 +4204,23 @@ final class AppState {
             if case .gemini = attributionBackend { return GeminiService() }
             return nil
         }()
+        let openAICompatForAttribution: OpenAICompatibleService?
+        let oaiCheapModel: String
+        let oaiEscalateModel: String
+        switch attributionBackend {
+        case .openai:
+            openAICompatForAttribution = OpenAICompatibleService(provider: .openAI)
+            oaiCheapModel = "gpt-5.4-mini"
+            oaiEscalateModel = "gpt-5.5"
+        case .zai(let model):
+            openAICompatForAttribution = OpenAICompatibleService(provider: .zai)
+            oaiCheapModel = model
+            oaiEscalateModel = model   // single-tier; escalation skipped (== cheap)
+        default:
+            openAICompatForAttribution = nil
+            oaiCheapModel = ""
+            oaiEscalateModel = ""
+        }
 
         // v3.10 #2: aggregate confidence per cluster from every signal.
         // Initialised here so each branch below can contribute its score.
@@ -4320,7 +4337,10 @@ final class AppState {
             priorAliases: combinedPriorAliases,
             ollama: ollamaService,
             claude: claudeForAttribution,
-            gemini: geminiForAttribution
+            gemini: geminiForAttribution,
+            openAICompat: openAICompatForAttribution,
+            openAICompatCheapModel: oaiCheapModel,
+            openAICompatEscalateModel: oaiEscalateModel
         )
 
         // Signal precedence on a per-cluster collision: the gated voice

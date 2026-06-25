@@ -39,7 +39,10 @@ final class SpeakerAttributionService {
         claude: ClaudeService?,
         gemini: GeminiService? = nil,
         geminiCheapModel: String = "gemini-2.5-flash",
-        geminiEscalateModel: String = "gemini-2.5-pro"
+        geminiEscalateModel: String = "gemini-2.5-pro",
+        openAICompat: OpenAICompatibleService? = nil,
+        openAICompatCheapModel: String = "",
+        openAICompatEscalateModel: String = ""
     ) async -> AttributionOutcome {
         // Filter transcripts: only the system-stream turns matter (user turns
         // are tagged "mic" — we already know who they are).
@@ -125,7 +128,11 @@ final class SpeakerAttributionService {
 
         let cheapResponse: String?
         let cheapReason: AttributionReason
-        if let gemini {
+        if let openAICompat {
+            let result = await callOpenAICompat(prompt: prompt, service: openAICompat, model: openAICompatCheapModel)
+            cheapResponse = result
+            cheapReason = (result == nil) ? .llmCallFailed("OpenAI-compatible call failed") : .ok
+        } else if let gemini {
             let result = await callGemini(prompt: prompt, gemini: gemini, model: geminiCheapModel)
             cheapResponse = result
             cheapReason = (result == nil) ? .llmCallFailed("Gemini flash call failed") : .ok
@@ -152,7 +159,30 @@ final class SpeakerAttributionService {
         // provider (Claude or Gemini) is active, retry once with a more
         // capable model. Worth the cost — attribution is a one-shot
         // per-meeting expense and getting names right is high-leverage.
-        if mapping.isEmpty, let gemini {
+        if mapping.isEmpty, let openAICompat,
+           !openAICompatEscalateModel.isEmpty,
+           openAICompatEscalateModel != openAICompatCheapModel {
+            logger.info("Cheap pass returned 0 mappings; escalating to \(openAICompatEscalateModel)")
+            let escalated = await callOpenAICompat(
+                prompt: prompt,
+                service: openAICompat,
+                model: openAICompatEscalateModel
+            )
+            mapping = parseIfNonEmpty(
+                response: escalated,
+                validClusters: validClusters,
+                validNames: validNames
+            )
+            if mapping.isEmpty {
+                return AttributionOutcome(
+                    mapping: [:],
+                    reason: .llmReturnedAllUnknown
+                )
+            }
+            // Escalated LLM is more capable → solidly above review threshold
+            let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, Float(0.78)) })
+            return AttributionOutcome(mapping: mapping, reason: .okEscalated, confidenceMap: conf)
+        } else if mapping.isEmpty, let gemini {
             logger.info("Cheap pass returned 0 mappings; escalating to \(geminiEscalateModel)")
             let escalated = await callGemini(
                 prompt: prompt,
@@ -210,7 +240,7 @@ final class SpeakerAttributionService {
         // amber "needs review" dot. Claude haiku and Gemini Flash both clear
         // the 0.70 threshold at 0.72; local Ollama stays below at 0.62 as a
         // deliberate signal that those attributions warrant a glance.
-        let cheapConfidence: Float = (claude != nil || gemini != nil) ? 0.72 : 0.62
+        let cheapConfidence: Float = (claude != nil || gemini != nil || openAICompat != nil) ? 0.72 : 0.62
         let conf = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, cheapConfidence) })
         return AttributionOutcome(mapping: mapping, reason: .ok, confidenceMap: conf)
     }
@@ -322,6 +352,22 @@ final class SpeakerAttributionService {
             return result
         } catch {
             logger.error("Gemini attribution call failed (\(model, privacy: .public)): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func callOpenAICompat(prompt: String, service: OpenAICompatibleService, model: String) async -> String? {
+        do {
+            let result = try await service.sendMessage(
+                systemPrompt: "You match anonymous speaker clusters to real attendee names. Reply with JSON only.",
+                userPrompt: prompt,
+                model: model,
+                maxTokens: 1024,
+                thinking: false
+            )
+            return result
+        } catch {
+            logger.error("OpenAI-compatible attribution call failed (\(model, privacy: .public)): \(error.localizedDescription)")
             return nil
         }
     }
