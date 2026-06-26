@@ -15,8 +15,9 @@ struct AppSettings: Codable, Equatable {
     /// AIProvider. `aiEnabled` and `useLocalLLM` are derived from this.
     var aiProvider: AIProvider = .none
 
-    /// Gemini model used when `aiProvider == .gemini`.
-    var geminiModel: String = "gemini-2.5-flash"
+    /// Gemini model used when `aiProvider == .gemini`. Defaults to the
+    /// fastest/cheapest tier; the picker offers the full current lineup.
+    var geminiModel: String = "gemini-2.5-flash-lite"
 
     /// OpenAI model used when `aiProvider == .openai`.
     var openaiModel: String = "gpt-5.4-mini"

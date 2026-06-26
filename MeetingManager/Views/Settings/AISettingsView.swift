@@ -45,8 +45,12 @@ private struct CloudAIConfigView: View {
     ]
 
     private let geminiModels: [(id: String, label: String)] = [
+        ("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite (Fastest)"),
         ("gemini-2.5-flash", "Gemini 2.5 Flash (Fast)"),
         ("gemini-2.5-pro", "Gemini 2.5 Pro (Premium)"),
+        ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
+        ("gemini-3.5-flash", "Gemini 3.5 Flash (Newest)"),
+        ("gemini-3.1-pro", "Gemini 3.1 Pro"),
     ]
 
     private let openaiModels: [(id: String, label: String)] = [
@@ -173,7 +177,7 @@ private struct CloudAIConfigView: View {
             } header: {
                 Text("Model")
             } footer: {
-                Text("Flash is faster and more cost-effective. Pro provides higher quality for complex meetings.")
+                Text("Flash-Lite is the fastest and most cost-effective and is the default. Flash balances cost and quality; Pro is the highest quality. The 3.x models are the newest generation.")
             }
         case .openai:
             Section {
