@@ -331,6 +331,32 @@ final class TaskQueueManager {
         }
     }
 
+    /// User escape hatch: wipe the ENTIRE queue — pending, running, completed,
+    /// and failed — and stop the in-flight task. This is the "a task is wedged,
+    /// just reset everything" button, deliberately blunt rather than a graceful
+    /// per-task cancel: we cancel the processor (which cooperatively cancels the
+    /// running `execute()`), delete every row, and reset live state so the queue
+    /// returns to empty. A re-enqueue (or app restart) restarts the processor.
+    func clearAll() async {
+        // Stop the processor first so the in-flight task is cancelled and the
+        // loop can neither pop more work nor re-mark a row we're about to delete.
+        processorTask?.cancel()
+        processorTask = nil
+        currentTask = nil
+        currentProgress = nil
+        idleNotified = false
+        do {
+            try await database.writer.write { db in
+                _ = try TaskQueueItem.deleteAll(db)
+            }
+            Logger.general.info("TaskQueue: clearAll — queue wiped by user")
+            AppFileLogger.shared.log("TaskQueue: clearAll — queue wiped by user")
+        } catch {
+            Logger.general.error("TaskQueue: clearAll failed: \(error.localizedDescription)")
+        }
+        await refreshTaskList()
+    }
+
     // MARK: - Task List
 
     func refreshTaskList() async {

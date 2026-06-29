@@ -3,6 +3,7 @@ import SwiftUI
 /// Full-page activity view — failed jobs are collapsible-by-default; completed jobs are a flat list.
 struct TaskQueueView: View {
     @Environment(AppState.self) private var appState
+    @State private var showClearAllConfirm = false
 
     var body: some View {
         let qm = appState.taskQueueManager
@@ -39,21 +40,56 @@ struct TaskQueueView: View {
 
                     Spacer()
 
-                    if !done.isEmpty || !failed.isEmpty {
-                        Button("Clear finished") {
-                            Task { await qm.clearCompleted() }
+                    HStack(spacing: 8) {
+                        if !done.isEmpty || !failed.isEmpty {
+                            Button("Clear finished") {
+                                Task { await qm.clearCompleted() }
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.appTextSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color.appSurfaceSecondary)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(Color.appBorderStrong, lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .buttonStyle(.plain)
                         }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.appTextSecondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .background(Color.appSurfaceSecondary)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(Color.appBorderStrong, lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .buttonStyle(.plain)
+
+                        // Escape hatch for a wedged queue: clears EVERYTHING,
+                        // including a stuck pending/running task that "Clear
+                        // finished" can't touch. Confirmed because it stops
+                        // in-flight work.
+                        if !qm.allTasks.isEmpty {
+                            Button("Clear all") {
+                                showClearAllConfirm = true
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.appRecording)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color.appSurfaceSecondary)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(Color.appRecording.opacity(0.5), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .buttonStyle(.plain)
+                            .confirmationDialog(
+                                "Clear all tasks?",
+                                isPresented: $showClearAllConfirm,
+                                titleVisibility: .visible
+                            ) {
+                                Button("Clear all tasks", role: .destructive) {
+                                    Task { await qm.clearAll() }
+                                }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("This stops any task that's currently running and removes every pending, running, and finished task from the queue. Work already saved to a meeting is kept.")
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 24)
