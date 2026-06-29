@@ -157,7 +157,14 @@ final class AppleSpeechTranscriber {
     /// Marked nonisolated so it can be called directly from the audio callback queue
     /// without allocating a Task per buffer (~100 calls/sec on the hot audio path).
     nonisolated func appendBuffer(_ buffer: AVAudioPCMBuffer) {
-        requestLock.withLock { recognitionRequest }?.append(buffer)
+        // Append INSIDE the lock. Reading the request under the lock and then
+        // appending after releasing it left a window where `stop()` could nil
+        // the request and call `endAudio()` while this `append(buffer)` was
+        // still running on the same SFSpeechAudioBufferRecognitionRequest —
+        // concurrent append/endAudio on one request is undefined. Holding the
+        // lock across the append serializes it against stop(); `append` doesn't
+        // re-enter our code, so there's no deadlock.
+        requestLock.withLock { recognitionRequest?.append(buffer) }
     }
 
     /// Stop transcription.
