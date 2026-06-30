@@ -46,6 +46,9 @@ struct TaskTriageInboxView: View {
             }
             Spacer()
             if !items.isEmpty {
+                Button("Reject All") { Task { await rejectAll() } }
+                    .help("Dismiss every queued task")
+                    .foregroundStyle(Color.appTextSecondary)
                 Button("Accept All") { Task { await acceptAll() } }
                     .help("Move every queued task onto the board")
             }
@@ -170,6 +173,19 @@ struct TaskTriageInboxView: View {
             if let id = item.id { try? await repo.accept(id: id) }
         }
         undo = nil
+        await load()
+    }
+
+    private func rejectAll() async {
+        let dismissed = items
+        for item in dismissed {
+            if let id = item.id { try? await repo.dismiss(id: id) }
+        }
+        undo = UndoAction(label: "Dismissed \(dismissed.count) task\(dismissed.count == 1 ? "" : "s")") {
+            for item in dismissed {
+                if let id = item.id { try? await repo.restoreToInbox(id: id) }
+            }
+        }
         await load()
     }
 }

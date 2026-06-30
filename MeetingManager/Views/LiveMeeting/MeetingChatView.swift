@@ -12,6 +12,7 @@ struct MeetingChatView: View {
     @State private var lastFailedQuestion: String?
     @State private var loadTask: Task<Void, Never>?
     @State private var sendTask: Task<Void, Never>?
+    @State private var catchUpTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -23,6 +24,14 @@ struct MeetingChatView: View {
                     .font(.headline)
                     .foregroundStyle(Color.appTextPrimary)
                 Spacer()
+                Button(action: catchMeUp) {
+                    Label("Catch me up", systemImage: "arrow.clockwise.circle")
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
+                }
+                .buttonStyle(.borderless)
+                .disabled(chatService?.isProcessing == true)
+                .help("Summarise the meeting so far and the current topic")
                 Text("\(messages.count) messages")
                     .font(.caption)
                     .foregroundStyle(Color.appTextTertiary)
@@ -54,6 +63,7 @@ struct MeetingChatView: View {
         .onDisappear {
             loadTask?.cancel()
             sendTask?.cancel()
+            catchUpTask?.cancel()
         }
     }
 
@@ -281,6 +291,20 @@ struct MeetingChatView: View {
                 try await service.sendQuery(meetingId: meetingId, question: question, meeting: meeting, textGenerator: textGenerator)
                 messages = try await repo.messagesForMeeting(meetingId)
                 lastFailedQuestion = nil
+            } catch {
+                messages = (try? await repo.messagesForMeeting(meetingId)) ?? messages
+            }
+        }
+    }
+
+    private func catchMeUp() {
+        guard let service = chatService, let repo = chatMessageRepo else { return }
+        catchUpTask = Task { // EXEMPT: same lifecycle rationale as sendMessage
+            guard let textGenerator = await buildTextGenerator() else { return }
+            do {
+                let meeting = try? await appState.meetingRepository.find(id: meetingId)
+                try await service.catchMeUp(meetingId: meetingId, meeting: meeting, textGenerator: textGenerator)
+                messages = (try? await repo.messagesForMeeting(meetingId)) ?? messages
             } catch {
                 messages = (try? await repo.messagesForMeeting(meetingId)) ?? messages
             }
