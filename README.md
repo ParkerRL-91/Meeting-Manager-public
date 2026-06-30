@@ -21,6 +21,12 @@ You only do this once.
 
 ---
 
+## What's New in v4.13.0
+
+**Ask "catch me up" mid-meeting and get a live summary.** A button in the AI Chat panel on the meeting screen summarizes everything discussed so far and names the current topic, drawing on the full live transcript as it's being captured — no need to type a question or wait for the meeting to end.
+
+**Clear a wedged task inbox in one click.** The task triage Inbox now has a Reject All button alongside Accept All, so a backlog of AI-suggested action items can be dismissed in bulk. The action is reversible via the same Undo bar used for individual dismissals.
+
 ## What's New in v4.7.2
 
 This release recovers a silently-failing microphone on its own and polishes the Key Quotes and Topics screens.
