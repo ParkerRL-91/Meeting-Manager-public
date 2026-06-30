@@ -168,6 +168,23 @@ final class MeetingChatService {
         return response
     }
 
+    /// Sends a "catch me up" summary covering everything so far and the current topic.
+    @discardableResult
+    func catchMeUp(
+        meetingId: String,
+        meeting: Meeting? = nil,
+        textGenerator: (String, String) async throws -> String
+    ) async throws -> String {
+        let question = "Catch me up: give a brief summary of everything discussed so far and what the current topic is."
+        return try await sendQuery(
+            meetingId: meetingId,
+            question: question,
+            meeting: meeting,
+            textGenerator: textGenerator,
+            recentTranscriptMinutes: .infinity
+        )
+    }
+
     /// Clears the error state.
     func clearError() {
         lastError = nil
