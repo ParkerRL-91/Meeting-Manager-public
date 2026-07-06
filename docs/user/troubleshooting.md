@@ -165,5 +165,5 @@ Copy these to the same paths on the new Mac:
 
 ## Still stuck?
 
-- File an issue at [github.com/ParkerRL-91/Meeting-Manager/issues](https://github.com/ParkerRL-91/Meeting-Manager/issues), attaching the relevant log file from `~/Library/Application Support/MeetingManager/` (`app.log`, plus rotated `app-YYYY-MM-DD.log` files).
+- File an issue at [github.com/ParkerRL-91/Meeting-Manager-public/issues](https://github.com/ParkerRL-91/Meeting-Manager-public/issues), attaching the relevant log file from `~/Library/Application Support/MeetingManager/` (`app.log`, plus rotated `app-YYYY-MM-DD.log` files).
 - The logs don't include transcript text, though they may mention meeting titles and attendee names — strip anything sensitive before posting.

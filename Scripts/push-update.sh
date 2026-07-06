@@ -319,10 +319,10 @@ gh release create "v${VERSION}" \
 **Install:** Download and open the DMG, then drag Meeting Manager to Applications.
 
 **Update:** Quit any running copy first, then drag the new version over the previous one." \
-    --repo "ParkerRL-91/Meeting-Manager"
+    --repo "ParkerRL-91/Meeting-Manager-public"
 
 echo ""
 echo "=== Release v${VERSION} complete ==="
 echo "  DMG:      ${DMG_PATH}"
 echo "  SHA-256:  ${DMG_SHA}"
-echo "  Release:  https://github.com/ParkerRL-91/Meeting-Manager/releases/tag/v${VERSION}"
+echo "  Release:  https://github.com/ParkerRL-91/Meeting-Manager-public/releases/tag/v${VERSION}"

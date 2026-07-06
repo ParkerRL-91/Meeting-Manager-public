@@ -4,7 +4,7 @@ A 5-minute walkthrough from download to your first recorded meeting.
 
 ## Install
 
-1. Download the latest `MeetingManager-vX.Y.Z.dmg` from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager/releases).
+1. Download the latest `MeetingManager-vX.Y.Z.dmg` from the [releases page](https://github.com/ParkerRL-91/Meeting-Manager-public/releases).
 2. Open the DMG and drag **Meeting Manager** to **Applications**.
 3. Launch from Applications or Spotlight (`⌘ Space` → "Meeting Manager").
 

@@ -16,7 +16,7 @@ xcode-select --install
 ## Clone and Build
 
 ```bash
-git clone https://github.com/ParkerRL-91/Meeting-Manager.git
+git clone https://github.com/ParkerRL-91/Meeting-Manager-public.git
 cd Meeting-Manager
 
 # Debug build (fast, includes debug symbols)

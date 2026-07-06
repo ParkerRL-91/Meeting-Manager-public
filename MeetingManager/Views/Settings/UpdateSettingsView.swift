@@ -26,7 +26,7 @@ struct AboutSettingsView: View {
                 }
 
                 Button("Open GitHub Releases") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/ParkerRL-91/Meeting-Manager/releases")!)
+                    NSWorkspace.shared.open(URL(string: "https://github.com/ParkerRL-91/Meeting-Manager-public/releases")!)
                 }
             } header: {
                 Text("Software Updates")

@@ -157,4 +157,4 @@ To restore: copy back over a closed app.
 
 ## Reporting Concerns
 
-If you find a privacy bug — data leaving the device unintentionally, a feature that sends more than it should — open an issue at [github.com/ParkerRL-91/Meeting-Manager/issues](https://github.com/ParkerRL-91/Meeting-Manager/issues) with reproduction steps. We treat these as critical.
+If you find a privacy bug — data leaving the device unintentionally, a feature that sends more than it should — open an issue at [github.com/ParkerRL-91/Meeting-Manager-public/issues](https://github.com/ParkerRL-91/Meeting-Manager-public/issues) with reproduction steps. We treat these as critical.
