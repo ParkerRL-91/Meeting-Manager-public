@@ -355,10 +355,9 @@ final class VoiceProfileService: Sendable {
     // MARK: - Utilities
 
     private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count else { return 0 }
-        var dot: Float = 0
-        vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
-        return dot  // both vectors are L2-normalised, so dot == cosine similarity
+        // Delegates to the shared full-cosine helper. This path's inputs are
+        // L2-normalised, so the extra norm division is a no-op here (dot == cosine).
+        EmbeddingMath.cosineSimilarity(a, b)
     }
 
     private func loadSamples(from url: URL) -> [Float]? {

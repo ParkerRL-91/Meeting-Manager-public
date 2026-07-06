@@ -35,6 +35,8 @@ let package = Package(
             dependencies: [
                 "MeetingManager",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                // Enrollment-match tests construct FluidAudio.Speaker directly.
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Tests/MeetingManagerTests"
         ),

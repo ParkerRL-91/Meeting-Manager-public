@@ -16,14 +16,26 @@ import os
 ///   1. `enrolledSpeakers(for:)` — for each RSVP-accepted attendee with a stored
 ///      reference, build a `Speaker(id: personId, name: canonicalName, ...)`.
 ///   2. Pass them to `FluidAudioDiarizationService.diarize(..., enrolledSpeakers:)`.
-///   3. `enrolledClusterNames(result:)` — map clusters whose raw id is a known
-///      `Person.id` back to that person's name (highest, audio-grounded signal).
+///   3. `enrolledClusterMatches(result:)` — map clusters whose raw id is a known
+///      `Person.id` back to that person plus a measured cosine similarity
+///      (highest, audio-grounded signal).
 ///   4. After a confirmed attribution, `rebuildReference(...)` aggregates that
 ///      person's highest-confidence segment embeddings into a new reference.
 /// FluidAudio's enrolled-voice type. Aliased so call sites (e.g. AppState) can
 /// hold the value without importing FluidAudio, whose module also vends a same-
 /// named `FluidAudio` struct that shadows member lookup of `FluidAudio.Speaker`.
 typealias EnrolledSpeaker = Speaker
+
+/// One FluidAudio enrollment hit: a diarization cluster ("Speaker N") matched an
+/// enrolled person. `similarity` is the measured cosine between the cluster's
+/// mean quality-gated segment embedding and the person's stored `VoiceReference`;
+/// `nil` when no usable segment embeddings were available, in which case callers
+/// fall back to the fixed legacy confidence tier.
+struct EnrollmentMatch: Sendable, Equatable {
+    let personId: String
+    let name: String
+    let similarity: Float?
+}
 
 @MainActor
 final class SpeakerEnrollmentService {
@@ -86,24 +98,55 @@ final class SpeakerEnrollmentService {
 
     // MARK: - Resolve enrolled matches (after diarization)
 
-    /// Map normalized "Speaker N" cluster labels to person names where FluidAudio
-    /// matched an enrolled reference. A segment whose raw FluidAudio id equals a
-    /// known `Person.id` means that cluster matched that enrolled voice.
+    /// Map normalized "Speaker N" cluster labels to enrolled-person matches where
+    /// FluidAudio matched an enrolled reference. A segment whose raw FluidAudio id
+    /// equals a known `Person.id` means that cluster matched that enrolled voice.
     ///
-    /// Returns `["Speaker N": canonicalName]`. Caller treats these as the highest
+    /// For each matched cluster, the returned `EnrollmentMatch` carries a measured
+    /// cosine similarity between the cluster's mean quality-gated segment embedding
+    /// and the person's enrolled reference — so a weak match can surface for review
+    /// instead of riding a fixed tier. Caller treats these as the highest
     /// non-manual attribution signal (audio-grounded, above vocative/LLM).
-    func enrolledClusterNames(
+    func enrolledClusterMatches(
         result: FluidDiarizationResult,
         enrolledSpeakers: [Speaker]
-    ) -> [String: String] {
+    ) -> [String: EnrollmentMatch] {
         guard !enrolledSpeakers.isEmpty else { return [:] }
-        let nameForId = Dictionary(uniqueKeysWithValues: enrolledSpeakers.map { ($0.id, $0.name) })
-        var mapping: [String: String] = [:]
+        let speakerForId = Dictionary(uniqueKeysWithValues: enrolledSpeakers.map { ($0.id, $0) })
+
+        // Group segments by their normalized cluster id, keeping the raw id (only
+        // an enrolled cluster carries a Person.id there).
+        var segmentsByCluster: [Int: (rawId: String, segments: [FluidDiarizationResult.Segment])] = [:]
         for segment in result.segments {
-            guard let name = nameForId[segment.rawSpeakerId] else { continue }
-            mapping["Speaker \(segment.speakerId)"] = name
+            segmentsByCluster[segment.speakerId, default: (segment.rawSpeakerId, [])].segments.append(segment)
         }
-        return mapping
+
+        var matches: [String: EnrollmentMatch] = [:]
+        for (clusterId, group) in segmentsByCluster {
+            guard let enrolled = speakerForId[group.rawId] else { continue }
+
+            // Prefer the quality-gated segments; fall back to any valid-dimension
+            // embeddings; if none survive, leave similarity nil (fixed-tier fallback).
+            let gated = group.segments
+                .filter { $0.qualityScore >= Self.minSegmentQuality && $0.embedding.count == Self.embeddingDimension }
+                .map { $0.embedding }
+            let valid = group.segments
+                .filter { $0.embedding.count == Self.embeddingDimension }
+                .map { $0.embedding }
+            let pool = gated.isEmpty ? valid : gated
+
+            let similarity: Float?
+            if pool.isEmpty {
+                similarity = nil
+            } else {
+                similarity = EmbeddingMath.cosineSimilarity(Self.meanEmbedding(pool), enrolled.currentEmbedding)
+            }
+
+            let label = "Speaker \(clusterId)"
+            matches[label] = EnrollmentMatch(personId: enrolled.id, name: enrolled.name, similarity: similarity)
+            logger.info("Enrollment match \(label, privacy: .public) → \(enrolled.name, privacy: .public) (cosine \(similarity.map { String(format: "%.3f", $0) } ?? "n/a", privacy: .public))")
+        }
+        return matches
     }
 
     // MARK: - Reference (re)build (after confirmed attribution)

@@ -21,6 +21,7 @@ struct TranscriptionSettingsView: View {
             modelSection
             modelInfoSection
             languageSection
+            speakerEngineSection
         }
         .formStyle(.grouped)
     }
@@ -82,6 +83,23 @@ struct TranscriptionSettingsView: View {
             Text("Language")
         } footer: {
             Text("BCP-47 language code used as a hint for transcription. The default \"en\" targets English.")
+        }
+    }
+
+    private var speakerEngineSection: some View {
+        @Bindable var appState = appState
+        return Section {
+            Toggle("Use the FluidAudio speaker engine", isOn: Binding(
+                get: { appState.settings.useFluidAudioDiarization },
+                set: { newValue in
+                    appState.settings.useFluidAudioDiarization = newValue
+                    Logger.transcription.info("FluidAudio speaker engine \(newValue ? "enabled" : "disabled")")
+                }
+            ))
+        } header: {
+            Text("Speaker Identification")
+        } footer: {
+            Text("FluidAudio detects the number of speakers automatically and learns each attendee's voice across meetings, which improves who-said-what labeling. Turning it off reverts to the legacy SpeakerKit engine. The change applies to the next transcription or re-analysis, not to transcripts that have already been produced.")
         }
     }
 }

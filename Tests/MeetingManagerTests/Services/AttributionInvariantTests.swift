@@ -168,4 +168,18 @@ final class AttributionInvariantTests: XCTestCase {
         XCTAssertEqual(norm, 1.0, accuracy: 0.001,
                        "EMA-merged embeddings must stay unit length — the matcher treats dot product as cosine")
     }
+
+    // MARK: - Enrollment confidence clamp
+
+    func testEnrollmentConfidenceClampsMeasuredSimilarity() {
+        // Weak match floors at 0.50 (below the 0.60 amber bar → draws the dot).
+        XCTAssertEqual(AppState.enrollmentConfidence(for: 0.3), 0.50, accuracy: 0.0001)
+        // Strong match caps at 0.99 (1.0 is reserved for manual renames).
+        XCTAssertEqual(AppState.enrollmentConfidence(for: 0.995), 0.99, accuracy: 0.0001)
+        // Mid-range passes through unclamped.
+        XCTAssertEqual(AppState.enrollmentConfidence(for: 0.82), 0.82, accuracy: 0.0001)
+        // Unmeasured → the fixed legacy tier.
+        XCTAssertEqual(AppState.enrollmentConfidence(for: nil),
+                       AppState.enrollmentMatchFallbackConfidence, accuracy: 0.0001)
+    }
 }

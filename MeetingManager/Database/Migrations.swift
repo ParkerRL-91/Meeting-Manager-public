@@ -1582,5 +1582,14 @@ enum Migrations {
                 t.add(column: "zaiModel", .text).notNull().defaults(to: "glm-5.2")
             }
         }
+
+        // FluidAudio becomes the default diarization engine (ADR-011 rollout,
+        // validated on real meetings). Unconditional flip: no Settings toggle
+        // existed before this version, so a stored `false` is the OLD column
+        // default, not a user choice. SpeakerKit remains the fallback, reachable
+        // via the toggle added in the same change.
+        migrator.registerMigration("v67-fluidaudio-default-on") { db in
+            try db.execute(sql: "UPDATE appSettings SET useFluidAudioDiarization = 1")
+        }
     }
 }

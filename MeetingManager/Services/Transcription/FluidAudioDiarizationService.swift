@@ -344,4 +344,12 @@ struct FluidDiarizationResult: Sendable {
         self.segments = segs
         self.speakerCount = idForCluster.count
     }
+
+    /// Test/support memberwise init (the custom `init(_:)` above suppresses the
+    /// synthesized one). Not used in production — enrollment-match tests build
+    /// results directly rather than through FluidAudio.
+    init(segments: [Segment], speakerCount: Int) {
+        self.segments = segments
+        self.speakerCount = speakerCount
+    }
 }

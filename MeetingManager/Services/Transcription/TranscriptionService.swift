@@ -5,6 +5,19 @@ import os
 
 // MARK: - Transcription Segment
 
+/// A single word with its timing. App-local mirror of `WhisperKit.WordTiming`
+/// so WhisperKit types never leak past this file. Produced by WhisperKit's
+/// word-timestamp DTW alignment; used by `TranscriptAligner` to split a segment
+/// at speaker boundaries.
+struct WordStamp: Sendable, Equatable {
+    /// The word text, whitespace-trimmed (WhisperKit emits leading spaces).
+    let text: String
+    /// Start time in seconds, same timebase as the enclosing segment.
+    let start: Double
+    /// End time in seconds; guaranteed >= start (clamped at construction).
+    let end: Double
+}
+
 /// A single segment produced by the transcription engine.
 /// Named `TranscriptSegment` to avoid conflict with `WhisperKit.TranscriptSegment`.
 struct TranscriptSegment: Sendable {
@@ -16,6 +29,18 @@ struct TranscriptSegment: Sendable {
     let endTime: Double
     /// Model confidence for this segment (0.0 – 1.0).
     let confidence: Double
+    /// Word-level timings when the engine provides them (WhisperKit with
+    /// `wordTimestamps == true`). `nil` for Apple Speech and older payloads —
+    /// consumers fall back to segment-level (best-overlap) alignment.
+    let words: [WordStamp]?
+
+    init(text: String, startTime: Double, endTime: Double, confidence: Double, words: [WordStamp]? = nil) {
+        self.text = text
+        self.startTime = startTime
+        self.endTime = endTime
+        self.confidence = confidence
+        self.words = words
+    }
 }
 
 // MARK: - Transcription Engine Protocol
@@ -243,11 +268,26 @@ final class WhisperEngine: TranscriptionEngine, @unchecked Sendable {
                 guard !text.isEmpty else { return nil }
                 // Convert log-probability to a 0–1 confidence score.
                 let confidence = min(max(Double(Foundation.exp(seg.avgLogprob)), 0), 1)
+                // Carry per-word timings through for speaker-boundary splitting.
+                // WhisperKit's word times are already seek-adjusted into this
+                // segment's timebase (same as seg.start/seg.end), so no offset
+                // math is needed. Drop pure-whitespace tokens; clamp negative-
+                // length words. A `nil` (not empty) array means "no word data",
+                // which is the aligner's fallback trigger.
+                let words: [WordStamp]? = seg.words.flatMap { timings -> [WordStamp]? in
+                    let mapped = timings.compactMap { w -> WordStamp? in
+                        let t = w.word.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                        guard !t.isEmpty else { return nil }
+                        return WordStamp(text: t, start: Double(w.start), end: Double(max(w.start, w.end)))
+                    }
+                    return mapped.isEmpty ? nil : mapped
+                }
                 return TranscriptSegment(
                     text: text,
                     startTime: Double(seg.start),
                     endTime: Double(seg.end),
-                    confidence: confidence
+                    confidence: confidence,
+                    words: words
                 )
             }
         }

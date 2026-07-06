@@ -1495,7 +1495,9 @@ final class AppState {
                 }
             }
 
-            var rawTranscripts = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
+            let output = try await self.batchTranscribe(meetingId: meetingId, audioURL: effectiveURL, timebaseOffset: timebaseOffset)
+            var rawTranscripts = output.rows
+            var enrollmentMatches = output.enrollmentMatches
 
             // Append mode: the new session's diarization numbers clusters from
             // "Speaker 1" again, colliding with session 1's label namespace —
@@ -1511,6 +1513,10 @@ final class AppState {
                 let labelShift = Self.maxSpeakerNumber(in: existingLabels + existingMapKeys)
                 if labelShift > 0 {
                     rawTranscripts = Self.shiftSessionSpeakerLabels(rawTranscripts, by: labelShift)
+                    // Keep enrollment-match keys aligned with the shifted rows.
+                    enrollmentMatches = Dictionary(uniqueKeysWithValues: enrollmentMatches.map {
+                        (Self.shiftSpeakerLabel($0.key, by: labelShift), $0.value)
+                    })
                     self.fileLog("TaskQueue: append-mode labels shifted by +\(labelShift)")
                 }
             }
@@ -1551,6 +1557,7 @@ final class AppState {
                 let (transcripts, attributedMeeting) = await self.applySpeakerAttribution(
                     transcripts: rawTranscripts,
                     meeting: meeting,
+                    enrollmentMatches: enrollmentMatches,
                     existingAssignments: isAppend ? priorMap : [:]
                 )
                 meeting = attributedMeeting
@@ -1613,6 +1620,19 @@ final class AppState {
                 }
                 if commitSucceeded {
                     Logger.transcription.info("Transcription committed: \(transcripts.count) segments for \(meetingId)")
+                }
+
+                // Phase 2 — rebuild enrolled voices from this meeting's confirmed
+                // clusters (FluidAudio path only; fluidResult is nil otherwise).
+                // Skip append sessions: their map keys were shifted but the
+                // fluidResult segment ids weren't, so a rebuild would key on the
+                // wrong cluster — the next full meeting rebuilds anyway.
+                if commitSucceeded, let fr = output.fluidResult, timebaseOffset == 0 {
+                    await self.rebuildEnrollmentReferences(
+                        speakerMap: meeting.speakerMapDictionary,
+                        confidenceMap: meeting.speakerConfidenceMapDictionary,
+                        result: fr
+                    )
                 }
 
                 // P1-T06: auto-title ad-hoc meetings once transcripts are persisted.
@@ -3609,6 +3629,19 @@ final class AppState {
         let rawSeconds: Double
     }
 
+    /// What `batchTranscribe` hands back to the transcription handler. `rows` is
+    /// the payload; the FluidAudio fields ride along so the handler can (a) pass
+    /// enrollment matches into `applySpeakerAttribution` and (b) rebuild voice
+    /// references after the attribution commits. Both are empty/nil on the
+    /// SpeakerKit path (including the FluidAudio→SpeakerKit fallback) and on
+    /// diarization failure.
+    struct BatchTranscriptionOutput: Sendable {
+        var rows: [Transcript]
+        var enrollmentMatches: [String: EnrollmentMatch] = [:]
+        var fluidResult: FluidDiarizationResult? = nil
+        static func rowsOnly(_ rows: [Transcript]) -> BatchTranscriptionOutput { .init(rows: rows) }
+    }
+
     /// Decode both WAVs, silence-trim, and select the diarization source —
     /// the gigabyte-scale synchronous work of a batch run. nonisolated so it
     /// runs in a detached task instead of stalling the MainActor; the interim
@@ -3797,7 +3830,7 @@ final class AppState {
     private nonisolated static func buildTranscriptRows(
         meetingId: String,
         segments: [TranscriptSegment],
-        speakerMap: [Int: String],
+        diarizationTurns: [TranscriptAligner.Turn],
         samples: [Float],
         diarizationSamples: [Float],
         diarizationSource: String,
@@ -3879,30 +3912,39 @@ final class AppState {
                 }
             }
 
-            // Label the user's own turns first (mic-dominant windows), then
-            // fall back to the diarization cluster for remote speakers.
-            let speaker: String
-            if canDetectUser {
-                let mixedRMS = windowRMS(samples, seg.startTime, seg.endTime)
-                let systemRMS = windowRMS(diarizationSamples, seg.startTime, seg.endTime)
-                if mixedRMS > userSpeechFloor && systemRMS < mixedRMS * userDominanceRatio {
-                    speaker = userDisplayName
-                    userSegmentCount += 1
+            // Split the segment at diarization turn boundaries (word-level when
+            // WhisperKit gave word timings, whole-segment best-overlap otherwise),
+            // then label each sub-row: the user's mic-dominance check first (per
+            // sub-row window — a half-user/half-remote segment no longer gets one
+            // verdict), then the diarization cluster.
+            let aligned = TranscriptAligner.align(segment: seg, turns: diarizationTurns)
+            for sub in aligned {
+                let subText = sub.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !subText.isEmpty else { continue }
+                let clusterLabel = sub.sid.map { "Speaker \($0)" } ?? "Speaker"
+                let speaker: String
+                if canDetectUser {
+                    let mixedRMS = windowRMS(samples, sub.startTime, sub.endTime)
+                    let systemRMS = windowRMS(diarizationSamples, sub.startTime, sub.endTime)
+                    if mixedRMS > userSpeechFloor && systemRMS < mixedRMS * userDominanceRatio {
+                        speaker = userDisplayName
+                        userSegmentCount += 1
+                    } else {
+                        speaker = clusterLabel
+                    }
                 } else {
-                    speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
+                    speaker = clusterLabel
                 }
-            } else {
-                speaker = speakerMap[Int(seg.startTime)] ?? "Speaker"
-            }
 
-            toSave.append(Transcript(
-                meetingId: meetingId,
-                speakerLabel: speaker,
-                text: text,
-                startTime: seg.startTime + trimOffsetSeconds,
-                endTime: seg.endTime + trimOffsetSeconds,
-                confidence: seg.confidence
-            ))
+                toSave.append(Transcript(
+                    meetingId: meetingId,
+                    speakerLabel: speaker,
+                    text: subText,
+                    startTime: sub.startTime + trimOffsetSeconds,
+                    endTime: sub.endTime + trimOffsetSeconds,
+                    confidence: seg.confidence
+                ))
+            }
         }
         return (toSave, userSegmentCount, skippedCount)
     }
@@ -3931,6 +3973,15 @@ final class AppState {
             copy.speakerLabel = "Speaker \(n + shift)"
             return copy
         }
+    }
+
+    /// Shift a single "Speaker N" label by `shift` (returns other labels
+    /// unchanged). Used to keep enrollment-match keys aligned with the
+    /// append-mode row-label shift above.
+    nonisolated static func shiftSpeakerLabel(_ label: String, by shift: Int) -> String {
+        guard shift > 0, label.hasPrefix("Speaker "),
+              let n = Int(label.dropFirst("Speaker ".count)) else { return label }
+        return "Speaker \(n + shift)"
     }
 
     /// Partition audio paths into usable sessions vs husks. A crash husk is
@@ -3967,10 +4018,10 @@ final class AppState {
     /// `timebaseOffset` shifts every persisted row's timestamps — used by
     /// append-mode (reopened meetings) so a second session's rows sort after
     /// the first session's timeline.
-    private func batchTranscribe(meetingId: String, audioURL: URL?, timebaseOffset: Double = 0) async throws -> [Transcript] {
+    private func batchTranscribe(meetingId: String, audioURL: URL?, timebaseOffset: Double = 0) async throws -> BatchTranscriptionOutput {
         guard let audioURL else {
             fileLog("Batch transcribe: no audio file URL")
-            return []
+            return .rowsOnly([])
         }
 
         if !transcriptionService.isModelLoaded {
@@ -3987,7 +4038,7 @@ final class AppState {
             fileLog("Batch transcribe: model not loaded after 5 min — queuing for later")
             addPendingTranscription(meetingId: meetingId, audioURL: audioURL)
             lastUserError = "Transcription queued — will process when model loads."
-            return []
+            return .rowsOnly([])
         }
 
         fileLog("Batch transcribe: processing \(audioURL.lastPathComponent)...")
@@ -4015,7 +4066,7 @@ final class AppState {
             throw error
         }
         guard let prepared = maybePrepared else {
-            return []
+            return .rowsOnly([])
         }
 
         do {
@@ -4030,40 +4081,66 @@ final class AppState {
             let segments = try await transcriptionService.transcribe(samples: samples)
             fileLog("Batch transcribe: WhisperKit returned \(segments.count) segments")
 
-            var speakerMap: [Int: String] = [:] // startTime (seconds, rounded) → "Speaker 1"
+            var diarizationTurns: [TranscriptAligner.Turn] = []
+            var enrollmentMatches: [String: EnrollmentMatch] = [:]
+            var fluidResult: FluidDiarizationResult? = nil
             do {
                 // Diarize through the engine the flag selects. Both engines emit
                 // 1-based "Speaker N" labels; FluidAudio normalizes its string
                 // cluster ids in FluidDiarizationResult, SpeakerKit's are 0-based
                 // here (hence +1). Energy-aware source selection (above) is
                 // engine-agnostic and applies to whichever runs.
-                let segments: [(sid: Int, start: Float, end: Float)]
-                if settings.useFluidAudioDiarization {
-                    let r = try await FluidAudioDiarizationService.shared.diarize(
-                        audioArray: diarizationSamples,
-                        participantCount: participantHint
-                    )
-                    segments = r.segments.map { (sid: $0.speakerId, start: $0.startTime, end: $0.endTime) }
-                } else {
+                func speakerKitTurns() async throws -> [TranscriptAligner.Turn] {
                     let r = try await SpeakerDiarizationService.shared.diarize(
                         audioArray: diarizationSamples,
                         participantCount: participantHint
                     )
-                    segments = r.segments.map { (sid: ($0.speaker.speakerId ?? 0) + 1, start: $0.startTime, end: $0.endTime) }
-                }
-                fileLog("Diarization: \(segments.count) speaker segments from \(diarizationSource) input (engine: \(settings.useFluidAudioDiarization ? "FluidAudio" : "SpeakerKit"), hint: \(participantHint.map(String.init) ?? "auto"))")
-
-                // Build a lookup: for each second, which speaker is active
-                for seg in segments {
-                    let label = "Speaker \(seg.sid)"
-                    var t = Int(seg.start)
-                    while t < Int(seg.end) + 1 {
-                        speakerMap[t] = label
-                        t += 1
+                    return r.segments.map {
+                        TranscriptAligner.Turn(sid: ($0.speaker.speakerId ?? 0) + 1, start: Double($0.startTime), end: Double($0.endTime))
                     }
                 }
 
-                let uniqueSpeakers = Set(segments.map { $0.sid })
+                if settings.useFluidAudioDiarization {
+                    do {
+                        // Phase-2: seed known voices so matching clusters come back
+                        // tagged with the enrolled Person.id (→ a name on first pass).
+                        var enrolledSpeakers: [EnrolledSpeaker] = []
+                        if let m = meeting {
+                            enrolledSpeakers = await SpeakerEnrollmentService.shared.enrolledSpeakers(
+                                for: m,
+                                personRepo: PersonRepository(database: database),
+                                referenceRepo: VoiceReferenceRepository(database: database)
+                            )
+                        }
+                        let r = try await FluidAudioDiarizationService.shared.diarize(
+                            audioArray: diarizationSamples,
+                            participantCount: participantHint,
+                            enrolledSpeakers: enrolledSpeakers
+                        )
+                        fluidResult = r
+                        enrollmentMatches = SpeakerEnrollmentService.shared.enrolledClusterMatches(
+                            result: r, enrolledSpeakers: enrolledSpeakers
+                        )
+                        if !enrollmentMatches.isEmpty {
+                            fileLog("Diarization: enrollment matched \(enrollmentMatches.count) cluster(s)")
+                        }
+                        diarizationTurns = r.segments.map {
+                            TranscriptAligner.Turn(sid: $0.speakerId, start: Double($0.startTime), end: Double($0.endTime))
+                        }
+                    } catch {
+                        // FluidAudio failed (e.g. a first-run model download) —
+                        // degrade to SpeakerKit rather than to a label-less
+                        // transcript. Enrollment is unavailable on this fallback
+                        // (SpeakerKit exposes no embeddings), so matches stay empty.
+                        fileLog("FluidAudio diarization failed (\(error.localizedDescription)); falling back to SpeakerKit")
+                        diarizationTurns = try await speakerKitTurns()
+                    }
+                } else {
+                    diarizationTurns = try await speakerKitTurns()
+                }
+                fileLog("Diarization: \(diarizationTurns.count) speaker turns from \(diarizationSource) input (hint: \(participantHint.map(String.init) ?? "auto"))")
+
+                let uniqueSpeakers = Set(diarizationTurns.map { $0.sid })
                 fileLog("Diarization: \(uniqueSpeakers.count) unique speaker(s)")
             } catch {
                 fileLog("Diarization failed (continuing without speaker labels): \(error.localizedDescription)")
@@ -4079,7 +4156,7 @@ final class AppState {
                 Self.buildTranscriptRows(
                     meetingId: meetingId,
                     segments: segments,
-                    speakerMap: speakerMap,
+                    diarizationTurns: diarizationTurns,
                     samples: samples,
                     diarizationSamples: diarizationSamples,
                     diarizationSource: diarizationSource,
@@ -4111,7 +4188,7 @@ final class AppState {
                     throw TranscriptionEmptyResultError(rawSeconds: prepared.rawSeconds)
                 }
             }
-            return built.rows
+            return BatchTranscriptionOutput(rows: built.rows, enrollmentMatches: enrollmentMatches, fluidResult: fluidResult)
 
         } catch {
             // Rethrow — the old `return []` here swallowed WhisperKit and
@@ -4142,18 +4219,29 @@ final class AppState {
     /// it sits above vocative (≤0.85) and LLM (≤0.78) but below a manual
     /// rename (1.0). The match is audio-grounded AND already RSVP-gated to this
     /// meeting (only accepted attendees are enrolled), so the attendance gate is
-    /// moot. Default ~0.85 per the Phase-0 spike; FluidAudio doesn't expose a
-    /// per-match score, so we use a fixed tier rather than a similarity value.
-    static let enrollmentMatchConfidence: Float = 0.85
+    /// moot. Used as the FALLBACK confidence only when a match's cosine similarity
+    /// couldn't be measured (no usable segment embeddings) — see
+    /// `enrollmentConfidence(for:)`. Historical fixed tier from the Phase-0 spike.
+    static let enrollmentMatchFallbackConfidence: Float = 0.85
 
-    /// - Parameter enrollmentMatches: clusters FluidAudio pre-named via Phase-2
-    ///   enrollment (`["Speaker N": personName]`). Treated as the highest
-    ///   non-manual signal — seeded into the mapping above vocative/LLM and
-    ///   scored at `enrollmentMatchConfidence`. Empty on the SpeakerKit path and
-    ///   on retry (where transcripts are already relabelled and the pass is
-    ///   fill-only). These clusters' transcript rows are relabelled upstream in
-    ///   `runDiarization`, so passing them here is what gets them into the
-    ///   persisted `speakerMap`/`speakerConfidenceMap` with a real score.
+    /// Confidence for a FluidAudio enrollment match: the measured cosine similarity
+    /// clamped to [0.50, 0.99]. The 0.99 cap keeps a manual rename (1.0) the ONLY
+    /// source of full confidence — `runDiarization`'s manual-preserve merge keys on
+    /// `>= 1.0`, so enrollment must never mint it. The 0.50 floor sits deliberately
+    /// BELOW the 0.60 amber review threshold, so a weak match draws the needs-review
+    /// dot instead of being hidden. `nil` similarity → the fixed fallback tier.
+    static func enrollmentConfidence(for similarity: Float?) -> Float {
+        guard let s = similarity else { return enrollmentMatchFallbackConfidence }
+        return min(max(s, 0.50), 0.99)
+    }
+
+    /// - Parameter enrollmentMatches: clusters FluidAudio matched to an enrolled
+    ///   voice (`["Speaker N": EnrollmentMatch]`). Treated as the highest
+    ///   non-manual signal — seeded into the mapping above vocative/LLM and scored
+    ///   at the match's measured cosine (fallback tier when unmeasured). Empty on
+    ///   the SpeakerKit path and on retry (where transcripts are already relabelled
+    ///   and the pass is fill-only). Passing them here is what gets them into the
+    ///   persisted `speakerMap`/`speakerConfidenceMap`.
     /// - Parameter existingAssignments: the meeting's already-persisted
     ///   cluster→name map, passed by RE-RUN paths (retry, Re-run AI, series
     ///   propagation). Resolved rows hide their clusters from this pass, so
@@ -4163,7 +4251,7 @@ final class AppState {
     private func applySpeakerAttribution(
         transcripts: [Transcript],
         meeting: Meeting,
-        enrollmentMatches: [String: String] = [:],
+        enrollmentMatches: [String: EnrollmentMatch] = [:],
         existingAssignments: [String: String] = [:]
     ) async -> (transcripts: [Transcript], meeting: Meeting) {
         // v3.10 #1 RSVP gate: never consider declined attendees as candidates.
@@ -4409,16 +4497,23 @@ final class AppState {
         }
 
         // Enrollment matches (FluidAudio Phase-2) are the highest NON-manual
-        // signal: audio-grounded and already RSVP-gated to this meeting. They
-        // win over vocative/LLM on a name collision and are scored at the fixed
-        // enrollment tier. Applied AFTER the combine step so the tier isn't
-        // diluted by a weaker corroborating signal. Their transcript rows were
-        // relabelled upstream in runDiarization; seeding the mapping here is what
-        // persists them in the meeting's speakerMap + speakerConfidenceMap.
-        for (cluster, name) in enrollmentMatches {
-            mapping[cluster] = name
-            clusterConfidence[cluster] = Self.enrollmentMatchConfidence
-            Logger.general.info("[Enrollment] cluster \(cluster, privacy: .public) → \(name, privacy: .public) (conf \(Self.enrollmentMatchConfidence))")
+        // signal: audio-grounded and already RSVP-gated to this meeting. They own
+        // the NAME on a collision (applied AFTER the combine step so the score
+        // isn't diluted by a weaker corroborating signal), but the CONFIDENCE is
+        // the match's measured cosine (clamped) rather than a fixed tier — a weak
+        // match then draws the amber review dot. When an independent signal already
+        // agreed on the same name, keep the higher score (corroboration must never
+        // LOWER it). Seeding the mapping here is what persists them into the
+        // meeting's speakerMap + speakerConfidenceMap.
+        for (cluster, match) in enrollmentMatches {
+            let conf = Self.enrollmentConfidence(for: match.similarity)
+            if let existing = mapping[cluster], existing.lowercased() == match.name.lowercased() {
+                clusterConfidence[cluster] = max(clusterConfidence[cluster] ?? 0, conf)
+            } else {
+                mapping[cluster] = match.name
+                clusterConfidence[cluster] = conf
+            }
+            Logger.general.info("[Enrollment] cluster \(cluster, privacy: .public) → \(match.name, privacy: .public) (conf \(conf)\(match.similarity == nil ? ", fixed-tier fallback" : ""))")
         }
 
         // Auto-map the user's own mic cluster (if any). Mic-tagged turns are
@@ -4527,7 +4622,7 @@ final class AppState {
         for (cluster, name) in mapping where cluster.hasPrefix("Speaker ") {
             let nl = name.lowercased()
             let fromVoice = (voiceMatches[cluster]?.lowercased() == nl)
-                || (enrollmentMatches[cluster]?.lowercased() == nl)
+                || (enrollmentMatches[cluster]?.name.lowercased() == nl)
             guard fromVoice else { continue }
             // An LLM verdict that merely echoes the prompt-seeded name is not
             // independent corroboration.
@@ -5222,11 +5317,12 @@ final class AppState {
             // can have their per-Person voice reference (re)built after attribution.
             var fluidResult: FluidDiarizationResult? = nil
             var enrolledSpeakers: [EnrolledSpeaker] = []
-            // FluidAudio enrollment matches ("Speaker N" → person), passed to
-            // applySpeakerAttribution as the highest non-manual signal. Distinct
-            // from `voiceMatches` (which also carries SpeakerKit mel-spectrum
-            // matches) so the SpeakerKit path doesn't get an enrollment tier.
-            var enrollmentMatches: [String: String] = [:]
+            // FluidAudio enrollment matches ("Speaker N" → person + measured
+            // cosine), passed to applySpeakerAttribution as the highest non-manual
+            // signal. Distinct from `voiceMatches` (which also carries SpeakerKit
+            // mel-spectrum matches) so the SpeakerKit path doesn't get an
+            // enrollment tier.
+            var enrollmentMatches: [String: EnrollmentMatch] = [:]
 
             if useFluid {
                 // Phase 2 — seed cross-meeting voice identity: enroll the known
@@ -5260,14 +5356,16 @@ final class AppState {
                 // Clusters FluidAudio matched to an enrolled reference resolve
                 // straight to a name — treat as voice matches (the attendance gate
                 // is moot since enrollment is already RSVP-gated to this meeting).
-                let enrolledNames = SpeakerEnrollmentService.shared.enrolledClusterNames(
+                // `voiceMatches` needs plain names for the pre-relabel below;
+                // `enrollmentMatches` keeps the measured cosine for scoring.
+                let matches = SpeakerEnrollmentService.shared.enrolledClusterMatches(
                     result: result,
                     enrolledSpeakers: enrolledSpeakers
                 )
-                if !enrolledNames.isEmpty {
-                    voiceMatches = enrolledNames
-                    enrollmentMatches = enrolledNames
-                    fileLog("Diarization: enrollment matched \(enrolledNames.count) cluster(s) for \(meetingId) (FluidAudio)")
+                if !matches.isEmpty {
+                    voiceMatches = matches.mapValues(\.name)
+                    enrollmentMatches = matches
+                    fileLog("Diarization: enrollment matched \(matches.count) cluster(s) for \(meetingId) (FluidAudio)")
                 }
             } else {
                 let result = try await service.diarize(
@@ -5479,27 +5577,13 @@ final class AppState {
                 // Phase 2 — FluidAudio path: (re)build each confirmed speaker's
                 // per-Person voice reference from this meeting's highest-confidence
                 // segment embeddings, so future meetings match the voice via
-                // enrollment instead of falling back to vocative/LLM. Only rebuild
-                // for clusters whose final attribution is high-confidence (≥ 0.85,
-                // the audio-grounded tier) — low-confidence LLM guesses must not
-                // poison the reference. Enrollment matches are already confident.
+                // enrollment instead of falling back to vocative/LLM.
                 if let fr = fluidResult {
-                    let finalSpeakerMap = attributed.speakerMapDictionary
-                    let confidence = attributed.speakerConfidenceMapDictionary
-                    let referenceRepo = VoiceReferenceRepository(database: database)
-                    let personRepo = PersonRepository(database: database)
-                    for (clusterLabel, personName) in finalSpeakerMap {
-                        guard !personName.isEmpty,
-                              !Self.isGenericSpeakerLabel(personName) else { continue }
-                        guard (confidence[clusterLabel] ?? 0) >= 0.85 else { continue }
-                        await SpeakerEnrollmentService.shared.rebuildReference(
-                            personName: personName,
-                            clusterLabel: clusterLabel,
-                            result: fr,
-                            personRepo: personRepo,
-                            referenceRepo: referenceRepo
-                        )
-                    }
+                    await rebuildEnrollmentReferences(
+                        speakerMap: attributed.speakerMapDictionary,
+                        confidenceMap: attributed.speakerConfidenceMapDictionary,
+                        result: fr
+                    )
                 }
             }
 
@@ -5511,6 +5595,37 @@ final class AppState {
             // swallowed error here reported "completed" for a run that did
             // nothing, and the queue's retry machinery never engaged.
             throw error
+        }
+    }
+
+    /// High-confidence bar for feeding an attributed cluster back into its
+    /// per-Person voice reference. A weak/low-confidence attribution (now scored
+    /// by a real cosine on the enrollment path) must not EMA-blend possibly-wrong
+    /// audio into the reference — so the rebuild gate doubles as drift protection.
+    static let enrollmentRebuildThreshold: Float = 0.85
+
+    /// Phase 2 — (re)build each confirmed cluster's per-Person voice reference
+    /// from this meeting's highest-confidence FluidAudio segment embeddings, so
+    /// future meetings match the voice via enrollment. Shared by the inline batch
+    /// path, `processPendingTranscriptions`, and `runDiarization`.
+    private func rebuildEnrollmentReferences(
+        speakerMap: [String: String],
+        confidenceMap: [String: Float],
+        result: FluidDiarizationResult
+    ) async {
+        let referenceRepo = VoiceReferenceRepository(database: database)
+        let personRepo = PersonRepository(database: database)
+        for (clusterLabel, personName) in speakerMap {
+            guard !personName.isEmpty,
+                  !Self.isGenericSpeakerLabel(personName) else { continue }
+            guard (confidenceMap[clusterLabel] ?? 0) >= Self.enrollmentRebuildThreshold else { continue }
+            await SpeakerEnrollmentService.shared.rebuildReference(
+                personName: personName,
+                clusterLabel: clusterLabel,
+                result: result,
+                personRepo: personRepo,
+                referenceRepo: referenceRepo
+            )
         }
     }
 
@@ -5662,9 +5777,9 @@ final class AppState {
                 continue
             }
             // Use same atomic-write pattern as transcriptionHandler
-            let rawTranscripts: [Transcript]
+            let output: BatchTranscriptionOutput
             do {
-                rawTranscripts = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
+                output = try await batchTranscribe(meetingId: meetingId, audioURL: audioURL)
             } catch {
                 // Deterministic empty result: re-running next launch can't
                 // change it — drop the entry (attemptedAt was stamped before
@@ -5688,8 +5803,9 @@ final class AppState {
 
                 // v3.1 Layer 2: attribute Speaker N clusters before persistence.
                 let (transcripts, attributedMeeting) = await applySpeakerAttribution(
-                    transcripts: rawTranscripts,
-                    meeting: meeting
+                    transcripts: output.rows,
+                    meeting: meeting,
+                    enrollmentMatches: output.enrollmentMatches
                 )
                 meeting = attributedMeeting
 
@@ -5697,6 +5813,16 @@ final class AppState {
                 try? await database.writer.write { db in
                     for var t in transcripts { try t.save(db) }
                     try meeting.save(db)
+                }
+
+                // Phase 2 — rebuild enrolled voices (FluidAudio path only). This
+                // path has no append mode, so a rebuild always keys correctly.
+                if let fr = output.fluidResult {
+                    await rebuildEnrollmentReferences(
+                        speakerMap: meeting.speakerMapDictionary,
+                        confidenceMap: meeting.speakerConfidenceMapDictionary,
+                        result: fr
+                    )
                 }
 
                 // P1-T06: auto-title ad-hoc meetings on the recovery path too.

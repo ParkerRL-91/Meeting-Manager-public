@@ -139,10 +139,12 @@ struct AppSettings: Codable, Equatable {
     var micOverrideDeviceID: String = ""
 
     /// When true, speaker diarization runs through FluidAudio
-    /// (`FluidAudioDiarizationService`) instead of SpeakerKit. Defaults off so
-    /// FluidAudio can be A/B-tested against the shipped SpeakerKit path without
-    /// risk; flipping it back to false instantly reverts to SpeakerKit.
-    var useFluidAudioDiarization: Bool = false
+    /// (`FluidAudioDiarizationService`) instead of SpeakerKit. Default ON since
+    /// v67 (ADR-011 rollout): FluidAudio auto-clusters and exposes the embeddings
+    /// that power cross-meeting enrollment. Setting it false reverts to the legacy
+    /// SpeakerKit path (the fallback), reachable via the Transcription settings
+    /// toggle. Existing installs are flipped by migration v67.
+    var useFluidAudioDiarization: Bool = true
 
     /// Days to keep meeting audio (WAV) files. 0 = keep forever (default).
     /// >0 arms the startup retention sweep, which deletes the audio of meetings

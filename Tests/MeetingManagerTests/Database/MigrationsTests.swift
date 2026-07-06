@@ -137,4 +137,13 @@ final class MigrationsTests: XCTestCase {
         XCTAssertEqual(settings?.id, 1)
         XCTAssertFalse(settings!.summaryPromptTemplate.isEmpty)
     }
+
+    // v67 flips the shipped default: after all migrations run, the seeded
+    // appSettings row must have FluidAudio enabled.
+    func testFluidAudioDefaultOnAfterMigration() throws {
+        let enabled = try db.writer.read { dbConn in
+            try Bool.fetchOne(dbConn, sql: "SELECT useFluidAudioDiarization FROM appSettings WHERE id = 1")
+        }
+        XCTAssertEqual(enabled, true)
+    }
 }
