@@ -2445,7 +2445,7 @@ final class AppState {
 
     /// Extract context entities for the connections section: participant
     /// names (excluding the local user), all-caps acronyms (Globex, NHS, Initech,
-    /// 2–6 chars), and CamelCase product names (Acme). Used as exact-name
+    /// 2–6 chars), and CamelCase product names (AcmeCorp). Used as exact-name
     /// gates against KB excerpts so the section can't drift to a different
     /// customer with a similar topic. Static so it stays trivially testable.
     static func extractContextEntities(meeting: Meeting, userEmail: String?, userName: String) -> [String] {
@@ -2475,7 +2475,7 @@ final class AppState {
 
         // Acronyms (3–6 ALL CAPS letters/digits — 2-letter ones like "IT",
         // "OK", "AI" are too generic to anchor a connection on) and CamelCase
-        // (initial cap + at least one internal cap, e.g. "Acme") from
+        // (initial cap + at least one internal cap, e.g. "AcmeCorp") from
         // the title.
         let titleStop: Set<String> = [
             "TBD"

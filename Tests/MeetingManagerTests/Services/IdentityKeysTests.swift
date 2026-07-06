@@ -360,7 +360,7 @@ final class IdentityKeysTests: XCTestCase {
     // MARK: - POTENTIAL BUG: canonicalKey collision on shared first name
     //
     // ADR-003 §"Domain Disambiguation" acknowledges that two people sharing a
-    // first name (e.g. "Dave from Acme" vs "Dave from Acme") will both
+    // first name (e.g. "Dave from Globex" vs "Dave from Acme") will both
     // produce canonicalKey "dave", causing Person.matches to return true for
     // both against any "dave"-keyed input.  The disambiguation is handled in
     // PersonRepository.findOrCreate, NOT in Person.matches / canonicalKeys.

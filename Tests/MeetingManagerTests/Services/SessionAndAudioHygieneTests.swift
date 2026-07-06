@@ -1138,9 +1138,9 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     // MARK: - Glossary miner (TASK-064)
 
     func testJargonTokensMatchCapsAndCamelCase() {
-        let tokens = GlossaryMiner.jargonTokens(in: "The MTB reviewed Acme output via taskQueue, which was okay.")
+        let tokens = GlossaryMiner.jargonTokens(in: "The MTB reviewed AcmeCorp output via taskQueue, which was okay.")
         XCTAssertTrue(tokens.contains("MTB"))
-        XCTAssertTrue(tokens.contains("Acme"))
+        XCTAssertTrue(tokens.contains("AcmeCorp"))
         XCTAssertTrue(tokens.contains("taskQueue"))
         XCTAssertFalse(tokens.contains("okay"), "plain lowercase words never match")
     }

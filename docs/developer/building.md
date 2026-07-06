@@ -82,7 +82,7 @@ All managed by Swift Package Manager. No manual steps needed — SPM resolves on
 | GRDB | 6.29.3 | SQLite ORM |
 | swift-argument-parser | 1.8.1 | Transitive (argmax-oss-swift) |
 
-**Note:** MLX and llama.cpp remain banned by policy ([ADR-001](../../knowledge/decisions/ADR-001-ollama-over-mlx-for-local-llm.md)) — local LLM goes through Ollama's HTTP API. The old `swift-transformers` pin that made the ban mechanical disappeared with the Argmax OSS 1.0.0 upgrade; see the 2026-05-29 update note in the ADR.
+**Note:** MLX and llama.cpp remain banned by policy (ADR-001) — local LLM goes through Ollama's HTTP API. The old `swift-transformers` pin that made the ban mechanical disappeared with the Argmax OSS 1.0.0 upgrade; see the 2026-05-29 update note in the ADR.
 
 ---
 

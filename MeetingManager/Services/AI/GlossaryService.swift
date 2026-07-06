@@ -82,7 +82,7 @@ enum GlossaryMiner {
         var out = Set<String>()
         let patterns = [
             "\\b[A-Z]{2,6}s?\\b",                       // MTB, ACMG, APIs
-            "\\b[A-Z][a-z]+(?:[A-Z][a-zA-Z]*)+\\b",    // Acme, TaskQueue
+            "\\b[A-Z][a-z]+(?:[A-Z][a-zA-Z]*)+\\b",    // AcmeCorp, TaskQueue
             "\\b[a-z]+(?:[A-Z][a-zA-Z]*)+\\b",         // camelCase
         ]
         for pattern in patterns {

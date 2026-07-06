@@ -1,7 +1,7 @@
 # Distribution Guide
 
 How to build and publish a Meeting Manager release. Sparkle was removed in
-3.x (see `knowledge/decisions/ADR-006-self-signed-release.md`): updates ship
+3.x: updates ship
 as GitHub Releases that users download manually — there is no appcast and no
 in-app update check.
 

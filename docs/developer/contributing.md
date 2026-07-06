@@ -2,42 +2,16 @@
 
 ## Development Workflow
 
-This project uses a structured task-based workflow managed through `project-management/`. Every code change traces to a task.
-
-### Starting Work
-
-1. Check `project-management/ACTIVE.md` for current sprint and blockers
-2. Pick a task from "Up Next" or create a new one in `project-management/backlog/`
-3. Move it to "Current Sprint" in ACTIVE.md when starting
-
-### Task File Format
-
-```markdown
----
-title: Feature Name
-id: TASK-{N}
-project: PRJ-{N}
-status: in-progress   # ready | in-progress | done
-priority: P1          # P0 | P1 | P2 | P3
----
-
-## User Stories
-## Outcomes
-## Success Metrics
-## Implementation Plan
-## Files Changed
-## Status Log
-## Takeaways
-```
+1. Read `docs/developer/architecture.md` for the area you'll touch.
+2. Make the change, scoped strictly to the task at hand.
+3. Run `swift build -c release` — it must be clean before you open a PR.
 
 ### Commit Format
 
 ```
-TASK-XXX: short imperative description
+short imperative description
 
 Longer explanation if needed.
-
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 ```
 
 ---
@@ -84,23 +58,3 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 2. Add it to `AppState`
 3. In `SummaryView.regenerateSummary()`, add a routing case that constructs the closure
 4. Add a settings toggle/picker if the user needs to configure it
-
----
-
-## Project Structure
-
-```
-project-management/
-├── ACTIVE.md              — current sprint, blockers, recently completed
-├── projects/PRJ-*.md      — project-level objectives and task tables
-└── backlog/TASK-*.md      — individual task files
-
-knowledge/
-├── architecture/          — system design docs
-├── decisions/             — ADRs (architecture decision records)
-├── features/              — how specific features work
-├── integrations/          — third-party API behavior
-└── data-model/            — schema and migration docs
-```
-
-The `knowledge/` directory is the living technical reference for this codebase. Update it whenever you discover a non-obvious behavior, make an architectural decision, or change how a feature works.

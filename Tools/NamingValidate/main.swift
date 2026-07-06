@@ -53,7 +53,10 @@ var correct = 0, attempted = 0, abstained = 0, total = 0, goldCorrect = 0, goldA
 print("meetingId,kind,clusters,predicted,trueUser,energyFrac,margin,result,predDominantLabel,predUserPurity")
 for (idx, job) in jobs.enumerated() {
     total += 1
-    let isGold = !job.userLabels.contains("Parker Reid.s")
+    // Gold jobs are marked by a "<self-name>.s" user label. Set NAMING_SELF_LABEL
+    // to your own self-name locally; defaults to "Self" so no name is hardcoded.
+    let selfLabel = ProcessInfo.processInfo.environment["NAMING_SELF_LABEL"] ?? "Self"
+    let isGold = !job.userLabels.contains("\(selfLabel).s")
     diar.speakerManager.initializeKnownSpeakers([], mode: .reset, preserveIfPermanent: false)
     guard let mixed = load16k(job.mixedWav), let system = load16k(job.systemWav),
           !mixed.isEmpty, !system.isEmpty,

@@ -21,7 +21,7 @@ The left pane of the People tab shows every Person, sorted by canonical name. Ea
 
 - Initials avatar
 - Canonical name
-- **Org chip** (Acme, Acme, etc.) — derived from email domain
+- **Org chip** (Acme, Globex, etc.) — derived from email domain
 - Number of meetings + last meeting date
 - A waveform icon when a voice fingerprint is stored
 

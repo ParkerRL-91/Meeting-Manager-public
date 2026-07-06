@@ -207,7 +207,7 @@ if settings.useLocalLLM {
 
 ## Key Architectural Decisions
 
-- **[ADR-001](../../knowledge/decisions/ADR-001-ollama-over-mlx-for-local-llm.md):** Ollama API over embedded MLX — avoids unresolvable SPM dependency conflict with WhisperKit
+- **ADR-001:** Ollama API over embedded MLX — avoids unresolvable SPM dependency conflict with WhisperKit
 - **No sandbox** — app requires microphone, filesystem access, and the ability to install/launch other apps (Ollama)
 - **SwiftPM only** — no Xcode project file; build with `swift build`
 - **Retry with backoff** — all HTTP clients (Claude, Google Calendar, Google Auth) use exponential backoff + jitter, skipping retries on 400/401/403
