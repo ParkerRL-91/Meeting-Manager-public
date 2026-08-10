@@ -38,7 +38,8 @@ final class KnowledgeRetrievalTests: XCTestCase {
             lastSummaryExcerpt: nil,
             meetLink: nil,
             previousSession: nil,
-            sinceLastMet: nil
+            sinceLastMet: nil,
+            seriesOpenLoops: nil
         )
     }
 

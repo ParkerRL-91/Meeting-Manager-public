@@ -382,7 +382,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         let noteRepo = NoteRepository(database: db)
         let summaryRepo = SummaryRepository(database: db)
         let chatRepo = ChatMessageRepository(database: db)
-        let actionRepo = ActionItemRepository(database: db)
+        let actionRepo = TaskRepository(database: db)
 
         var meeting = SampleData.makeMeeting(id: "cascade-test")
         try await meetingRepo.save(&meeting)

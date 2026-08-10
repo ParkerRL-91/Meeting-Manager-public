@@ -144,7 +144,13 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
         func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
         wav += Data("RIFF".utf8) + le32(0) + Data("WAVE".utf8)
-        wav += Data("fmt ".utf8) + le32(16) + le16(1) + le16(1) + le32(16000) + le32(32000) + le16(2) + le16(16)
+        // Built in steps: as a single concatenation this expression exceeds
+        // the type checker's budget.
+        wav += Data("fmt ".utf8)
+        wav += le32(16)                       // subchunk size
+        wav += le16(1) + le16(1)              // PCM, mono
+        wav += le32(16000) + le32(32000)      // sample rate, byte rate
+        wav += le16(2) + le16(16)             // block align, bits per sample
         wav += Data("data".utf8) + le32(0)     // killed before close: size 0
         wav += Data(repeating: 0, count: 2_000)
         let bare = FileManager.default.temporaryDirectory

@@ -109,15 +109,20 @@ enum SampleData {
         dueDate: Date? = nil,
         isCompleted: Bool = false,
         extractedAt: Date = fixedDate
-    ) -> ActionItem {
-        ActionItem(
+    ) -> TaskItem {
+        // The model was renamed ActionItem -> TaskItem; the DB table is still
+        // "actionItem". createdAt/updatedAt default to Date(), so pin them to
+        // keep the fixture deterministic for equality/round-trip assertions.
+        TaskItem(
             id: id,
             meetingId: meetingId,
             title: title,
             assignee: assignee,
             dueDate: dueDate,
             isCompleted: isCompleted,
-            extractedAt: extractedAt
+            extractedAt: extractedAt,
+            createdAt: extractedAt,
+            updatedAt: extractedAt
         )
     }
 

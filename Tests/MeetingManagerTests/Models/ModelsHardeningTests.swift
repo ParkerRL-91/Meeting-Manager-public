@@ -687,11 +687,11 @@ final class ModelsHardeningTests: XCTestCase {
     }
 
     // -------------------------------------------------------------------------
-    // MARK: - ActionItem Codable round-trip with nil optionals
+    // MARK: - TaskItem Codable round-trip with nil optionals
     // -------------------------------------------------------------------------
 
     func testActionItemCodableRoundTripAllNilOptionals() throws {
-        let item = ActionItem(
+        let item = TaskItem(
             id: nil,
             meetingId: "m-1",
             title: "Task",
@@ -707,7 +707,7 @@ final class ModelsHardeningTests: XCTestCase {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSinceReferenceDate
-        let decoded = try decoder.decode(ActionItem.self, from: data)
+        let decoded = try decoder.decode(TaskItem.self, from: data)
 
         XCTAssertEqual(item, decoded)
         XCTAssertNil(decoded.id)
@@ -844,13 +844,12 @@ final class ModelsHardeningTests: XCTestCase {
 
     func testAppSettingsCodableRoundTripWithAllFieldsPopulated() throws {
         var settings = AppSettings.default
-        settings.aiEnabled = true
+        settings.aiProvider = .local   // derives aiEnabled == true, useLocalLLM == true
         settings.autoRecord = true
         settings.autoInvite = false
         settings.selectedCalendarId = "primary"
         settings.selectedGoogleCalendarIds = "cal1,cal2"
         settings.selectedAppleCalendarIds = "uuid-1,uuid-2"
-        settings.useLocalLLM = true
         settings.ollamaModel = "llama3.2:3b"
         settings.autoGenerateSummary = true
         settings.defaultRecipeId = "recipe-abc"
