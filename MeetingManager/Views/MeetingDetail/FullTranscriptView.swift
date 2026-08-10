@@ -10,6 +10,10 @@ struct FullTranscriptView: View {
 
     @Environment(AppState.self) private var appState
     @State private var transcripts: [Transcript] = []
+    // TASK-125: whitespace-split word total across all transcript texts,
+    // computed once per load (not per render) to drive the partial-silence
+    // caption. No persistence — derived purely from the loaded rows.
+    @State private var transcriptWordCount = 0
     @State private var meeting: Meeting?
     @State private var searchQuery: String = ""
     @State private var isLoading = true
@@ -122,6 +126,30 @@ struct FullTranscriptView: View {
                 Spacer()
                 ProgressView()
                 Spacer()
+            } else if transcripts.isEmpty, meeting?.noSpeechDetectedAt != nil {
+                Spacer()
+                // TASK-123: the recording was genuinely silent — the mic and
+                // system audio produced no speech, so transcription returned
+                // zero segments and the meeting was closed into the terminal
+                // "no speech" state. Explain that calmly rather than showing a
+                // failure badge, and offer a manual Retry (clears the flag and
+                // re-enqueues transcription through the normal queue path).
+                EmptyStateView(
+                    icon: "waveform.slash",
+                    title: "No Speech Captured",
+                    // A very short clip warrants plainer framing — "retry"
+                    // makes sense for a real meeting's silent capture, less so
+                    // for a 20-second accidental recording.
+                    subtitle: {
+                        if let d = meeting?.duration, d < 30 {
+                            return "This \(max(1, Int(d)))-second recording contained no speech."
+                        }
+                        return "No speech was captured in this recording — the mic and system audio were silent."
+                    }(),
+                    ctaLabel: "Retry transcription",
+                    ctaAction: { retryNoSpeechTranscription() }
+                )
+                Spacer()
             } else if transcripts.isEmpty {
                 Spacer()
                 // Live queue truth instead of a generic placeholder: failed →
@@ -152,6 +180,7 @@ struct FullTranscriptView: View {
                 // The diagnostic banner is shown here too (it used to appear
                 // only in the raw segment list), so the default view explains
                 // why speaker names are missing and offers the next step.
+                partialSilenceCaption
                 attributionDiagnosticBanner
                 cleanedView(cleaned)
             } else if filteredTranscripts.isEmpty {
@@ -163,6 +192,7 @@ struct FullTranscriptView: View {
                 )
                 Spacer()
             } else {
+                partialSilenceCaption
                 attributionDiagnosticBanner
                 transcriptList
             }
@@ -182,6 +212,11 @@ struct FullTranscriptView: View {
         .refreshOnTaskCompletion(
             meetingId: meetingId,
             types: [.transcription, .transcriptCleanup, .diarization, .retryAttribution],
+            // .failed too (TASK-123): after a Retry that fails again, the
+            // meeting is re-flagged no-speech in the DB — re-read it so the
+            // tab lands back on the calm explanation instead of the generic
+            // failed-task card until the next visit.
+            statuses: [.completed, .failed],
             tasks: appState.taskQueueManager.allTasks
         ) {
             Task {
@@ -246,6 +281,49 @@ struct FullTranscriptView: View {
     }
 
     // MARK: - Attribution Diagnostic Banner
+
+    /// TASK-125: a complete meeting whose transcript is non-empty but sparse
+    /// relative to its recorded length usually means one audio channel (mic OR
+    /// system) was silent — half the conversation was never captured. Surface a
+    /// calm caption above the transcript so the thin result reads as a capture
+    /// gap, not a short meeting. Gated to recordings >= 2 minutes so tiny memos
+    /// (a 30s "note to self") never trip it. Caption only — no state written, no
+    /// behavior changed; the word/minute density is derived from already-loaded
+    /// rows and `meeting.duration`.
+    private var isPartialSilence: Bool {
+        guard let meeting, meeting.status == .complete, !transcripts.isEmpty,
+              let duration = meeting.duration, duration >= 120 else { return false }
+        // Reopened meetings keep session 1's startDate, so `duration` spans the
+        // gap between sessions and deflates words/min on a healthy transcript —
+        // skip multi-session meetings rather than false-positive them. Also
+        // suppress while searching: the caption above filtered RESULTS reads
+        // like a verdict on the search, not the meeting.
+        guard meeting.audioFilePaths.count <= 1, searchQuery.isEmpty else { return false }
+        let minutes = duration / 60
+        return Double(transcriptWordCount) / minutes < 5
+    }
+
+    @ViewBuilder
+    private var partialSilenceCaption: some View {
+        if isPartialSilence {
+            let message = "Very little speech was captured for this meeting's length — one audio channel may have been silent."
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.slash")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.appAccent.opacity(0.08))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(message)
+        }
+    }
 
     /// Returns a thin in-list banner when the transcript still contains
     /// unattributed Speaker N rows AND the meeting actually has calendar
@@ -757,8 +835,31 @@ struct FullTranscriptView: View {
         isLoading = true
         defer { isLoading = false }
         transcripts = (try? await appState.transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        transcriptWordCount = transcripts.reduce(0) {
+            $0 + $1.text.split(whereSeparator: \.isWhitespace).count
+        }
         // Pull the cleaned blob (may be nil if cleanup hasn't run yet).
         cleanedTranscript = try? await CleanedTranscriptRepository().cleanedTranscript(meetingId: meetingId)
+    }
+
+    /// TASK-123: manual retry from the no-speech empty state. Clears the
+    /// terminal `noSpeechDetectedAt` flag so the meeting is eligible for
+    /// processing again, then re-enqueues transcription through the normal
+    /// queue path. The refresh-on-completion hook already re-reads the meeting
+    /// and transcripts, so a successful retry replaces this empty state.
+    private func retryNoSpeechTranscription() {
+        Task {
+            if var m = try? await appState.meetingRepository.find(id: meetingId),
+               m.noSpeechDetectedAt != nil {
+                m.noSpeechDetectedAt = nil
+                try? await appState.meetingRepository.update(m)
+                meeting = m
+            }
+            _ = await appState.taskQueueManager.enqueue(
+                type: .transcription, meetingId: meetingId, priority: 0
+            )
+            await appState.taskQueueManager.refreshTaskList()
+        }
     }
 
     // MARK: - Cleaned view

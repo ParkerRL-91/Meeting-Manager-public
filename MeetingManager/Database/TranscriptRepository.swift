@@ -94,6 +94,13 @@ final class TranscriptRepository {
         }
     }
 
+    /// One transcript segment by row id — used to widen a BM25 anchor into a
+    /// playable range (start+end) and to snapshot the verbatim segment text
+    /// (PRJ-017 Decision Log receipts).
+    func segment(id: Int64) async throws -> Transcript? {
+        try await database.writer.read { db in try Transcript.fetchOne(db, key: id) }
+    }
+
     /// TASK-066: speaker labels for a set of anchor segments, keyed by id.
     func speakerLabels(for ids: [Int64]) async throws -> [Int64: String] {
         guard !ids.isEmpty else { return [:] }

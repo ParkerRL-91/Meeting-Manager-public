@@ -20,6 +20,10 @@ Package.resolved
 # Build artifacts / release DMGs (managed by push-update.sh + GitHub Releases)
 *.dmg
 
+# Python bytecode (Tests/Scripts tooling)
+__pycache__/
+*.pyc
+
 # QA evidence / local screenshots
 qa-evidence/
 

@@ -7,28 +7,28 @@ final class ActionItemTests: XCTestCase {
     // MARK: - Table Name
 
     func testDatabaseTableName() {
-        XCTAssertEqual(ActionItem.databaseTableName, "actionItem")
+        XCTAssertEqual(TaskItem.databaseTableName, "actionItem")
     }
 
     // MARK: - Default Values
 
     func testDefaultIsCompletedFalse() {
-        let item = ActionItem(meetingId: "m1", title: "Do something")
+        let item = TaskItem(meetingId: "m1", title: "Do something")
         XCTAssertFalse(item.isCompleted)
     }
 
     func testDefaultIdIsNil() {
-        let item = ActionItem(meetingId: "m1", title: "Do something")
+        let item = TaskItem(meetingId: "m1", title: "Do something")
         XCTAssertNil(item.id)
     }
 
     func testDefaultAssigneeIsNil() {
-        let item = ActionItem(meetingId: "m1", title: "Do something")
+        let item = TaskItem(meetingId: "m1", title: "Do something")
         XCTAssertNil(item.assignee)
     }
 
     func testDefaultDueDateIsNil() {
-        let item = ActionItem(meetingId: "m1", title: "Do something")
+        let item = TaskItem(meetingId: "m1", title: "Do something")
         XCTAssertNil(item.dueDate)
     }
 
@@ -51,7 +51,7 @@ final class ActionItemTests: XCTestCase {
         XCTAssertNotNil(item.id)
 
         let fetched = try db.writer.read { dbConn in
-            try ActionItem.fetchOne(dbConn, key: item.id!)
+            try TaskItem.fetchOne(dbConn, key: item.id!)
         }
 
         XCTAssertNotNil(fetched)
@@ -66,11 +66,11 @@ final class ActionItemTests: XCTestCase {
         var meeting = SampleData.makeMeeting()
         try db.writer.write { dbConn in try meeting.save(dbConn) }
 
-        var item = ActionItem(meetingId: meeting.id, title: "No optional fields")
+        var item = TaskItem(meetingId: meeting.id, title: "No optional fields")
         try db.writer.write { dbConn in try item.save(dbConn) }
 
         let fetched = try db.writer.read { dbConn in
-            try ActionItem.fetchOne(dbConn, key: item.id!)
+            try TaskItem.fetchOne(dbConn, key: item.id!)
         }
 
         XCTAssertNotNil(fetched)
@@ -94,7 +94,7 @@ final class ActionItemTests: XCTestCase {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSinceReferenceDate
-        let decoded = try decoder.decode(ActionItem.self, from: data)
+        let decoded = try decoder.decode(TaskItem.self, from: data)
 
         XCTAssertEqual(original, decoded)
     }
@@ -106,7 +106,7 @@ final class ActionItemTests: XCTestCase {
         var meeting = SampleData.makeMeeting()
         try db.writer.write { dbConn in try meeting.save(dbConn) }
 
-        var item = ActionItem(meetingId: meeting.id, title: "Test")
+        var item = TaskItem(meetingId: meeting.id, title: "Test")
         XCTAssertNil(item.id)
 
         try db.writer.write { dbConn in try item.save(dbConn) }

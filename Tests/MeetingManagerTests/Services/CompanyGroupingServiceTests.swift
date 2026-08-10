@@ -53,7 +53,7 @@ final class CompanyGroupingServiceTests: XCTestCase {
 
     func testDisplayNameAndConsumerDomainHelpers() {
         // Mirrors Person.orgHint: first letter uppercased only.
-        XCTAssertEqual(CompanyGroupingService.displayName(forDomain: "acme.com"), "Acme")
+        XCTAssertEqual(CompanyGroupingService.displayName(forDomain: "acmecorp.com"), "Acmecorp")
         XCTAssertEqual(CompanyGroupingService.displayName(forDomain: "acme.com"), "Acme")
         XCTAssertTrue(CompanyGroupingService.isConsumerDomain("gmail.com"))
         XCTAssertTrue(CompanyGroupingService.isConsumerDomain("ICLOUD.COM"))

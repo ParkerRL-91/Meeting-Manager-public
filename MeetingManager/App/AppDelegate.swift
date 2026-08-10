@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 import UserNotifications
 import os
@@ -27,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Timer that polls model download progress to update the menu bar.
     private var modelProgressTimer: Timer?
 
+    /// PRJ-017 F4: system-wide "record a thought" hotkey (⌥⌘R).
+    private var quickMemoHotKey: GlobalHotKey?
+
     /// Local recording state mirror — updated by .meetingStateChanged and .startRecording/.stopRecording.
     private var _isRecording = false
 
@@ -37,6 +41,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         startCallDetection()
         observeStatusChanges()
         startModelProgressPolling()
+        setupGlobalHotKeys()
+    }
+
+    /// Register the system-wide Quick Memo hotkey (⌥⌘R). Posts the same
+    /// notification the menu-bar item and ⇧⌘M command use, so all three paths
+    /// converge on `AppState.startQuickMemo` (PRJ-017 F4).
+    private func setupGlobalHotKeys() {
+        quickMemoHotKey = GlobalHotKey(
+            keyCode: UInt32(kVK_ANSI_R),
+            modifiers: UInt32(cmdKey | optionKey)
+        ) {
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .startQuickMemo, object: nil)
+        }
     }
 
     // MARK: - Menu Bar
@@ -55,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func setupPopover() {
         let popover = NSPopover()
-        popover.contentSize = NSSize(width: 280, height: 300)
+        popover.contentSize = NSSize(width: 300, height: 300)
         popover.behavior = .transient
         popover.animates = true
 
@@ -102,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 // Let SwiftUI size the popover naturally
                 let fittingSize = hostingView.fittingSize
                 popover.contentSize = NSSize(
-                    width: max(280, fittingSize.width),
+                    width: max(300, fittingSize.width),
                     height: max(150, fittingSize.height)
                 )
             }
@@ -125,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
             let fittingSize = hostingView.fittingSize
             popover.contentSize = NSSize(
-                width: max(280, fittingSize.width),
+                width: max(300, fittingSize.width),
                 height: max(150, fittingSize.height)
             )
         }
@@ -166,6 +184,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             menu.addItem(header)
             menu.addItem(NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: ""))
             menu.addItem(NSMenuItem.separator())
+
+            // Pending switch suggestion (TASK-118): a disabled header plus the
+            // same two actions offered on every other surface.
+            if let suggestion = findAppState()?.pendingSwitchSuggestion {
+                // Truncate — a long tab title would stretch the context menu.
+                let headerTitle = suggestion.detectedTitle.count > 60
+                    ? "New meeting detected: \(suggestion.detectedTitle.prefix(57))…"
+                    : "New meeting detected: \(suggestion.detectedTitle)"
+                let switchHeader = NSMenuItem(title: headerTitle, action: nil, keyEquivalent: "")
+                switchHeader.isEnabled = false
+                menu.addItem(switchHeader)
+                let accept = NSMenuItem(title: "Switch & Record", action: #selector(acceptSwitchSuggestion), keyEquivalent: "")
+                accept.target = self
+                menu.addItem(accept)
+                let declineTitle = suggestion.origin == .detectedApp ? "Keep recording" : "Same meeting"
+                let decline = NSMenuItem(title: declineTitle, action: #selector(declineSwitchSuggestion), keyEquivalent: "")
+                decline.target = self
+                menu.addItem(decline)
+                menu.addItem(NSMenuItem.separator())
+            }
         }
 
         menu.addItem(NSMenuItem(title: "New Meeting", action: #selector(newMeeting), keyEquivalent: "n"))
@@ -275,21 +313,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         })
 
-        // Switch-meetings banner: persistent, shown when a new meeting is
-        // about to start while another is being recorded.
+        // Unified switch suggestion (TASK-118): the floating window shows only
+        // for high-confidence, undemoted offers — a speculative medium guess
+        // must not pop UI over a live screen share. The orange status item is
+        // the beacon for medium offers; all surfaces read pendingSwitchSuggestion.
         statusObservers.append(nc.addObserver(
             forName: .meetingSwitchShow, object: nil, queue: .main
-        ) { [weak self] notification in
-            let meetingId = notification.userInfo?["meetingId"] as? String
+        ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self,
-                      let meetingId,
-                      let meeting = AppState.shared?.upcomingMeetings.first(where: { $0.id == meetingId })
-                else { return }
-                if self.switchWindowController == nil {
-                    self.switchWindowController = MeetingReminderWindowController()
+                guard let self, let appState = AppState.shared,
+                      let suggestion = appState.pendingSwitchSuggestion else { return }
+                if suggestion.confidence == .high && !appState.switchSuggestionDemoted {
+                    if self.switchWindowController == nil {
+                        self.switchWindowController = MeetingReminderWindowController()
+                    }
+                    self.switchWindowController?.show(suggestion: suggestion)
                 }
-                self.switchWindowController?.show(meeting: meeting, mode: .switch)
+                self.updateStatusBar()
             }
         })
 
@@ -298,6 +338,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.switchWindowController?.dismiss()
+                self?.updateStatusBar()
+            }
+        })
+
+        // TASK-124: silent-capture warning toggled — refresh the status item so
+        // the orange "No audio?" title appears/clears while recording.
+        statusObservers.append(nc.addObserver(
+            forName: .captureSilenceChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updateStatusBar()
             }
         })
 
@@ -339,9 +390,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let callAppName = callDetectionService?.activeCallAppName
 
         if isRecording {
-            button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")
-            button.title = "  Recording"
-            button.contentTintColor = .systemRed
+            let appState = findAppState()
+            // Precedence in the recording branch (TASK-124): silence warning >
+            // switch suggestion > plain "Recording". A capture producing nothing
+            // invalidates everything else, so it outranks the switch beacon.
+            // In every case the red record dot stays — the always-visible "am I
+            // recording?" signal must never disappear — and only the title swaps
+            // (orange via attributedTitle; contentTintColor would tint the whole
+            // button and erase the red icon).
+            if let appState, appState.captureSilenceWarning {
+                button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording — no audio detected")
+                button.contentTintColor = .systemRed
+                button.attributedTitle = NSAttributedString(
+                    string: "  No audio?",
+                    attributes: [.foregroundColor: NSColor.systemOrange,
+                                 .font: NSFont.menuBarFont(ofSize: 0)]
+                )
+            } else if let appState,
+                      appState.pendingSwitchSuggestion != nil,
+                      !appState.switchSuggestionDemoted {
+                button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording — new meeting suggested")
+                button.contentTintColor = .systemRed
+                button.attributedTitle = NSAttributedString(
+                    string: "  Switch?",
+                    attributes: [.foregroundColor: NSColor.systemOrange,
+                                 .font: NSFont.menuBarFont(ofSize: 0)]
+                )
+            } else {
+                button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")
+                button.title = "  Recording"
+                button.contentTintColor = .systemRed
+            }
         } else if let appState = findAppState(), appState.isLoadingModel {
             // Show download progress in the menu bar
             let pct = Int(appState.modelDownloadProgress * 100)
@@ -381,6 +460,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func stopRecording() {
         NotificationCenter.default.post(name: .stopRecording, object: nil)
+    }
+
+    @objc private func acceptSwitchSuggestion() {
+        AppState.shared?.acceptSwitchSuggestion()
+    }
+
+    @objc private func declineSwitchSuggestion() {
+        AppState.shared?.dismissSwitchSuggestion(byUser: true)
     }
 
     @objc private func startRecordingAction() {
@@ -521,6 +608,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // otherwise our own capture engine makes "in call" permanently true
         // and browser call-end detection can never fire.
         callDetectionService?.isRecordingProvider = { AppState.shared?.isRecording ?? false }
+        // Switch detection (TASK-117): forward every in-call browser title poll
+        // and debounced call-app activations to AppState's engine.
+        callDetectionService?.onBrowserCallTitles = { titles in
+            AppState.shared?.forwardBrowserCallTitles(titles)
+        }
+        callDetectionService?.onCallAppActivated = { bundleId, name in
+            AppState.shared?.forwardCallAppActivation(bundleId: bundleId, name: name)
+        }
         callDetectionService?.startMonitoring()
     }
 
@@ -558,6 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 extension Notification.Name {
     static let createNewMeeting = Notification.Name("createNewMeeting")
+    static let startQuickMemo = Notification.Name("startQuickMemo")
     static let startRecording = Notification.Name("startRecording")
     static let stopRecording = Notification.Name("stopRecording")
     static let callAppLaunched = Notification.Name("callAppLaunched")
@@ -576,13 +672,33 @@ extension Notification.Name {
     /// Posted when the switch offer should be dismissed (user acted, meeting
     /// passed, recording stopped, etc.).
     static let meetingSwitchDismiss = Notification.Name("meetingSwitchDismiss")
+
+    /// TASK-124: sustained silent-capture warning flipped on/off in AppState.
+    /// The status item (an AppKit surface, can't observe @Observable) refreshes
+    /// off this to show the orange "No audio?" title.
+    static let captureSilenceChanged = Notification.Name("captureSilenceChanged")
     /// Posted by the switch banner when the user clicks "Switch & Record".
     /// AppState handles the stop+start sequencing.
     static let switchToMeeting = Notification.Name("switchToMeeting")
+    /// Posted by `MeetingSwitchDetectionService` (TASK-117) when the live call
+    /// appears to have changed while recording. userInfo (all value types):
+    /// detectedTitle, normalizedTitle, sourceSignal, confidence, and optional
+    /// matchedMeetingId / bundleIdentifier. The consumer funnel is TASK-118.
+    static let meetingSwitchDetected = Notification.Name("meetingSwitchDetected")
     static let openUpdateSettings = Notification.Name("openUpdateSettings")
     static let calendarBackfillCompleted = Notification.Name("calendarBackfillCompleted")
     /// Posted whenever the user changes which calendar source the app should
     /// pull from. CalendarSyncManager observes this to stop/restart its timer
     /// without an app relaunch.
     static let calendarSourceChanged = Notification.Name("calendarSourceChanged")
+    /// Posted by GoogleAuthManager on every `isSignedIn` transition — including
+    /// both outcomes of the async Keychain restore, so "restore finished, and the
+    /// user really is signed out" is observable rather than indistinguishable from
+    /// "restore hasn't landed yet". CalendarSyncManager observes this to sync the
+    /// moment auth becomes usable instead of waiting out the 15-minute tick.
+    static let googleAuthStateChanged = Notification.Name("googleAuthStateChanged")
+    /// TASK-122: posted when a weekly digest finishes writing. userInfo carries
+    /// the ISO week id under "isoWeek". `WeeklyReviewSection` on Home observes it
+    /// to refresh live without polling.
+    static let weeklyDigestCompleted = Notification.Name("weeklyDigestCompleted")
 }

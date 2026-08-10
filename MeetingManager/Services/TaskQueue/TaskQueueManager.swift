@@ -79,13 +79,26 @@ final class TaskQueueManager {
     var embedIndexHandler: ((String) async throws -> Void)?
 
     /// PRJ-009 TASK-051: weekly digest generation (sentinel meetingId).
-    var weeklyDigestHandler: (() async throws -> Void)?
+    /// Receives the task's meetingId sentinel, which may carry a `:<isoWeek>`
+    /// suffix to target a specific week (PRJ-017 F2).
+    var weeklyDigestHandler: ((String) async throws -> Void)?
     var gardenerHandler: (() async throws -> Void)?
     var factBackfillHandler: (() async throws -> Void)?
     var glossaryHandler: (() async throws -> Void)?
     var speechStatsHandler: (() async throws -> Void)?
     var sentimentBackfillHandler: (() async throws -> Void)?
     var topicBackfillHandler: (() async throws -> Void)?
+
+    /// PRJ-016 TASK-135: compress one meeting's recordings to Apple Lossless.
+    /// Local file work only — no LLM, no network.
+    var audioArchiveHandler: ((String) async throws -> Void)?
+
+    /// TASK-123: called when a `.transcription` task FINALLY fails (all retries
+    /// exhausted). The raw thrown error is passed so AppState can do the typed
+    /// check for its empty-result error and close the meeting into the terminal
+    /// "no speech" state. Only invoked when `willRetry == false`; a retry-able
+    /// failure is left alone so the queue can try again.
+    var transcriptionExhausted: ((_ meetingId: String, _ error: Error) -> Void)?
 
     /// Returns true when an AI backend (Claude key or Ollama) is configured.
     /// Set by AppState. AI-dependent tasks (summary) are only auto-enqueued
@@ -133,6 +146,12 @@ final class TaskQueueManager {
                   let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return [] }
             return contents
         }
+        // TASK-135: an archive encode killed mid-write leaves a `*.m4a.tmp`
+        // beside the source. The source WAV is only deleted after the temp is
+        // verified AND swapped in, so a leftover temp is never the only copy of
+        // anything — dropping it here is the whole crash recovery needed.
+        _ = await Task.detached(priority: .utility) { AudioArchiveService.sweepOrphanTempFiles() }.value
+
         guard !entries.isEmpty else { return }
 
         // Map: meetingId UUID → main wav URLs (skip _system.wav siblings).
@@ -188,42 +207,37 @@ final class TaskQueueManager {
     /// Patch the RIFF size + data chunk size of a WAV file that was killed
     /// before `AVAudioFile.close` ran. Returns true if the file was modified.
     /// Safe to call on healthy files (early-exits when the data chunk size
-    /// already matches reality).
+    /// already matches reality) and on anything it can't positively identify as
+    /// RIFF/WAVE (returns false rather than writing).
     ///
-    /// WAV layout written by AVAudioFile (Float32 mono 16k):
-    ///   0..3   "RIFF"
-    ///   4..7   RIFF size (file_size - 8)
-    ///   8..11  "WAVE"
-    ///   12..43 JUNK (28) + fmt (16) + ...
-    ///   4088   "data"
-    ///   4092   data size  ← zero on a force-killed file
-    ///   4096   audio samples
+    /// The `data` chunk is located by walking the chunk list (`WavFileLayout`)
+    /// rather than assumed at a fixed offset. AVAudioFile pads its header to
+    /// 4096 for both the Int16 and Float32 settings we write, but that padding
+    /// is an undocumented implementation detail — a fixed offset would make this
+    /// repair silently no-op the day it changes, and transcription would produce
+    /// zero segments with no explanation.
     private static func repairWavHeaderIfNeeded(at url: URL) -> Bool {
         guard let handle = try? FileHandle(forUpdating: url) else { return false }
         defer { try? handle.close() }
         do {
-            try handle.seek(toOffset: 0)
-            guard let riffTag = try handle.read(upToCount: 4), riffTag == Data("RIFF".utf8) else { return false }
-            try handle.seek(toOffset: 4088)
-            guard let dataTag = try handle.read(upToCount: 4), dataTag == Data("data".utf8) else { return false }
-            try handle.seek(toOffset: 4092)
-            guard let sizeBytes = try handle.read(upToCount: 4), sizeBytes.count == 4 else { return false }
-
-            // File size — seek to end and read offset.
             let endOffset = try handle.seekToEnd()
+            // RIFF sizes are 32-bit; a file that can't be described by one is
+            // not something to rewrite blind.
+            guard endOffset >= 8, endOffset <= UInt64(UInt32.max),
+                  let chunk = try WavFileLayout.findDataChunk(in: handle, fileSize: endOffset),
+                  chunk.payloadOffset <= endOffset else { return false }
+
             let fileSize = UInt32(endOffset)
-            let newDataSize = fileSize &- 4096
-            let existing = sizeBytes.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let newDataSize = UInt32(endOffset - chunk.payloadOffset)
+            if chunk.declaredSize == newDataSize { return false }
 
-            if existing == newDataSize { return false }
-
-            // Patch RIFF size (offset 4) and data size (offset 4092).
+            // Patch RIFF size (offset 4) and the located data size field.
             let newRiffSize = fileSize &- 8
             var riffLE = newRiffSize.littleEndian
             var dataLE = newDataSize.littleEndian
             try handle.seek(toOffset: 4)
             try handle.write(contentsOf: Data(bytes: &riffLE, count: 4))
-            try handle.seek(toOffset: 4092)
+            try handle.seek(toOffset: chunk.sizeFieldOffset)
             try handle.write(contentsOf: Data(bytes: &dataLE, count: 4))
             Logger.general.info("WAV header repaired for \(url.lastPathComponent, privacy: .public) (data=\(newDataSize, privacy: .public) bytes)")
             return true
@@ -304,6 +318,62 @@ final class TaskQueueManager {
         } catch {
             Logger.general.error("TaskQueue: retry failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Manual-tier priority for user-initiated / expedited work (TASK-122).
+    /// Lower number = popped sooner; the pipeline still outranks it (summary
+    /// is 5), so an expedited digest never preempts a fresh meeting's summary.
+    static let expeditedPriority = 7
+
+    /// User-initiated escape hatch (TASK-122): promote an existing PENDING row
+    /// out of quiet-gap deferral. Marks it userInitiated (so `isBackgroundItem`
+    /// stops classifying it as background), clears the governor's deferral
+    /// fields (`runAfter` + `firstDeferredAt`), bumps priority to the manual
+    /// tier, then re-kicks the processor so the change takes effect (the loop
+    /// re-reads via `fetchNextPending`). No-op on running/terminal rows —
+    /// expediting a row mid-flight or after completion is meaningless.
+    /// Returns whether a pending row was actually expedited — false when the
+    /// row went terminal/running between the caller's snapshot read and the
+    /// write (callers should fall through to a fresh enqueue on false so a
+    /// user click is never silently swallowed).
+    @discardableResult
+    func expedite(taskId: String) async -> Bool {
+        do {
+            let acted = try await database.writer.write { db -> Bool in
+                guard var task = try TaskQueueItem.fetchOne(db, key: taskId),
+                      task.status == .pending else { return false }
+                task.metadata = Self.settingUserInitiated(task.metadata)
+                task.runAfter = nil
+                task.firstDeferredAt = nil
+                task.priority = min(task.priority, Self.expeditedPriority)
+                try task.update(db)
+                return true
+            }
+            await refreshTaskList()
+            reevaluate()
+            return acted
+        } catch {
+            Logger.general.error("TaskQueue: expedite failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Merge `"userInitiated": true` into an existing metadata JSON blob,
+    /// preserving any other keys (e.g. recipeId). Produces a fresh blob when
+    /// metadata is absent or unparseable.
+    nonisolated static func settingUserInitiated(_ metadata: String?) -> String {
+        var dict: [String: Any] = [:]
+        if let metadata,
+           let data = metadata.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            dict = json
+        }
+        dict["userInitiated"] = true
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let string = String(data: data, encoding: .utf8) else {
+            return "{\"userInitiated\":true}"
+        }
+        return string
     }
 
     func cancel(taskId: String) async {
@@ -426,6 +496,7 @@ final class TaskQueueManager {
                       AND m.status IN ('transcribing', 'complete')
                       AND NOT EXISTS (SELECT 1 FROM transcript t WHERE t.meetingId = m.id)
                       AND m.transcriptionAttemptedAt IS NULL
+                      AND m.noSpeechDetectedAt IS NULL
                     LIMIT 50
                 """)
             }
@@ -622,7 +693,7 @@ final class TaskQueueManager {
             // background rows, then continue with whatever's runnable.
             // Pipeline tasks never pass through here, and a running task is
             // never preempted.
-            if TaskQueueItem.isBackgroundItem(type: next.type, meetingId: next.meetingId),
+            if TaskQueueItem.isBackgroundItem(type: next.type, meetingId: next.meetingId, metadata: next.metadata),
                let inputs = backgroundPolicyInputs?() {
                 if case .deferFor(let minutes) = BackgroundWorkPolicy.decision(inputs) {
                     Logger.general.info("TaskQueue: deferring background work \(next.type.rawValue) for \(minutes)m (recording=\(inputs.isRecording), nextMeeting=\(inputs.minutesToNextMeeting.map(String.init) ?? "none")m, battery=\(inputs.onBattery))")
@@ -690,10 +761,29 @@ final class TaskQueueManager {
                         Logger.general.info("TaskQueue: transcription produced 0 segments for \(next.meetingId) — skipping diarization + summary")
                     }
                 }
+            } catch TaskQueueError.notNow(let reason, let minutes) {
+                // Handler-level "not now" (TASK-135): the work is still wanted,
+                // it just can't run at this instant. Push the row forward
+                // instead of failing it — a failed row would burn its retries
+                // in ~2 minutes and then show the user a red task for a
+                // condition that is expected and self-clearing.
+                await deferRow(next, minutes: minutes)
+                Logger.general.info("TaskQueue: deferring \(next.type.rawValue) for \(next.meetingId) by \(minutes)m — \(reason)")
+                AppFileLogger.shared.log("TaskQueue: deferred \(next.type.rawValue)/\(next.meetingId) by \(minutes)m — \(reason)")
             } catch {
                 let shouldRetry = next.retryCount + 1 < next.maxRetries
                 await markFailed(next, error: Self.humanizedTaskError(error), willRetry: shouldRetry)
                 Logger.general.error("TaskQueue: \(next.type.rawValue) failed: \(error.localizedDescription) (retry: \(shouldRetry))")
+
+                // TASK-123: a transcription task that has exhausted its retries
+                // gets one last look. When the failure is the empty-result error
+                // (no speech captured), AppState closes the meeting into the
+                // terminal "no speech" state so the startup scan stops resurrecting
+                // it. The raw error is handed over so the typed check stays in
+                // AppState, where the error type is defined.
+                if !shouldRetry, next.type == .transcription {
+                    transcriptionExhausted?(next.meetingId, error)
+                }
 
                 if shouldRetry {
                     let delay = Double((next.retryCount + 1) * (next.retryCount + 1)) * 10
@@ -777,6 +867,7 @@ final class TaskQueueManager {
         case .speechStats:        stage = "Computing speaking stats"
         case .sentimentBackfill:  stage = "Reading tone"
         case .topicBackfill:      stage = "Scanning topics"
+        case .audioArchive:       stage = "Compressing audio"
         }
         return TaskProgress(stage: stage, fraction: nil, updatedAt: Date())
     }
@@ -832,7 +923,7 @@ final class TaskQueueManager {
                     .filter(TaskQueueItem.Columns.status == TaskQueueItem.TaskStatus.pending.rawValue)
                     .fetchAll(db)
                 let ids = pending
-                    .filter { TaskQueueItem.isBackgroundItem(type: $0.type, meetingId: $0.meetingId) }
+                    .filter { TaskQueueItem.isBackgroundItem(type: $0.type, meetingId: $0.meetingId, metadata: $0.metadata) }
                     .map(\.id)
                 guard !ids.isEmpty else { return }
                 let placeholders = ids.map { _ in "?" }.joined(separator: ",")
@@ -934,7 +1025,7 @@ final class TaskQueueManager {
             guard let handler = weeklyDigestHandler else {
                 throw TaskQueueError.noHandler("weeklyDigest")
             }
-            try await handler()
+            try await handler(task.meetingId)
 
         case .gardener:
             guard let handler = gardenerHandler else {
@@ -989,6 +1080,12 @@ final class TaskQueueManager {
                 throw TaskQueueError.noHandler("enhanceNotes")
             }
             try await handler(task.meetingId)
+
+        case .audioArchive:
+            guard let handler = audioArchiveHandler else {
+                throw TaskQueueError.noHandler("audioArchive")
+            }
+            try await handler(task.meetingId)
         }
     }
 
@@ -1020,6 +1117,37 @@ final class TaskQueueManager {
             }
         } catch {
             Logger.general.error("TaskQueue: markCompleted failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Push a row back to pending with a future `runAfter` — the handler-level
+    /// counterpart of the governor's quiet-gap deferral, for a task that must
+    /// not run *right now* but is not failing (`TaskQueueError.notNow`).
+    ///
+    /// Reuses machinery that is already general rather than background-specific:
+    /// `fetchNextPending` filters out any pending row whose `runAfter` is in the
+    /// future, and the parked processor's `earliestDeferredWake` one-shot covers
+    /// every such row — so this can neither hot-spin (the row is invisible until
+    /// its time) nor strand (the wake is scheduled). `retryCount` is left alone:
+    /// a deferral is not a failed attempt, so repeated deferrals across a long
+    /// recording never exhaust the row.
+    private func deferRow(_ task: TaskQueueItem, minutes: Int) async {
+        do {
+            try await database.writer.write { db in
+                var t = task
+                t.status = .pending
+                t.startedAt = nil
+                t.runAfter = Date().addingTimeInterval(Double(max(1, minutes)) * 60)
+                // `task` is the pre-run snapshot, so writing it back would
+                // resurrect the governor's starvation clock that markRunning
+                // just cleared. A handler-level postponement is not a
+                // background deferral and must not feed that cap.
+                t.firstDeferredAt = nil
+                try t.update(db)
+            }
+        } catch {
+            Logger.general.error("TaskQueue: deferRow failed: \(error.localizedDescription)")
+            AppFileLogger.shared.log("TaskQueue: deferRow failed for \(task.type.rawValue)/\(task.meetingId): \(error.localizedDescription)")
         }
     }
 
@@ -1091,11 +1219,19 @@ final class TaskQueueManager {
 
 enum TaskQueueError: LocalizedError {
     case noHandler(String)
+    /// A handler declining to run *at this instant* without failing: the
+    /// processor re-pends the row with `runAfter = now + minutes` rather than
+    /// consuming a retry. For conditions that are expected and self-clearing —
+    /// e.g. the meeting whose audio an archive wants to rewrite is being
+    /// recorded again right now (TASK-135).
+    case notNow(reason: String, minutes: Int)
 
     var errorDescription: String? {
         switch self {
         case .noHandler(let type):
             return "No handler registered for task type: \(type)"
+        case .notNow(let reason, let minutes):
+            return "Postponed \(minutes) minute(s): \(reason)"
         }
     }
 }

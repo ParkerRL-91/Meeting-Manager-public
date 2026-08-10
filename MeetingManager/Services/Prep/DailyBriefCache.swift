@@ -120,7 +120,17 @@ enum DailyBriefCache {
                 .sorted { ($0.relativePath, $0.chunkIndex) < ($1.relativePath, $1.chunkIndex) }
                 .map { "\($0.relativePath)#\($0.chunkIndex):\($0.body)" }
                 .joined(separator: "\u{00A7}")
-            parts.append("\(m.id)|\(title)|\(Int(startStamp))|\(p)|\(prev)|\(Int(prevDate))|\(entry.prepBrief.openActionItems.count)|kb:\(shortHash(kb))")
+            // PRJ-017 F3: fold the series open loops so completing a carried-in
+            // task (or a new decision/question landing) regenerates the brief.
+            let loops = entry.prepBrief.seriesOpenLoops
+            let loopSig: String = {
+                guard let loops else { return "-" }
+                let tasks = loops.openTasks.compactMap(\.id).sorted().map(String.init).joined(separator: ",")
+                let qs = loops.unresolvedQuestions.count
+                let decs = loops.recentDecisions.compactMap(\.id).sorted().map(String.init).joined(separator: ",")
+                return "t:\(tasks);q:\(qs);d:\(decs)"
+            }()
+            parts.append("\(m.id)|\(title)|\(Int(startStamp))|\(p)|\(prev)|\(Int(prevDate))|\(entry.prepBrief.openActionItems.count)|loops:\(loopSig)|kb:\(shortHash(kb))")
         }
         let joined = parts.joined(separator: "\n")
         let hash = SHA256.hash(data: Data(joined.utf8))

@@ -21,8 +21,30 @@ struct MeetingPrepBrief: Sendable {
     /// last session with them. nil for multi-person meetings.
     let sinceLastMet: SinceLastMet?
 
+    /// PRJ-017 F3: unresolved items carried from prior occurrences of a
+    /// recurring series — open tasks sourced from those meetings, unanswered
+    /// questions from the last session, and recent series decisions. nil for
+    /// non-recurring or first-occurrence meetings.
+    let seriesOpenLoops: SeriesOpenLoops?
+
     /// True when there is any prior context worth showing to the user.
-    var hasContext: Bool { !relatedMeetings.isEmpty || !openActionItems.isEmpty || previousSession != nil || sinceLastMet != nil }
+    var hasContext: Bool {
+        !relatedMeetings.isEmpty || !openActionItems.isEmpty || previousSession != nil
+            || sinceLastMet != nil || (seriesOpenLoops?.isEmpty == false)
+    }
+}
+
+/// PRJ-017 F3: open loops carried forward from prior occurrences of a
+/// recurring meeting. Computed live (task completion changes it) — never
+/// cached into `Meeting.contextJSON`, unlike related meetings.
+struct SeriesOpenLoops: Sendable {
+    let seriesName: String
+    let occurrenceCount: Int
+    let openTasks: [TaskItem]
+    let unresolvedQuestions: [String]
+    let recentDecisions: [Decision]
+
+    var isEmpty: Bool { openTasks.isEmpty && unresolvedQuestions.isEmpty && recentDecisions.isEmpty }
 }
 
 /// "Since you last met" diff for a 1:1 counterpart (TASK-058). Pure data;
@@ -147,6 +169,13 @@ final class MeetingPrepService {
     /// items for this meeting's participants, and the latest summary excerpt
     /// from the most recent related meeting.
     func prepBrief(for meeting: Meeting) async throws -> MeetingPrepBrief {
+        // Single briefs fetch their own series candidates; batch callers
+        // (prepBriefs) share one fetch across the whole set.
+        let candidates = (try? await MeetingRepository(database: database).pastMeetings(limit: 200)) ?? []
+        return try await prepBrief(for: meeting, candidates: candidates)
+    }
+
+    private func prepBrief(for meeting: Meeting, candidates: [Meeting]) async throws -> MeetingPrepBrief {
         let participants = meeting.participantList
 
         // 1. Related past meetings (from cached contextJSON)
@@ -169,8 +198,13 @@ final class MeetingPrepService {
             return excerpt == "No summary available" ? nil : excerpt
         }()
 
-        // 4. P5-T02: Detect prior sessions in the same series
-        let previousSession = await previousSessionInfo(for: meeting)
+        // 4. Detect prior sessions in the same series ONCE, then derive both
+        // the "Last time:" line (P5-T02) and the open loops (PRJ-017 F3).
+        let series = await MainActor.run {
+            MeetingSeriesService.shared.detectSeries(for: meeting, in: candidates)
+        }
+        let previousSession = await previousSessionInfo(from: series)
+        let seriesOpenLoops = await buildSeriesOpenLoops(for: meeting, series: series)
 
         Logger.general.debug("PrepBrief for \(meeting.title): \(participants.count) participants, \(openItems.count) open items, \(relatedMeetings.count) related meetings")
 
@@ -198,35 +232,29 @@ final class MeetingPrepService {
             lastSummaryExcerpt: lastExcerpt,
             meetLink: meeting.meetLink,
             previousSession: previousSession,
-            sinceLastMet: sinceLastMet
+            sinceLastMet: sinceLastMet,
+            seriesOpenLoops: seriesOpenLoops
         )
     }
 
     /// Build prep briefs for multiple meetings in a batch.
     /// More efficient than calling `prepBrief(for:)` individually when loading
-    /// all of today's meetings on HomeView.
+    /// all of today's meetings on HomeView — the 200-meeting series-candidate
+    /// set is fetched once and reused across the whole batch (PRJ-017 F3).
     func prepBriefs(for meetings: [Meeting]) async throws -> [String: MeetingPrepBrief] {
+        let candidates = (try? await MeetingRepository(database: database).pastMeetings(limit: 200)) ?? []
         var result: [String: MeetingPrepBrief] = [:]
         for meeting in meetings {
-            result[meeting.id] = try await prepBrief(for: meeting)
+            result[meeting.id] = try await prepBrief(for: meeting, candidates: candidates)
         }
         return result
     }
 
     // MARK: - P5-T02 Series Awareness
 
-    /// Looks up the most recent prior session in the same series. Returns nil
-    /// when no series is detected or no candidates exist in the database.
-    private func previousSessionInfo(for meeting: Meeting) async -> PreviousSessionInfo? {
-        let candidates: [Meeting]
-        do {
-            candidates = try await MeetingRepository(database: database).pastMeetings(limit: 200)
-        } catch {
-            return nil
-        }
-        let series = await MainActor.run {
-            MeetingSeriesService.shared.detectSeries(for: meeting, in: candidates)
-        }
+    /// The most recent prior session in an already-detected series, shaped for
+    /// the "Last time:" line. Returns nil when the series is empty.
+    private func previousSessionInfo(from series: [Meeting]) async -> PreviousSessionInfo? {
         guard let prev = series.first else { return nil }
         let excerpt = (try? await summaryRepo.latestSummary(meetingId: prev.id))?.summaryText
         let trimmed = excerpt?
@@ -241,5 +269,52 @@ final class MeetingPrepService {
             date: date,
             summaryExcerpt: trimmed
         )
+    }
+
+    // MARK: - PRJ-017 F3 Series Open Loops
+
+    /// Gather the unresolved items a recurring meeting carries in from prior
+    /// occurrences: open tasks sourced from those meetings, unanswered
+    /// questions from the most recent prior session, and recent series
+    /// decisions. Bounded to the last 10 occurrences. Returns nil for a
+    /// non-recurring meeting, a first occurrence, or when nothing is open.
+    private func buildSeriesOpenLoops(for meeting: Meeting, series: [Meeting]) async -> SeriesOpenLoops? {
+        guard !series.isEmpty else { return nil }
+        let occurrences = Array(series.prefix(10))
+        let ids = occurrences.map(\.id)
+
+        let openTasks = (try? await actionItemRepo.openItems(meetingIds: ids, limit: 15)) ?? []
+
+        // Questions from the most recent prior session only — older ones are
+        // noise. Deduped, capped at 5.
+        var questions: [String] = []
+        if let last = series.first {
+            let facts = (try? await EntityFactRepository(database: database)
+                .factsForMeetings([last.id], kinds: ["question"])) ?? []
+            var seen = Set<String>()
+            for f in facts {
+                let t = f.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty, seen.insert(t).inserted {
+                    questions.append(t)
+                    if questions.count >= 5 { break }
+                }
+            }
+        }
+
+        // TASK-129: prep includes BOTH confirmed and suggested rows (dismissed
+        // excluded). Going confirmed-only here would make prep WORSE for a user
+        // who hasn't triaged — the surface that motivated the log. Suggested
+        // rows render under an "unreviewed" marker in the prep card.
+        let decisions = (try? await DecisionRepository(database: database)
+            .decisionsForMeetings(ids, confirmedOnly: false, limit: 5)) ?? []
+
+        let loops = SeriesOpenLoops(
+            seriesName: meeting.title,
+            occurrenceCount: series.count,
+            openTasks: openTasks,
+            unresolvedQuestions: questions,
+            recentDecisions: decisions
+        )
+        return loops.isEmpty ? nil : loops
     }
 }

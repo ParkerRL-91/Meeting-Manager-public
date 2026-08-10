@@ -27,6 +27,15 @@ final class WeeklyDigestRepository {
         }
     }
 
+    /// The review for the most recent WEEK — distinct from `latest()`, which
+    /// orders by `createdAt` and so ranks a just-refreshed old week above a
+    /// newer one. ISO week ids ("2026-W31") sort chronologically as strings.
+    func newest() async throws -> WeeklyDigestRecord? {
+        try await database.writer.read { db in
+            try WeeklyDigestRecord.order(Column("isoWeek").desc).fetchOne(db)
+        }
+    }
+
     func save(_ record: WeeklyDigestRecord) async throws {
         try await database.writer.write { db in try record.save(db) }
     }
@@ -53,14 +62,47 @@ enum WeeklyDigest {
         return (prevStart, thisWeekStart, isoWeek(for: prevStart))
     }
 
+    /// The [Monday 00:00, next Monday 00:00) range containing an ISO week id
+    /// ("2026-W27"). Used by on-demand and Friday-cadence generation to target
+    /// an arbitrary week. Returns nil for a malformed id.
+    static func range(forISOWeek id: String) -> (start: Date, end: Date)? {
+        let parts = id.split(separator: "-W")
+        guard parts.count == 2, let year = Int(parts[0]), let week = Int(parts[1]) else { return nil }
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = .current
+        var comps = DateComponents()
+        comps.weekOfYear = week
+        comps.yearForWeekOfYear = year
+        comps.weekday = cal.firstWeekday   // Monday for iso8601
+        guard let start = cal.date(from: comps),
+              let end = cal.date(byAdding: .day, value: 7, to: start) else { return nil }
+        return (start, end)
+    }
+
+    /// PRJ-017 F2: the ISO week the weekly review should target right now,
+    /// honoring the "first run after Friday 00:00" cadence with catch-up. On
+    /// Fri/Sat/Sun this is the current week (the week so far); Mon–Thu it's the
+    /// previous week (whose Friday has already passed), so a skipped Friday is
+    /// caught up on the next launch.
+    static func targetReviewWeek(now: Date = Date()) -> String {
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = .current
+        let weekStart = cal.dateInterval(of: .weekOfYear, for: now)!.start
+        let friday = cal.date(byAdding: .day, value: 4, to: weekStart)!   // Mon+4 = Fri 00:00
+        if now >= friday { return isoWeek(for: weekStart) }
+        let prevStart = cal.date(byAdding: .day, value: -7, to: weekStart)!
+        return isoWeek(for: prevStart)
+    }
+
     static let systemPrompt = """
     You write a one-page weekly review for one person from structured \
     meeting data. Output Markdown with EXACTLY these sections: \
     "## The week in brief" (3-4 sentences), "## Decisions" (bullets), \
-    "## Commitments" (bullets, owner first, flag anything past due), \
     "## People" (one line: who they met and how often), \
     "## Worth revisiting" (open questions and stale action items). \
-    Use only the data provided — never invent. Stay under 400 words. \
+    The open action items in the data are context for judging staleness, \
+    not a list to reproduce — the app shows live open items elsewhere. \
+    Use only the data provided — never invent. Stay under 350 words. \
     Skip a section with a single line "Nothing this week." when empty.
     """
 }

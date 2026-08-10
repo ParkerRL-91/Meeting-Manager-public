@@ -502,6 +502,15 @@ private struct FolderMeetingRow: View {
                             .font(.caption)
                             .foregroundStyle(Color.appTextSecondary)
                     }
+                    // TASK-123: mark silent recordings in the list.
+                    if meeting.noSpeechDetectedAt != nil {
+                        Text("·")
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextTertiary)
+                        Text("No speech captured")
+                            .font(.caption)
+                            .foregroundStyle(.orange.opacity(0.85))
+                    }
                 }
 
                 // Participant avatars

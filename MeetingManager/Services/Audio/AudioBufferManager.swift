@@ -91,8 +91,17 @@ final class AudioBufferManager: @unchecked Sendable {
     private lazy var canonicalFormat: AVAudioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false
     )!
-    /// One stateful AVAudioConverter per distinct input format (mic vs system
-    /// differ), so sample-rate conversion keeps phase continuity across buffers.
+    /// Which delivery stream a buffer arrived on. Part of the converter cache key:
+    /// `AVAudioConverter` is STATEFUL (it carries resampler phase across calls) and
+    /// `convert` deliberately runs outside `converterLock`, so two delivery threads
+    /// must never share one instance. Format alone is not a safe key — on the
+    /// SCK-mic fallback path the mic and the system audio both arrive in SCK's
+    /// native 48 kHz stereo, i.e. an identical format on two different threads.
+    private enum ConverterStream: String { case mic, system }
+
+    /// One stateful AVAudioConverter per (delivery stream, input format), so
+    /// sample-rate conversion keeps phase continuity across buffers while staying
+    /// single-threaded per instance.
     private var converters: [String: AVAudioConverter] = [:]
     private let converterLock = NSLock()
 
@@ -100,12 +109,12 @@ final class AudioBufferManager: @unchecked Sendable {
     /// input unchanged when it already matches, and nil — so the caller safely
     /// skips the buffer rather than crashing — when the format is degenerate
     /// (0 Hz / 0 ch, e.g. an un-granted mic) or a converter can't be built.
-    private func canonicalize(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+    private func canonicalize(_ buffer: AVAudioPCMBuffer, stream: ConverterStream) -> AVAudioPCMBuffer? {
         let inFmt = buffer.format
         if inFmt == canonicalFormat { return buffer }
         guard inFmt.sampleRate > 0, inFmt.channelCount > 0, buffer.frameLength > 0 else { return nil }
 
-        let key = "\(inFmt.sampleRate)|\(inFmt.channelCount)|\(inFmt.commonFormat.rawValue)|\(inFmt.isInterleaved)"
+        let key = "\(stream.rawValue)|\(inFmt.sampleRate)|\(inFmt.channelCount)|\(inFmt.commonFormat.rawValue)|\(inFmt.isInterleaved)"
         converterLock.lock()
         let converter: AVAudioConverter?
         if let cached = converters[key] {
@@ -203,12 +212,11 @@ final class AudioBufferManager: @unchecked Sendable {
         // creation throwing a raw AVFoundation error
         // (com.apple.coreaudio.avfaudio 2003334207 / kAudioFileUnspecifiedError)
         // is the most likely reason recording fails on a machine the build
-        // wasn't tested on. We try the canonical Float32 WAV first (what the
-        // write path produces) and fall back to a universally-supported 16-bit
-        // PCM WAV if a given macOS rejects IEEE-float WAV. Either way the file's
-        // processingFormat is 16 kHz mono Float32, so the converted buffers
-        // still match on write.
-        let made = Self.makeAudioFile(at: outputURL, primary: canonicalFormat.settings)
+        // wasn't tested on. We try the compact 16-bit PCM WAV first and fall
+        // back to the canonical Float32 (IEEE-float) WAV if a given macOS
+        // rejects it. Either way the file's processingFormat is 16 kHz mono
+        // Float32, so the converted buffers still match on write.
+        let made = Self.makeAudioFile(at: outputURL, fallback: canonicalFormat.settings)
         guard let file = made.file else {
             // Surface the full path and the real OS error — the previous generic
             // "disk may be full" guess was undiagnosable in the field.
@@ -222,7 +230,7 @@ final class AudioBufferManager: @unchecked Sendable {
 
         // System-only file is best-effort (used for diarization). Same fallback.
         let systemURL = Self.systemAudioURL(for: outputURL)
-        systemAudioFile = Self.makeAudioFile(at: systemURL, primary: canonicalFormat.settings).file
+        systemAudioFile = Self.makeAudioFile(at: systemURL, fallback: canonicalFormat.settings).file
         systemFileURL = systemAudioFile != nil ? systemURL : nil
 
         recordingStartHostTime = nil
@@ -232,39 +240,51 @@ final class AudioBufferManager: @unchecked Sendable {
         startMemoryPressureMonitoring()
     }
 
-    /// Create an AVAudioFile for writing, trying the preferred (Float32) settings
-    /// then a maximally-compatible 16-bit PCM WAV fallback. Returns nil only if
-    /// both fail (disk/permission). Both produce a 16 kHz mono file whose
-    /// processingFormat is Float32, matching the canonical write buffers.
-    private static func makeAudioFile(at url: URL, primary: [String: Any]) -> (file: AVAudioFile?, error: Error?) {
-        do { return (try AVAudioFile(forWriting: url, settings: primary), nil) }
+    /// Create an AVAudioFile for writing, trying 16-bit PCM first and the given
+    /// `fallback` (the canonical Float32 settings) only if a given macOS rejects
+    /// it. Returns nil only if both fail (disk/permission).
+    ///
+    /// Both produce a 16 kHz mono file whose processingFormat is Float32, so the
+    /// canonical Float32 write buffers match either way — AVAudioFile converts on
+    /// write. Int16 is preferred because it halves the bytes on disk (2 vs 4 per
+    /// frame) at a dynamic range far beyond what 16 kHz speech capture carries.
+    private static func makeAudioFile(at url: URL, fallback: [String: Any]) -> (file: AVAudioFile?, error: Error?) {
+        let pcm16: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        do { return (try AVAudioFile(forWriting: url, settings: pcm16), nil) }
         catch {
-            let pcm16: [String: Any] = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: 16000,
-                AVNumberOfChannelsKey: 1,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
-            ]
-            do { return (try AVAudioFile(forWriting: url, settings: pcm16), nil) }
+            do { return (try AVAudioFile(forWriting: url, settings: fallback), nil) }
             catch { return (nil, error) }
         }
     }
 
-    /// Returns the system-audio-only WAV URL derived from the mixed audio URL.
+    /// Returns the system-audio-only URL derived from the mixed audio URL.
     /// e.g. `.../abc123.wav` → `.../abc123_system.wav`
+    ///
+    /// The extension is carried over from the input rather than hardcoded to
+    /// `wav`: `AudioArchiveService` compresses the mixed file and its `_system`
+    /// sibling together, so a mixed `.m4a` always has an `_system.m4a` beside
+    /// it. Hardcoding `.wav` here would make every consumer (diarization, voice
+    /// profiles, the energy anchor, retention, delete) look for a file that no
+    /// longer exists on an archived meeting.
     static func systemAudioURL(for mixedURL: URL) -> URL {
         let stem = mixedURL.deletingPathExtension().lastPathComponent
+        let ext = mixedURL.pathExtension.isEmpty ? "wav" : mixedURL.pathExtension
         return mixedURL.deletingLastPathComponent()
-            .appendingPathComponent("\(stem)_system.wav")
+            .appendingPathComponent("\(stem)_system.\(ext)")
     }
 
     func appendMicBuffer(_ rawBuffer: AVAudioPCMBuffer, at time: AVAudioTime) {
         // Convert to 16 kHz mono Float32 first; skip the buffer if it can't be
         // converted (degenerate device format) rather than writing a mismatch.
-        guard let buffer = canonicalize(rawBuffer) else { return }
+        guard let buffer = canonicalize(rawBuffer, stream: .mic) else { return }
 
         lock.lock()
         totalMicSamplesAppended += Int(buffer.frameLength)
@@ -282,7 +302,7 @@ final class AudioBufferManager: @unchecked Sendable {
         // ScreenCaptureKit usually delivers 44.1/48 kHz; convert to the canonical
         // 16 kHz so it matches the file format AND the 16 kHz mic samples it gets
         // summed with at stop. Skip if it can't be converted.
-        guard let buffer = canonicalize(rawBuffer) else { return }
+        guard let buffer = canonicalize(rawBuffer, stream: .system) else { return }
 
         lock.lock()
         totalSystemSamplesAppended += Int(buffer.frameLength)
@@ -504,7 +524,7 @@ final class AudioBufferManager: @unchecked Sendable {
         }
         let tmpURL = mixedURL.deletingPathExtension().appendingPathExtension("mixing.wav")
         try? FileManager.default.removeItem(at: tmpURL)
-        guard let out = Self.makeAudioFile(at: tmpURL, primary: canonicalFormat.settings).file else { return }
+        guard let out = Self.makeAudioFile(at: tmpURL, fallback: canonicalFormat.settings).file else { return }
 
         let block = 32_000
         guard let micBuf = AVAudioPCMBuffer(pcmFormat: micIn.processingFormat, frameCapacity: AVAudioFrameCount(block)),

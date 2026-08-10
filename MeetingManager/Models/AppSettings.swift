@@ -152,6 +152,30 @@ struct AppSettings: Codable, Equatable {
     /// installs (default 0) never delete anything until the user chooses a window.
     var audioRetentionDays: Int = 0
 
+    // MARK: - Backup (PRJ-017 F5)
+    /// Destination folder for backups (a `MeetingManagerBackup/` subfolder is
+    /// created inside it). Empty = not configured.
+    var backupDestinationPath: String = ""
+    /// Include the Audio/ + video/ recordings in the backup (large). Off by
+    /// default — the headline path is text-only (DB + attachments + markdown).
+    var backupIncludeMedia: Bool = false
+    /// Also write a human-readable `transcripts/` folder (one markdown file per
+    /// meeting) that survives without the app. On by default.
+    var backupIncludeMarkdown: Bool = true
+    /// Run an automatic backup on first launch each week when a destination is
+    /// set and no recording is active.
+    var backupAutoWeekly: Bool = true
+    /// Timestamp of the last successful backup (nil = never).
+    var lastBackupAt: Date? = nil
+
+    // MARK: - Switch Detection (PRJ-018 / TASK-117)
+    /// Kill switch for the meeting-switch detector. When on (default), the app
+    /// watches the live detection signals while recording and suggests starting
+    /// a new meeting when the call appears to have changed. Off disables all
+    /// switch suggestions from the detector (the calendar-proximity path is
+    /// independent).
+    var switchDetectionEnabled: Bool = true
+
     static let `default` = AppSettings(
         whisperModel: WhisperModel.largev3turbo.rawValue,
         summaryPromptTemplate: DefaultPrompts.meetingSummary,
@@ -189,6 +213,8 @@ extension AppSettings: FetchableRecord, PersistableRecord {
         case micOverrideEnabled, micOverrideDeviceID
         case useFluidAudioDiarization
         case audioRetentionDays
+        case backupDestinationPath, backupIncludeMedia, backupIncludeMarkdown, backupAutoWeekly, lastBackupAt
+        case switchDetectionEnabled
     }
 }
 

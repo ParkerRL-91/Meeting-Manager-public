@@ -89,6 +89,33 @@ final class MigrationsIntegrityTests: XCTestCase {
         "v46-enhanced-note",
         "v47-apollo-profile",
         "v48-claude-model-refresh",
+        "v49-knowledge-ai",
+        "v50-governor-and-knowledge",
+        "v51-taskqueue-sentinels",
+        "v52-follow-up-receipts",
+        "v53-intent-and-docs",
+        "v54-speech-stats",
+        "v55-meeting-slides",
+        "v56-clips",
+        "v57-sentiment",
+        "v58-topic-trackers",
+        "v59-meeting-video",
+        "v60-governor-first-deferred-at",
+        "v61-task-system-core",
+        "v61b-task-due-alerts-setting",
+        "v62-task-projects-dependencies",
+        "v63-kb-citations",
+        "v64-audio-retention",
+        "v65-ai-provider-selection",
+        "v66-openai-zai-models",
+        "v67-fluidaudio-default-on",
+        "v68-decision-log",
+        "v69-meeting-source",
+        "v70-backup-settings",
+        "v71-switch-detection",
+        "v72-no-speech-terminal-state",
+        "v73-decision-triage-ownership",
+        "v74-decision-target",
     ]
 
     override func setUpWithError() throws {
@@ -382,7 +409,7 @@ final class MigrationsIntegrityTests: XCTestCase {
         let noteRepo = NoteRepository(database: db)
         let summaryRepo = SummaryRepository(database: db)
         let chatRepo = ChatMessageRepository(database: db)
-        let actionRepo = ActionItemRepository(database: db)
+        let actionRepo = TaskRepository(database: db)
 
         var meeting = SampleData.makeMeeting(id: "cascade-test")
         try await meetingRepo.save(&meeting)

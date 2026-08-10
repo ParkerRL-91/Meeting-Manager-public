@@ -45,10 +45,11 @@ struct GoogleCalendarSettingsView: View {
     @State private var availableAppleCalendars: [AppleCalendarService.CalendarInfo] = []
     /// Multi-select for Apple. Empty = include all readable calendars.
     @State private var selectedAppleCalendarIds: Set<String> = []
-    /// True when the most recent calendar fetch returned 401/403, meaning the
-    /// stored OAuth token doesn't grant calendar access any more (revoked,
-    /// scope mismatch, or expired refresh token). UI surfaces a Reconnect CTA.
-    @State private var calendarAccessRevoked = false
+    /// True when the stored OAuth token no longer grants calendar access (revoked,
+    /// scope mismatch, or a dead refresh token). Read from the shared auth manager
+    /// rather than a local `@State`, so the verdict holds whether it was reached
+    /// here or by a background sync — which is what lets Home surface it too.
+    private var calendarAccessRevoked: Bool { authManager.accessRevoked }
 
     // Sync
     @State private var isSyncing = false
@@ -634,7 +635,10 @@ struct GoogleCalendarSettingsView: View {
 
             // Read directly from the manager so the timestamp updates as
             // periodic syncs land — even when the user doesn't tap Sync Now.
-            if let lastSync = appState.calendarSyncManager.lastSyncDate {
+            // `lastSuccessfulSyncDate`, not `lastSyncDate`: the latter advances
+            // even when every calendar failed, so it showed a fresh timestamp
+            // throughout the 18-day outage this feature exists to catch.
+            if let lastSync = appState.calendarSyncManager.lastSuccessfulSyncDate {
                 LabeledContent("Last synced") {
                     HStack(spacing: 4) {
                         Image(systemName: "clock")
@@ -781,12 +785,11 @@ struct GoogleCalendarSettingsView: View {
         refreshMeetings()
         // Mirror the live manager's last sync date so the UI doesn't show
         // "never synced" when periodic sync has actually been running.
-        lastSyncDate = appState.calendarSyncManager.lastSyncDate
+        lastSyncDate = appState.calendarSyncManager.lastSuccessfulSyncDate
     }
 
     private func loadCalendars() {
         isLoadingCalendars = true
-        calendarAccessRevoked = false
         Task {
             do {
                 let token = try await authManager.refreshTokenIfNeeded()
@@ -797,14 +800,13 @@ struct GoogleCalendarSettingsView: View {
                     : [(id: "primary", name: "Primary Calendar")] + calendars
                 availableCalendars = withPrimary
                 Logger.calendar.info("Loaded \(calendars.count) calendars")
-            } catch GoogleCalendarError.accessRevoked {
-                Logger.calendar.error("Calendar access revoked — clearing stale session for clean reconnect")
-                calendarAccessRevoked = true
+            } catch GoogleCalendarError.accessRevoked, GoogleAuthError.accessRevoked {
                 availableCalendars = []
-                // Clear the stale token so the next sign-in is a clean OAuth handshake
-                // requesting full calendar scope (rather than re-using whatever scope
-                // the old refresh token was minted with).
-                authManager.signOut()
+                // Latch the revocation instead of signing out. `signIn()` clears
+                // the stale Keychain item itself, so a clean handshake is still
+                // guaranteed — and `userEmail` survives, which speaker attribution
+                // depends on for the local-user exclusion.
+                authManager.markAccessRevoked()
             } catch {
                 Logger.calendar.error("Failed to load calendars: \(error.localizedDescription)")
             }
@@ -812,19 +814,19 @@ struct GoogleCalendarSettingsView: View {
         }
     }
 
+    /// Thin wrapper over the shared reconnect so Home and Settings can't drift.
+    /// `loadCalendars()` stays here — populating the checkbox list is this view's
+    /// concern, not part of the reconnect contract.
     private func signIn() {
         isSigningIn = true
         signInError = nil
         Task {
-            do {
-                try await authManager.signIn()
+            switch await appState.reconnectGoogleCalendar() {
+            case .success:
                 loadCalendars()
                 Logger.calendar.info("Google sign-in completed from settings")
-                // Newly signed-in: tell the live sync manager to (re)start.
-                NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
-            } catch {
+            case .failure(let error):
                 signInError = error.localizedDescription
-                Logger.calendar.error("Google sign-in failed: \(error.localizedDescription)")
             }
             isSigningIn = false
         }
@@ -842,7 +844,7 @@ struct GoogleCalendarSettingsView: View {
             let manager = appState.calendarSyncManager
             do {
                 try await manager.syncNow()
-                lastSyncDate = manager.lastSyncDate ?? Date()
+                lastSyncDate = manager.lastSuccessfulSyncDate ?? manager.lastSyncDate
                 let count = manager.eventsSyncedCount
                 syncSuccess = "\(count) event\(count == 1 ? "" : "s") synced"
                 refreshMeetings()

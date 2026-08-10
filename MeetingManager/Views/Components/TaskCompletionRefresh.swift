@@ -15,35 +15,43 @@ import SwiftUI
 struct TaskCompletionRefreshModifier: ViewModifier {
     let meetingId: String
     let types: Set<TaskQueueItem.TaskType>
+    /// Terminal statuses that trigger the refresh. Defaults to completion
+    /// only; a consumer that must also react to FINAL failure (e.g. the
+    /// transcript tab returning to the no-speech state after a failed Retry,
+    /// TASK-123) opts into `.failed` explicitly — existing call sites keep
+    /// their behavior.
+    let statuses: Set<TaskQueueItem.TaskStatus>
     let tasks: [TaskQueueItem]
     let action: () -> Void
 
     func body(content: Content) -> some View {
         content.onChange(of: tasks) { oldTasks, newTasks in
-            let justCompleted = newTasks.contains { task in
+            let justTransitioned = newTasks.contains { task in
                 guard task.meetingId == meetingId,
                       types.contains(task.type),
-                      task.status == .completed else { return false }
+                      statuses.contains(task.status) else { return false }
                 // Fire only on the transition edge: the task was absent or not
-                // yet completed in the previous snapshot.
+                // yet in a triggering status in the previous snapshot.
                 guard let previous = oldTasks.first(where: { $0.id == task.id }) else { return true }
-                return previous.status != .completed
+                return !statuses.contains(previous.status)
             }
-            if justCompleted { action() }
+            if justTransitioned { action() }
         }
     }
 }
 
 extension View {
-    /// Refresh this tab when a relevant background task for `meetingId` completes.
+    /// Refresh this tab when a relevant background task for `meetingId`
+    /// reaches a triggering terminal status (completion by default).
     func refreshOnTaskCompletion(
         meetingId: String,
         types: Set<TaskQueueItem.TaskType>,
+        statuses: Set<TaskQueueItem.TaskStatus> = [.completed],
         tasks: [TaskQueueItem],
         perform action: @escaping () -> Void
     ) -> some View {
         modifier(TaskCompletionRefreshModifier(
-            meetingId: meetingId, types: types, tasks: tasks, action: action
+            meetingId: meetingId, types: types, statuses: statuses, tasks: tasks, action: action
         ))
     }
 }

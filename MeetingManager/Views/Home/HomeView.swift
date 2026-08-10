@@ -1,25 +1,39 @@
 import SwiftUI
 import AppKit
 
-/// Dashboard shown when no meeting is selected. Shows today's meetings and upcoming context.
-/// Shows today's scheduled meetings with countdown timers and Start Now CTAs, followed by recent activity.
+/// Dashboard shown when no meeting is selected. Shows today's scheduled meetings
+/// with countdown timers and Start Now CTAs, open action items, the AI briefing,
+/// and the embedded Weekly Review section (TASK-138).
 struct HomeView: View {
     @Environment(AppState.self) private var appState
 
     // Tick every 60 seconds to refresh countdowns
     @State private var now = Date()
-    @State private var showAllRecent = false
     @State private var cachedAllToday: [Meeting] = []
-    @State private var cachedRecentMeetings: [Meeting] = []
     @State private var prepBriefs: [String: MeetingPrepBrief] = [:]
     @State private var expandedCardIds: Set<String> = []
     @State private var prepBriefDebounce: DispatchWorkItem?
-    @State private var authManager = GoogleAuthManager()
+    /// The shared instance from AppState, not a private one. A second
+    /// GoogleAuthManager re-reads the Keychain on every Home mount, reports
+    /// `isSignedIn == false` during its own async restore, and never sees a
+    /// sign-out performed in Settings.
+    private var authManager: GoogleAuthManager { appState.googleAuthManager }
     @AppStorage("home.calendarBannerDismissed") private var calendarBannerDismissed: Bool = false
+    /// Episode id of the health banner the user dismissed. Deliberately `@State`,
+    /// not `@AppStorage`: a dismissal must not outlive its failure episode. The
+    /// `calendarBannerDismissed` flag above can be silenced forever, which is the
+    /// pattern that let an 18-day sync outage go unnoticed.
+    @State private var dismissedHealthEpisodeId: UUID?
+    /// Episodes whose dismissal the 24-hour re-raise has already overridden, so a
+    /// second dismissal of the same long outage still sticks.
+    @State private var reRaisedHealthEpisodeIds: Set<UUID> = []
     @State private var openActionItems: [TaskItem] = []
-    @State private var latestDigest: WeeklyDigestRecord?
-    @State private var digestExpanded = false
     @State private var actionItemMeetingTitles: [String: String] = [:]
+    // Categorized schedule + AI-briefing data (merged from the former Daily
+    // Brief page). `nil` until the first `buildBrief` lands; `cachedAllToday`
+    // renders as an instant skeleton until then.
+    @State private var brief: DailyBrief?
+    @State private var briefLoadFailed = false
     private let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -40,16 +54,16 @@ struct HomeView: View {
                             .foregroundStyle(Color.appTextSecondary)
                     }
                     Spacer()
-                    // Quick action: new ad-hoc meeting
-                    Button {
-                        NotificationCenter.default.post(name: .createNewMeeting, object: nil)
-                    } label: {
-                        Label("New Meeting", systemImage: "plus")
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.appAccent)
-                    .controlSize(.regular)
+                    // Quick action (TASK-121): context-sensitive New Meeting
+                    // control. Opens the picker when the click maps to calendar
+                    // meetings (or while recording); otherwise plain-clicks the
+                    // app-wide fast path (`.createNewMeeting` → startNewMeeting).
+                    NewMeetingButton(
+                        style: .prominent,
+                        primaryAction: {
+                            NotificationCenter.default.post(name: .createNewMeeting, object: nil)
+                        }
+                    )
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 28)
@@ -62,12 +76,44 @@ struct HomeView: View {
                         .padding(.bottom, 16)
                 }
 
+                // MARK: - Calendar Sync Health Banner
+                // Ranked above the connect banner: a broken sync is more urgent
+                // than an absent one, and the two are mutually exclusive (see
+                // `showConnectBanner`). Health is `.unknown` until the Keychain
+                // restore resolves AND a sync produces an outcome, so this cannot
+                // flash during launch.
+                if let reason = healthBannerReason,
+                   let episodeId = appState.calendarSyncManager.healthEpisodeId,
+                   dismissedHealthEpisodeId != episodeId {
+                    CalendarSyncHealthBanner(
+                        message: reason.bannerMessage,
+                        onReconnect: {
+                            // EXEMPT: user-driven OAuth handshake, not post-meeting
+                            // AI/network work — TaskQueueManager doesn't apply.
+                            Task {
+                                if case .success = await appState.reconnectGoogleCalendar() {
+                                    // `calendarBannerDismissed` is @AppStorage, so one
+                                    // past click silences the connect banner forever.
+                                    // A successful reconnect is the one moment we know
+                                    // the user wants calendar state surfaced again.
+                                    calendarBannerDismissed = false
+                                }
+                            }
+                        },
+                        onDismiss: { dismissedHealthEpisodeId = episodeId }
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
+                }
+
                 // MARK: - Calendar Connect Banner (subtle, dismissible)
                 // Only nag about connecting Google Calendar if the user actually
                 // wants Google as their calendar source. Users who picked Apple
                 // Calendar (or none) shouldn't see this banner.
-                if !authManager.isSignedIn
-                    && cachedAllToday.isEmpty
+                // Brief-gated: only nag once the brief has loaded and confirmed
+                // an empty day, so an async load can't flash the banner.
+                if let brief, brief.meetings.isEmpty
+                    && showConnectBanner
                     && !calendarBannerDismissed
                     && (CalendarSource.current == .googleCalendar || CalendarSource.current == .both) {
                     CalendarConnectBanner(
@@ -84,36 +130,78 @@ struct HomeView: View {
                     .padding(.bottom, 16)
                 }
 
-                // MARK: - Today's Meetings
-                let todayMeetings = cachedAllToday
-                if !todayMeetings.isEmpty {
-                    SectionHeader(title: "Today")
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 10)
-
-                    VStack(spacing: 8) {
-                        ForEach(todayMeetings) { meeting in
-                            MeetingPrepCardView(
-                                meeting: meeting,
-                                prepBrief: prepBriefs[meeting.id],
-                                now: now,
-                                isExpanded: Binding(
-                                    get: { expandedCardIds.contains(meeting.id) },
-                                    set: { newValue in
-                                        if newValue { expandedCardIds.insert(meeting.id) }
-                                        else { expandedCardIds.remove(meeting.id) }
-                                    }
-                                )
-                            )
+                // MARK: - Today's schedule (categorized time-rail)
+                // First-paint rule: while `brief == nil`, render the cached
+                // plain cards as an instant skeleton (no full-page spinner);
+                // the rail + categories swap in when `buildBrief` lands. The
+                // empty state gates on `brief != nil` so an async load can't
+                // flash "No meetings today".
+                if let brief {
+                    if brief.meetings.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            NoMeetingsTodayCard()
+                            // TASK-134: "no meetings" is a claim about the
+                            // calendar, and a wedged sync produces exactly the
+                            // same empty list as a genuinely free day.
+                            if let caption = staleSyncCaption {
+                                Text(caption)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appTextSecondary)
+                            }
                         }
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 24)
-                } else {
-                    // No meetings today
-                    NoMeetingsTodayCard()
                         .padding(.horizontal, 24)
                         .padding(.bottom, 24)
+                    } else {
+                        SectionHeader(title: "Today")
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 10)
+                        HomeScheduleRail(brief: brief, now: now, expandedCardIds: $expandedCardIds)
+                            .padding(.bottom, 24)
+                    }
+                } else {
+                    if !cachedAllToday.isEmpty {
+                        SectionHeader(title: "Today")
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 10)
+
+                        VStack(spacing: 8) {
+                            ForEach(cachedAllToday) { meeting in
+                                MeetingPrepCardView(
+                                    meeting: meeting,
+                                    prepBrief: prepBriefs[meeting.id],
+                                    now: now,
+                                    isExpanded: Binding(
+                                        get: { expandedCardIds.contains(meeting.id) },
+                                        set: { newValue in
+                                            if newValue { expandedCardIds.insert(meeting.id) }
+                                            else { expandedCardIds.remove(meeting.id) }
+                                        }
+                                    )
+                                )
+                            }
+                        }
+                        // Match the rail's card x-position (56px time column +
+                        // 17px dot lane + 4px padding each side) so the rail
+                        // swapping in over the skeleton doesn't reflow the
+                        // cards horizontally.
+                        .padding(.leading, 81)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 24)
+                    }
+
+                    // buildBrief failed (brief stayed nil past the load
+                    // attempt): say so instead of a silent forever-skeleton —
+                    // the old Daily Brief page had an explicit error state.
+                    if briefLoadFailed {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle")
+                            Text("Couldn't load today's schedule details — showing basic cards. It retries when your meetings change.")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextSecondary)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 24)
+                    }
                 }
 
                 // MARK: - Processing strip (TASK-042) — what the queue is
@@ -159,74 +247,32 @@ struct HomeView: View {
                     .padding(.bottom, 24)
                 }
 
-                // MARK: - Weekly digest (TASK-051) — collapsed card for the
-                // most recent generated week.
-                if let digest = latestDigest {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { digestExpanded.toggle() }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "calendar.badge.clock")
-                                    .font(.caption)
-                                    .foregroundStyle(Color.appAccent)
-                                Text("Weekly digest — \(digest.isoWeek)")
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(Color.appTextPrimary)
-                                Spacer()
-                                Image(systemName: digestExpanded ? "chevron.down" : "chevron.right")
-                                    .font(.caption2)
-                                    .foregroundStyle(Color.appTextTertiary)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        if digestExpanded {
-                            MarkdownRenderer(text: digest.content, baseFontSize: 13)
-                        }
-                    }
-                    .padding(14)
-                    .background(Color.appSurfaceSecondary.opacity(0.4))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 20)
+                // MARK: - AI Briefing (merged from the former Daily Brief page)
+                // Collapsible; sits below the actionable content so a long
+                // narrative can't push the morning to-do list below the fold.
+                // NO view-level auto-generation kick and NO Ollama status
+                // ping — generation runs only via the scheduler + the button.
+                if let brief, !brief.meetings.isEmpty {
+                    HomeAIBriefingSection(brief: brief)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 24)
                 }
 
-                // MARK: - Recent Meetings (exclude today — already shown above)
-                let allRecent = cachedRecentMeetings
-                let visibleRecent = showAllRecent ? allRecent : Array(allRecent.prefix(8))
-                if !visibleRecent.isEmpty {
-                    SectionHeader(title: "Recent")
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 10)
-
-                    VStack(spacing: 6) {
-                        ForEach(visibleRecent) { meeting in
-                            RecentMeetingRow(meeting: meeting)
-                                .onTapGesture {
-                                    appState.selectedMeetingId = meeting.id
-                                }
-                        }
-                    }
+                // MARK: - Weekly Review (TASK-138) — the full former page, now
+                // embedded: week picker, derived queue states, Generate/Refresh.
+                WeeklyReviewSection()
                     .padding(.horizontal, 24)
-
-                    if allRecent.count > 8 {
-                        Button(showAllRecent ? "Show less" : "Show \(allRecent.count - 8) more") {
-                            withAnimation { showAllRecent.toggle() }
-                        }
-                        .font(.subheadline)
-                        .foregroundStyle(Color.appAccent)
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 24)
-                        .padding(.top, 6)
-                    }
-                    Spacer().frame(height: 32)
-                }
+                    .padding(.bottom, 32)
             }
         }
         .background(Color.appBackground)
         .onReceive(timer) { date in
             now = date
+            // Reusing the existing 60s countdown tick rather than adding a timer.
+            // This is what makes the one-hour staleness verdict appear (and the
+            // overdue-sync catch-up fire) without the user navigating anywhere.
+            appState.calendarSyncManager.refreshHealth(now: date)
+            reRaiseAgedStaleDismissal(now: date)
         }
         .onAppear {
             rebuildCache()
@@ -234,21 +280,13 @@ struct HomeView: View {
         }
         .task {
             await loadOpenActionItems()
-            latestDigest = try? await WeeklyDigestRepository(database: AppDatabase.shared).latest()
+            await loadBrief()
         }
         .onChange(of: appState.upcomingMeetings) { _, _ in
-            rebuildCache()
-            prepBriefDebounce?.cancel()
-            let work = DispatchWorkItem { loadPrepBriefs() }
-            prepBriefDebounce = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+            scheduleReactiveRefresh()
         }
         .onChange(of: appState.pastMeetings) { _, _ in
-            rebuildCache()
-            prepBriefDebounce?.cancel()
-            let work = DispatchWorkItem { loadPrepBriefs() }
-            prepBriefDebounce = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+            scheduleReactiveRefresh()
         }
     }
 
@@ -264,6 +302,59 @@ struct HomeView: View {
         now.formatted(date: .complete, time: .omitted)
     }
 
+    // MARK: - Calendar Sync Health
+
+    /// The reason to show the health banner, or nil when there's nothing wrong.
+    /// `.unknown` and `.healthy` both render nothing.
+    private var healthBannerReason: CalendarHealthReason? {
+        switch appState.calendarSyncManager.health {
+        case .disconnected(let reason), .degraded(let reason): return reason
+        case .unknown, .healthy: return nil
+        }
+    }
+
+    /// Keeps the two calendar banners mutually exclusive. The `accessRevoked`
+    /// check is a belt on top of the health verdict: it covers the window between
+    /// `markAccessRevoked()` flipping `isSignedIn` false and the next
+    /// `refreshHealth()`, during which the connect banner would otherwise
+    /// briefly claim no calendar is connected at all.
+    private var showConnectBanner: Bool {
+        healthBannerReason == nil
+            && !authManager.accessRevoked
+            // Don't claim "no calendar connected" before the Keychain restore has
+            // resolved — `isSignedIn` is false during that window even for a
+            // signed-in user.
+            && authManager.didAttemptSessionRestore
+            && !authManager.isSignedIn
+    }
+
+    /// Caption for the empty-day card: names the age of the last good sync when
+    /// it's old enough that an empty schedule is more likely a sync problem than
+    /// a free day. Google-sourced only — the copy (and the sync it describes) is
+    /// meaningless for an Apple-Calendar-only user. Silent when there is no
+    /// successful sync on record at all; that state belongs to the connect /
+    /// health banners above, which name it far more directly.
+    private var staleSyncCaption: String? {
+        guard CalendarSource.current == .googleCalendar || CalendarSource.current == .both,
+              let last = appState.calendarSyncManager.effectiveLastSuccessfulSync,
+              now.timeIntervalSince(last) > 6 * 60 * 60 else { return nil }
+        return "Calendar last synced \(last.formatted(.relative(presentation: .named))) — this may not reflect your real schedule."
+    }
+
+    /// A `.syncStalled` episode keeps its identity for as long as the outage
+    /// lasts, so one dismissal can hide a multi-day failure indefinitely.
+    /// Forget the dismissal once the outage passes a day old — once per episode,
+    /// so a second dismissal of the same outage still holds. The manager's episode
+    /// identity is deliberately untouched; only this view's memory is cleared.
+    private func reRaiseAgedStaleDismissal(now: Date) {
+        guard let dismissed = dismissedHealthEpisodeId,
+              !reRaisedHealthEpisodeIds.contains(dismissed),
+              case .syncStalled(let since)? = healthBannerReason,
+              now.timeIntervalSince(since) > 24 * 60 * 60 else { return }
+        reRaisedHealthEpisodeIds.insert(dismissed)
+        dismissedHealthEpisodeId = nil
+    }
+
     // MARK: - Cache
 
     private func loadOpenActionItems() async {
@@ -275,6 +366,41 @@ struct HomeView: View {
         }
         openActionItems = items
         actionItemMeetingTitles = titles
+    }
+
+    /// Rebuild the synchronous skeleton immediately, then debounce the richer
+    /// `buildBrief` + prep-brief reload (Home's existing 0.5s debounce).
+    private func scheduleReactiveRefresh() {
+        rebuildCache()
+        prepBriefDebounce?.cancel()
+        let work = DispatchWorkItem {
+            // prepBriefs only feeds the pre-brief skeleton; buildBrief computes
+            // the same prep data internally, so skip once the rail is live —
+            // otherwise every meeting-list change pays the prep pipeline twice.
+            if brief == nil { loadPrepBriefs() }
+            Task { await loadBrief() }
+        }
+        prepBriefDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Load the categorized brief and keep the sidebar needs-prep badge in
+    /// sync (mirrors the former DailyBriefView.loadBrief). No AI kick here.
+    @MainActor
+    private func loadBrief() async {
+        let service = DailyBriefService()
+        do {
+            let loaded = try await service.buildBrief(for: Date())
+            brief = loaded
+            briefLoadFailed = false
+            appState.dailyBriefMeetingsNeedingPrep = loaded.meetingsNeedingPrep
+        } catch {
+            // Keep any previously-loaded brief; only flag when we have nothing
+            // to show, so the gates (empty state / banner) don't stay shut
+            // silently forever.
+            if brief == nil { briefLoadFailed = true }
+            appState.fileLog("Home: buildBrief failed — \(error.localizedDescription)")
+        }
     }
 
     private func loadPrepBriefs() {
@@ -305,20 +431,6 @@ struct HomeView: View {
                 let db = $1.scheduledStartDate ?? $1.startDate ?? .distantFuture
                 return da < db
             }
-        cachedRecentMeetings = appState.pastMeetings.filter { !isToday($0) }
-    }
-}
-
-// MARK: - Section Header
-
-private struct SectionHeader: View {
-    let title: String
-    var body: some View {
-        Text(title)
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(Color.appTextTertiary)
-            .textCase(.uppercase)
-            .tracking(0.8)
     }
 }
 
@@ -373,30 +485,104 @@ private struct NoMeetingsTodayCard: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "calendar")
-                .font(.title3)
-                .foregroundStyle(Color.appTextTertiary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "calendar")
+                    .font(.title3)
+                    .foregroundStyle(Color.appTextTertiary)
 
-            Text("No meetings scheduled for today")
-                .font(.subheadline)
-                .foregroundStyle(Color.appTextSecondary)
+                Text("No meetings scheduled for today")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.appTextSecondary)
 
-            Spacer()
+                Spacer()
 
-            Button {
-                appState.startNewMeeting()
-            } label: {
-                Label("Start a meeting now", systemImage: "record.circle")
-                    .font(.subheadline.weight(.medium))
+                Button {
+                    appState.startNewMeeting()
+                } label: {
+                    Label("Start a meeting now", systemImage: "record.circle")
+                        .font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.appAccent)
+                .controlSize(.small)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.appAccent)
-            .controlSize(.small)
+
+            // PRJ-014 discoverability hook (ported from Daily Brief empty
+            // state): the KB sidebar item is hidden until a folder is
+            // configured, so offer a way in from here.
+            if !appState.kbConfigured {
+                Button {
+                    appState.pendingSettingsTab = 8   // Knowledge Base tab
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Text("Connect a Knowledge Base to ground briefs in your own documents →")
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(16)
         .background(Color.appSurface)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - Calendar Sync Health Banner
+
+/// Amber warning shown when calendar sync is broken, with a one-click reconnect.
+/// Distinct from `CalendarConnectBanner` (blue, "you've never connected") both in
+/// colour and in dismissal semantics — see `dismissedHealthEpisodeId`.
+private struct CalendarSyncHealthBanner: View {
+    let message: String
+    let onReconnect: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(Color.appWarning)
+                .frame(width: 18)
+
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(Color.appTextSecondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer()
+
+            Button("Reconnect") {
+                onReconnect()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.appAccent)
+            .controlSize(.small)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    onDismiss()
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appTextSecondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss calendar warning")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.appWarningSubtle)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.appWarning.opacity(0.3), lineWidth: 1)
+        )
     }
 }
 
@@ -450,70 +636,8 @@ private struct CalendarConnectBanner: View {
     }
 }
 
-// MARK: - Recent Meeting Row
-
-private struct RecentMeetingRow: View {
-    let meeting: Meeting
-
-    var body: some View {
-        HStack(spacing: 12) {
-            // Status dot
-            Circle()
-                .fill(meeting.status == .complete ? Color.appSuccess : Color.appTextTertiary)
-                .frame(width: 7, height: 7)
-                .padding(.leading, 4)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(meeting.title)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextPrimary)
-                    .lineLimit(1)
-
-                HStack(spacing: 6) {
-                    if let date = meeting.startDate ?? meeting.scheduledStartDate {
-                        Text(relativeDate(date))
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
-                    }
-                    let dur = meeting.formattedDuration
-                    if dur != "--" {
-                        Text("·")
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextTertiary)
-                        Text(dur)
-                            .font(.caption)
-                            .foregroundStyle(Color.appTextSecondary)
-                    }
-                }
-            }
-
-            Spacer()
-
-            // Participant initials (up to 3)
-            HStack(spacing: -6) {
-                ForEach(Array(meeting.participantList.prefix(3).enumerated()), id: \.offset) { idx, name in
-                    InitialsAvatar(name: name, size: 22, index: idx)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Color.appSurface.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func relativeDate(_ date: Date) -> String {
-        let cal = Calendar.current
-        if cal.isDateInToday(date) { return "Today" }
-        if cal.isDateInYesterday(date) { return "Yesterday" }
-        let days = cal.dateComponents([.day], from: date, to: Date()).day ?? 0
-        if days < 7 { return "\(days)d ago" }
-        return date.formatted(date: .abbreviated, time: .omitted)
-    }
-}
-
 // InitialsAvatar moved to Views/Components/InitialsAvatar.swift
+// SectionHeader moved to Views/Components/SectionHeader.swift (TASK-138)
 
 // MARK: - Home Action Item Row (TASK-042)
 

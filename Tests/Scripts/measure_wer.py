@@ -8,7 +8,7 @@ and measures Word Error Rate (WER), hallucinations, and repetitions.
 Usage:
     python3 repo/Tests/Scripts/measure_wer.py \
         --fixtures repo/Tests/Fixtures \
-        --output repo/harness/evaluations/latest-wer.json
+        --output repo/.build/wer/latest-wer.json
 
 Requirements:
     - The Meeting Manager app must be built (swift build)

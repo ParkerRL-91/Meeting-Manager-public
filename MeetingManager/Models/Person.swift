@@ -71,7 +71,7 @@ struct Person: Codable, Identifiable, FetchableRecord, MutablePersistableRecord 
     }
 
     /// Short org hint derived from domain — strips common TLDs for display.
-    /// "acme.com" → "Acme", "dave@acme.io" → "Acme"
+    /// "acme.com" → "Acme", "dave@globex.io" → "Globex"
     var orgHint: String? {
         guard let d = domain else { return nil }
         let base = d.components(separatedBy: ".").first ?? d

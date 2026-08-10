@@ -1,8 +1,7 @@
 import Foundation
 
 /// Pure, testable naming logic layered on top of the signal stack in
-/// `applySpeakerAttribution`. Implements the design in
-/// `harness/spec-speaker-naming-logic.md`:
+/// `applySpeakerAttribution`. The design it implements:
 ///   - margin-guarded constraint propagation (1:1 → N-person elimination),
 ///   - contradiction flags (name not invited, count mismatch, duplicate name).
 ///

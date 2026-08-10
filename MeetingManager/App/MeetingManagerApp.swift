@@ -46,6 +46,11 @@ struct MeetingManagerApp: App {
                     appState.showGlobalSearch = true
                 }
                 .keyboardShortcut("k", modifiers: .command)
+
+                Button("Quick Memo") {
+                    NotificationCenter.default.post(name: .startQuickMemo, object: nil)
+                }
+                .keyboardShortcut(KeyboardShortcuts.quickMemo)
             }
 
             CommandMenu("Meeting") {

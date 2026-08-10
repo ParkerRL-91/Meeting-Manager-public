@@ -16,6 +16,7 @@ struct GlobalSearchView: View {
     @State private var discussedBy: [PersonTopicAffinity.Ranked] = []
     @State private var glossaryHits: [GlossaryTerm] = []
     @State private var slideHits: [(slide: MeetingSlide, meetingTitle: String?)] = []
+    @State private var decisionHits: [(decision: Decision, meetingTitle: String?)] = []
     @State private var searchTask: Task<Void, Never>?
     @FocusState private var fieldFocused: Bool
 
@@ -53,7 +54,7 @@ struct GlobalSearchView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.appTextTertiary)
                 Spacer()
-            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty && glossaryHits.isEmpty && slideHits.isEmpty {
+            } else if titleHits.isEmpty && transcriptHits.isEmpty && peopleHits.isEmpty && itemHits.isEmpty && discussedBy.isEmpty && glossaryHits.isEmpty && slideHits.isEmpty && decisionHits.isEmpty {
                 Spacer()
                 Text("No matches for \"\(query)\".")
                     .font(.subheadline)
@@ -152,6 +153,20 @@ struct GlobalSearchView: View {
                                 resultRow(icon: "checklist", title: hit.item.title,
                                           subtitle: hit.meetingTitle ?? "") {
                                     if let mid = hit.item.meetingId { open(meetingId: mid) }
+                                }
+                            }
+                        }
+                    }
+                    if !decisionHits.isEmpty {
+                        // TASK-129: recall a decision from anywhere. Confirmed +
+                        // suggested both searchable (suggested labeled
+                        // "Unreviewed"); dismissed excluded upstream.
+                        Section("Decisions") {
+                            ForEach(decisionHits, id: \.decision.id) { hit in
+                                resultRow(icon: hit.decision.isSuggested ? "checkmark.seal" : "checkmark.seal.fill",
+                                          title: hit.decision.title,
+                                          subtitle: decisionSubtitle(hit.decision, meetingTitle: hit.meetingTitle)) {
+                                    open(meetingId: hit.decision.meetingId)
                                 }
                             }
                         }
@@ -323,6 +338,18 @@ struct GlobalSearchView: View {
         .buttonStyle(.plain)
     }
 
+    /// "Unreviewed · Decided by Jordan · Standup · Jul 3" — owner, meeting, and
+    /// date, prefixed with the triage state for a suggested row.
+    private func decisionSubtitle(_ decision: Decision, meetingTitle: String?) -> String {
+        var parts: [String] = []
+        if decision.isSuggested { parts.append("Unreviewed") }
+        if let owner = decision.ownerName, !owner.isEmpty { parts.append("Decided by \(owner)") }
+        if let target = decision.targetName, !target.isEmpty { parts.append("For \(target)") }
+        if let title = meetingTitle, !title.isEmpty { parts.append(title) }
+        parts.append(decision.extractedAt.formatted(date: .abbreviated, time: .omitted))
+        return parts.joined(separator: " · ")
+    }
+
     private func open(meetingId: String) {
         appState.sidebarDestination = .meetings
         appState.selectedMeetingId = meetingId
@@ -338,6 +365,7 @@ struct GlobalSearchView: View {
         let q = raw.trimmingCharacters(in: .whitespaces)
         guard q.count >= 2 else {
             titleHits = []; transcriptHits = []; peopleHits = []; itemHits = []
+            decisionHits = []
             return
         }
         let lowered = q.lowercased()
@@ -374,6 +402,20 @@ struct GlobalSearchView: View {
         slideHits = ((try? await MeetingSlideRepository(database: AppDatabase.shared)
             .search(query: q)) ?? [])
             .map { (slide: $0, meetingTitle: titlesById[$0.meetingId]) }
+
+        // TASK-129: decision recall. `allDecisions` excludes dismissed rows
+        // (dismissedAt set) — confirmed + suggested remain. Match title /
+        // rationale / owner / involved, in-memory over the 500 cap.
+        decisionHits = ((try? await DecisionRepository(database: appState.database)
+            .allDecisions()) ?? [])
+            .filter { d in
+                d.title.lowercased().contains(lowered)
+                    || (d.rationale?.lowercased().contains(lowered) ?? false)
+                    || (d.ownerName?.lowercased().contains(lowered) ?? false)
+                    || d.involvedNames.contains { $0.lowercased().contains(lowered) }
+            }
+            .prefix(6)
+            .map { (decision: $0, meetingTitle: titlesById[$0.meetingId]) }
 
         // TASK-060: semantic person-affinity. Skipped when the local model
         // is mid-generation — a type-ahead must not queue behind a summary

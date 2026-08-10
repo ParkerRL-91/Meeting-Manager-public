@@ -336,19 +336,16 @@ final class AppleCalendarService {
                 return url
             }
             // Combined search corpus — location first because it's the
-            // most common spot for Outlook/work-domain calendars.
-            let candidates = [event.location, event.notes].compactMap { $0 }
-            for text in candidates {
-                if let conf = Self.conferencingURL(in: text) {
-                    Logger.notifications.debug("[meetLink] '\(event.title ?? "untitled", privacy: .public)' from conferencing URL match")
-                    return conf
-                }
+            // most common spot for Outlook/work-domain calendars. Detection
+            // lives in the shared ConferencingLinkParser (see TASK-127).
+            let candidates: [String?] = [event.location, event.notes]
+            if let conf = ConferencingLinkParser.firstConferencingURL(in: candidates) {
+                Logger.notifications.debug("[meetLink] '\(event.title ?? "untitled", privacy: .public)' from conferencing URL match")
+                return conf
             }
-            for text in candidates {
-                if let any = Self.firstURL(in: text) {
-                    Logger.notifications.debug("[meetLink] '\(event.title ?? "untitled", privacy: .public)' from first-URL fallback")
-                    return any
-                }
+            if let any = ConferencingLinkParser.firstURL(in: candidates) {
+                Logger.notifications.debug("[meetLink] '\(event.title ?? "untitled", privacy: .public)' from first-URL fallback")
+                return any
             }
             Logger.notifications.debug("[meetLink] '\(event.title ?? "untitled", privacy: .public)' — no link found in event.url/location/notes")
             return nil
@@ -367,46 +364,6 @@ final class AppleCalendarService {
             meetLink: meetLink,
             declinedAttendees: declinedString
         )
-    }
-
-    /// Crude URL extractor used to pull a meeting link out of the notes body.
-    private static func firstURL(in text: String) -> String? {
-        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = detector?.firstMatch(in: text, options: [], range: range),
-              let url = match.url else { return nil }
-        return url.absoluteString
-    }
-
-    /// Find a conferencing-platform URL specifically. Used to disambiguate
-    /// when the notes/location field has multiple URLs and we want the
-    /// "join the call" one rather than e.g. a docs link.
-    private static let conferencingHostPatterns: [String] = [
-        "zoom.us", "zoom.com",
-        "meet.google.com", "g.co/meet",
-        "teams.microsoft.com", "teams.live.com",
-        "webex.com",
-        "gotomeeting.com", "gotomeet.me",
-        "whereby.com",
-        "bluejeans.com",
-        "ringcentral.com",
-        "jit.si", "meet.jit.si",
-        "around.co",
-        "discord.gg",
-    ]
-
-    private static func conferencingURL(in text: String) -> String? {
-        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        let range = NSRange(text.startIndex..., in: text)
-        guard let detector else { return nil }
-        let matches = detector.matches(in: text, options: [], range: range)
-        for match in matches {
-            guard let url = match.url, let host = url.host?.lowercased() else { continue }
-            if conferencingHostPatterns.contains(where: { host.contains($0) }) {
-                return url.absoluteString
-            }
-        }
-        return nil
     }
 
     // MARK: - Logging helpers

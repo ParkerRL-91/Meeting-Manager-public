@@ -17,16 +17,52 @@ final class KBWriteBackService {
     static let shared = KBWriteBackService()
     private init() {}
 
+    /// Tail of the in-flight write chain per meeting id (TASK-133). `writeMeeting`
+    /// is `@MainActor` but suspends four times (cleaned transcript, decisions,
+    /// prior export record, reindex), so two exports for the same meeting used to
+    /// interleave: the pass that read the *older* confirmed-decision set could
+    /// finish last, leaving the canonical note missing the newest decision — with
+    /// a stored hash matching that stale content, so no later pass self-corrected
+    /// it. The adjacent interleaving (one pass reading the hash the other had not
+    /// yet written) minted a spurious "Title (update <date>).md" fork instead.
+    ///
+    /// Per-meeting rather than global so an unrelated meeting's export is never
+    /// held up, and chained inside the service rather than debounced at the
+    /// notification sink because the racing writes come from three different call
+    /// sites (post-summary export, KB backfill, decision re-export) that no single
+    /// debounce can cover.
+    private var writeChain: [String: Task<Void, Never>] = [:]
+
     // MARK: - Write
 
     /// Write a meeting's summary + cleaned transcript to the KB folder.
     /// Silently no-ops if no KB root is configured.
     ///
-    /// Prefers the cleaned transcript blob when available — that's what users
-    /// see in the app, and what they expect to find in their KB. Falls back
-    /// to a stitched-on-the-fly version of the raw segments when no cleaned
-    /// blob exists yet (e.g. cleanup task hasn't run).
+    /// Serialized per meeting id — see `writeChain`. Concurrent callers for the
+    /// same meeting complete in call order; callers for different meetings still
+    /// run concurrently.
     func writeMeeting(
+        _ meeting: Meeting,
+        summary: String,
+        transcript: [Transcript]
+    ) async {
+        let predecessor = writeChain[meeting.id]
+        let write = Task {
+            await predecessor?.value
+            await self.performWrite(meeting, summary: summary, transcript: transcript)
+        }
+        writeChain[meeting.id] = write
+        await write.value
+        // Only the tail clears the slot — a caller that enqueued behind us must
+        // keep its predecessor handle reachable.
+        if writeChain[meeting.id] == write { writeChain[meeting.id] = nil }
+    }
+
+    /// The actual export. Prefers the cleaned transcript blob when available —
+    /// that's what users see in the app, and what they expect to find in their
+    /// KB. Falls back to a stitched-on-the-fly version of the raw segments when
+    /// no cleaned blob exists yet (e.g. cleanup task hasn't run).
+    private func performWrite(
         _ meeting: Meeting,
         summary: String,
         transcript: [Transcript]
@@ -44,13 +80,31 @@ final class KBWriteBackService {
         //   3. Empty (no transcript at all)
         let cleanedText = await resolveCleanedText(meetingId: meeting.id, fallback: transcript)
 
+        // Confirmed decisions only — suggestions stay in the inbox until the
+        // user blesses them, so the KB note (and KB-grounded chat) only sees
+        // decisions the user vouched for (TASK-129).
+        let decisions = (try? await DecisionRepository(database: AppDatabase.shared)
+            .decisionsForMeetings([meeting.id], confirmedOnly: true)) ?? []
+
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
 
-            let content = buildMarkdown(meeting: meeting, summary: summary, cleanedText: cleanedText)
+            let content = buildMarkdown(meeting: meeting, summary: summary,
+                                        cleanedText: cleanedText, decisions: decisions)
+
+            // No-op short-circuit: a user mutation that didn't change the
+            // confirmed set (dismissing a suggestion, owner fix on an
+            // unconfirmed row) rebuilds identical content — skip the rewrite
+            // AND the addendum path entirely.
+            let priorRecord = try? await KBExportRepository(database: AppDatabase.shared)
+                .record(meetingId: meeting.id)
+            if let priorRecord, priorRecord.contentHash == EmbeddingService.hash(content) {
+                logger.info("KBWriteBack: content unchanged for \(meeting.id, privacy: .public) — skipping rewrite")
+                return
+            }
 
             // Never clobber a user-edited note (TASK-050): if the file on
             // disk no longer matches what WE last wrote (content hash from
@@ -58,7 +112,7 @@ final class KBWriteBackService {
             // instead and leave their edits alone.
             var targetURL = fileURL
             let repo = KBExportRepository(database: AppDatabase.shared)
-            if let prior = try? await repo.record(meetingId: meeting.id),
+            if let prior = priorRecord,
                FileManager.default.fileExists(atPath: prior.filePath),
                let onDisk = try? String(contentsOfFile: prior.filePath, encoding: .utf8),
                EmbeddingService.hash(onDisk) != prior.contentHash {
@@ -99,7 +153,7 @@ final class KBWriteBackService {
 
     func outputURL(for meeting: Meeting, root: URL) -> URL {
         // Memos (TASK-052) live in their own folder, not under Meeting Notes.
-        if meeting.templateId == "memo" {
+        if meeting.isMemo {
             let dir = root.appendingPathComponent("Memos", isDirectory: true)
             let safe = meeting.title.replacingOccurrences(of: "/", with: "-")
             return dir.appendingPathComponent("\(safe).md")
@@ -128,10 +182,11 @@ final class KBWriteBackService {
 
     // MARK: - Markdown builder
 
-    private func buildMarkdown(
+    func buildMarkdown(
         meeting: Meeting,
         summary: String,
-        cleanedText: String
+        cleanedText: String,
+        decisions: [Decision] = []
     ) -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .long
@@ -179,6 +234,31 @@ final class KBWriteBackService {
                 summary.trimmingCharacters(in: .whitespacesAndNewlines),
                 "",
             ]
+        }
+
+        // Confirmed decisions (TASK-129). Each line: the statement, who owns it,
+        // the meeting date, and an indented rationale. Makes decisions visible
+        // to KB-grounded chat without a separate index.
+        if !decisions.isEmpty {
+            lines += ["## Decisions", ""]
+            let dayFormatter = DateFormatter()
+            dayFormatter.dateStyle = .long
+            let decisionDate = (meeting.startDate ?? meeting.scheduledStartDate).map { dayFormatter.string(from: $0) }
+            for decision in decisions {
+                var meta: [String] = []
+                if let owner = decision.ownerName?.trimmingCharacters(in: .whitespacesAndNewlines), !owner.isEmpty {
+                    meta.append("decided by \(owner)")
+                }
+                if let decisionDate { meta.append(decisionDate) }
+                var head = "- **\(decision.title)**"
+                if !meta.isEmpty { head += " (\(meta.joined(separator: ", ")))" }
+                lines.append(head)
+                if let rationale = decision.rationale?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !rationale.isEmpty {
+                    lines.append("  \(rationale)")
+                }
+            }
+            lines.append("")
         }
 
         let trimmedTranscript = cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)

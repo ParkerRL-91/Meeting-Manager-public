@@ -452,6 +452,7 @@ private struct PersonDetailView: View {
     @State private var apolloProfile: ApolloService.Profile?
     @State private var apolloLoading = false
     @State private var personOpenItems: [TaskItem] = []
+    @State private var personDecisions: [Decision] = []
     @State private var dossierFacts: [EntityFact] = []
     @State private var factConflicts: [FactLinkDescriptor] = []
     @State private var healthSignals: [RelationshipHealth.Signal] = []
@@ -597,6 +598,7 @@ private struct PersonDetailView: View {
                 }
                 if isSelf, !speakingStats.isEmpty { speakingSection }
                 if !personOpenItems.isEmpty { rollupActionItems }
+                if !personDecisions.isEmpty { decisionLogSection }
                 if !dossierFacts.isEmpty { dossierSection }
                 if !recentSummaries.isEmpty { rollupSummaries }
 
@@ -720,6 +722,13 @@ private struct PersonDetailView: View {
 
     private func loadRollups() async {
         personOpenItems = await rollups.openActionItems(forParticipants: [person.canonicalName] + person.aliases)
+        // TASK-129: this person's confirmed decisions — owner Person-id match, or
+        // owner/involved names matching the person's canonical keys (aliases
+        // included). Confirmed only; the DOSSIER section below shows the broader
+        // entityFact provenance separately.
+        personDecisions = ((try? await DecisionRepository(database: AppDatabase.shared)
+            .decisions(status: .active)) ?? [])
+            .filter { $0.belongsTo(person: person) }
         dossierFacts = (try? await EntityFactRepository(database: AppDatabase.shared)
             .facts(entityType: "person",
                    entityKey: VocativeMiningService.canonicalKey(for: person.canonicalName),
@@ -742,6 +751,67 @@ private struct PersonDetailView: View {
     /// The newer fact that superseded/contradicted this one, if any.
     private func conflict(for fact: EntityFact) -> FactLinkDescriptor? {
         factConflicts.first { $0.toMeetingId == fact.meetingId && $0.toText == fact.text }
+    }
+
+    /// TASK-129: the confirmed decisions this person owns or was involved in,
+    /// each deep-linking to its meeting. A distinct "Decision Log" header + a
+    /// "Confirmed" badge distinguish these curated, triaged rows from the
+    /// DOSSIER's broader auto-extracted entityFacts below, which overlap in the
+    /// decision kind but differ in provenance.
+    private var decisionLogSection: some View {
+        let titlesById = Dictionary(appState.meetings.map { ($0.id, $0.title) },
+                                    uniquingKeysWith: { a, _ in a })
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("DECISION LOG")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.appTextMuted)
+                    .tracking(0.4)
+                Text("Confirmed")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.appSuccess)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.appSuccess.opacity(0.14))
+                    .clipShape(Capsule())
+            }
+            ForEach(personDecisions) { decision in
+                Button {
+                    appState.sidebarDestination = .meetings
+                    appState.selectedMeetingId = decision.meetingId
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(decision.title)
+                            .font(.caption)
+                            .foregroundStyle(Color.appTextPrimary)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(2)
+                        HStack(spacing: 6) {
+                            if let owner = decision.ownerName, !owner.isEmpty {
+                                Text("Decided by \(owner)")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appTextTertiary)
+                            }
+                            if let title = titlesById[decision.meetingId] {
+                                Text(title)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appAccent)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.appSurfaceSecondary.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 24)
+        .padding(.top, 10)
     }
 
     /// Auto-maintained dossier (TASK-047): the durable facts this person's

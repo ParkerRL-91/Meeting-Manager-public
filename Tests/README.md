@@ -36,10 +36,10 @@ Each fixture = `.aiff` audio + `.txt` ground truth transcript.
 ```bash
 python3 Tests/Scripts/measure_wer.py \
   --fixtures Tests/Fixtures \
-  --output harness/evaluations/latest-wer.json
+  --output .build/wer/latest-wer.json
 ```
 
-Results in `harness/evaluations/latest-wer.json`. Exit code 0 = all gates pass.
+Results in `.build/wer/latest-wer.json`. Exit code 0 = all gates pass.
 
 **Optional: faster repeated runs**
 Compile the transcription helper:
@@ -48,7 +48,7 @@ swift build --product transcribe-audio
 python3 Tests/Scripts/measure_wer.py \
   --fixtures Tests/Fixtures \
   --build-dir .build/debug \
-  --output harness/evaluations/latest-wer.json
+  --output .build/wer/latest-wer.json
 ```
 
 ### Detection Tests (Swift test target)
@@ -58,14 +58,7 @@ swift test --filter MeetingDetectionTests
 
 Tests meeting start/stop detection using process simulation — no real Zoom needed.
 
-## Sprint Contracts
-
-| Sprint | Contract | Status |
-|--------|----------|--------|
-| 1 | harness/sprint-contracts/sprint-1-transcription.md | Active |
-| 2 | harness/sprint-contracts/sprint-2-detection.md | Not started |
-
-## Pass Thresholds (Sprint 1)
+## Pass Thresholds
 
 | Metric | Threshold |
 |--------|-----------|

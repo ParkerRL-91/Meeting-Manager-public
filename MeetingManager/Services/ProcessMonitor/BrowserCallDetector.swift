@@ -28,6 +28,13 @@ final class BrowserCallDetector {
     /// and detection falls through to tab/window-title checks.
     var isRecordingProvider: (() -> Bool)?
 
+    /// Reports EVERY meeting title matched this poll (deduped, order-preserved)
+    /// while a recording is active — the raw material for switch detection
+    /// (`MeetingSwitchDetectionService`). Fires on the main actor (this class is
+    /// `@MainActor`, poll runs via `MainActor.assumeIsolated`). Does not affect
+    /// start/end debounce — the single-title `DetectionResult` still drives that.
+    var onInCallTitlesObserved: (([String]) -> Void)?
+
     /// Number of consecutive "not in call" polls before we declare the call
     /// ended. At the 10 s default interval, 3 misses = 30 seconds of no-call
     /// before stop fires. This prevents false stops from transient detection
@@ -103,6 +110,12 @@ final class BrowserCallDetector {
                 fileLog("Call may have ended — miss \(consecutiveNotInCall)/\(threshold) (debouncing)")
             }
         }
+
+        // Report all matched titles to the switch detector while recording.
+        // Empty reports are harmless (the detector treats them as no-signal).
+        if isRecordingProvider?() == true {
+            onInCallTitlesObserved?(result.allTitles)
+        }
     }
 
     // MARK: - Detection
@@ -111,6 +124,9 @@ final class BrowserCallDetector {
         let inCall: Bool
         let name: String?
         let method: String
+        /// All meeting titles matched this poll (deduped). Empty for the
+        /// mic-usage path (which has no title) and when nothing matched.
+        let allTitles: [String]
     }
 
     /// Polls since the last AppleScript probe — see the throttle below.
@@ -121,42 +137,56 @@ final class BrowserCallDetector {
         // including the CGWindowList walk that previously ran on each poll
         // regardless.
         guard anyBrowserRunning() else {
-            return DetectionResult(inCall: false, name: nil, method: "noBrowser")
+            return DetectionResult(inCall: false, name: nil, method: "noBrowser", allTitles: [])
         }
 
         // Strategy 1: Check if a browser is using the microphone (cheapest, no
         // permissions needed). Suppressed while we're recording — our own
         // engine holds the input device, so the signal is always positive.
+        // Retains precedence: when not recording, a mic-usage hit short-circuits
+        // before the title probes exactly as before.
         if isRecordingProvider?() != true, isBrowserUsingMicrophone() {
-            return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage")
+            return DetectionResult(inCall: true, name: "Browser Call", method: "MicUsage", allTitles: [])
         }
 
         // Strategy 2: CGWindowList — milliseconds, no IPC. Catches the
-        // meeting when it's the active tab of any browser window.
-        if let match = checkViaCGWindowList() {
-            return DetectionResult(inCall: true, name: match, method: "CGWindowList")
-        }
+        // meeting when it's the active tab of any browser window. Collects
+        // ALL matched titles (not just the first) so the switch detector can
+        // diff the full open-tab set.
+        var titles = checkViaCGWindowList()
 
         // Strategy 3: AppleScript tab enumeration — the expensive probe. It
         // walks EVERY Chrome tab over synchronous Apple Events on the main
         // thread (NSAppleScript is documented main-thread-only), tens of ms
         // with a busy Chrome. It exists to catch meetings in BACKGROUND tabs
-        // that CGWindowList can't see, so while idle it runs every 3rd poll
-        // (~30 s detection latency for that one case); while a call is
-        // active it runs every poll so end-debounce isn't delayed.
+        // that CGWindowList can't see. Throttled to every 3rd poll (~30 s)
+        // in ALL states — running it every poll during a call put a
+        // synchronous Apple Event walk on the main thread every 10 s for the
+        // whole recording. End-debounce tolerates the gap: 3 (idle) / 6
+        // (recording) consecutive misses are required, and a background-tab
+        // hit every 3rd poll resets the counter in time. The switch detector's
+        // confirm window is likewise flap-tolerant (2-of-last-3 polls).
         let chromeRunning = NSWorkspace.shared.runningApplications
             .contains { $0.bundleIdentifier == "com.google.Chrome" }
         if chromeRunning {
             pollsSinceAppleScript += 1
-            if isInBrowserCall || pollsSinceAppleScript >= 3 {
+            if pollsSinceAppleScript >= 3 {
                 pollsSinceAppleScript = 0
-                if let match = checkChromeTabsViaAppleScript() {
-                    return DetectionResult(inCall: true, name: match, method: "AppleScript")
-                }
+                titles.append(contentsOf: checkChromeTabsViaAppleScript())
             }
         }
 
-        return DetectionResult(inCall: false, name: nil, method: "none")
+        // Dedupe, preserving discovery order. First match keeps the original
+        // CGWindowList-before-AppleScript precedence for the single-title
+        // start/end contract.
+        var seen = Set<String>()
+        let uniqueTitles = titles.filter { seen.insert($0).inserted }
+
+        if let first = uniqueTitles.first {
+            return DetectionResult(inCall: true, name: first, method: "title", allTitles: uniqueTitles)
+        }
+
+        return DetectionResult(inCall: false, name: nil, method: "none", allTitles: [])
     }
 
     /// True when any known browser is running at all.
@@ -176,10 +206,10 @@ final class BrowserCallDetector {
 
     // MARK: - Strategy 1: AppleScript
 
-    private func checkChromeTabsViaAppleScript() -> String? {
+    private func checkChromeTabsViaAppleScript() -> [String] {
         guard NSWorkspace.shared.runningApplications.contains(where: {
             $0.bundleIdentifier == "com.google.Chrome"
-        }) else { return nil }
+        }) else { return [] }
 
         let script = """
         tell application "Google Chrome"
@@ -192,7 +222,7 @@ final class BrowserCallDetector {
             return tabTitles
         end tell
         """
-        guard let appleScript = NSAppleScript(source: script) else { return nil }
+        guard let appleScript = NSAppleScript(source: script) else { return [] }
         var errorInfo: NSDictionary?
         let result = appleScript.executeAndReturnError(&errorInfo)
         if let errorInfo {
@@ -204,34 +234,36 @@ final class BrowserCallDetector {
             if let code = errorInfo[NSAppleScript.errorNumber] as? Int, code == -1743 {
                 Logger.general.info("BrowserCallDetector: Automation permission denied (errAEEventNotPermitted); falling back to window-title detection. Enable it in System Settings → Privacy & Security → Automation.")
             }
-            return nil
+            return []
         }
 
         let count = result.numberOfItems
-        guard count > 0 else { return nil }
+        guard count > 0 else { return [] }
 
+        var matches: [String] = []
         for i in 1...count {
             guard let desc = result.atIndex(i), let title = desc.stringValue, !title.isEmpty else { continue }
-            if matchesMeetingKeyword(title) { return title }
+            if matchesMeetingKeyword(title) { matches.append(title) }
         }
-        return nil
+        return matches
     }
 
     // MARK: - Strategy 2: CGWindowList
 
-    private func checkViaCGWindowList() -> String? {
+    private func checkViaCGWindowList() -> [String] {
         let browserNames: Set<String> = ["Google Chrome", "Safari", "Firefox", "Microsoft Edge", "Brave Browser"]
         let options = CGWindowListOption([.optionOnScreenOnly, .excludeDesktopElements])
-        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [] }
 
+        var matches: [String] = []
         for w in list {
             guard let owner = w[kCGWindowOwnerName as String] as? String,
                   browserNames.contains(owner),
                   let title = w[kCGWindowName as String] as? String,
                   !title.isEmpty else { continue }
-            if matchesMeetingKeyword(title) { return title }
+            if matchesMeetingKeyword(title) { matches.append(title) }
         }
-        return nil
+        return matches
     }
 
     // MARK: - Strategy 3: Browser Microphone Usage

@@ -20,6 +20,7 @@ struct GeneralSettingsView: View {
     @State private var morningBriefHour: Int = 8
     @State private var morningBriefMinute: Int = 30
     @State private var taskDueAlertsEnabled: Bool = AppSettings.default.taskDueAlertsEnabled
+    @State private var switchDetectionEnabled: Bool = AppSettings.default.switchDetectionEnabled
 
     // Recording storage location (hydrated in .task; refreshed after changes).
     @State private var recordingPath: String = ""
@@ -67,6 +68,7 @@ struct GeneralSettingsView: View {
             morningBriefHour = appState.settings.morningBriefHour
             morningBriefMinute = appState.settings.morningBriefMinute
             taskDueAlertsEnabled = appState.settings.taskDueAlertsEnabled
+            switchDetectionEnabled = appState.settings.switchDetectionEnabled
             refreshRecordingStatus()
             let repo = RecipeRepository(database: appState.database)
             recipes = (try? await repo.allRecipes()) ?? []
@@ -286,10 +288,16 @@ struct GeneralSettingsView: View {
                     appState.settings.taskDueAlertsEnabled = enabled
                     Task { await appState.refreshTaskNotifications() }
                 }
+
+            Toggle("Suggest a new meeting when I switch calls", isOn: $switchDetectionEnabled)
+                .onChange(of: switchDetectionEnabled) { _, enabled in
+                    persistSetting { $0.switchDetectionEnabled = enabled }
+                    appState.settings.switchDetectionEnabled = enabled
+                }
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Set how many minutes before a meeting to be notified. Enable the Morning Brief to receive a daily summary of your meetings, open items, and due tasks at the configured time. Task alerts fire a single reminder at each task's due or reminder time.")
+            Text("Set how many minutes before a meeting to be notified. Enable the Morning Brief to receive a daily summary of your meetings, open items, and due tasks at the configured time. Task alerts fire a single reminder at each task's due or reminder time. When a call changes while you're recording — a new Google Meet tab or a second call app — Meeting Manager suggests starting a new meeting rather than merging both conversations into one.")
         }
     }
 

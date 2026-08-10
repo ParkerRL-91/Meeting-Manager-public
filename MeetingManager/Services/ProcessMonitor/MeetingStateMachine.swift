@@ -180,12 +180,21 @@ final class MeetingStateMachine {
         updated.status = .recording
         // Don't overwrite startDate — keep the original recording start time.
         // endDate will be updated when this session stops.
+        // A stale "no speech" verdict from a prior silent session no longer
+        // applies once a new session attaches — clearing it also keeps the
+        // startup recovery scan able to resurrect this meeting if session 2's
+        // transcription dies mid-flight (the scan excludes flagged rows).
+        updated.noSpeechDetectedAt = nil
         try await persist(&updated)
 
         do {
             try await audioCaptureService.startCapture(meetingId: updated.id)
         } catch {
             updated.status = .complete
+            // Capture never started — the prior session's no-speech verdict
+            // still stands, so restore it (mirrors startRecording's rollback
+            // restoring startDate).
+            updated.noSpeechDetectedAt = meeting.noSpeechDetectedAt
             try? await persist(&updated)
             throw error
         }

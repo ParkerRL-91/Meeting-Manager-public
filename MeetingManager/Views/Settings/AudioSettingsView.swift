@@ -20,6 +20,10 @@ struct AudioSettingsView: View {
     @State private var showPruneConfirm = false
     @State private var pruneResultMessage: String?
 
+    // TASK-135 compression backfill
+    @State private var compression = AudioArchiveService.Preview()
+    @State private var showCompressConfirm = false
+
     private let audioManager = AudioSessionManager()
 
     /// The microphone auto-detection would currently pick.
@@ -38,6 +42,7 @@ struct AudioSettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear(perform: loadState)
+        .onChange(of: appState.audioCompressionResult) { _, _ in refreshUsage() }
         .alert("Remove old audio?", isPresented: $showPruneConfirm) {
             Button("Cancel", role: .cancel) { }
             Button(pruneConfirmButtonTitle) {
@@ -55,6 +60,12 @@ struct AudioSettingsView: View {
             }
         } message: {
             Text(pruneConfirmMessage)
+        }
+        .alert("Compress existing recordings?", isPresented: $showCompressConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button("Compress now") { appState.startAudioCompressionBackfill() }
+        } message: {
+            Text(compressConfirmMessage)
         }
     }
 
@@ -123,11 +134,65 @@ struct AudioSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            compressionRow
         } header: {
             Text("Audio storage")
         } footer: {
             Text(storageFooterText)
         }
+    }
+
+    /// TASK-135: one-time recompression of the existing library. New recordings
+    /// are compressed automatically once their transcript is finished, so this
+    /// only exists for meetings recorded before that shipped.
+    private var compressionRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                showCompressConfirm = true
+            } label: {
+                Label("Compress existing recordings", systemImage: "arrow.down.circle")
+            }
+            .disabled(appState.isCompressingAudio || compression.meetings == 0)
+
+            if let progress = appState.audioCompressionProgress {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Compressed \(progress.done) of \(progress.total) meetings…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Stop") { appState.stopAudioCompressionBackfill() }
+                        .controlSize(.small)
+                }
+            } else if let result = appState.audioCompressionResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(compressionIdleText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var compressionIdleText: String {
+        if compression.meetings == 0 {
+            return "Every recording is already stored in the compressed format. New recordings are compressed automatically once their transcript is finished."
+        }
+        guard compression.bytes > 0 else {
+            // Files are compressed but their meeting records still name the old
+            // ones — an interrupted run. Running it again only fixes the records.
+            return "A previous compression run was interrupted. Running it again finishes updating \(compression.meetings) meeting record(s); no audio is re-encoded."
+        }
+        return "\(ByteCountFormatter.string(fromByteCount: compression.bytes, countStyle: .file)) of older recordings across \(compression.meetings) meetings are still stored uncompressed. Compressing them keeps the audio lossless and playable while using about a fifth of the space."
+    }
+
+    private var compressConfirmMessage: String {
+        let size = ByteCountFormatter.string(fromByteCount: compression.bytes, countStyle: .file)
+        return "Meeting Manager will rewrite \(size) of recordings as compressed lossless audio, one meeting at a time in the background. Playback, re-transcription, and speaker re-analysis keep working, and each original file is only removed after its compressed copy is verified. Recording pauses the run; you can stop it at any time."
     }
 
     private var storageFooterText: String {
@@ -264,9 +329,18 @@ struct AudioSettingsView: View {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         hasMicPermission = (status == .authorized)
 
+        refreshUsage()
+    }
+
+    /// Both figures stat every recording, so they're read off the main actor.
+    private func refreshUsage() {
         Task {
             let usage = await Task.detached { AudioRetention.currentAudioUsageBytes() }.value
-            await MainActor.run { currentUsageBytes = usage }
+            let preview = await AudioArchiveService.compressionPreview(database: appState.database)
+            await MainActor.run {
+                currentUsageBytes = usage
+                compression = preview
+            }
         }
     }
 

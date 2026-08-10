@@ -5,12 +5,12 @@ import GRDB
 final class ActionItemRepositoryTests: XCTestCase {
 
     private var db: AppDatabase!
-    private var repo: ActionItemRepository!
+    private var repo: TaskRepository!
     private let meetingId = "meeting-ai"
 
     override func setUpWithError() throws {
         db = try TestDatabase.create()
-        repo = ActionItemRepository(database: db)
+        repo = TaskRepository(database: db)
 
         var meeting = SampleData.makeMeeting(id: meetingId)
         try db.writer.write { dbConn in try meeting.save(dbConn) }
@@ -101,7 +101,7 @@ final class ActionItemRepositoryTests: XCTestCase {
         try await repo.toggleComplete(id: item.id!)
 
         let fetched = try await db.writer.read { dbConn in
-            try ActionItem.fetchOne(dbConn, key: item.id!)
+            try TaskItem.fetchOne(dbConn, key: item.id!)
         }
         XCTAssertTrue(fetched!.isCompleted)
     }
@@ -114,7 +114,7 @@ final class ActionItemRepositoryTests: XCTestCase {
         try await repo.toggleComplete(id: item.id!)
 
         let fetched = try await db.writer.read { dbConn in
-            try ActionItem.fetchOne(dbConn, key: item.id!)
+            try TaskItem.fetchOne(dbConn, key: item.id!)
         }
         XCTAssertFalse(fetched!.isCompleted)
     }
