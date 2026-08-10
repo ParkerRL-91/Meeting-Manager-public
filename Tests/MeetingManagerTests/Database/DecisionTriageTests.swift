@@ -120,7 +120,8 @@ final class DecisionTriageTests: XCTestCase {
         let fresh = makeDecision(title: "A totally different decision", status: .suggested)
         try await repo.mergeForMeeting(meetingId, extracted: [fresh])
 
-        XCTAssertNotNil(try await fetch(id), "A confirmed row whose key vanished must not be deleted.")
+        let survivor = try await fetch(id)
+        XCTAssertNotNil(survivor, "A confirmed row whose key vanished must not be deleted.")
     }
 
     func testMergePreservesCorrectedButSuggestedOwner() async throws {
@@ -188,12 +189,12 @@ final class DecisionTriageTests: XCTestCase {
 
     func testSingleMatchResolvesOwnerPersonId() {
         let david = Person.make(canonicalName: "David Smith")
-        let bekim = Person.make(canonicalName: "Jordan")
-        let people = [david, bekim]
+        let jordan = Person.make(canonicalName: "Jordan")
+        let people = [david, jordan]
 
         let hits = people.filter { $0.matches(participant: "Jordan") }
         XCTAssertEqual(hits.count, 1)
-        XCTAssertEqual(hits.first?.id, bekim.id)
+        XCTAssertEqual(hits.first?.id, jordan.id)
     }
 
     func testAmbiguousMatchLeavesOwnerUnresolved() {

@@ -40,8 +40,8 @@ final class NoSpeechTerminalStateTests: XCTestCase {
     func testBackfillFlipsStuckSilentMeeting() async throws {
         let now = Date()
         var stuck = SampleData.makeMeeting(
-            id: "m-stuck", status: .transcribing,
-            startDate: now.addingTimeInterval(-48 * 3600))
+            id: "m-stuck",
+            startDate: now.addingTimeInterval(-48 * 3600), status: .transcribing)
         try await repo.save(&stuck)
 
         try await runBackfill(now: now)
@@ -54,8 +54,8 @@ final class NoSpeechTerminalStateTests: XCTestCase {
     func testBackfillSparesRecentTranscribing() async throws {
         let now = Date()
         var recent = SampleData.makeMeeting(
-            id: "m-recent", status: .transcribing,
-            startDate: now.addingTimeInterval(-3600))
+            id: "m-recent",
+            startDate: now.addingTimeInterval(-3600), status: .transcribing)
         try await repo.save(&recent)
 
         try await runBackfill(now: now)
@@ -68,8 +68,8 @@ final class NoSpeechTerminalStateTests: XCTestCase {
     func testBackfillSparesMeetingWithTranscripts() async throws {
         let now = Date()
         var hasText = SampleData.makeMeeting(
-            id: "m-hastext", status: .transcribing,
-            startDate: now.addingTimeInterval(-48 * 3600))
+            id: "m-hastext",
+            startDate: now.addingTimeInterval(-48 * 3600), status: .transcribing)
         try await repo.save(&hasText)
         try await db.writer.write { dbc in
             var t = SampleData.makeTranscript(meetingId: "m-hastext")
@@ -86,8 +86,8 @@ final class NoSpeechTerminalStateTests: XCTestCase {
     func testBackfillSparesNonTranscribingMeeting() async throws {
         let now = Date()
         var complete = SampleData.makeMeeting(
-            id: "m-complete", status: .complete,
-            startDate: now.addingTimeInterval(-48 * 3600))
+            id: "m-complete",
+            startDate: now.addingTimeInterval(-48 * 3600), status: .complete)
         try await repo.save(&complete)
 
         try await runBackfill(now: now)
