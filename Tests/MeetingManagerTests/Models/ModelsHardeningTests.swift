@@ -765,9 +765,10 @@ final class ModelsHardeningTests: XCTestCase {
     }
 
     func testDefaultOllamaModelIsQwen3() {
-        // Default is the hybrid qwen3:8b (run with thinking on, see ADR-007 +
-        // TASK-024), not "auto" — "auto" stays selectable but isn't the default.
-        XCTAssertEqual(AppSettings.default.ollamaModel, "qwen3:8b")
+        // Default is the small non-thinking qwen3:4b-instruct (ADR-016 /
+        // TASK-082), not "auto" — "auto" stays selectable but isn't the
+        // default, and the bare thinking-only qwen3:4b is never the default.
+        XCTAssertEqual(AppSettings.default.ollamaModel, "qwen3:4b-instruct")
     }
 
     func testDefaultAutoGenerateSummaryFalse() {

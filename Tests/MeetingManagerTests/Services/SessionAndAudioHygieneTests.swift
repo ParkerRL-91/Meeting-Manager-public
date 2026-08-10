@@ -1181,7 +1181,10 @@ final class SessionAndAudioHygieneTests: XCTestCase {
         XCTAssertEqual(record.map(\.index), [1, 2, 3], "indexes are 1-based and contiguous")
 
         let prompt = PracticeMode.systemPrompt(personaName: "Acme", record: record)
-        XCTAssertTrue(prompt.contains("[1]") && prompt.contains("Price too high"))
+        XCTAssertTrue(prompt.contains("[1]"),
+                      "citation marker for record item 1 missing from prompt:\n\(prompt)")
+        XCTAssertTrue(prompt.contains("Price too high"),
+                      "record text missing from prompt:\n\(prompt)")
         XCTAssertTrue(prompt.contains("ONLY positions"), "grounding rule present")
     }
 
@@ -1454,12 +1457,26 @@ final class SessionAndAudioHygieneTests: XCTestCase {
             "Ship Friday": near, "Ship next Monday": near, "Ship someday": near,
             "Ship when?": near, "Ship eventually": near, "Unrelated topic": far,
         ]
+        // Cross-kind and hidden facts never pair, so `a` pairs only with `b`.
         let pairs = GardenerService.candidatePairs(
-            facts: [a, b, sameMeeting, otherKind, hidden],
-            vectors: vectors)
-        XCTAssertEqual(pairs.count, 1, "same-meeting, cross-kind, and hidden facts never pair")
+            facts: [a, b, otherKind, hidden], vectors: vectors)
+        XCTAssertEqual(pairs.count, 1, "cross-kind and hidden facts never pair")
         XCTAssertEqual(pairs.first?.older.id, 1, "older by extractedAt")
         XCTAssertEqual(pairs.first?.newer.id, 2)
+
+        // Two facts from the SAME meeting never pair with each other.
+        XCTAssertTrue(
+            GardenerService.candidatePairs(facts: [b, sameMeeting], vectors: vectors).isEmpty,
+            "same-meeting facts never pair")
+
+        // `sameMeeting` shares m2 with `b` but is a different meeting from `a`,
+        // so adding it back adds a legitimate second pair — both anchored on the
+        // older `a`. (Equal similarity + unstable sort, so don't assert on order.)
+        let withSameMeeting = GardenerService.candidatePairs(
+            facts: [a, b, sameMeeting, otherKind, hidden], vectors: vectors)
+        XCTAssertEqual(withSameMeeting.count, 2)
+        XCTAssertEqual(withSameMeeting.map(\.older.id), [1, 1], "both pair with the oldest fact")
+        XCTAssertEqual(Set(withSameMeeting.compactMap(\.newer.id)), [2, 3])
 
         let excluded = GardenerService.candidatePairs(
             facts: [a, b], vectors: vectors, excludedPairKeys: ["1-2"])

@@ -91,7 +91,10 @@ struct TaskRecurrenceRule: Codable, Equatable {
             result += ", starting \(Self.formatDate(dueDate, now: now, calendar: calendar, weekday: true))"
         }
         if let endDate {
-            result += ", until \(Self.formatDate(endDate, now: now, calendar: calendar, weekday: false))"
+            // Comma only when a "starting …" clause precedes it, so a rule with
+            // just an end date reads "Repeats every 3 days until Sep 1".
+            let lead = dueDate == nil ? " " : ", "
+            result += "\(lead)until \(Self.formatDate(endDate, now: now, calendar: calendar, weekday: false))"
         }
         return result
     }

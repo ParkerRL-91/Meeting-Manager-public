@@ -31,18 +31,23 @@ final class OnboardingManagerTests: XCTestCase {
     }
 
     // MARK: - Step Navigation
-    // Flow: welcome -> calendar -> knowledgeBase -> ready
+    // Flow (OnboardingManager.visibleSteps, which nextStep/previousStep walk):
+    // welcome -> storage -> calendar -> localModel -> audioRetention
+    //         -> knowledgeBase -> ready
+    //
+    // Note this is NOT allCases order: .localModel/.audioRetention/.storage
+    // have legacy-pinned raw values and are placed by visibleSteps instead.
 
     func testNextStepFromWelcome() {
         manager.currentStep = .welcome
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .calendar)
+        XCTAssertEqual(manager.currentStep, .storage)
     }
 
     func testNextStepFromCalendar() {
         manager.currentStep = .calendar
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .knowledgeBase)
+        XCTAssertEqual(manager.currentStep, .localModel)
     }
 
     func testNextStepFromKnowledgeBase() {
@@ -60,13 +65,13 @@ final class OnboardingManagerTests: XCTestCase {
     func testPreviousStepFromCalendar() {
         manager.currentStep = .calendar
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .welcome)
+        XCTAssertEqual(manager.currentStep, .storage)
     }
 
     func testPreviousStepFromKnowledgeBase() {
         manager.currentStep = .knowledgeBase
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .calendar)
+        XCTAssertEqual(manager.currentStep, .audioRetention)
     }
 
     func testPreviousStepFromReady() {
@@ -98,7 +103,15 @@ final class OnboardingManagerTests: XCTestCase {
 
     func testAllStepsExist() {
         let allSteps = OnboardingManager.OnboardingStep.allCases
-        XCTAssertEqual(allSteps.count, 4)
+        XCTAssertEqual(allSteps.count, 7)
+    }
+
+    /// Navigation walks `visibleSteps`, so its order is the real contract —
+    /// pin it, not `allCases` (whose order follows legacy raw values).
+    func testVisibleStepsOrder() {
+        XCTAssertEqual(manager.visibleSteps,
+                       [.welcome, .storage, .calendar, .localModel,
+                        .audioRetention, .knowledgeBase, .ready])
     }
 
     func testStepRawValues() {
@@ -106,6 +119,10 @@ final class OnboardingManagerTests: XCTestCase {
         XCTAssertEqual(OnboardingManager.OnboardingStep.calendar.rawValue, 1)
         XCTAssertEqual(OnboardingManager.OnboardingStep.knowledgeBase.rawValue, 2)
         XCTAssertEqual(OnboardingManager.OnboardingStep.ready.rawValue, 3)
+        // Appended later; raw values are legacy-pinned because they persist.
+        XCTAssertEqual(OnboardingManager.OnboardingStep.localModel.rawValue, 4)
+        XCTAssertEqual(OnboardingManager.OnboardingStep.audioRetention.rawValue, 5)
+        XCTAssertEqual(OnboardingManager.OnboardingStep.storage.rawValue, 6)
     }
 
     func testStepTitles() {
@@ -113,31 +130,32 @@ final class OnboardingManagerTests: XCTestCase {
         XCTAssertEqual(OnboardingManager.OnboardingStep.calendar.title, "Calendar")
         XCTAssertEqual(OnboardingManager.OnboardingStep.knowledgeBase.title, "Knowledge Base")
         XCTAssertEqual(OnboardingManager.OnboardingStep.ready.title, "Ready")
+        XCTAssertEqual(OnboardingManager.OnboardingStep.localModel.title, "On-Device AI")
+        XCTAssertEqual(OnboardingManager.OnboardingStep.audioRetention.title, "Audio")
+        XCTAssertEqual(OnboardingManager.OnboardingStep.storage.title, "Recordings")
     }
 
     // MARK: - Full Navigation Cycle
 
     func testFullForwardNavigationCycle() {
         XCTAssertEqual(manager.currentStep, .welcome)
-        manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .calendar)
-        manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .knowledgeBase)
-        manager.nextStep()
+        for expected in manager.visibleSteps.dropFirst() {
+            manager.nextStep()
+            XCTAssertEqual(manager.currentStep, expected)
+        }
         XCTAssertEqual(manager.currentStep, .ready)
         manager.nextStep()
-        XCTAssertEqual(manager.currentStep, .ready) // Stays at ready
+        XCTAssertEqual(manager.currentStep, .ready, "Should not advance past the last step")
     }
 
     func testFullBackwardNavigationCycle() {
         manager.currentStep = .ready
-        manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .knowledgeBase)
-        manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .calendar)
-        manager.previousStep()
+        for expected in manager.visibleSteps.dropLast().reversed() {
+            manager.previousStep()
+            XCTAssertEqual(manager.currentStep, expected)
+        }
         XCTAssertEqual(manager.currentStep, .welcome)
         manager.previousStep()
-        XCTAssertEqual(manager.currentStep, .welcome) // Stays at welcome
+        XCTAssertEqual(manager.currentStep, .welcome, "Should not go before the first step")
     }
 }

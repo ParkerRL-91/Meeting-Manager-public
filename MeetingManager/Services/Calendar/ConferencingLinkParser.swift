@@ -5,10 +5,11 @@ import Foundation
 ///
 /// This is the single source of truth for conferencing-link detection,
 /// shared by both `AppleCalendarService` (EventKit) and
-/// `GoogleCalendarService` (REST). It uses `NSDataDetector`'s link checker —
-/// so it only ever returns URLs that are actually present in the text, never
-/// a bare-domain prose match — and disambiguates by host against a known
-/// list of conferencing platforms.
+/// `GoogleCalendarService` (REST). It uses `NSDataDetector`'s link checker,
+/// restricted to matches that carry an explicit scheme in the source text,
+/// so a bare-domain prose mention ("we'll use zoom.us") is never treated as
+/// a link. Matches are then disambiguated by host against a known list of
+/// conferencing platforms.
 enum ConferencingLinkParser {
 
     /// Known conferencing-platform domains. A detected URL is a "join" link
@@ -37,18 +38,33 @@ enum ConferencingLinkParser {
         host == pattern || host.hasSuffix("." + pattern)
     }
 
+    /// Real URLs detected in `text`, in the order they appear.
+    ///
+    /// `NSDataDetector`'s link checker also matches bare domains in prose and
+    /// synthesizes an `http://` URL for them — "we'll use zoom.us for this one"
+    /// yields `http://zoom.us`, which would become a dead Join button. Requiring
+    /// the matched source text to carry a scheme keeps those out. (It also drops
+    /// `mailto:` matches, which are never join links.)
+    private static func detectedURLs(in text: String) -> [URL] {
+        guard let detector = try? NSDataDetector(
+            types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return detector.matches(in: text, options: [], range: range).compactMap { match in
+            guard let url = match.url,
+                  let matched = Range(match.range, in: text),
+                  text[matched].contains("://") else { return nil }
+            return url
+        }
+    }
+
     /// Returns the first real URL whose host matches a known conferencing
     /// platform, scanning `candidates` in order and, within each candidate,
     /// in the order the URLs appear. Nil candidates are skipped.
     static func firstConferencingURL(in candidates: [String?]) -> String? {
         for text in candidates {
             guard let text else { continue }
-            let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-            let range = NSRange(text.startIndex..., in: text)
-            guard let detector else { continue }
-            let matches = detector.matches(in: text, options: [], range: range)
-            for match in matches {
-                guard let url = match.url, let host = url.host?.lowercased() else { continue }
+            for url in detectedURLs(in: text) {
+                guard let host = url.host?.lowercased() else { continue }
                 if conferencingHostPatterns.contains(where: { hostMatches(host, $0) }) {
                     return url.absoluteString
                 }
@@ -63,11 +79,7 @@ enum ConferencingLinkParser {
     static func firstURL(in candidates: [String?]) -> String? {
         for text in candidates {
             guard let text else { continue }
-            let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-            let range = NSRange(text.startIndex..., in: text)
-            guard let match = detector?.firstMatch(in: text, options: [], range: range),
-                  let url = match.url else { continue }
-            return url.absoluteString
+            if let url = detectedURLs(in: text).first { return url.absoluteString }
         }
         return nil
     }
