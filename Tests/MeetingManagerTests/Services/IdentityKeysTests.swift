@@ -139,7 +139,7 @@ final class IdentityKeysTests: XCTestCase {
 
     func testVocative_caseInsensitive() {
         // textMentionsVocative lowercases `text` internally; name is already lowercase
-        XCTAssertTrue(VocativeMiningService.textMentionsVocative("Hey MARIEL, great point.", name: "dana"))
+        XCTAssertTrue(VocativeMiningService.textMentionsVocative("Hey DANA, great point.", name: "dana"))
     }
 
     func testVocative_substringFalsePositive_samNotInSame() {

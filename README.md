@@ -21,11 +21,35 @@ You only do this once.
 
 ---
 
-## What's New in v4.13.0
+## What's New in v4.23.0
 
-**Ask "catch me up" mid-meeting and get a live summary.** A button in the AI Chat panel on the meeting screen summarizes everything discussed so far and names the current topic, drawing on the full live transcript as it's being captured — no need to type a question or wait for the meeting to end.
+**Your weekly review now lives on the Home screen.** The standalone Weekly Review page and its sidebar entry are gone. The full review — the ◀ ▶ week picker, Generate/Refresh, and the queue states with Generate-now and Retry — is now a permanently expanded section on Home, opening on the current review week. Home's separate "Recent" list is removed, and the generated review no longer repeats a Commitments list that duplicated the live Open Action Items already on the same screen.
 
-**Clear a wedged task inbox in one click.** The task triage Inbox now has a Reject All button alongside Accept All, so a backlog of AI-suggested action items can be dismissed in bulk. The action is reversible via the same Undo bar used for individual dismissals.
+## Also New Since v4.13.0
+
+A condensed list of the user-facing changes across v4.14.0–v4.22.1.
+
+**Decision Log, expanded.** Decisions gained a triage inbox, correctable ownership, and search/recall. Each decision also records who or what it is *for* — distinct from who made it — surfaced as a "For …" chip, a filter, an editor field, and a subtitle in global search.
+
+**Backup and restore.** A snapshot covers the database, sidecar files, readable markdown, and media (incrementally), restores on next launch, and can run automatically every week. Configured in a new Backup settings tab.
+
+**A much smaller audio library.** Finished recordings are archived to ALAC — verified before the original is deleted — and Settings can backfill an existing library. Captured audio is stored as 16-bit, halving the size of new recordings.
+
+**Quick voice capture.** Record a mic-only voice memo from ⇧⌘M, the menu bar, or a global ⌥⌘R hotkey. It is auto-titled and skips the meeting-only parts of the pipeline.
+
+**Meeting-switch detection.** When the call you are on changes, the app notices and offers to move the recording — as a floating suggestion, a banner on the live-meeting screen, or a menu-bar entry.
+
+**Series open loops in prep.** Pre-meeting prep for a recurring series lists the items still open from earlier instances, completable inline.
+
+**Calendar sync you can trust.** The app now distinguishes revoked access, an unreadable calendar, and a changed connected account; shows an amber banner with Reconnect on Home and a warning row in the menu bar; and keeps its 15-minute refresh honest across sleep and sign-in changes.
+
+**Clearer Home states.** Empty, stale, and error states are stated explicitly instead of a section silently rendering nothing, and an empty day no longer discards the cached daily brief.
+
+**Silent-capture and no-speech visibility.** A recording where both channels stayed silent now says so, and a meeting with no detected speech reaches a final state instead of retrying indefinitely.
+
+**Stability.** Fixed a recurring crash caused by microphone-engine lifecycle races, and release packaging no longer leaves multiple copies of the app behind for Spotlight to find.
+
+**Daily Brief merged into Home** as a schedule rail plus a collapsible AI briefing, a redesigned menu bar popover, Zoom-link extraction from Google Calendar events, and a click-to-pick New Meeting button.
 
 Full changelog at [GitHub Releases](https://github.com/ParkerRL-91/Meeting-Manager-public/releases).
 

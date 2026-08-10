@@ -187,6 +187,18 @@ final class TaskRepository {
         }
     }
 
+    /// PRJ-017 F3: live, incomplete, accepted tasks sourced from a specific
+    /// set of meetings (the occurrences of a recurring series) — the "open
+    /// loops from previous sessions" a prep card carries forward. Ordered by
+    /// due date then priority, capped.
+    func openItems(meetingIds: [String], limit: Int = 15) async throws -> [TaskItem] {
+        guard !meetingIds.isEmpty else { return [] }
+        let items = try await liveIncomplete { query in
+            query.filter(meetingIds.contains(TaskItem.Columns.meetingId))
+        }
+        return Array(items.prefix(limit))
+    }
+
     // MARK: - Smart lists (accepted, live, incomplete)
 
     /// Overdue: due before the start of today and not completed.

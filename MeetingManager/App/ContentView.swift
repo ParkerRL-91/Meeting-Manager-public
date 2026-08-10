@@ -38,9 +38,6 @@ struct ContentView: View {
         case .home:
             HomeView()
 
-        case .dailyBrief:
-            DailyBriefView()
-
         case .chat:
             GlobalChatView()
 
@@ -61,6 +58,9 @@ struct ContentView: View {
 
         case .keyQuotes:
             KeyQuotesView()
+
+        case .decisions:
+            DecisionBrowserView()
 
         case .topics:
             TopicTrackersView()

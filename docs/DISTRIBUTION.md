@@ -44,12 +44,6 @@ Notarization requires a notarytool keychain profile named
 `MeetingManager-Notarize`. Without `NOTARIZE=1` the script ships
 self-signed and reminds you about the Gatekeeper warning.
 
-## Guided release
-
-Use the `/git-update` Claude Code skill for an interactive release: it reads
-the current version, helps pick the next one, drafts the change summary,
-runs `--dry-run` first, and then calls `push-update.sh`.
-
 ## Local install for testing
 
 ```bash

@@ -87,13 +87,20 @@ struct MicHealthSnapshot: Equatable {
     )
 }
 
-/// Lock-guarded snapshot of the AVAudioEngine's run/format state for cross-actor
-/// health readers (D2). Trivially `Sendable` — two `Bool`s, copied out under `lock`
-/// so the caller never touches the `engine` reference, which is reassigned on the
-/// config-change thread.
+/// Lock-guarded snapshot of the AVAudioEngine's run state, input format, and the
+/// bound device id, for cross-thread health readers (D2). Trivially `Sendable`,
+/// and copied out in ONE locked read so the caller never touches the `engine`
+/// reference (which lifecycle operations reassign) and never sees a run state and
+/// a device id that came from different instants.
 struct EngineLiveness: Sendable {
     var isRunning: Bool
-    var isFormatUsable: Bool
+    var deviceID: AudioDeviceID
+    var sampleRate: Double
+    var channelCount: UInt32
+
+    var isFormatUsable: Bool {
+        MicrophoneCapture.isUsableInputFormat(sampleRate: sampleRate, channelCount: channelCount)
+    }
 }
 
 /// Pure liveness + verdict math. Extracted so it is unit-testable without any
@@ -249,31 +256,82 @@ struct BiquadLowPass {
 /// stateful biquad low-pass runs before decimation so the interpolation
 /// doesn't alias high-frequency content into the speech band.
 ///
-/// `@unchecked Sendable`: every mutable field is either confined to the serialized
-/// start/stop/switch lifecycle or guarded by `lock` (`isRunning`, `rawBufferCount`,
-/// `activeDeviceID` via `currentDeviceID`). The `engine` reference is reassigned in
-/// `stop`, `startByCyclingDevices`, `syncEngineFormatToDevice`, and the config-change
-/// handler. The config handler runs on the notification-posting thread and reassigns
-/// `engine` while holding `lock` (it can race a cross-actor reader); the start/switch
-/// reassignments run before `isRunning` flips true, so no health reader observes them
-/// on a live session. Cross-actor readers therefore go through `engineLiveness`,
-/// which snapshots the engine reference + its run/format state under `lock` — never
-/// touching `engine` unsynchronized.
+/// ## Threading contract (TASK-133)
+///
+/// `@unchecked Sendable`, with three distinct mechanisms. Conflating them is what
+/// produced the 2026-07 heap-corruption crashes, so keep them straight:
+///
+/// 1. **`lifecycleQueue` serializes every engine-lifecycle operation** — `start`,
+///    `stop`, `switchDevice`, `rebuildInputInPlace`, and the configuration-change
+///    restart. Three of those are entered from independent threads (a detached
+///    self-heal, a detached mic switch, a CoreAudio notification thread) and
+///    `start()`'s `isRunning` test is check-then-act, so before this queue two of
+///    them could run `startByCyclingDevices` concurrently: racing writes to
+///    `engine`, `activeDeviceID`, `antiAliasFilter`, `lastStopAt`,
+///    `configChangeObserver`, plus a double observer registration. State reachable
+///    only from the queue (`lastStopAt`, `configChangeObserver`) therefore needs
+///    no lock, and a single live engine means a single live tap thread, which is
+///    what makes `antiAliasFilter` single-writer again.
+/// 2. **`lock` guards cross-thread reads**, and is held only for short,
+///    non-blocking critical sections — never across a sleep, an `engine.start()`,
+///    or a device probe, because the per-buffer tap callback takes the same lock.
+///    It guards `isRunning`, `rawBufferCount`, the probe accumulators,
+///    `activeDeviceID`, the preferred-device fields, the callback closures, and
+///    the `engine` reference itself. Readers on other threads go through
+///    `engineLiveness` / `currentDeviceID`, never the reference.
+/// 3. **`graveyard` defers releasing retired engines** — see `retireEngineAndInstallFresh`.
 final class MicrophoneCapture: @unchecked Sendable {
     /// 16kHz mono Float32 buffers for WhisperKit + WAV recording.
-    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    ///
+    /// All four callback vars are read on the engine's tap thread / on
+    /// `lifecycleQueue` and rewritten on the main actor, so they are lock-guarded:
+    /// a plain `var` lets ARC race the closure box's retain in the reader against
+    /// the assignment's release in the writer. Readers snapshot into a local under
+    /// `lock` and invoke it OUTSIDE the lock.
+    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)? {
+        get { lock.withLock { _onBuffer } }
+        set { lock.withLock { _onBuffer = newValue } }
+    }
+    private var _onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+
     /// Raw hardware-format buffers for SFSpeechRecognizer.
-    var onRawBuffer: ((AVAudioPCMBuffer) -> Void)?
+    var onRawBuffer: ((AVAudioPCMBuffer) -> Void)? {
+        get { lock.withLock { _onRawBuffer } }
+        set { lock.withLock { _onRawBuffer = newValue } }
+    }
+    private var _onRawBuffer: ((AVAudioPCMBuffer) -> Void)?
 
     /// Called when the microphone device is disconnected mid-recording.
-    var onDeviceDisconnected: ((Error) -> Void)?
+    var onDeviceDisconnected: ((Error) -> Void)? {
+        get { lock.withLock { _onDeviceDisconnected } }
+        set { lock.withLock { _onDeviceDisconnected = newValue } }
+    }
+    private var _onDeviceDisconnected: ((Error) -> Void)?
 
-    /// AVAudioEngine instance. `var` because we deliberately recreate it on
-    /// `stop()` — reusing a stopped engine across recording sessions has
-    /// repeatedly caused -10868 (`kAudioUnitErr_FormatNotSupported`) on the
-    /// next `start()` when the input HAL hasn't fully released the prior
-    /// format. A fresh engine sidesteps the issue entirely.
-    var engine = AVAudioEngine()
+    /// Diagnostic: callback for logging raw buffer info (set by AudioCaptureService)
+    var onDiagnostic: ((String) -> Void)? {
+        get { lock.withLock { _onDiagnostic } }
+        set { lock.withLock { _onDiagnostic = newValue } }
+    }
+    private var _onDiagnostic: ((String) -> Void)?
+
+    /// AVAudioEngine instance. Deliberately recreated on `stop()` — reusing a
+    /// stopped engine across recording sessions has repeatedly caused -10868
+    /// (`kAudioUnitErr_FormatNotSupported`) on the next `start()` when the input
+    /// HAL hasn't fully released the prior format. A fresh engine sidesteps it.
+    ///
+    /// PRIVATE and lock-guarded: it is reassigned by `stop`, the device cycle, the
+    /// format resync, and the config-change restart, while health readers on other
+    /// threads used to dereference it directly — racing ARC retain against release
+    /// on the same reference, which corrupts the heap. Outside callers read
+    /// `engineLiveness` instead.
+    private var _engine = AVAudioEngine()
+
+    /// The live engine reference, snapshotted under `lock`. NEVER call this while
+    /// holding `lock` — NSLock is not recursive; the members that need the
+    /// reference inside a locked region use `_engine` directly.
+    private var engine: AVAudioEngine { lock.withLock { _engine } }
+
     private var isRunning = false
     /// Anti-alias low-pass for the downsampler. Touched only on the engine's
     /// tap callback queue (single thread per session); self-reconfigures when
@@ -281,21 +339,55 @@ final class MicrophoneCapture: @unchecked Sendable {
     private var antiAliasFilter = BiquadLowPass()
     /// Wall-clock time the last `stop()` returned. Used to throttle the next
     /// `start()` so the CoreAudio HAL has time to release the input device.
+    /// `lifecycleQueue`-only.
     private var lastStopAt: Date?
-    private(set) var preferredInputDeviceID: String?
+
+    /// The device the caller asked for (a UID), or nil for the system default.
+    /// Written on the main actor via `configure(inputDeviceID:)`, read on
+    /// `lifecycleQueue` by the cycle — hence lock-guarded.
+    var preferredInputDeviceID: String? { lock.withLock { _preferredInputDeviceID } }
+    private var _preferredInputDeviceID: String?
+
     /// True when `preferredInputDeviceID` is an EXPLICIT user pin (mic override on),
     /// so the cycle tries it FIRST — ahead of the call's in-use mic — and honors it
     /// even if it's the built-in. Set on the main actor before start()/switchDevice()
     /// (same set-before-cycle ordering as `preferredInputDeviceID`); read in the cycle.
-    var preferredIsExplicit = false
-    /// Diagnostic: callback for logging raw buffer info (set by AudioCaptureService)
-    var onDiagnostic: ((String) -> Void)?
+    var preferredIsExplicit: Bool {
+        get { lock.withLock { _preferredIsExplicit } }
+        set { lock.withLock { _preferredIsExplicit = newValue } }
+    }
+    private var _preferredIsExplicit = false
+
     private var rawBufferCount: Int = 0
 
-    /// Lock protecting mutable state (`isRunning`, `rawBufferCount`,
-    /// probe stats) accessed from both the main thread and the audio
-    /// callback queue.
+    /// Lock protecting mutable state (`isRunning`, `rawBufferCount`, probe stats,
+    /// `activeDeviceID`, the callback closures, the `engine` reference) accessed
+    /// from the main thread, `lifecycleQueue`, and the audio callback queue.
+    /// Critical sections must stay short — the per-buffer tap callback takes it.
     private let lock = NSLock()
+
+    /// Serializes every engine-lifecycle operation. See the threading contract on
+    /// the type. Public lifecycle methods hop onto it; the `…Queued` bodies assume
+    /// they are already on it and compose freely (NSLock-style re-entrancy on a
+    /// serial queue would deadlock, so the split is mandatory).
+    private let lifecycleQueue = DispatchQueue(label: "com.meetingmanager.mic-lifecycle")
+
+    /// Engines retired by a lifecycle operation, with the instant they were retired.
+    ///
+    /// Releasing a just-stopped engine synchronously is what corrupted the heap:
+    /// device cycling queues `kAudioOutputUnitProperty_CurrentDevice` listener
+    /// blocks on the engine's private AVAudioIOUnit serial queue, and
+    /// `-[AVAudioEngine dealloc]` → `AudioComponentInstanceDispose` running while
+    /// those blocks are still pending lets them `objc_msgSend` into freed memory
+    /// (the observed crash: `dealloc` from `startByCyclingDevices` on one thread,
+    /// the AVAudioIOUnit queue faulting on another). Parking the reference for
+    /// `graveyardDelay` lets that queue drain first. Guarded by `lock`.
+    private var graveyard: [(engine: AVAudioEngine, retiredAt: Date)] = []
+    private let graveyardDelay: TimeInterval = 2
+    /// Hard bound so a long device cycle can't hold engines indefinitely. Overflow
+    /// releases the OLDEST entries, which are the ones most likely already drained.
+    private let graveyardCap = 12
+    private let graveyardQueue = DispatchQueue(label: "com.meetingmanager.mic-graveyard", qos: .utility)
 
     /// Cycler-probe accumulators (REQ-4), updated in the tap callback under
     /// `lock`. `probePeakRMS` is the loudest window seen since the last reset;
@@ -317,8 +409,12 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Observer token for audio engine configuration change notifications.
     private var configChangeObserver: NSObjectProtocol?
 
-    /// The actual AudioDeviceID being used (for diagnostics)
-    private(set) var activeDeviceID: AudioDeviceID = 0
+    /// The actual AudioDeviceID being used (for diagnostics). Written only on
+    /// `lifecycleQueue` but always under `lock`, because `currentDeviceID` and
+    /// `engineLiveness` read it from other threads. Read it through
+    /// `currentDeviceID` even on the lifecycle queue — one accessor, one rule.
+    private var activeDeviceID: AudioDeviceID = 0
+    private func setActiveDeviceID(_ id: AudioDeviceID) { lock.withLock { activeDeviceID = id } }
 
     /// Lock-guarded snapshot of `activeDeviceID` for callers on other actors
     /// (e.g. `AudioCaptureService.switchMicrophone` doing a no-op identity compare).
@@ -333,23 +429,71 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// "which mic are we on" with zero audio.
     var currentDeviceUID: String? { deviceUID(currentDeviceID) }
 
-    /// Lock-guarded read of the engine's run state + input-format usability for a
-    /// cross-actor health reader (D2). Snapshots `engine.isRunning` and the input
-    /// node's output format under `lock`, so the caller (`AudioCaptureService`,
-    /// `@MainActor`) never reads the `engine` reference unsynchronized while the
-    /// config-change handler reassigns it under the same lock. Pure reads on
+    /// Lock-guarded read of the engine's run state, input format, and bound device
+    /// for cross-thread health readers (D2). This is the ONLY way outside code
+    /// learns anything about the engine: the reference itself is private, because
+    /// dereferencing it unsynchronized while a lifecycle operation reassigns it
+    /// races ARC retain against release and corrupts the heap. Pure reads on
     /// AVAudioEngine — they do not start/stop IO — so holding `lock` briefly here
     /// can't deadlock the audio path.
     var engineLiveness: EngineLiveness {
         lock.withLock {
-            let running = engine.isRunning
-            let fmt = engine.inputNode.outputFormat(forBus: 0)
+            let running = _engine.isRunning
+            let fmt = _engine.inputNode.outputFormat(forBus: 0)
             return EngineLiveness(
                 isRunning: running,
-                isFormatUsable: Self.isUsableInputFormat(
-                    sampleRate: fmt.sampleRate, channelCount: fmt.channelCount)
+                deviceID: activeDeviceID,
+                sampleRate: fmt.sampleRate,
+                channelCount: fmt.channelCount
             )
         }
+    }
+
+    // MARK: - Engine retirement (deferred release)
+
+    /// Tear the live engine down and install a fresh one, PARKING the retired
+    /// instance rather than releasing it here — see `graveyard` for why a
+    /// synchronous release faults the AVAudioIOUnit queue. `lifecycleQueue`-only.
+    private func retireEngineAndInstallFresh() {
+        let retired = lock.withLock { _engine }
+        retired.inputNode.removeTap(onBus: 0)
+        retired.stop()
+        lock.withLock { _engine = AVAudioEngine() }
+        park(retired)
+    }
+
+    private func park(_ retired: AVAudioEngine) {
+        let overCap = lock.withLock { () -> Bool in
+            graveyard.append((retired, Date()))
+            return graveyard.count > graveyardCap
+        }
+        // Sweeps always run on `graveyardQueue`, never on the lifecycle path — the
+        // release (dealloc → AudioComponentInstanceDispose) is exactly what must
+        // not happen inline.
+        if overCap {
+            graveyardQueue.async { [weak self] in self?.sweepGraveyard(force: true) }
+        }
+        graveyardQueue.asyncAfter(deadline: .now() + graveyardDelay) { [weak self] in
+            self?.sweepGraveyard(force: false)
+        }
+    }
+
+    /// Release parked engines that have outlived `graveyardDelay`; `force` also
+    /// trims anything past `graveyardCap`.
+    private func sweepGraveyard(force: Bool) {
+        let cutoff = Date().addingTimeInterval(-graveyardDelay)
+        lock.lock()
+        var expired = graveyard.filter { $0.retiredAt <= cutoff }.map(\.engine)
+        graveyard.removeAll { $0.retiredAt <= cutoff }
+        if force, graveyard.count > graveyardCap {
+            let drop = graveyard.count - graveyardCap
+            expired.append(contentsOf: graveyard.prefix(drop).map(\.engine))
+            graveyard.removeFirst(drop)
+        }
+        lock.unlock()
+        // Drop the references OFF the lock: the dealloc must not run while `lock`
+        // is held, because the per-buffer tap callback takes it.
+        expired.removeAll()
     }
 
     /// Signal-independent mic-health snapshot for the status surface (REQ-6) and
@@ -406,7 +550,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     )!
 
     func configure(inputDeviceID: String) {
-        self.preferredInputDeviceID = inputDeviceID.isEmpty ? nil : inputDeviceID
+        lock.withLock { _preferredInputDeviceID = inputDeviceID.isEmpty ? nil : inputDeviceID }
     }
 
     /// A device mid-transition (a Bluetooth headset switching A2DP→HFP the
@@ -431,6 +575,14 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func start() throws {
+        try lifecycleQueue.sync { try startQueued() }
+    }
+
+    /// Lifecycle-queue body of `start()`. The `isRunning` test is still
+    /// check-then-act, but the queue makes that safe: no other lifecycle operation
+    /// can run between the check and the mutation, so two threads can no longer
+    /// both pass it and cycle devices concurrently.
+    private func startQueued() throws {
         lock.lock()
         guard !isRunning else { lock.unlock(); return }
         lock.unlock()
@@ -490,31 +642,33 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func stop() {
+        lifecycleQueue.sync { stopQueued() }
+    }
+
+    /// Lifecycle-queue body of `stop()`.
+    private func stopQueued() {
         lock.lock()
         guard isRunning else { lock.unlock(); return }
         isRunning = false
+        lock.unlock()
 
-        // Teardown stays INSIDE the lock: handleEngineConfigurationChange
-        // restarts the engine under this same lock (it runs on the
-        // notification-posting thread), so a handler interleaving with
-        // stop() can no longer install a tap + start the freshly-recreated
-        // engine — which left the mic held open after the meeting ended.
+        // The teardown runs OFF `lock`. It used to be held across this whole block
+        // to keep handleEngineConfigurationChange from interleaving; `lifecycleQueue`
+        // is now that guarantee (a strictly stronger one — the handler can't even
+        // start), and holding `lock` across engine teardown would stall the
+        // per-buffer tap callback that shares it.
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
         }
 
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-
         // Recreate the engine for the next session. Reusing a stopped engine
         // is supposed to be safe but in practice it leaves the input IO unit
         // in a half-released state — the next start() then fails with
         // -10868 (FormatNotSupported). A fresh engine is cheap (~ms) and
-        // makes "stop → start" idempotent.
-        engine = AVAudioEngine()
+        // makes "stop → start" idempotent. The retired one is parked, not released.
+        retireEngineAndInstallFresh()
         lastStopAt = Date()
-        lock.unlock()
 
         Logger.audio.info("MicrophoneCapture stopped (engine recreated for next session)")
     }
@@ -529,13 +683,17 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// May block up to ~0.25s on the HAL-release throttle — callers run it off the
     /// main actor. Returns `start()`'s error on failure, `nil` on success.
     func switchDevice(toUID uid: String) -> Error? {
-        stop()
-        configure(inputDeviceID: uid)
-        do {
-            try start()
-            return nil
-        } catch {
-            return error
+        // ONE queue hop for the whole stop→configure→start, so a concurrent
+        // heal/config-change can't slip between the stop and the start.
+        lifecycleQueue.sync { () -> Error? in
+            stopQueued()
+            configure(inputDeviceID: uid)
+            do {
+                try startQueued()
+                return nil
+            } catch {
+                return error
+            }
         }
     }
 
@@ -552,15 +710,17 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// failure, `nil` on success. May block on HAL-release throttling — callers
     /// run it off the main actor. Bounded retries/backoff are the caller's job.
     func rebuildInputInPlace() -> Error? {
-        onDiagnostic?("DIAG:mic_heal rebuilding input in place (same device, fresh format)")
-        stop()
-        do {
-            try start()
-            onDiagnostic?("DIAG:mic_heal rebuild SUCCEEDED on \(currentDeviceName)")
-            return nil
-        } catch {
-            onDiagnostic?("DIAG:mic_heal rebuild FAILED: \(error.localizedDescription)")
-            return error
+        lifecycleQueue.sync { () -> Error? in
+            onDiagnostic?("DIAG:mic_heal rebuilding input in place (same device, fresh format)")
+            stopQueued()
+            do {
+                try startQueued()
+                onDiagnostic?("DIAG:mic_heal rebuild SUCCEEDED on \(currentDeviceName)")
+                return nil
+            } catch {
+                onDiagnostic?("DIAG:mic_heal rebuild FAILED: \(error.localizedDescription)")
+                return error
+            }
         }
     }
 
@@ -573,7 +733,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 onDiagnostic?("DIAG:mic_device preferred device failed, trying system default")
                 let defaultID = getDefaultInputDeviceID()
                 if defaultID != kAudioObjectUnknown {
-                    activeDeviceID = defaultID
+                    setActiveDeviceID(defaultID)
                     _ = setInputDeviceByID(defaultID)
                     onDiagnostic?("DIAG:mic_device fell back to system default deviceID=\(defaultID) name=\(getDeviceName(defaultID))")
                 }
@@ -581,7 +741,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         } else {
             let defaultID = getDefaultInputDeviceID()
             if defaultID != kAudioObjectUnknown {
-                activeDeviceID = defaultID
+                setActiveDeviceID(defaultID)
                 _ = setInputDeviceByID(defaultID)
                 onDiagnostic?("DIAG:mic_device using system default deviceID=\(defaultID) name=\(getDeviceName(defaultID))")
             }
@@ -603,7 +763,8 @@ final class MicrophoneCapture: @unchecked Sendable {
         // from the file log: a 0Hz/0ch format means the input device couldn't be
         // acquired at all (permission/contention), which is a different failure
         // than a valid format being rejected by the engine.
-        onDiagnostic?("DIAG:mic_format hw=\(hwRate)Hz/\(hwChannels)ch deviceID=\(activeDeviceID) name=\(getDeviceName(activeDeviceID))")
+        let boundDeviceID = currentDeviceID
+        onDiagnostic?("DIAG:mic_format hw=\(hwRate)Hz/\(hwChannels)ch deviceID=\(boundDeviceID) name=\(getDeviceName(boundDeviceID))")
 
         guard hwRate > 0 else {
             onDiagnostic?("DIAG:mic_format INVALID (0Hz) — input device not acquirable; engine.start() will fail -10868. No tap installed.")
@@ -621,6 +782,12 @@ final class MicrophoneCapture: @unchecked Sendable {
             let probing = self.isProbing
             if running { self.rawBufferCount += 1 }
             let currentRawBufferCount = self.rawBufferCount
+            // Snapshot the sinks under the same lock the main actor rewrites them
+            // under, then invoke them below OFF the lock — a bare `var` read races
+            // ARC's retain here against the assignment's release there.
+            let diagnostic = self._onDiagnostic
+            let rawSink = self._onRawBuffer
+            let bufferSink = self._onBuffer
             self.lock.unlock()
 
             // Cycler liveness probe (REQ-4): collected independently of
@@ -651,15 +818,15 @@ final class MicrophoneCapture: @unchecked Sendable {
                     sampleDump = samples.joined(separator: ",")
                 }
                 let fmt = buffer.format
-                self.onDiagnostic?("DIAG:raw_mic #\(currentRawBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.6f", rawRMS)) fmt=\(fmt.sampleRate)/\(fmt.channelCount)ch samples=[\(sampleDump)]")
+                diagnostic?("DIAG:raw_mic #\(currentRawBufferCount) frames=\(buffer.frameLength) rms=\(String(format: "%.6f", rawRMS)) fmt=\(fmt.sampleRate)/\(fmt.channelCount)ch samples=[\(sampleDump)]")
             }
 
             // Send raw buffer for SFSpeechRecognizer
-            self.onRawBuffer?(buffer)
+            rawSink?(buffer)
 
             // Downsample to 16kHz mono
             if let downsampled = self.downsample(buffer: buffer, fromRate: hwRate, channels: hwChannels) {
-                self.onBuffer?(downsampled, time)
+                bufferSink?(downsampled, time)
             }
         }
     }
@@ -788,7 +955,7 @@ final class MicrophoneCapture: @unchecked Sendable {
             deviceID = getDefaultInputDeviceID()
         }
         guard deviceID != kAudioObjectUnknown else { return false }
-        activeDeviceID = deviceID
+        setActiveDeviceID(deviceID)
         let success = setInputDeviceByID(deviceID)
         if success {
             onDiagnostic?("DIAG:mic_device set to '\(getDeviceName(deviceID))' (id=\(deviceID), uid=\(uid))")
@@ -876,9 +1043,10 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// re-set device) until they agree or attempts run out.
     private func syncEngineFormatToDevice(stage: String, attempts: Int = 5) throws {
         for attempt in 1...attempts {
+            let deviceID = currentDeviceID
             let au = engine.inputNode.inputFormat(forBus: 0)
-            let halRate = getDeviceNominalSampleRate(activeDeviceID)
-            let halChannels = getDeviceInputChannelCount(activeDeviceID)
+            let halRate = getDeviceNominalSampleRate(deviceID)
+            let halChannels = getDeviceInputChannelCount(deviceID)
             if Self.engineFormatAgreesWithHAL(auRate: au.sampleRate, auChannels: au.channelCount,
                                               halRate: halRate, halChannels: halChannels) {
                 if attempt > 1 {
@@ -892,11 +1060,9 @@ final class MicrophoneCapture: @unchecked Sendable {
             // Rebind: a fresh engine re-derives formats when its inputNode
             // is touched AFTER the device assignment; the sleep lets
             // coreaudiod finish whatever reconfiguration raced us.
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            engine = AVAudioEngine()
+            retireEngineAndInstallFresh()
             Thread.sleep(forTimeInterval: 0.12 * Double(attempt))
-            _ = setInputDeviceByID(activeDeviceID)
+            _ = setInputDeviceByID(deviceID)
         }
         throw AudioCaptureError.captureSetupFailed(
             "Microphone format never settled: the audio engine reports a different format than the device. "
@@ -1073,13 +1239,14 @@ final class MicrophoneCapture: @unchecked Sendable {
         var lastError: Error?
         for (idx, deviceID) in candidates.enumerated() {
             // Fresh engine per candidate — a failed start leaves the IO
-            // unit half-wired, and reusing it re-triggers -10868.
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            engine = AVAudioEngine()
+            // unit half-wired, and reusing it re-triggers -10868. The rejected
+            // candidate's engine is parked, never released here: it was started
+            // milliseconds ago and its AVAudioIOUnit queue still has our
+            // set-device listener blocks pending.
+            retireEngineAndInstallFresh()
             if idx > 0 { Thread.sleep(forTimeInterval: 0.15) }
 
-            activeDeviceID = deviceID
+            setActiveDeviceID(deviceID)
             let label = "\(getDeviceName(deviceID)) (\(idx + 1)/\(candidates.count))"
             guard setInputDeviceByID(deviceID) else {
                 onDiagnostic?("DIAG:mic_cycle SET-DEVICE failed for \(label) — next")
@@ -1250,13 +1417,18 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     // MARK: - Device Disconnection Handling
 
-    /// Called when the AVAudioEngine configuration changes (e.g., device disconnected/reconnected).
+    /// Called when the AVAudioEngine configuration changes (e.g., device
+    /// disconnected/reconnected). Fires on the notification-posting thread and
+    /// hands the work to `lifecycleQueue`, so it can no longer interleave with a
+    /// concurrent start/stop/switch/heal. Dispatched ASYNC deliberately: nothing
+    /// awaits this handler, and a `sync` hop would deadlock if AVFoundation ever
+    /// posts the notification from the same thread a queued `engine.start()` runs on.
     private func handleEngineConfigurationChange() {
-        lock.lock()
-        let wasRunning = isRunning
-        lock.unlock()
+        lifecycleQueue.async { [weak self] in self?.handleEngineConfigurationChangeQueued() }
+    }
 
-        guard wasRunning else { return }
+    private func handleEngineConfigurationChangeQueued() {
+        guard lock.withLock({ isRunning }) else { return }
 
         onDiagnostic?("DIAG:mic_device AVAudioEngine configuration changed — device may have disconnected")
         Logger.audio.warning("AVAudioEngine configuration changed mid-recording")
@@ -1267,32 +1439,29 @@ final class MicrophoneCapture: @unchecked Sendable {
             // Device is gone — stop gracefully and notify
             Logger.audio.error("Microphone device disconnected mid-recording — stopping capture")
             onDiagnostic?("DIAG:mic_device DISCONNECTED — stopping capture gracefully")
-            stop()
+            stopQueued()
             let error = MicrophoneCaptureError.deviceDisconnected(
                 "The microphone was disconnected during recording. Please reconnect and restart."
             )
             onDeviceDisconnected?(error)
         } else {
             // Device changed but still valid — try to restart the engine.
-            // The re-check AND the restart run under the same lock stop()
-            // tears down under: a bare re-check left a window where stop()
-            // completed in between and the restart resurrected the capture
-            // (mic indicator on, device held, after the meeting ended).
+            // The still-running re-check no longer needs `lock` held across the
+            // restart: `lifecycleQueue` is the serialization, so a stop() can't
+            // complete between the check and the restart (the window that used to
+            // resurrect capture after the meeting ended). Holding `lock` across the
+            // restart is in fact forbidden now — the resync sleeps for up to ~1.8 s
+            // and the tap callback shares that lock.
             onDiagnostic?("DIAG:mic_device config changed but format still valid (\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch), attempting restart")
-            lock.lock()
-            guard isRunning else {
-                lock.unlock()
-                onDiagnostic?("DIAG:mic_device config changed after stop — not restarting")
-                return
-            }
             // Re-pin the device we selected before restarting. A configuration
             // change (a device (dis)connect, a Continuity mic appearing) can
             // silently revert AVAudioEngine's input to the *system default* —
             // which may be a phantom aggregate/Continuity mic that captures pure
             // silence. Re-applying our chosen device + tap keeps capture on the
             // intended mic instead of drifting onto a silent default mid-meeting.
-            if activeDeviceID != kAudioObjectUnknown && activeDeviceID != 0 {
-                _ = setInputDeviceByID(activeDeviceID)
+            let boundDeviceID = currentDeviceID
+            if boundDeviceID != kAudioObjectUnknown && boundDeviceID != 0 {
+                _ = setInputDeviceByID(boundDeviceID)
             }
             // Same AU-vs-HAL agreement gate as start(): a config change is
             // exactly when the engine's cached format goes stale.
@@ -1304,12 +1473,11 @@ final class MicrophoneCapture: @unchecked Sendable {
             } catch {
                 restartError = error
             }
-            lock.unlock()
 
             if let error = restartError {
                 Logger.audio.error("Failed to restart engine after config change: \(error.localizedDescription)")
                 onDiagnostic?("DIAG:mic_device engine restart FAILED: \(error.localizedDescription)")
-                stop()
+                stopQueued()
                 let disconnectError = MicrophoneCaptureError.deviceDisconnected(
                     "Microphone configuration changed and engine could not restart: \(error.localizedDescription)"
                 )
@@ -1328,7 +1496,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 ) { [weak self] _ in
                     self?.handleEngineConfigurationChange()
                 }
-                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(activeDeviceID)))")
+                onDiagnostic?("DIAG:mic_device engine restarted successfully after config change (device re-pinned to \(getDeviceName(boundDeviceID)))")
                 // REQ-3: a config change is exactly when capture can silently
                 // wedge on a flat stream. Kick event-driven liveness
                 // re-validation now (≤ ~15 s clock in the owner) instead of

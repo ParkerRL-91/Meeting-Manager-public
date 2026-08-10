@@ -52,11 +52,11 @@ final class AudioPlaybackService {
 
         let item: AVPlayerItem
         if existing.count == 1 {
-            item = AVPlayerItem(url: URL(fileURLWithPath: existing[0]))
+            item = AVPlayerItem(asset: Self.asset(for: existing[0]))
         } else if let composed = Self.composition(for: existing) {
             item = AVPlayerItem(asset: composed)
         } else {
-            item = AVPlayerItem(url: URL(fileURLWithPath: existing[0]))
+            item = AVPlayerItem(asset: Self.asset(for: existing[0]))
             logger.warning("Playback: composition failed; playing first segment only")
         }
         // Speech-friendly time stretch — rate changes don't pitch-shift.
@@ -180,13 +180,25 @@ final class AudioPlaybackService {
         return offsets
     }
 
+    /// Assets are built with precise duration/timing because archived audio is
+    /// compressed (Apple Lossless `.m4a`, TASK-135). Without it AVFoundation
+    /// estimates duration from the container's bitrate metadata, which drifts —
+    /// and both the composition offsets below and `playRange`'s clip boundaries
+    /// are derived from `asset.duration`, so an estimate turns a sample-accurate
+    /// seek into an audible miss. WAV playback is unaffected (its duration is
+    /// exact either way).
+    private static func asset(for path: String) -> AVURLAsset {
+        AVURLAsset(url: URL(fileURLWithPath: path),
+                   options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+    }
+
     private static func composition(for paths: [String]) -> AVMutableComposition? {
         let composition = AVMutableComposition()
         guard let track = composition.addMutableTrack(
             withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
         var cursor = CMTime.zero
         for path in paths {
-            let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+            let asset = Self.asset(for: path)
             guard let src = asset.tracks(withMediaType: .audio).first else { continue }
             let range = CMTimeRange(start: .zero, duration: asset.duration)
             try? track.insertTimeRange(range, of: src, at: cursor)

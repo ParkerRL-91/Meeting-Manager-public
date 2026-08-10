@@ -17,7 +17,18 @@ struct MeetingPrepCardView: View {
     @State private var intentLoaded = false
     @State private var intentSaveTask: Task<Void, Never>?
 
+    // PRJ-017 F3: tasks the user completed straight from a prep card's
+    // "open loops" list — tracked locally for immediate strike-through +
+    // undo without rebuilding the whole brief.
+    @State private var locallyCompleted: Set<Int64> = []
+
     // MARK: - Computed
+
+    /// Task ids surfaced in the series "open loops" list, so the general
+    /// Open Items list can drop them (series list wins the slot, PRJ-017 F3).
+    private var seriesTaskIDs: Set<Int64> {
+        Set((prepBrief?.seriesOpenLoops?.openTasks ?? []).compactMap(\.id))
+    }
 
     private var scheduledDate: Date? {
         meeting.scheduledStartDate ?? meeting.startDate
@@ -397,8 +408,18 @@ struct MeetingPrepCardView: View {
                 }
             }
 
-            // Open action items
-            if !brief.openActionItems.isEmpty {
+            // PRJ-017 F3: open loops carried in from prior sessions of a
+            // recurring series (rendered above the general open items).
+            if let loops = brief.seriesOpenLoops, !loops.isEmpty {
+                seriesOpenLoopsSection(loops)
+            }
+
+            // Open action items (excluding any shown in the series loops above)
+            let generalOpen = brief.openActionItems.filter { item in
+                guard let id = item.id else { return true }
+                return !seriesTaskIDs.contains(id)
+            }
+            if !generalOpen.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Open Items")
                         .font(.caption.weight(.semibold))
@@ -406,7 +427,7 @@ struct MeetingPrepCardView: View {
                         .textCase(.uppercase)
                         .tracking(0.5)
 
-                    ForEach(brief.openActionItems.prefix(5)) { item in
+                    ForEach(generalOpen.prefix(5)) { item in
                         HStack(spacing: 8) {
                             Image(systemName: "circle")
                                 .font(.caption2)
@@ -431,8 +452,8 @@ struct MeetingPrepCardView: View {
                         }
                     }
 
-                    if brief.openActionItems.count > 5 {
-                        Text("+\(brief.openActionItems.count - 5) more")
+                    if generalOpen.count > 5 {
+                        Text("+\(generalOpen.count - 5) more")
                             .font(.caption)
                             .foregroundStyle(Color.appTextSecondary)
                     }
@@ -519,6 +540,123 @@ struct MeetingPrepCardView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    // MARK: - PRJ-017 F3 Series Open Loops
+
+    @ViewBuilder
+    private func seriesOpenLoopsSection(_ loops: SeriesOpenLoops) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.caption2)
+                    .foregroundStyle(Color.appAccent)
+                Text("Open loops from previous sessions")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appTextSecondary)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+                Spacer(minLength: 0)
+                Text("\(loops.occurrenceCount) prior")
+                    .font(.caption2)
+                    .foregroundStyle(Color.appTextTertiary)
+            }
+
+            // Open tasks with inline completion.
+            ForEach(loops.openTasks) { task in
+                let done = task.id.map { locallyCompleted.contains($0) } ?? false
+                HStack(spacing: 8) {
+                    Button {
+                        guard let id = task.id else { return }
+                        let newValue = !done
+                        if newValue { locallyCompleted.insert(id) } else { locallyCompleted.remove(id) }
+                        Task { try? await appState.taskRepository.setCompleted(id: id, newValue) }
+                    } label: {
+                        Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                            .font(.caption2)
+                            .foregroundStyle(done ? Color.appSuccess : Color.appWarning)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(done ? "Mark task not done" : "Mark task done")
+
+                    Text(task.title)
+                        .font(.caption)
+                        .foregroundStyle(done ? Color.appTextTertiary : Color.appTextPrimary)
+                        .strikethrough(done)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    if let assignee = task.assignee {
+                        Text(assignee)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Color.appTextSecondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.appTextTertiary.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+
+            // Unanswered questions from the last session.
+            ForEach(Array(loops.unresolvedQuestions.enumerated()), id: \.offset) { _, question in
+                HStack(alignment: .top, spacing: 6) {
+                    Text("OPEN Q")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.appAccentSubtle)
+                        .clipShape(Capsule())
+                    Text(question)
+                        .font(.caption)
+                        .foregroundStyle(Color.appTextTertiary)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+            }
+
+            // Recent series decisions — tappable to their meeting. Confirmed
+            // rows carry the green "DECIDED" tag; suggested (untriaged) rows
+            // carry an accent "UNREVIEWED" tag + dimmed text so prep stays
+            // useful for a user who hasn't triaged, without overstating them
+            // (TASK-129).
+            ForEach(loops.recentDecisions) { decision in
+                Button {
+                    appState.selectedMeetingId = decision.meetingId
+                } label: {
+                    HStack(alignment: .top, spacing: 6) {
+                        if decision.isSuggested {
+                            Text("UNREVIEWED")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.appAccent)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.appAccentSubtle)
+                                .clipShape(Capsule())
+                        } else {
+                            Text("DECIDED")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.appSuccess)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.appSuccess.opacity(0.14))
+                                .clipShape(Capsule())
+                        }
+                        Text(decision.title)
+                            .font(.caption)
+                            .foregroundStyle(decision.isSuggested ? Color.appTextTertiary : Color.appTextSecondary)
+                            .lineLimit(2)
+                        Spacer(minLength: 0)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(10)
+        .background(Color.appSurfaceSecondary.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

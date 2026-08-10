@@ -174,21 +174,42 @@ struct SummaryView: View {
             if activeSummaryTask != nil {
                 summaryQueueStatusView
             } else if transcriptCount == 0 {
-                // No transcript — explain why generation isn't possible
-                VStack(spacing: 12) {
-                    Image(systemName: "waveform.slash")
-                        .font(.system(size: 44))
-                        .foregroundStyle(.tertiary)
-                    Text("No Transcript Available")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text("A summary can only be generated from a transcript.\nRecord this meeting to capture audio, then Meeting Manager\nwill transcribe it automatically.")
-                        .font(.subheadline)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(3)
+                if meeting?.noSpeechDetectedAt != nil {
+                    // TASK-123: the meeting WAS recorded but the audio was
+                    // silent. The old copy ("Record this meeting to capture
+                    // audio") told the user to do something they already did —
+                    // this is the default tab, so it must tell the truth.
+                    VStack(spacing: 12) {
+                        Image(systemName: "waveform.slash")
+                            .font(.system(size: 44))
+                            .foregroundStyle(.tertiary)
+                        Text("No Speech Was Captured")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("This meeting was recorded, but the microphone and\nsystem audio were silent, so there is nothing to summarize.\nYou can retry transcription from the Transcript tab.")
+                            .font(.subheadline)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(3)
+                    }
+                    .padding(.horizontal, 40)
+                } else {
+                    // No transcript — explain why generation isn't possible
+                    VStack(spacing: 12) {
+                        Image(systemName: "waveform.slash")
+                            .font(.system(size: 44))
+                            .foregroundStyle(.tertiary)
+                        Text("No Transcript Available")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("A summary can only be generated from a transcript.\nRecord this meeting to capture audio, then Meeting Manager\nwill transcribe it automatically.")
+                            .font(.subheadline)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(3)
+                    }
+                    .padding(.horizontal, 40)
                 }
-                .padding(.horizontal, 40)
             } else {
                 // Has transcript — show generate button with recipe picker
                 VStack(spacing: 20) {
@@ -451,6 +472,10 @@ struct SummaryView: View {
                     SkimSectionLabel(kind: .decisions, title: "Action items")
                         .padding(.bottom, 8)
                     InlineActionItemsSection(meetingId: meetingId)
+                        .padding(.bottom, 28)
+
+                    // Decisions (PRJ-017 F1) — self-hides when none were extracted.
+                    DecisionsSection(meetingId: meetingId)
                         .padding(.bottom, 28)
 
                     // Previous sessions strip — populated from meeting series

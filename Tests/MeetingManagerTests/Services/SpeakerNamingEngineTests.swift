@@ -2,7 +2,7 @@ import XCTest
 @testable import MeetingManager
 
 // Unit coverage for the pure naming logic in SpeakerNamingEngine. These pin the
-// safety-critical behavior described in harness/spec-speaker-naming-logic.md:
+// safety-critical behavior of the naming design:
 // elimination only fires when unambiguous, hygiene drops non-persons, and the
 // contradiction flags surface (rather than apply) every uncertain case.
 final class SpeakerNamingEngineTests: XCTestCase {

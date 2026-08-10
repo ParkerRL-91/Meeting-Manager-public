@@ -235,6 +235,18 @@ struct DailyBriefAIService {
                 openItemsLines.append(li)
             }
 
+            // PRJ-017 F3: open loops carried in from prior sessions of a
+            // recurring series — surfaced so the brief can flag what's unresolved
+            // going in.
+            if let loops = entry.prepBrief.seriesOpenLoops, !loops.isEmpty {
+                for task in loops.openTasks.prefix(3) {
+                    openItemsLines.append("- \(task.title) *(open loop from \(title))*")
+                }
+                for q in loops.unresolvedQuestions.prefix(2) {
+                    openItemsLines.append("- Still open from last time: \(q) *(\(title))*")
+                }
+            }
+
             // KB background for this meeting. Each chunk gets a stable [KBn] id
             // the model must cite; the full body is retained in `citations` so
             // `verify` can confirm any quote is verbatim. The model is shown a

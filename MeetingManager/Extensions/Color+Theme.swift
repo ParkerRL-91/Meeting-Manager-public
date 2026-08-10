@@ -106,6 +106,11 @@ extension Color {
     static let appRecordingSubtle = Color(light: .hex(0xEF4444, opacity: 0.08), dark: .hex(0xEF4444, opacity: 0.14))
     static let appViolet = Color(light: .hex(0x8B5CF6), dark: .hex(0xA78BFA))
     static let appVioletSubtle = Color(light: .hex(0xA78BFA, opacity: 0.10), dark: .hex(0xA78BFA, opacity: 0.14))
+    // Neutral primary (distinct from indigo appAccent): the menu-bar popover's
+    // mic meter, Start Recording CTA, and model-download progress. Blue means
+    // "go / in progress", never "warning" — see the popover urgency ramp.
+    static let appInfo = Color(light: .hex(0x007AFF), dark: .hex(0x0A84FF))
+    static let appInfoTint = Color(light: .hex(0x0A84FF), dark: .hex(0x5AA9FF))
 
     // MARK: - Borders
     // border-1: primary hairline (cards, sections)

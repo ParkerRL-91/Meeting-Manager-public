@@ -22,6 +22,11 @@ struct Meeting: Identifiable, Codable, Equatable {
     var meetLink: String?
     /// Optional reference to a MeetingTemplate to pre-populate the notepad.
     var templateId: String?
+    /// Provenance (PRJ-017 F4): "memo" for a quick voice capture, "import" for
+    /// an imported recording, nil for a normal meeting (calendar-ness is still
+    /// derived from `calendarEventId`). Replaces the old `templateId == "memo"`
+    /// convention so `templateId` is free for real template resolution.
+    var source: String?
     /// JSON-encoded `[clusterId: name]` dictionary persisted by Layer 2
     /// speaker attribution (e.g. `{"Speaker 1": "Alex Chen"}`). NULL when no
     /// attribution ran or attribution returned empty. Used by Layer 3 to
@@ -50,6 +55,13 @@ struct Meeting: Identifiable, Codable, Equatable {
     /// summary, and notes are kept. Drives the "audio removed" UI caption and
     /// distinguishes a pruned meeting from one that never recorded.
     var audioPrunedAt: Date?
+    /// TASK-123: timestamp the meeting was closed as "no speech captured" — a
+    /// terminal state for recordings whose mic and system audio were both
+    /// silent, so transcription produced zero segments. Non-nil means the
+    /// meeting is deliberately complete-with-no-transcript: the startup orphan
+    /// scan skips it (it must not re-enqueue transcription forever) and the
+    /// meeting detail shows an explanatory empty state with a manual Retry.
+    var noSpeechDetectedAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -68,12 +80,14 @@ struct Meeting: Identifiable, Codable, Equatable {
         contextJSON: String? = nil,
         meetLink: String? = nil,
         templateId: String? = nil,
+        source: String? = nil,
         speakerMap: String? = nil,
         declinedAttendees: String? = nil,
         speakerConfidenceMap: String? = nil,
         attributionFlags: String? = nil,
         transcriptionAttemptedAt: Date? = nil,
         audioPrunedAt: Date? = nil,
+        noSpeechDetectedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -91,12 +105,14 @@ struct Meeting: Identifiable, Codable, Equatable {
         self.contextJSON = contextJSON
         self.meetLink = meetLink
         self.templateId = templateId
+        self.source = source
         self.speakerMap = speakerMap
         self.declinedAttendees = declinedAttendees
         self.speakerConfidenceMap = speakerConfidenceMap
         self.attributionFlags = attributionFlags
         self.transcriptionAttemptedAt = transcriptionAttemptedAt
         self.audioPrunedAt = audioPrunedAt
+        self.noSpeechDetectedAt = noSpeechDetectedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -289,8 +305,11 @@ extension Meeting: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case id, title, startDate, endDate, scheduledStartDate, scheduledEndDate
-        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, speakerMap, declinedAttendees, speakerConfidenceMap, attributionFlags, transcriptionAttemptedAt, audioPrunedAt, createdAt, updatedAt
+        case status, calendarEventId, audioFilePaths, isAllDay, participants, contextJSON, meetLink, templateId, source, speakerMap, declinedAttendees, speakerConfidenceMap, attributionFlags, transcriptionAttemptedAt, audioPrunedAt, noSpeechDetectedAt, createdAt, updatedAt
     }
+
+    /// PRJ-017 F4: a quick voice capture ("record a thought"), not a meeting.
+    var isMemo: Bool { source == "memo" }
 
     mutating func willUpdate(_ db: Database) throws {
         updatedAt = Date()

@@ -46,6 +46,9 @@ private struct EventResource: Decodable, Sendable {
     let id: String
     let summary: String?
     let description: String?
+    /// Free-text location. Third-party schedulers and Outlook often paste the
+    /// Zoom/Teams/Webex join URL here instead of into structured conferenceData.
+    let location: String?
     let start: EventDateTime?
     let end: EventDateTime?
     let attendees: [Attendee]?
@@ -290,10 +293,14 @@ final class GoogleCalendarService {
             Logger.calendar.debug("Event '\(resource.summary ?? "untitled")' has \(attendees.count) attendees (\(declined.count) declined)")
         }
 
-        // Prefer conference data entry point, fall back to hangoutLink.
+        // Structured conferencing data always wins. When Google carries no
+        // conferenceData/hangoutLink (Zoom/Teams/Webex invites pasted into the
+        // body or location), scan those free-text fields with the shared
+        // ConferencingLinkParser — location first, then description (TASK-127).
         let meetLink = resource.conferenceData?.entryPoints?
             .first(where: { $0.entryPointType == "video" })?.uri
             ?? resource.hangoutLink
+            ?? ConferencingLinkParser.firstConferencingURL(in: [resource.location, resource.description])
 
         return CalendarEvent(
             id: resource.id,
@@ -311,7 +318,9 @@ final class GoogleCalendarService {
 
     // MARK: - Retry Helper
 
-    /// Retries an operation with exponential backoff. Does NOT retry on 400/401/403 client errors.
+    /// Retries an operation with exponential backoff. Does NOT retry on terminal
+    /// client errors — a dead credential or a deleted calendar returns the same
+    /// answer every time, and retrying it costs 3 requests per calendar per tick.
     private func withRetry<T>(maxAttempts: Int = 3, operation: () async throws -> T) async throws -> T {
         var lastError: Error?
         for attempt in 0..<maxAttempts {
@@ -319,9 +328,15 @@ final class GoogleCalendarService {
                 return try await operation()
             } catch {
                 lastError = error
-                // Don't retry on client errors (400, 401, 403)
+                // 401/403 were already converted to `.accessRevoked` by
+                // `validateHTTPResponse`, so they never matched the httpError
+                // check below and were being retried. 404/410 mean the calendar
+                // is gone — equally pointless to retry.
+                if case GoogleCalendarError.accessRevoked = error {
+                    throw error
+                }
                 if case GoogleCalendarError.httpError(let statusCode, _) = error,
-                   [400, 401, 403].contains(statusCode) {
+                   [400, 401, 403, 404, 410].contains(statusCode) {
                     throw error
                 }
                 if attempt < maxAttempts - 1 {

@@ -34,17 +34,6 @@ struct SidebarView: View {
                     }
 
                     NavItem(
-                        icon: "calendar.badge.clock",
-                        label: "Daily Brief",
-                        badge: appState.dailyBriefMeetingsNeedingPrep,
-                        destination: .dailyBrief,
-                        current: appState.sidebarDestination
-                    ) {
-                        appState.sidebarDestination = .dailyBrief
-                        appState.selectedMeetingId = nil
-                    }
-
-                    NavItem(
                         icon: "sparkles",
                         label: "Ask Anything",
                         destination: .chat,
@@ -117,6 +106,17 @@ struct SidebarView: View {
                     }
 
                     NavItem(
+                        icon: "checkmark.seal",
+                        label: "Decisions",
+                        badge: appState.suggestedDecisionCount,
+                        destination: .decisions,
+                        current: appState.sidebarDestination
+                    ) {
+                        appState.sidebarDestination = .decisions
+                        appState.selectedMeetingId = nil
+                    }
+
+                    NavItem(
                         icon: "tag",
                         label: "Topics",
                         destination: .topics,
@@ -180,30 +180,14 @@ struct SidebarView: View {
             // MARK: - Pinned bottom: New Meeting + Action Items + status
 
             VStack(spacing: 6) {
-                Button {
-                    createAdHocMeeting()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("New Meeting")
-                            .font(.system(size: 12.5, weight: .medium))
-                    }
-                    .foregroundStyle(Color.appTextSecondary)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 30)
-                    .background(Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
-                            .foregroundStyle(Color.appBorderStrongest)
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("New Meeting (⌘N)")
-                // ⌘N is registered at the app level via `CommandGroup` in
-                // MeetingManagerApp; binding it locally too caused a duplicate
-                // registration with non-deterministic responder-chain behaviour.
+                // Context-sensitive control (TASK-121): a plain click takes the
+                // smart-match fast path when nothing maps to it; when candidates
+                // exist the click opens the picker (preview of the bind, nearby
+                // events, blank meeting). ⌘N is registered at the app level via
+                // `CommandGroup` in MeetingManagerApp; binding it locally too
+                // caused a duplicate registration with non-deterministic
+                // responder-chain behaviour.
+                NewMeetingButton(style: .full, primaryAction: { createAdHocMeeting() })
 
                 Button {
                     showAllActionItems = true

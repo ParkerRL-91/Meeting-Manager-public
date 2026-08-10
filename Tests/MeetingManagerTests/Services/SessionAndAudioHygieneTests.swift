@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import MeetingManager
 
@@ -47,12 +48,14 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     // MARK: - Crash-husk partitioning
 
     func testPartitionTreatsHeaderScaffoldingAsHusk() {
-        // AVAudioFile's header occupies ~4 KB before the first sample — the
-        // old `> 44` threshold classified a zero-sample husk as usable.
-        let sizes = ["good.wav": 1_000_000, "husk.wav": 4_140]
+        // A zero-sample husk is identified by walking to the WAV `data` chunk,
+        // not by a byte threshold — the old `> 4200` rule encoded the header
+        // size of one AVAudioFile layout (TASK-135).
+        let sizes = ["good.wav": 1_000_000, "husk.wav": 4_096]
         let (usable, husks) = AppState.partitionUsableAudioPaths(
             ["good.wav", "husk.wav", "missing.wav", ""],
-            sizeOf: { sizes[$0] }
+            sizeOf: { sizes[$0] },
+            hasAudio: { $0 == "good.wav" }
         )
         XCTAssertEqual(usable, ["good.wav"])
         XCTAssertEqual(Set(husks), Set(["husk.wav", "missing.wav"]),
@@ -62,10 +65,123 @@ final class SessionAndAudioHygieneTests: XCTestCase {
     func testPartitionKeepsAllGoodSessions() {
         let (usable, husks) = AppState.partitionUsableAudioPaths(
             ["a.wav", "b.wav"],
-            sizeOf: { _ in 50_000 }
+            sizeOf: { _ in 50_000 },
+            hasAudio: { _ in true }
         )
         XCTAssertEqual(usable, ["a.wav", "b.wav"])
         XCTAssertTrue(husks.isEmpty)
+    }
+
+    // MARK: - WAV layout independence (TASK-135)
+
+    /// Both settings dicts `AudioBufferManager.makeAudioFile` uses: Int16 (now
+    /// primary, half the bytes on disk) and Float32 (the compatibility fallback).
+    private static let int16Settings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+        AVSampleRateKey: 16000,
+        AVNumberOfChannelsKey: 1,
+        AVLinearPCMBitDepthKey: 16,
+        AVLinearPCMIsFloatKey: false,
+        AVLinearPCMIsBigEndianKey: false,
+        AVLinearPCMIsNonInterleaved: false
+    ]
+    private static let float32Settings: [String: Any] =
+        AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!.settings
+
+    private func makeWav(_ name: String, _ settings: [String: Any], frames: Int) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mm-wav-tests", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(UUID().uuidString)-\(name)")
+        let file = try AVAudioFile(forWriting: url, settings: settings)
+        if frames > 0 {
+            let fmt = file.processingFormat
+            let buf = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frames)))
+            buf.frameLength = AVAudioFrameCount(frames)
+            let ch = try XCTUnwrap(buf.floatChannelData)[0]
+            for i in 0..<frames { ch[i] = sin(Float(i) * 0.02) * 0.4 }
+            try file.write(from: buf)
+        }
+        return url
+    }
+
+    private func fileSize(_ url: URL) -> Int {
+        (((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]) as? NSNumber)?.intValue ?? 0
+    }
+
+    func testInt16CaptureHalvesBytesAndStillVendsFloat32() throws {
+        let n = 8_000
+        let header = try makeWav("hdr.wav", Self.int16Settings, frames: 0)
+        let i16 = try makeWav("i16.wav", Self.int16Settings, frames: n)
+        let f32 = try makeWav("f32.wav", Self.float32Settings, frames: n)
+
+        XCTAssertEqual(fileSize(i16) - fileSize(header), n * 2, "Int16 payload is 2 bytes/frame")
+        XCTAssertEqual(fileSize(f32) - fileSize(header), n * 4, "Float32 payload is 4 bytes/frame")
+
+        // The reason no consumer needs migrating: every reader goes through
+        // AVAudioFile, whose processingFormat is Float32 for BOTH layouts, and
+        // the 16 kHz mono gates the pipeline checks are unchanged.
+        let read = try AVAudioFile(forReading: i16)
+        XCTAssertEqual(read.fileFormat.commonFormat, .pcmFormatInt16, "on-disk format is Int16")
+        XCTAssertEqual(read.processingFormat.commonFormat, .pcmFormatFloat32)
+        XCTAssertEqual(read.processingFormat.sampleRate, 16000)
+        XCTAssertEqual(read.processingFormat.channelCount, 1)
+        XCTAssertEqual(read.length, Int64(n))
+    }
+
+    func testDataChunkIsLocatedByWalkingNotByFixedOffset() throws {
+        for settings in [Self.int16Settings, Self.float32Settings] {
+            let url = try makeWav("walk.wav", settings, frames: 1_000)
+            let chunk = try XCTUnwrap(WavFileLayout.findDataChunk(atPath: url.path))
+            XCTAssertEqual(chunk.sizeFieldOffset + 4, chunk.payloadOffset)
+            XCTAssertEqual(UInt64(chunk.declaredSize), UInt64(fileSize(url)) - chunk.payloadOffset,
+                           "a closed file's declared data size matches the bytes on disk")
+        }
+
+        // A 44-byte-header WAV (no JUNK/FLLR padding) puts `data` at 36, where
+        // the old hardcoded offset-4088 lookup found nothing at all.
+        var wav = Data()
+        func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+        func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+        wav += Data("RIFF".utf8) + le32(0) + Data("WAVE".utf8)
+        wav += Data("fmt ".utf8) + le32(16) + le16(1) + le16(1) + le32(16000) + le32(32000) + le16(2) + le16(16)
+        wav += Data("data".utf8) + le32(0)     // killed before close: size 0
+        wav += Data(repeating: 0, count: 2_000)
+        let bare = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mm-wav-tests/\(UUID().uuidString)-bare.wav")
+        try FileManager.default.createDirectory(at: bare.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try wav.write(to: bare)
+
+        let chunk = try XCTUnwrap(WavFileLayout.findDataChunk(atPath: bare.path))
+        XCTAssertEqual(chunk.payloadOffset, 44)
+        XCTAssertEqual(chunk.sizeFieldOffset, 40)
+        XCTAssertEqual(chunk.declaredSize, 0, "the crash signature the repair keys on")
+
+        XCTAssertNil(WavFileLayout.findDataChunk(atPath: "/nonexistent/nope.wav"))
+    }
+
+    func testHuskClassificationIsLayoutIndependentAndSparesKilledRecordings() throws {
+        for settings in [Self.int16Settings, Self.float32Settings] {
+            let headerOnly = try makeWav("husk.wav", settings, frames: 0)
+            let real = try makeWav("real.wav", settings, frames: 4_000)
+            XCTAssertFalse(WavFileLayout.containsAudioBytes(atPath: headerOnly.path),
+                           "header scaffolding with zero samples is a husk")
+            XCTAssertTrue(WavFileLayout.containsAudioBytes(atPath: real.path))
+
+            // A recording force-killed before close declares size 0 while
+            // holding real audio. It MUST stay usable — the header repair
+            // recovers it, and the husk branch deletes what it classifies.
+            let killed = try makeWav("killed.wav", settings, frames: 4_000)
+            let handle = try FileHandle(forUpdating: killed)
+            let end = try handle.seekToEnd()
+            let chunk = try XCTUnwrap(WavFileLayout.findDataChunk(in: handle, fileSize: end))
+            try handle.seek(toOffset: chunk.sizeFieldOffset)
+            try handle.write(contentsOf: Data([0, 0, 0, 0]))
+            try handle.close()
+            XCTAssertEqual(WavFileLayout.findDataChunk(atPath: killed.path)?.declaredSize, 0)
+            XCTAssertTrue(WavFileLayout.containsAudioBytes(atPath: killed.path),
+                          "a repairable recording is never a husk")
+        }
     }
 
     // MARK: - Anti-alias filter shape

@@ -37,6 +37,19 @@ struct LiveMeetingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // MARK: - Switch suggestion banner (TASK-118)
+            // Hides on soft-timeout demote; the menu bar popover keeps the row.
+            // Own animated container so insert/remove (including the machine-
+            // initiated 5-min demote) slides instead of snapping the notepad.
+            VStack(spacing: 0) {
+                if let suggestion = appState.pendingSwitchSuggestion, !appState.switchSuggestionDemoted {
+                    SwitchSuggestionInlineBanner(suggestion: suggestion)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.25), value: appState.pendingSwitchSuggestion?.id)
+            .animation(.easeInOut(duration: 0.25), value: appState.switchSuggestionDemoted)
+
             // MARK: - Top recording strip (minimal)
             RecordingStrip(meetingId: meetingId)
 
@@ -587,6 +600,16 @@ private struct RecordingStrip: View {
 
             Spacer()
 
+            // TASK-124: sustained silent-capture warning (visibility only). Both
+            // channels have been below the noise floor for the full window, so
+            // nothing is reaching the recording — surface it so the user can
+            // check their mic. Detection now lives on AppState (visible even
+            // with the main window closed); this is a label, it never touches
+            // the audio stack.
+            if appState.captureSilenceWarning {
+                silentCaptureWarning
+            }
+
             // Signal-independent mic-health status (TASK-095): shows which device
             // is live / muted / not capturing, even while silent. Suppressed while
             // the recovery banner owns the mic story (isMicRecovering).
@@ -686,6 +709,26 @@ private struct RecordingStrip: View {
         }
     }
 
+    /// TASK-124: compact warning pill in the mic-health style, rendered from
+    /// `appState.captureSilenceWarning`. Names the active mic so the user knows
+    /// which device to check.
+    private var silentCaptureWarning: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+            Text("Nothing is being captured — check your mic (\(activeMicLabel)) and audio")
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(Color.appWarning)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Color.appWarning.opacity(0.12))
+        .clipShape(Capsule())
+        .help("Both the microphone and system audio have been silent for over a minute. Check that the right mic is selected and unmuted. Recording continues.")
+        .accessibilityLabel("Warning: nothing is being captured. Check your microphone \(activeMicLabel) and audio.")
+    }
+
     // MARK: - Mic picker (TASK-111)
 
     /// Real input devices the user can pick. Excludes mics that can't capture right
@@ -775,7 +818,9 @@ private struct RecordingStrip: View {
     private func startTimer() {
         updateElapsed()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            Task { @MainActor in updateElapsed() }
+            Task { @MainActor in
+                updateElapsed()
+            }
         }
     }
 

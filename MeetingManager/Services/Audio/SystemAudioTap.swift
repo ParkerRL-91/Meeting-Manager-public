@@ -11,23 +11,44 @@ import os
 /// Even for audio-only capture, ScreenCaptureKit requires this permission.
 @available(macOS 14.2, *)
 final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
-    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    /// All four callback vars are assigned on the main actor and invoked on SCK's
+    /// delivery queues, so they are `lock`-guarded: a plain `var` lets ARC race the
+    /// reader's retain of the closure box against `= nil`'s release. The delivery
+    /// path snapshots the sink it needs inside the same locked block that reads
+    /// `isRunning`, and invokes it outside the lock.
+    var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)? {
+        get { lock.withLock { _onBuffer } }
+        set { lock.withLock { _onBuffer = newValue } }
+    }
+    private var _onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
 
     /// Microphone buffers, when this stream is started with `captureMicrophone:`.
     /// Used as the resilient mic path when AVAudioEngine can't acquire the input
     /// device (e.g. -10868 because the conferencing app holds the mic). SCK taps
     /// the mic at the system level, so it COEXISTS with Zoom/Meet/Teams.
-    var onMicBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    var onMicBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)? {
+        get { lock.withLock { _onMicBuffer } }
+        set { lock.withLock { _onMicBuffer = newValue } }
+    }
+    private var _onMicBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
 
     /// Diagnostic callback for logging (set by AudioCaptureService)
-    var onDiagnostic: ((String) -> Void)?
+    var onDiagnostic: ((String) -> Void)? {
+        get { lock.withLock { _onDiagnostic } }
+        set { lock.withLock { _onDiagnostic = newValue } }
+    }
+    private var _onDiagnostic: ((String) -> Void)?
 
     /// Fired when the SCStream dies mid-capture (permission revoked, display
     /// change, sleep/wake). Without this the owner never learns the remote
     /// audio went silent: levels freeze at their last value — which can hold
     /// the dual-silence auto-stop hostage forever — and the user records
     /// mic-only with no warning. Invoked on the SCK delegate queue.
-    var onStreamStopped: ((Error) -> Void)?
+    var onStreamStopped: ((Error) -> Void)? {
+        get { lock.withLock { _onStreamStopped } }
+        set { lock.withLock { _onStreamStopped = newValue } }
+    }
+    private var _onStreamStopped: ((Error) -> Void)?
 
     private var stream: SCStream?
     private var isRunning = false
@@ -43,8 +64,10 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
     /// (TASK-034). Reset on every start.
     private(set) var micPeakRMS: Float = 0
 
-    /// Lock protecting `isRunning`, `stream`, and `bufferCount` against
-    /// races between the audio callback queue and callers of start/stop.
+    /// Lock protecting `isRunning`, `stream`, `bufferCount`, and the callback
+    /// closures against races between the SCK delivery queues and callers of
+    /// start/stop. Critical sections must stay short — the per-buffer delivery
+    /// path takes it.
     private let lock = NSLock()
 
     /// Start capturing system audio via ScreenCaptureKit.
@@ -173,12 +196,18 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         let currentBufferCount: Int
         if isMic { micBufferCount += 1; currentBufferCount = micBufferCount }
         else { bufferCount += 1; currentBufferCount = bufferCount }
+        // Snapshot the sinks under the same lock the main actor rewrites them under
+        // and invoke them below OFF the lock. The `isRunning` check above is not
+        // enough on its own: the owner can nil a callback in the window between it
+        // and the invocation.
+        let diagnostic = _onDiagnostic
+        let sink = isMic ? _onMicBuffer : _onBuffer
         lock.unlock()
 
         // Extract audio data from CMSampleBuffer
         guard let formatDesc = sampleBuffer.formatDescription else {
             if currentBufferCount <= 3 {
-                onDiagnostic?("DIAG:sys_sckit #\(currentBufferCount) no format description")
+                diagnostic?("DIAG:sys_sckit #\(currentBufferCount) no format description")
             }
             return
         }
@@ -209,14 +238,14 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         )
         guard copyStatus == noErr else {
             if currentBufferCount <= 3 {
-                onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) PCM copy failed: \(copyStatus)")
+                diagnostic?("DIAG:\(tag) #\(currentBufferCount) PCM copy failed: \(copyStatus)")
             }
             return
         }
 
         // Diagnostic: log periodically
         if currentBufferCount <= 3 || currentBufferCount % 200 == 0 {
-            onDiagnostic?("DIAG:\(tag) #\(currentBufferCount) frames=\(frames) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", pcmBuffer.rmsLevel))")
+            diagnostic?("DIAG:\(tag) #\(currentBufferCount) frames=\(frames) rate=\(sampleRate) ch=\(channels) rms=\(String(format: "%.6f", pcmBuffer.rmsLevel))")
         }
 
         // Timestamp = the buffer's PRESENTATION time, not receipt time. The
@@ -231,10 +260,8 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
             lock.lock()
             if rms > micPeakRMS { micPeakRMS = rms }
             lock.unlock()
-            onMicBuffer?(pcmBuffer, time)
-        } else {
-            onBuffer?(pcmBuffer, time)
         }
+        sink?(pcmBuffer, time)
     }
 
     // MARK: - SCStreamDelegate
@@ -244,7 +271,8 @@ final class SystemAudioTap: NSObject, SCStreamDelegate, SCStreamOutput {
         Logger.audio.error("System audio stream stopped: \(error.localizedDescription)")
         lock.lock()
         isRunning = false
+        let stopped = _onStreamStopped
         lock.unlock()
-        onStreamStopped?(error)
+        stopped?(error)
     }
 }

@@ -188,10 +188,24 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     let micCapture = MicrophoneCapture()
 
     /// Callback for raw (unconverted) mic buffers — used by SFSpeechRecognizer.
-    var onRawMicBuffer: ((AVAudioPCMBuffer) -> Void)?
+    ///
+    /// Assigned and cleared on the main actor (AppState wires/unwires the Apple
+    /// Speech feed at recording start/stop) but INVOKED on the mic engine's tap
+    /// thread, so the storage is lock-guarded: a plain property let ARC race the
+    /// reader's retain of the closure box against `= nil`'s release. `nonisolated`
+    /// because the tap thread reads it.
+    private let _callbackLock = NSLock()
+    nonisolated(unsafe) private var _onRawMicBuffer: ((AVAudioPCMBuffer) -> Void)?
+    nonisolated var onRawMicBuffer: ((AVAudioPCMBuffer) -> Void)? {
+        get { _callbackLock.withLock { _onRawMicBuffer } }
+        set { _callbackLock.withLock { _onRawMicBuffer = newValue } }
+    }
 
-    /// The AVAudioEngine used by mic capture — exposed for SFSpeechRecognizer integration.
-    var micEngine: AVAudioEngine { micCapture.engine }
+    /// Whether the mic engine is currently running. Goes through
+    /// `MicrophoneCapture.engineLiveness`, which snapshots under MicrophoneCapture's
+    /// lock — callers must never reach for the `AVAudioEngine` reference itself,
+    /// which lifecycle operations reassign.
+    var micEngineIsRunning: Bool { micCapture.engineLiveness.isRunning }
     private let systemTap: AnyObject? = {
         if #available(macOS 14.2, *) {
             return SystemAudioTap()
@@ -208,6 +222,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// In-flight detached mic switch, if any — awaited by stopCapture so a
     /// switch's stop→configure→start can't land after teardown.
     private var activeMicSwitchTask: Task<String?, Never>?
+
+    /// In-flight detached self-heal rebuild, if any. Awaited by stopCapture for the
+    /// same reason as the switch task, and additionally so the teardown's
+    /// `micCapture.stop()` — which now waits on MicrophoneCapture's lifecycle queue
+    /// — never blocks the main actor behind a multi-second device cycle.
+    private var activeMicRebuildTask: Task<String?, Never>?
 
     /// Set synchronously at stopCapture entry. `isCapturing` stays true
     /// through the awaited merge (a new start must not race the file
@@ -226,11 +246,23 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     enum MicSource { case engine, screenCaptureKit }
     private(set) var micSource: MicSource = .engine
 
-    /// Serializes `switchMicrophone` so rapid requests don't race. While a switch
-    /// is in flight, the latest request is parked in `pendingSwitchUID` (only the
-    /// final selection wins) and run when the current switch finishes.
-    private var isMicSwitching = false
+    /// ONE gate for both mic-lifecycle coordinators. `switchMicrophone` and
+    /// `selfHealInput` each drive MicrophoneCapture through a stop→start, and each
+    /// used to guard only its OWN flag — so a self-heal and a switch could run
+    /// concurrently, which is precisely the overlap that raced the engine. Held for
+    /// the duration of either operation; a switch that loses the race parks itself in
+    /// `pendingSwitchUID` (only the final selection wins) and is drained by whichever
+    /// operation was holding the gate.
+    private var isMicLifecycleBusy = false
     private var pendingSwitchUID: (String?)?
+
+    /// Run the request parked while the gate was held. Called from the gate's
+    /// release path in both `switchMicrophone` and `selfHealInput`.
+    private func drainPendingSwitch() {
+        guard case let .some(next) = pendingSwitchUID else { return }
+        pendingSwitchUID = nil
+        Task { @MainActor in await self.switchMicrophone(toUID: next) }
+    }
 
     /// Reads whether the user has pinned a specific mic (override on). Wired by
     /// AppState. When override is on, the system-default auto-follow is suppressed.
@@ -337,9 +369,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         // Wire raw buffer callback for speech recognizer.
-        // Read the property dynamically so late-set callbacks are captured correctly.
+        // Read the property dynamically so late-set callbacks are captured
+        // correctly — snapshotting it under `_callbackLock` first, because this runs
+        // on the tap thread while the main actor can be clearing it.
         micCapture.onRawBuffer = { [weak self] buffer in
-            self?.onRawMicBuffer?(buffer)
+            guard let sink = self?.onRawMicBuffer else { return }
+            sink(buffer)
         }
 
         // Wire diagnostic logging from mic capture
@@ -508,11 +543,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             isCapturing = false
             throw error
         }
-        let engineRunning = micCapture.engine.isRunning
-        let inputFormat = micCapture.engine.inputNode.outputFormat(forBus: 0)
+        let engineState = micCapture.engineLiveness
         let micSourceLabel = micSource == .screenCaptureKit ? "ScreenCaptureKit"
             : micStartFailedPendingRecovery ? "NONE (recovery pending)" : "engine"
-        logToFile("Audio: mic capture STARTED (device: \(resolveInputDevice()?.localizedName ?? "default"), source: \(micSourceLabel), engine.running=\(engineRunning), inputFormat=\(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch)")
+        logToFile("Audio: mic capture STARTED (device: \(resolveInputDevice()?.localizedName ?? "default"), source: \(micSourceLabel), engine.running=\(engineState.isRunning), inputFormat=\(engineState.sampleRate)Hz/\(engineState.channelCount)ch)")
 
         // Start silence monitoring AFTER both captures are running
         consecutiveSilentSeconds = 0
@@ -702,8 +736,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
                 logToFile("Audio: SCK mic produced \(tap.micBufferCount) buffer(s) with peak rms \(String(format: "%.6f", tap.micPeakRMS)) (device=\(micUID ?? "default")) — \(tap.micBufferCount == 0 ? "no buffers" : "silent, rejecting")")
             }
             // SCK mic didn't produce audio — drop it and keep system audio only.
-            tap.onMicBuffer = nil
+            // STOP FIRST, then clear the sink: the scmic delivery queue is live
+            // until stop() flips the tap's `isRunning`, so nilling the callback
+            // ahead of it released the closure box out from under a thread that was
+            // about to invoke it.
             tap.stop()
+            tap.onMicBuffer = nil
             try? await Task.sleep(nanoseconds: 300_000_000)
             try? await tap.start()
         }
@@ -759,11 +797,17 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         pendingSwitchUID = nil
 
-        // Let an in-flight mic switch land before tearing down — its start()
-        // arriving after micCapture.stop() would resurrect the engine.
+        // Let an in-flight mic switch or self-heal rebuild land before tearing
+        // down — its start() arriving after micCapture.stop() would resurrect the
+        // engine, and `micCapture.stop()` would otherwise block the main actor
+        // behind MicrophoneCapture's lifecycle queue for the whole device cycle.
         if let switchTask = activeMicSwitchTask {
             _ = await switchTask.value
             activeMicSwitchTask = nil
+        }
+        if let rebuildTask = activeMicRebuildTask {
+            _ = await rebuildTask.value
+            activeMicRebuildTask = nil
         }
 
         silenceCheckTimer?.invalidate()
@@ -808,17 +852,14 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
             logToFile("Audio: mic switch ignored — not capturing (or stopping)")
             return
         }
-        guard !isMicSwitching else {
+        guard !isMicLifecycleBusy else {
             pendingSwitchUID = .some(requestedUID)   // overwrite — only the latest wins
             return
         }
-        isMicSwitching = true
+        isMicLifecycleBusy = true
         defer {
-            isMicSwitching = false
-            if case let .some(next) = pendingSwitchUID {
-                pendingSwitchUID = nil
-                Task { @MainActor in await self.switchMicrophone(toUID: next) }
-            }
+            isMicLifecycleBusy = false
+            drainPendingSwitch()
         }
 
         // Resolve target: an explicit (validated) UID wins, else override/best.
@@ -837,9 +878,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         // running. After a start-time failure the device is configured but
         // the engine never started — treating that as "already on it" would
         // block start-failed recovery from ever retrying (TASK-029).
+        // One `engineLiveness` snapshot answers both halves, so the bound device
+        // and the run state can't come from different instants.
         let targetID = sessionManager.deviceID(forUID: target.uniqueID)
-        if targetID != AudioDeviceID(kAudioObjectUnknown), targetID == micCapture.currentDeviceID,
-           micCapture.engine.isRunning {
+        let engineState = micCapture.engineLiveness
+        if targetID != AudioDeviceID(kAudioObjectUnknown), targetID == engineState.deviceID,
+           engineState.isRunning {
             logToFile("Audio: mic switch no-op — already on \(target.localizedName)")
             return
         }
@@ -872,12 +916,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         consecutiveMicDeadSeconds = 0
         micProblemWarned = false
-        logToFile("Audio: mic switch OK — now on \(micCapture.currentDeviceName) (requested \(target.localizedName), engine.running=\(micCapture.engine.isRunning))")
+        let postSwitchRunning = micCapture.engineLiveness.isRunning
+        logToFile("Audio: mic switch OK — now on \(micCapture.currentDeviceName) (requested \(target.localizedName), engine.running=\(postSwitchRunning))")
         // A successful switch — a user pick from the recovery banner, or an auto
         // resume — ends any in-flight recovery search immediately, so the inline
         // "finding a mic" banner clears right away instead of waiting for the next
         // poll tick (TASK-104, "so it stops searching quickly").
-        if isMicRecovering, micCapture.engine.isRunning {
+        if isMicRecovering, postSwitchRunning {
             endMicRecovery(resumedOn: target.localizedName)
         }
     }
@@ -974,7 +1019,7 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
         await switchMicrophone(toUID: target.uniqueID)
         guard isMicRecovering else { return true }   // a concurrent attempt may have ended it
-        if micCapture.engine.isRunning {
+        if micCapture.engineLiveness.isRunning {
             // Device cycling may have landed on a different (working) mic
             // than the target we asked for — report the device we're
             // actually capturing on.
@@ -1212,7 +1257,10 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
     /// between attempts; after `maxSelfHealAttempts` give up to a surfaced
     /// failure. Never runs while muted, recovering, or stopping.
     private func selfHealInput() async {
-        guard isCapturing, !isStoppingCapture, !isMicRecovering, !isSelfHealing else { return }
+        // `isMicLifecycleBusy` is the cross-coordinator half of the guard: without it
+        // a heal could start while `switchMicrophone` was mid stop→start.
+        guard isCapturing, !isStoppingCapture, !isMicRecovering, !isSelfHealing,
+              !isMicLifecycleBusy else { return }
         guard micSource == .engine else { return }
         guard selfHealAttempts < maxSelfHealAttempts else {
             if !selfHealWarned {
@@ -1227,10 +1275,13 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         }
 
         isSelfHealing = true
+        isMicLifecycleBusy = true
         onMicRecoveryStateChanged?(true)   // reuse the "reconnecting mic" banner
         defer {
             isSelfHealing = false
+            isMicLifecycleBusy = false
             onMicRecoveryStateChanged?(false)
+            drainPendingSwitch()
         }
 
         selfHealAttempts += 1
@@ -1242,9 +1293,12 @@ final class AudioCaptureService: ObservableObject, AudioCapturing {
         guard isCapturing, !isStoppingCapture, !isMicRecovering else { return }
 
         logToFile("Audio: self-heal attempt \(attempt)/\(maxSelfHealAttempts) — rebuilding mic input in place")
-        let failure: String? = await Task.detached(priority: .userInitiated) { [micCapture] in
+        let rebuildTask = Task.detached(priority: .userInitiated) { [micCapture] in
             micCapture.rebuildInputInPlace()?.localizedDescription
-        }.value
+        }
+        activeMicRebuildTask = rebuildTask
+        let failure: String? = await rebuildTask.value
+        activeMicRebuildTask = nil
         guard isCapturing, !isStoppingCapture else { return }
 
         if let failure {

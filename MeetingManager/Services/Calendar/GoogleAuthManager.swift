@@ -19,6 +19,11 @@ enum GoogleAuthError: LocalizedError {
     case authenticationFailed(String)
     case tokenRefreshFailed(String)
     case noRefreshToken
+    /// The stored grant is dead and no amount of retrying will revive it: the
+    /// user revoked access, the refresh token was rotated out, or the OAuth
+    /// client was deleted. Distinguished from `tokenRefreshFailed` (transient)
+    /// because only this case justifies telling the user they're disconnected.
+    case accessRevoked
     case invalidResponse
     case networkError(Error)
 
@@ -30,6 +35,8 @@ enum GoogleAuthError: LocalizedError {
             return "Token refresh failed: \(message)"
         case .noRefreshToken:
             return "No refresh token available. Please sign in again."
+        case .accessRevoked:
+            return "Google Calendar access was revoked. Please reconnect your account."
         case .invalidResponse:
             return "Received an invalid response from Google."
         case .networkError(let error):
@@ -105,6 +112,18 @@ final class GoogleAuthManager {
     private(set) var isSignedIn = false
     private(set) var userEmail: String?
 
+    /// Set when Google confirms the stored grant is dead. Distinct from
+    /// `!isSignedIn`: the credential is gone but `userEmail` survives, so the
+    /// UI can say "reconnect" instead of "connect", and speaker attribution
+    /// keeps knowing who the local user is.
+    private(set) var accessRevoked = false
+
+    /// True once the async Keychain restore has finished, whatever the outcome.
+    /// Without this, `!isSignedIn` conflates "signed out" with "we haven't
+    /// looked yet" — and the launch window is exactly when a health banner
+    /// would flash a wrong verdict.
+    private(set) var didAttemptSessionRestore = false
+
     // MARK: - Private
 
     private let session: URLSession
@@ -140,6 +159,12 @@ final class GoogleAuthManager {
             userEmail = tokens.email
             Logger.calendar.info("Restored Google session for \(tokens.email ?? "unknown")")
         }
+        didAttemptSessionRestore = true
+        // Posted on BOTH outcomes: a restored session lets CalendarSyncManager
+        // sync immediately instead of waiting out the first 15-minute tick, and
+        // a failed restore is what promotes health from `.unknown` to a real
+        // verdict.
+        postAuthStateChanged()
     }
 
     // MARK: - Public API
@@ -155,12 +180,24 @@ final class GoogleAuthManager {
         let authorizationCode = try await requestAuthorizationCode(challenge: challenge)
         let tokens = try await exchangeCodeForTokens(authorizationCode, verifier: verifier)
 
+        // Drop the stale grant only once a replacement is in hand. A revoked
+        // refresh token still carries whatever scope it was minted with, so
+        // reusing it can silently reconnect without calendar access — hence the
+        // explicit delete rather than relying on save-over. Doing it before the
+        // handshake (as this used to) meant any throw above — an offline
+        // "Reconnect" click, a cancelled consent screen — discarded a possibly
+        // valid grant and left the Keychain empty, so the next launch came up
+        // silently signed out.
+        try? KeychainHelper.delete(forKey: Keys.oauthTokens)
         try persistTokens(tokens)
         cachedTokens = tokens
         isSignedIn = true
+        accessRevoked = false
         userEmail = tokens.email
 
         Logger.calendar.info("Google sign-in successful for \(tokens.email ?? "unknown")")
+        AppFileLogger.shared.log("CALSYNC: signed in account=\(tokens.email ?? "unknown")")
+        postAuthStateChanged()
     }
 
     /// Signs the user out and removes all stored tokens.
@@ -175,7 +212,36 @@ final class GoogleAuthManager {
 
         cachedTokens = nil
         isSignedIn = false
+        accessRevoked = false
         userEmail = nil
+        // This is the user-initiated disconnect, so health must fall back to
+        // "never connected" (the connect banner) rather than warning that a
+        // sign-in was lost.
+        CalendarSyncManager.forgetLastSyncedAccount()
+        postAuthStateChanged()
+    }
+
+    /// Records a confirmed revocation: Google told us the grant is dead.
+    ///
+    /// Deliberately NOT `signOut()`. That clears `userEmail`, which feeds the
+    /// local-user exclusion in speaker attribution and the diarization cluster
+    /// hints — an expiring credential must not change who the user *is*.
+    /// Clearing `cachedTokens` is what stops `performSync` from re-POSTing a
+    /// dead refresh token every 15 minutes forever; the Keychain item is left
+    /// in place for `signIn()` to replace atomically.
+    func markAccessRevoked() {
+        guard !accessRevoked else { return }
+        accessRevoked = true
+        isSignedIn = false
+        cachedTokens = nil
+        refreshTask = nil
+        Logger.calendar.error("Google access revoked — credential cleared, identity retained")
+        AppFileLogger.shared.log("CALSYNC: access revoked account=\(userEmail ?? "unknown")")
+        postAuthStateChanged()
+    }
+
+    private func postAuthStateChanged() {
+        NotificationCenter.default.post(name: .googleAuthStateChanged, object: nil)
     }
 
     /// In-flight token refresh, if any. Coalesces concurrent callers so two
@@ -187,6 +253,7 @@ final class GoogleAuthManager {
 
     /// Returns a valid access token, refreshing it first if expired.
     func refreshTokenIfNeeded() async throws -> String {
+        if accessRevoked { throw GoogleAuthError.accessRevoked }
         guard let tokens = cachedTokens else {
             throw GoogleAuthError.authenticationFailed("Not signed in")
         }
@@ -204,21 +271,20 @@ final class GoogleAuthManager {
         let task = Task { try await refreshAccessToken() }
         refreshTask = task
         defer { refreshTask = nil }
-        return try await task.value
-    }
-
-    // MARK: - Session Restoration
-
-    private func restoreSession() {
         do {
-            if let tokens: OAuthTokens = try KeychainHelper.load(forKey: Keys.oauthTokens) {
-                cachedTokens = tokens
-                isSignedIn = true
-                userEmail = tokens.email
-                Logger.calendar.info("Restored Google session for \(tokens.email ?? "unknown")")
-            }
-        } catch {
-            Logger.calendar.warning("Failed to restore Google session: \(error.localizedDescription)")
+            return try await task.value
+        } catch GoogleAuthError.accessRevoked {
+            // Latch it here — this is the one place that knows a refresh (rather
+            // than a single calendar's ACL) is what failed.
+            markAccessRevoked()
+            throw GoogleAuthError.accessRevoked
+        } catch GoogleAuthError.noRefreshToken {
+            // A cached access token with no refresh token is as dead as a revoked
+            // grant — non-retryable, and the user's remedy is identical. Left
+            // unlatched it surfaced only as an hour of staleness with "check your
+            // connection" copy, which points at the wrong problem.
+            markAccessRevoked()
+            throw GoogleAuthError.noRefreshToken
         }
     }
 
@@ -360,10 +426,18 @@ final class GoogleAuthManager {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw GoogleAuthError.invalidResponse
             }
-            // Don't retry on 400/401/403
-            if [400, 401, 403].contains(httpResponse.statusCode) {
-                let message = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw GoogleAuthError.tokenRefreshFailed("HTTP \(httpResponse.statusCode): \(message)")
+            // Classify a dead grant so callers can say "disconnected" instead of
+            // retrying forever. Google signals it as 400 + an `error` code in the
+            // body, not a distinct status; 401/403 mean the same thing here.
+            // `invalid_client`/`unauthorized_client` cover a deleted custom OAuth
+            // client — same remedy (reconnect) from the user's point of view.
+            // Everything else stays `tokenRefreshFailed` and remains retryable.
+            let oauthError = Self.oauthErrorCode(from: data)
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403
+                || (httpResponse.statusCode == 400
+                    && ["invalid_grant", "invalid_client", "unauthorized_client"].contains(oauthError ?? "")) {
+                AppFileLogger.shared.log("CALSYNC: token refresh failed classified=accessRevoked http=\(httpResponse.statusCode) error=\(oauthError ?? "none")")
+                throw GoogleAuthError.accessRevoked
             }
             guard (200...299).contains(httpResponse.statusCode) else {
                 let message = String(data: data, encoding: .utf8) ?? "Unknown error"
@@ -451,7 +525,33 @@ final class GoogleAuthManager {
         Logger.calendar.debug("OAuth tokens persisted to Keychain")
     }
 
+    /// Pulls the OAuth 2.0 `error` code out of a token-endpoint error body.
+    private static func oauthErrorCode(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["error"] as? String
+    }
+
+    /// Errors that will produce the same result on every attempt.
+    private static func isRetryable(_ error: Error) -> Bool {
+        switch error {
+        case GoogleAuthError.accessRevoked,
+             GoogleAuthError.noRefreshToken,
+             GoogleAuthError.invalidResponse:
+            return false
+        default:
+            return true
+        }
+    }
+
     /// Retry an async operation up to `maxAttempts` times with exponential backoff.
+    ///
+    /// Terminal errors bail on the first attempt. The old version retried
+    /// unconditionally despite a comment claiming otherwise — the status check
+    /// lives inside the operation closure, so `withRetry` never saw it — which
+    /// meant a revoked token was POSTed three times with 1s/2s sleeps on every
+    /// sync tick.
     private func withRetry<T>(maxAttempts: Int = 3, operation: () async throws -> T) async throws -> T {
         var lastError: Error?
         for attempt in 1...maxAttempts {
@@ -459,6 +559,7 @@ final class GoogleAuthManager {
                 return try await operation()
             } catch {
                 lastError = error
+                if !Self.isRetryable(error) { throw error }
                 if attempt < maxAttempts {
                     let delay = Double(attempt) * 1.0
                     try? await Task.sleep(for: .seconds(delay))

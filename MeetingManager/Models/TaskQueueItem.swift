@@ -78,6 +78,13 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         /// PRJ-011 TASK-081: scan history for user topic trackers. Pure
         /// keyword match. Sentinel meetingId "__topic_backfill__".
         case topicBackfill
+        /// PRJ-016 TASK-135: compress a finished meeting's WAV recordings to
+        /// Apple Lossless `.m4a` (~5.5× smaller) once the post-meeting pipeline
+        /// is done with them. Pure local file work, no LLM. Enqueued at the
+        /// lowest pipeline priority so every audio-reading task runs first, and
+        /// idempotent — an already-archived session is skipped, never
+        /// re-encoded. See `Services/Audio/AudioArchiveService.swift`.
+        case audioArchive
     }
 
     enum TaskStatus: String, Codable, CaseIterable {
@@ -109,14 +116,35 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
         case .speechStats:        return "Compute Speaking Stats"
         case .sentimentBackfill:  return "Read Tone (History)"
         case .topicBackfill:      return "Scan Topics (History)"
+        case .audioArchive:       return "Compress Audio"
         }
     }
+
+    /// True when this row was enqueued by an explicit user request. Read from
+    /// the `metadata` JSON blob (a JSON String?, not a dictionary column) —
+    /// mirrors the recipeId parse in `TaskQueueManager.execute`. (TASK-122)
+    static func isUserInitiated(metadata: String?) -> Bool {
+        guard let metadata,
+              let data = metadata.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return (json["userInitiated"] as? Bool) == true
+    }
+
+    var isUserInitiated: Bool { Self.isUserInitiated(metadata: metadata) }
 
     /// Background-class work is governed by BackgroundWorkPolicy
     /// (deferrable to quiet gaps). Per-ITEM, not per-type (review M1): a
     /// fresh meeting's embedIndex must run promptly; only the batch
     /// sentinels are background.
-    static func isBackgroundItem(type: TaskType, meetingId: String) -> Bool {
+    ///
+    /// User-initiated rows are NEVER background-class regardless of type
+    /// (TASK-122): the user asked for it now, so it skips quiet-gap deferral.
+    /// The serial queue (one processLoop, one currentTask) is what prevents
+    /// LLM contention — there is no concurrency limiter this bypass violates.
+    static func isBackgroundItem(type: TaskType, meetingId: String, metadata: String? = nil) -> Bool {
+        if isUserInitiated(metadata: metadata) { return false }
         switch type {
         case .embedIndex:   return meetingId == "__embed_backfill__"
         case .weeklyDigest: return true
@@ -142,7 +170,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
     /// rows are ignored. Returns 0 when nothing qualifies.
     static func backgroundDeferralAgeHours(_ items: [TaskQueueItem], now: Date) -> Double {
         let oldest = items
-            .filter { $0.status == .pending && isBackgroundItem(type: $0.type, meetingId: $0.meetingId) }
+            .filter { $0.status == .pending && isBackgroundItem(type: $0.type, meetingId: $0.meetingId, metadata: $0.metadata) }
             .compactMap(\.firstDeferredAt)
             .min()
         guard let oldest else { return 0 }
@@ -159,7 +187,7 @@ struct TaskQueueItem: Codable, Identifiable, Equatable, Hashable {
              .enrichment, .gardener, .factBackfill, .glossary:
             return true
         case .transcription, .diarization, .knowledgeBaseIndex, .embedIndex,
-             .speechStats, .sentimentBackfill, .topicBackfill:
+             .speechStats, .sentimentBackfill, .topicBackfill, .audioArchive:
             return false
         }
     }

@@ -126,6 +126,20 @@ final class AppState {
     var systemLevel: Float = 0
     private var levelPollingCancellable: AnyCancellable?
 
+    /// TASK-124: sustained silent-capture warning (visibility only), promoted
+    /// from RecordingStrip's view-local `@State` so it is visible even when the
+    /// main window is closed (menu bar title + popover). Detection folds into
+    /// the audio-level poll: BOTH channels below the epsilon anchors
+    /// `captureSilentSince`; the flag flips true once that window holds for
+    /// `captureSilenceThreshold`, and clears the instant either channel shows
+    /// signal or recording stops. A HAL-muted mic alone never trips it — a live
+    /// remote speaker keeps systemLevel above the epsilon. This is a LABEL: it
+    /// never stops, switches, or otherwise touches the audio stack (TASK-095).
+    private(set) var captureSilenceWarning = false
+    private var captureSilentSince: Date?
+    private let captureSilenceEpsilon: Float = 1e-4
+    private let captureSilenceThreshold: TimeInterval = 75
+
     /// The name of a detected call app when a meeting is in progress but recording hasn't started.
     /// Cleared when recording begins or the call app exits.
     private(set) var detectedCallApp: String?
@@ -140,6 +154,9 @@ final class AppState {
     /// the same meeting (e.g., Zoom native app + Zoom in browser tab).
     private var lastCallDetectionTime: Date?
     var meetings: [Meeting] = []
+    /// Count of decisions awaiting triage (PRJ-020 / TASK-128). Drives the
+    /// Decisions sidebar badge; refreshed at launch and on `.decisionDataDidChange`.
+    var suggestedDecisionCount: Int = 0
     var upcomingMeetings: [Meeting] = [] { didSet { _cachedFolders = nil } }
     var pastMeetings: [Meeting] = []    { didSet { _cachedFolders = nil } }
 
@@ -309,14 +326,68 @@ final class AppState {
     /// Prevents posting 4+ duplicates across timer ticks for the same meeting.
     private var notifiedMeetingIds: Set<String> = []
 
-    /// The id of an upcoming meeting we've offered to switch to while
-    /// recording a different one. Drives the persistent "Switch meetings"
-    /// banner. nil when no offer is currently outstanding.
-    var pendingSwitchMeetingId: String?
+    // MARK: - Unified Switch Suggestion (TASK-118)
 
-    /// Switch offers the user explicitly dismissed — don't re-show for the
-    /// same meeting until it drops out of the upcoming set.
+    enum SwitchConfidence: Equatable { case medium, high }
+
+    /// One coherent "you may have switched meetings" offer, funneled from every
+    /// producer (calendar proximity, `.meetingSwitchDetected` engine) and read
+    /// by every surface (floating window, in-app banner, menu bar). Modeled on
+    /// the `DeparturePrompt` precedent.
+    struct SwitchSuggestion: Equatable, Identifiable {
+        enum Origin: Equatable { case calendar, detectedTitle, detectedApp }
+        /// Dedupe/dismiss key: `matchedMeetingId ?? "detector:{normalizedTitle}"`.
+        let id: String
+        let detectedTitle: String
+        let normalizedTitle: String?
+        let origin: Origin
+        let confidence: SwitchConfidence
+        let matchedMeetingId: String?
+        let meetLink: String?
+        let firedAt: Date
+        /// The call surface the detection came from ("browser.googleMeet" for
+        /// title-diff signals, the app bundle for second-app signals; nil for
+        /// calendar offers). Used to expire the offer when that surface quits.
+        var sourceBundleId: String? = nil
+    }
+
+    /// The single outstanding switch offer. All surfaces read this; all
+    /// producers write it through `presentSwitchSuggestion`.
+    private(set) var pendingSwitchSuggestion: SwitchSuggestion?
+
+    /// Set by the ~5-min soft timeout: floating + inline banners hide and the
+    /// menu bar reverts to plain "Recording", but the popover row persists for
+    /// the rest of the recording (recovery for the heads-down user).
+    private(set) var switchSuggestionDemoted = false
+
+    private var switchSuggestionDemoteTask: Task<Void, Never>?
+
+    /// READ-ONLY mirror kept for legacy consumers of the calendar-switch id.
+    /// The write path is now the suggestion funnel.
+    var pendingSwitchMeetingId: String? { pendingSwitchSuggestion?.matchedMeetingId }
+
+    /// Calendar-meeting switch offers the user explicitly dismissed — don't
+    /// re-show for the same meeting for the rest of the recording.
     private var dismissedSwitchMeetingIds: Set<String> = []
+
+    /// Detector-origin (normalized-title) switch offers the user dismissed.
+    private var dismissedSwitchTitles: Set<String> = []
+
+    /// Switch-detection engine (TASK-117). Armed on recording start, disarmed
+    /// synchronously at the top of `stopRecording()`. Emits
+    /// `.meetingSwitchDetected` when the live call appears to have changed; the
+    /// consumer funnel (present/accept/dismiss + surfaces) is TASK-118.
+    @ObservationIgnored
+    private lazy var switchDetectionService = MeetingSwitchDetectionService(
+        isEnabled: { [weak self] in self?.settings.switchDetectionEnabled ?? true },
+        isMemo: { [weak self] in self?.activeMeeting?.isMemo ?? false },
+        nearMeetings: { [weak self] date in
+            guard let self else { return [] }
+            let nearby = (try? await self.meetingRepository.meetingsNearDate(date, windowMinutes: 5)) ?? []
+            let activeId = self.activeMeeting?.id
+            return nearby.filter { Self.isRecordableCalendarMatch($0) && $0.id != activeId }
+        }
+    )
 
     /// Tracks meetings for which the 1-minute HUD panel has already been shown.
     /// Separate from notifiedMeetingIds so the HUD always fires at t-1min regardless
@@ -531,6 +602,10 @@ final class AppState {
         // get cleared).
         Task { await self.refreshTaskNotifications() }
 
+        // PRJ-020 / TASK-128: prime the Decisions inbox badge so it's correct
+        // on first paint (the post-migration 5 suggestions show immediately).
+        Task { await self.refreshDecisionInboxCount() }
+
         // Make this instance accessible to AppDelegate for the menu bar popover
         AppState.shared = self
         AppState.isInitialized = true
@@ -594,8 +669,22 @@ final class AppState {
 
     // MARK: - Settings
 
+    /// Handle on the in-flight `loadSettings()` read, so startup-time AI
+    /// consumers can await it. Without this, `startPrepContextTimer()` runs its
+    /// first pass against the *default* `settings` (aiProvider `.none`), so the
+    /// launch trigger resolved `.none`, wrote placeholder prep briefs, and
+    /// skipped both AI cadence checks — log-proven: "AI: text generator using
+    /// none" at launch, "using gemini" 13s later in the same session.
+    private var settingsLoadTask: Task<Void, Never>?
+
+    /// Suspends until the persisted settings row has landed (or failed to load).
+    /// A no-op after launch — awaiting a finished task doesn't delay anything.
+    func awaitSettingsReady() async {
+        await settingsLoadTask?.value
+    }
+
     func loadSettings() {
-        Task {
+        settingsLoadTask = Task {
             do {
                 let loaded = try await database.writer.read { db in
                     try AppSettings.fetchOne(db)
@@ -674,6 +763,66 @@ final class AppState {
         }
     }
 
+    /// PRJ-017 F1: turn the fresh summary into Decision Log rows — what was
+    /// decided, why, who was involved — anchored to their transcript moment.
+    /// Best-effort inside the summary handler (the TaskQueue rule holds), and
+    /// regen-safe: `mergeForMeeting` preserves any decision the user edited or
+    /// dismissed. Never fails the summary task.
+    private func extractDecisionsBestEffort(meetingId: String) async {
+        do {
+            guard let meeting = try await meetingRepository.find(id: meetingId) else { return }
+            guard let summary = try await summaryRepository.latestSummary(meetingId: meetingId),
+                  !summary.summaryText.isEmpty else { return }
+            guard let textGen = await makeTextGenerator(
+                maxOutputTokens: 1024,
+                schemaJSON: DecisionExtractor.schemaJSON,
+                activityLabel: "Extracting decisions"
+            ) else { return }
+            let response = try await textGen(
+                DecisionExtractor.systemPrompt,
+                "Meeting: \(meeting.title)\nParticipants: \(meeting.participantList.joined(separator: ", "))\n\nSummary:\n\(summary.summaryText)"
+            )
+            guard let raws = DecisionExtractor.parse(response) else {
+                fileLog("Decisions: unparseable extraction for \(meetingId) — skipping")
+                return
+            }
+            var decisions = DecisionExtractor.decisions(from: raws, meetingId: meetingId)
+            // Resolve the extracted owner name to a Person (single-unambiguous
+            // match only, mirroring TASK-111 assignee linking). Two Davids →
+            // personId stays nil, ownerName kept as extracted; the chip still
+            // renders and re-resolution happens on a manual pick. People
+            // matching lives here, not in the repository.
+            let people = (try? await PersonRepository(database: database).allPersons()) ?? []
+            for i in decisions.indices {
+                guard let name = decisions[i].ownerName, !name.isEmpty else { continue }
+                let hits = people.filter { $0.matches(participant: name) }
+                if hits.count == 1 { decisions[i].ownerPersonId = hits[0].id }
+            }
+            // Anchor each decision to its transcript moment (BM25 over the
+            // quote, falling back to the decision text). A hit widens into a
+            // playable range and snapshots the verbatim segment text; a miss
+            // ships without an anchor, keeping the model's quote.
+            var anchored = 0
+            for i in decisions.indices {
+                let needle = decisions[i].quoteText ?? decisions[i].title
+                guard let hit = try? await transcriptRepository.bestAnchor(meetingId: meetingId, factText: needle) else { continue }
+                decisions[i].startTime = hit.startTime
+                if let seg = try? await transcriptRepository.segment(id: hit.transcriptId) {
+                    decisions[i].endTime = max(seg.endTime, hit.startTime)
+                    let verbatim = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !verbatim.isEmpty { decisions[i].quoteText = verbatim }
+                } else {
+                    decisions[i].endTime = hit.startTime
+                }
+                anchored += 1
+            }
+            try await DecisionRepository(database: database).mergeForMeeting(meetingId, extracted: decisions)
+            fileLog("Decisions: \(decisions.count) for \(meetingId), \(anchored) anchored")
+        } catch {
+            fileLog("Decisions: extraction failed (best-effort) — \(error.localizedDescription)")
+        }
+    }
+
     /// TASK-065: score the user's pre-meeting intent against the summary —
     /// "did you get what you came for", one small schema call, neutral
     /// note. Best-effort inside the summary handler; re-scores on
@@ -746,34 +895,130 @@ final class AppState {
     private func enqueueWeeklyDigestIfDue() {
         Task { [weak self] in
             guard let self else { return }
-            let range = WeeklyDigest.previousWeekRange()
+            // The launch call fires before `loadSettings()` lands, so
+            // `isAIWorkConfigured` below would read the default `.none` provider
+            // and silently skip the week.
+            await self.awaitSettingsReady()
+            // PRJ-017 F2: target the current week once Friday 00:00 has passed,
+            // else the just-finished week (catch-up) — see targetReviewWeek.
+            let target = WeeklyDigest.targetReviewWeek()
             let repo = WeeklyDigestRepository(database: self.database)
-            if (try? await repo.digest(isoWeek: range.isoWeek)) != nil { return }
+            if (try? await repo.digest(isoWeek: target)) != nil { return }   // already generated
             let queued = self.taskQueueManager.allTasks.contains {
                 $0.type == .weeklyDigest && !$0.isTerminal
             }
             guard !queued, self.isAIWorkConfigured else { return }
+            guard let wr = WeeklyDigest.range(forISOWeek: target) else { return }
             // Only digest weeks that had meetings.
             let hadMeetings = ((try? await self.meetingRepository.allActiveMeetings()) ?? [])
-                .contains { $0.effectiveDate >= range.start && $0.effectiveDate < range.end }
+                .contains { $0.effectiveDate >= wr.start && $0.effectiveDate < wr.end }
             guard hadMeetings else { return }
             await self.taskQueueManager.enqueue(type: .weeklyDigest,
-                                                meetingId: Self.weeklyDigestSentinel, priority: 9)
+                                                meetingId: "\(Self.weeklyDigestSentinel):\(target)", priority: 9)
         }
     }
 
-    /// Build the digest from STRUCTURED data (meetings, facts, open items)
-    /// — one LLM call over aggregates, never raw transcripts.
-    private func generateWeeklyDigest() async throws {
-        let range = WeeklyDigest.previousWeekRange()
+    /// PRJ-017 F2: enqueue (re)generation of the weekly review for a specific
+    /// ISO week — the Weekly Review page's Generate/Refresh button. Deduped
+    /// against an in-flight weekly-digest task.
+    func enqueueWeeklyReviewGeneration(isoWeek: String) {
+        guard isAIWorkConfigured else {
+            lastUserError = "Configure an AI provider to generate the weekly review narrative."
+            return
+        }
+        // TASK-122: dedup is SENTINEL-SCOPED, not any-weeklyDigest-scoped. A
+        // cadence row for week A must not swallow (nor be expedited by) a manual
+        // Generate on week B. Same week + non-terminal → expedite it out of
+        // quiet-gap deferral; different week → fall through to enqueue (the
+        // serial queue + per-meetingId dedup handle both rows).
+        let sentinel = "\(Self.weeklyDigestSentinel):\(isoWeek)"
+        if let existing = taskQueueManager.allTasks.first(where: {
+            $0.type == .weeklyDigest && $0.meetingId == sentinel && !$0.isTerminal
+        }) {
+            let taskId = existing.id
+            let wasPending = existing.status == .pending
+            Task { [weak self] in
+                guard let self else { return }
+                // A row that's already running can't be expedited; only pending
+                // rows benefit. Running rows are left to finish. If the snapshot
+                // was stale (row went terminal between read and write), expedite
+                // reports false — fall through to a fresh enqueue so the user's
+                // click is never silently swallowed.
+                if wasPending {
+                    let acted = await self.taskQueueManager.expedite(taskId: taskId)
+                    if !acted {
+                        await self.taskQueueManager.enqueue(
+                            type: .weeklyDigest,
+                            meetingId: sentinel,
+                            priority: TaskQueueManager.expeditedPriority,
+                            metadata: "{\"userInitiated\":true}")
+                    }
+                }
+            }
+            return
+        }
+        Task { [weak self] in
+            await self?.taskQueueManager.enqueue(
+                type: .weeklyDigest,
+                meetingId: sentinel,
+                priority: TaskQueueManager.expeditedPriority,
+                metadata: "{\"userInitiated\":true}")
+        }
+    }
+
+    /// TASK-122: human-readable failures for the weekly-digest generator. These
+    /// used to be silent early returns that marked the task completed with no
+    /// saved record — the exact "generated nothing, explained nothing" bug the
+    /// user reported. Thrown here, they surface in the row's terminal error
+    /// (WeeklyReviewSection's Failed state) via `humanizedTaskError` pass-through.
+    enum WeeklyDigestError: LocalizedError {
+        case noMeetings(isoWeek: String)
+        case noGenerator
+        case emptyOutput
+
+        var errorDescription: String? {
+            switch self {
+            case .noMeetings:
+                return "No meetings were recorded this week, so there's nothing to review."
+            case .noGenerator:
+                return "No AI provider is available. Configure Claude or Ollama in Settings, then try again."
+            case .emptyOutput:
+                return "The AI returned an empty weekly review. This is usually transient — try again."
+            }
+        }
+    }
+
+    /// Build the digest from STRUCTURED data (meetings, facts, decisions, open
+    /// items) — one LLM call over aggregates, never raw transcripts. `sentinel`
+    /// is the queue item's meetingId: a bare `__weekly_digest__` targets the
+    /// previous week (back-compat); a `__weekly_digest__:<isoWeek>` suffix
+    /// targets a specific week (Friday cadence + on-demand, PRJ-017 F2).
+    private func generateWeeklyDigest(sentinel: String = AppState.weeklyDigestSentinel) async throws {
+        let isoWeek: String
+        let rangeStart: Date
+        let rangeEnd: Date
+        if let colon = sentinel.firstIndex(of: ":"),
+           let wr = WeeklyDigest.range(forISOWeek: String(sentinel[sentinel.index(after: colon)...])) {
+            isoWeek = String(sentinel[sentinel.index(after: colon)...])
+            rangeStart = wr.start
+            rangeEnd = wr.end
+        } else {
+            let prev = WeeklyDigest.previousWeekRange()
+            isoWeek = prev.isoWeek
+            rangeStart = prev.start
+            rangeEnd = prev.end
+        }
+        let range = (start: rangeStart, end: rangeEnd, isoWeek: isoWeek)
         let allHistory = (try? await meetingRepository.allActiveMeetings()) ?? []
         let meetings = allHistory
             .filter { $0.effectiveDate >= range.start && $0.effectiveDate < range.end }
-        guard !meetings.isEmpty else { return }
+        guard !meetings.isEmpty else { throw WeeklyDigestError.noMeetings(isoWeek: range.isoWeek) }
         let ids = meetings.map(\.id)
         let facts = (try? await EntityFactRepository(database: database)
             .factsForMeetings(ids)) ?? []
         let openItems = (try? await TaskRepository(database: database).allOpenItems(limit: 50)) ?? []
+        let decisions = (try? await DecisionRepository(database: database)
+            .decisionsForMeetings(ids, limit: 25)) ?? []
 
         var data: [String] = []
         data.append("Meetings (\(meetings.count)):")
@@ -787,6 +1032,15 @@ final class AppState {
                 data.append("- [\(f.kind)]\(f.owner.map { " (\($0))" } ?? "") \(f.text)")
             }
         }
+        // PRJ-017 F2: the curated Decision Log for the week (distinct from the
+        // entityFact decision facts above — richer, user-editable rows).
+        if !decisions.isEmpty {
+            data.append("\nDecisions made:")
+            for d in decisions.prefix(25) {
+                let who = d.involvedNames.isEmpty ? "" : " (\(d.involvedNames.joined(separator: ", ")))"
+                data.append("- \(d.title)\(who)")
+            }
+        }
         if !openItems.isEmpty {
             data.append("\nOpen action items:")
             for i in openItems.prefix(25) {
@@ -794,10 +1048,10 @@ final class AppState {
             }
         }
 
-        guard let textGen = await makeTextGenerator(maxOutputTokens: 1200) else { return }
+        guard let textGen = await makeTextGenerator(maxOutputTokens: 1200) else { throw WeeklyDigestError.noGenerator }
         var content = try await textGen(WeeklyDigest.systemPrompt,
                                         "Week \(range.isoWeek):\n\n" + data.joined(separator: "\n"))
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw WeeklyDigestError.emptyOutput }
 
         // TASK-056: deterministic appendix — never LLM-generated, so a
         // reversal is only reported when a factLink row actually exists.
@@ -869,6 +1123,12 @@ final class AppState {
         try await WeeklyDigestRepository(database: database).save(
             WeeklyDigestRecord(isoWeek: range.isoWeek, content: content, createdAt: Date()))
         fileLog("WeeklyDigest: wrote \(range.isoWeek)")
+
+        // TASK-122: completion signal so the Weekly Review page and the Home
+        // digest card refresh live — no poll, no stale "No review yet".
+        NotificationCenter.default.post(
+            name: .weeklyDigestCompleted, object: nil,
+            userInfo: ["isoWeek": range.isoWeek])
 
         // KB write-back when configured — same folder discipline as meetings.
         if settings.kbWriteBack, let root = KnowledgeBaseService.shared.rootURL {
@@ -1089,6 +1349,9 @@ final class AppState {
     /// transcript (one hit per tracker per meeting). Inline in the summary
     /// chain so new meetings populate immediately. Pure keyword match.
     private func matchTopicTrackersBestEffort(meetingId: String) async {
+        // Memos (PRJ-017 F4) are personal captures — topic trackers are a
+        // meeting/series feature, so skip them.
+        if let m = try? await meetingRepository.find(id: meetingId), m.isMemo { return }
         let repo = TopicTrackerRepository(database: database)
         let trackers = (try? await repo.activeTrackers()) ?? []
         guard !trackers.isEmpty else { return }
@@ -1255,6 +1518,235 @@ final class AppState {
         return result.bytes
     }
 
+    // MARK: - Audio Archival (TASK-135 / PRJ-016)
+
+    /// The lowest priority in the pipeline. Every task that reads a meeting's
+    /// audio has a smaller number — transcription 0/2, diarization and
+    /// retryAttribution 4, summary 5, cleanup 6, follow-up 7, outline 8 — and
+    /// the queue pops smallest-first, so an archive row can only run once the
+    /// meeting's audio-reading work has drained.
+    static let audioArchivePriority = 9
+
+    /// Enqueue the post-pipeline archive when this meeting clears the same
+    /// safety floor the retention sweep requires (finished, transcription ran,
+    /// at least one transcript row) and has no other queue work in flight. The
+    /// caller's own running row is discounted — cleanup calls this from inside
+    /// its own handler.
+    private func maybeEnqueueAudioArchive(meetingId: String) async {
+        guard await AudioArchiveService.isArchivable(
+            meetingId: meetingId,
+            database: database,
+            excludingTaskId: taskQueueManager.currentTask?.id) else { return }
+        await taskQueueManager.enqueue(
+            type: .audioArchive, meetingId: meetingId, priority: Self.audioArchivePriority)
+    }
+
+    /// Compress one meeting's recordings to Apple Lossless. Throws only when
+    /// every session failed, so the queue retries a transient problem (a full
+    /// disk) instead of reporting a red task for a file that simply had nothing
+    /// to archive.
+    private func runAudioArchive(meetingId: String) async throws {
+        // Run-time recording guard. The enqueue-time floor is not enough:
+        // recording is NOT a queue task, so a user who reopens this meeting
+        // after the row was enqueued would have its WAV re-opened for writing
+        // while this row waits. Encoding then reads a partially-written file,
+        // the length verify passes (both lengths are sampled at the same
+        // instant), and the swap DELETES the file capture is still writing —
+        // the live session's audio would vanish at merge time.
+        //
+        // 5 minutes, not the governor's 15: `reevaluate()` on recording-stop
+        // can't shorten a `runAfter`, so the postponement is also the worst-case
+        // stall a running backfill sees after the meeting ends. Re-popping every
+        // 5 minutes through a long recording costs one DB write each time.
+        if await isAudioBeingWritten(meetingId: meetingId) {
+            throw TaskQueueError.notNow(reason: "meeting \(meetingId) is recording", minutes: 5)
+        }
+        let outcome = try await AudioArchiveService.archiveMeeting(meetingId: meetingId, database: database)
+        guard outcome.pathsChanged else { return }
+        fileLog("AudioArchive: \(meetingId) — \(outcome.sessionsArchived) session(s) compressed, \(outcome.bytesSaved) bytes saved")
+        loadMeetings()
+        await refreshPlayerAfterArchive(meetingId: meetingId)
+    }
+
+    /// True when this meeting's audio files could be open for writing right now.
+    ///
+    /// Two independent signals, because they are set at different moments during
+    /// start/stop/reopen and either one alone has a blind window:
+    ///
+    /// - In-memory capture state. `activeMeeting` is assigned after the engine
+    ///   starts, so `isRecording` can briefly be true with it still nil or
+    ///   holding the previous meeting — an unknown state read conservatively
+    ///   (nil while recording counts as "could be this one").
+    /// - The persisted status, which covers the reverse window: the row is
+    ///   flipped to `.recording` around, not exactly with, the `isRecording`
+    ///   flag, and it is the signal that survives a relaunch mid-recording.
+    private func isAudioBeingWritten(meetingId: String) async -> Bool {
+        if isRecording, activeMeeting == nil || activeMeeting?.id == meetingId { return true }
+        let status: String? = try? await database.writer.read { db in
+            try String.fetchOne(db, sql: "SELECT status FROM meeting WHERE id = ?", arguments: [meetingId])
+        }
+        return status == MeetingStatus.recording.rawValue
+    }
+
+    /// Rebuild the transport when the archived meeting is the one loaded, so an
+    /// open MeetingDetail stops holding the deleted WAV paths. Deleting an open
+    /// file doesn't interrupt playback on macOS (the descriptor stays valid), so
+    /// this is about the paths going stale on the next reload, not a broken
+    /// transport — rebuilding in place at the same position is strictly better
+    /// than deferring the archive whenever a meeting happens to be open.
+    private func refreshPlayerAfterArchive(meetingId: String) async {
+        guard audioPlayback.loadedMeetingId == meetingId else { return }
+        let resumeAt = audioPlayback.currentTime
+        let wasPlaying = audioPlayback.isPlaying
+        guard let meeting = try? await meetingRepository.find(id: meetingId),
+              !meeting.audioFilePaths.isEmpty else { return }
+        let segments = (try? await transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        // load() returns early for an already-loaded meeting, so unload first.
+        audioPlayback.unload()
+        audioPlayback.load(meetingId: meetingId,
+                           audioFilePaths: meeting.audioFilePaths,
+                           segments: segments)
+        guard audioPlayback.isAvailable else { return }
+        audioPlayback.seek(to: resumeAt)
+        if wasPlaying { audioPlayback.play() }
+    }
+
+    // MARK: - Audio Compression Backfill (TASK-135 Phase 3)
+
+    /// Progress of the Settings-triggered "Compress existing recordings" run:
+    /// meetings compressed / meetings selected. nil when not running.
+    var audioCompressionProgress: (done: Int, total: Int)?
+
+    /// Result line shown after a run finishes, until another starts.
+    var audioCompressionResult: String?
+
+    /// In-flight guard. A disabled button alone doesn't survive a Settings view
+    /// rebuild, so reentrancy is gated here rather than on view state.
+    private var audioCompressionTask: Task<Void, Never>?
+
+    var isCompressingAudio: Bool { audioCompressionTask != nil }
+
+    /// How many archive rows the backfill keeps in the queue at once. The queue
+    /// is serial and pops by priority, so a small window is enough to keep it
+    /// fed while leaving a new meeting's pipeline free to cut ahead — and it
+    /// keeps Stop responsive instead of leaving hundreds of queued rows behind.
+    private static let audioCompressionBatchSize = 5
+
+    func startAudioCompressionBackfill() {
+        guard audioCompressionTask == nil else { return }
+        audioCompressionResult = nil
+        audioCompressionTask = Task { [weak self] in
+            await self?.runAudioCompressionBackfill()
+            self?.audioCompressionTask = nil
+        }
+    }
+
+    func stopAudioCompressionBackfill() {
+        audioCompressionTask?.cancel()
+    }
+
+    /// Feed archive tasks through the queue in small batches until every
+    /// eligible meeting is compressed. The work itself runs in the queue (one
+    /// meeting per `audioArchive` row), so it survives a quit mid-run and
+    /// resumes when the user starts it again — each row is idempotent.
+    private func runAudioCompressionBackfill() async {
+        let targets = await AudioArchiveService.archivableMeetings(database: database)
+        let ids = targets.map(\.id).filter { $0 != activeMeeting?.id }
+        guard !ids.isEmpty else {
+            audioCompressionResult = "Every recording that can be compressed already is."
+            return
+        }
+        let bytesBefore = await Task.detached { AudioRetention.currentAudioUsageBytes() }.value
+        audioCompressionProgress = (0, ids.count)
+        fileLog("AudioCompression: starting backfill over \(ids.count) meeting(s)")
+
+        var next = 0
+        while !Task.isCancelled {
+            let inFlight = await inFlightArchiveCount()
+            if next >= ids.count, inFlight == 0 { break }
+            // Never compete with a live capture: this is hundreds of files of
+            // disk I/O and the queue itself would happily run it mid-meeting.
+            // Pausing the FEED (rather than the queue) is what makes that work
+            // — anything already enqueued is one short file and drains anyway.
+            if !isRecording {
+                var room = Self.audioCompressionBatchSize - inFlight
+                while room > 0, next < ids.count {
+                    await taskQueueManager.enqueue(
+                        type: .audioArchive, meetingId: ids[next], priority: Self.audioArchivePriority)
+                    next += 1
+                    room -= 1
+                }
+            }
+            audioCompressionProgress = (await compressedCount(among: ids), ids.count)
+            try? await Task.sleep(for: .seconds(2))
+        }
+
+        let stopped = Task.isCancelled
+        let done = await compressedCount(among: ids)
+        let bytesAfter = await Task.detached { AudioRetention.currentAudioUsageBytes() }.value
+        let reclaimed = ByteCountFormatter.string(
+            fromByteCount: max(0, bytesBefore - bytesAfter), countStyle: .file)
+        audioCompressionProgress = nil
+        audioCompressionResult = stopped
+            ? "Stopped after compressing \(done) of \(ids.count) meeting(s), reclaiming \(reclaimed). Meetings already queued still finish; the rest stay uncompressed until you run this again."
+            : "Compressed \(done) of \(ids.count) meeting(s) and reclaimed \(reclaimed)."
+        fileLog("AudioCompression: finished — \(done)/\(ids.count) meeting(s), stopped=\(stopped)")
+    }
+
+    /// Archive rows still queued or running — the backfill's flow-control read.
+    private func inFlightArchiveCount() async -> Int {
+        (try? await database.writer.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM taskQueue
+                WHERE type = ? AND status IN ('pending', 'running')
+                """, arguments: [TaskQueueItem.TaskType.audioArchive.rawValue]) ?? 0
+        }) ?? 0
+    }
+
+    /// How many of these meetings no longer reference a `.wav` recording. Read
+    /// from the rows the archive repoints, so it counts real completions rather
+    /// than task rows (which "Clear finished" can delete mid-run).
+    private func compressedCount(among ids: [String]) async -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+        let arguments: [DatabaseValueConvertible] = ids
+        let remaining = (try? await database.writer.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM meeting
+                WHERE id IN (\(placeholders)) AND audioFilePaths LIKE '%.wav%'
+                """, arguments: StatementArguments(arguments)) ?? 0
+        }) ?? 0
+        return max(0, ids.count - remaining)
+    }
+
+    /// PRJ-017 F5: run the weekly automatic backup if due. Fires on the first
+    /// launch (and hourly tick) each week when a destination is set, the toggle
+    /// is on, nothing is recording, and the last backup was ≥7 days ago. A
+    /// missing destination or an unreachable drive is a silent no-op.
+    func maybeRunWeeklyBackup() {
+        guard settings.backupAutoWeekly,
+              !settings.backupDestinationPath.isEmpty,
+              !isRecording,
+              !BackupService.shared.isRunning,
+              AppDatabase.initializationError == nil else { return }
+        if let last = settings.lastBackupAt, Date().timeIntervalSince(last) < 7 * 24 * 3600 { return }
+        let dest = URL(fileURLWithPath: settings.backupDestinationPath)
+        // Skip silently if the destination isn't currently reachable/writable
+        // (e.g. an external drive is unplugged) — the next tick retries.
+        guard FileManager.default.fileExists(atPath: dest.path) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await BackupService.shared.runBackup(
+                destination: dest,
+                includeMedia: self.settings.backupIncludeMedia,
+                includeMarkdown: self.settings.backupIncludeMarkdown
+            )
+            if case .done = BackupService.shared.phase {
+                self.settings.lastBackupAt = Date()
+            }
+        }
+    }
+
     static let sentimentBackfillSentinel = "__sentiment_backfill__"
     static let sentimentBackfillDoneKey = "sentiment.processedMeetingIds"
 
@@ -1263,6 +1755,8 @@ final class AppState {
     /// `sentiment.enabled` toggle (default on).
     private func computeSentimentBestEffort(meetingId: String) async {
         guard UserDefaults.standard.object(forKey: "sentiment.enabled") as? Bool ?? true else { return }
+        // Single-speaker memos (PRJ-017 F4) have no interpersonal tone to read.
+        if let m = try? await meetingRepository.find(id: meetingId), m.isMemo { return }
         let rows = (try? await transcriptRepository.transcriptsForMeeting(meetingId, limit: 5000)) ?? []
         let spoken = rows.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
         guard spoken.count >= 2 else { return }
@@ -1418,6 +1912,9 @@ final class AppState {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self._cachedFolders = MeetingFolder.group(everything)
+                    // Refresh the New Meeting picker cache off the freshly-loaded
+                    // meeting set (TASK-121).
+                    self.refreshNewMeetingCandidates()
                 }
                 // System banner notifications are disabled in favour of the
                 // in-app HUD. Clear any reminders scheduled by older builds
@@ -1459,7 +1956,7 @@ final class AppState {
             // (meetingId, startTime, endTime) rows that the unique index
             // silently swallowed, so reopened audio never reached the
             // transcript. With no rows yet (crash recovery can leave a 44-byte
-            // husk as .first), transcribe the largest file instead.
+            // husk as .first), transcribe the longest session instead.
             var effectiveURL = audioURL
             var timebaseOffset: Double = 0
             if !replaceExisting,
@@ -1485,12 +1982,19 @@ final class AppState {
                     timebaseOffset = offsetFloor
                     self.fileLog("TaskQueue: append-mode transcription — session file \(URL(fileURLWithPath: lastPath).lastPathComponent), offset \(Int(timebaseOffset))s")
                 } else if existingMaxEnd == 0 {
-                    func fileSize(_ path: String) -> Int {
-                        ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int) ?? 0
+                    // Rank by decoded duration, not byte size: since ADR-033 a
+                    // meeting's sessions can mix uncompressed Int16 .wav with
+                    // ALAC .m4a (~5× smaller per minute), so a shorter WAV
+                    // would outrank a longer archived session. Unreadable
+                    // files (husks) score 0 and still rank last.
+                    let scored = meeting.audioFilePaths.map { path -> (path: String, duration: Double) in
+                        guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)),
+                              file.processingFormat.sampleRate > 0 else { return (path, 0) }
+                        return (path, Double(file.length) / file.processingFormat.sampleRate)
                     }
-                    if let largest = meeting.audioFilePaths.max(by: { fileSize($0) < fileSize($1) }) {
-                        effectiveURL = URL(fileURLWithPath: largest)
-                        self.fileLog("TaskQueue: multi-file meeting with no rows — transcribing largest file \(URL(fileURLWithPath: largest).lastPathComponent)")
+                    if let longest = scored.max(by: { $0.duration < $1.duration }) {
+                        effectiveURL = URL(fileURLWithPath: longest.path)
+                        self.fileLog("TaskQueue: multi-file meeting with no rows — transcribing longest session \(URL(fileURLWithPath: longest.path).lastPathComponent)")
                     }
                 }
             }
@@ -1587,6 +2091,18 @@ final class AppState {
                 // which deletes the task rows the scan used to rely on).
                 meeting.transcriptionAttemptedAt = Date()
 
+                // TASK-125: a sub-30s recording that produced zero segments from
+                // real audio is a genuine no-speech capture (the >= 30s path
+                // throws instead — TASK-031). Stamp the terminal no-speech flag
+                // IN the same completion write so the meeting shows the calm
+                // "No speech was captured" state (Summary/Transcript variants,
+                // list caption) rather than the generic placeholder. No summary/
+                // cleanup is enqueued for it — the follow-on gate requires
+                // segments — so this is purely explanatory.
+                if output.noSpeechDetected, meeting.noSpeechDetectedAt == nil {
+                    meeting.noSpeechDetectedAt = Date()
+                }
+
                 self.taskQueueManager.reportCurrentProgress(stage: "Saving transcripts")
                 let commitSucceeded: Bool
                 do {
@@ -1660,6 +2176,40 @@ final class AppState {
             }
         }
 
+        // TASK-123: a transcription task that has run out of retries with the
+        // empty-result error means the recording had no speech (silent mic AND
+        // no remote audio). Close the meeting into the terminal "no speech"
+        // state — status=complete + noSpeechDetectedAt — WITHOUT enqueuing any
+        // summary / action-item / KB work (there is nothing to process). The
+        // startup orphan scan excludes noSpeechDetectedAt != nil rows, so this
+        // meeting stops being re-enqueued every launch. Manual Retry from the
+        // meeting detail clears the flag and re-enqueues transcription.
+        taskQueueManager.transcriptionExhausted = { [weak self] meetingId, error in
+            guard let self else { return }
+            guard error is TranscriptionEmptyResultError else { return }
+            self.fileLog("TaskQueue: transcription exhausted with no speech for \(meetingId) — closing as no-speech terminal state")
+            // Already on the MainActor (TaskQueueManager is @MainActor) —
+            // plain Task inherits the actor; no @MainActor re-annotation.
+            Task {
+                guard var meeting = try? await self.meetingRepository.find(id: meetingId) else { return }
+                // Stamp the orphan-scan skip marker even when the flag is
+                // already set — an already-flagged meeting missing attemptedAt
+                // would otherwise stay a scan candidate after a queue clear.
+                if meeting.noSpeechDetectedAt != nil {
+                    if meeting.transcriptionAttemptedAt == nil {
+                        meeting.transcriptionAttemptedAt = Date()
+                        try? await self.meetingRepository.update(meeting)
+                    }
+                    return
+                }
+                meeting.status = .complete
+                meeting.noSpeechDetectedAt = Date()
+                meeting.transcriptionAttemptedAt = meeting.transcriptionAttemptedAt ?? Date()
+                try? await self.meetingRepository.update(meeting)
+                self.loadMeetings()
+            }
+        }
+
         taskQueueManager.summaryHandler = { [weak self] meetingId in
             guard let self else { return }
             self.fileLog("TaskQueue: running summary for \(meetingId)")
@@ -1671,6 +2221,7 @@ final class AppState {
             // summary handler, so the TaskQueue rule holds.
             await self.extractActionItemsBestEffort(meetingId: meetingId)
             await self.extractInsightsBestEffort(meetingId: meetingId)
+            await self.extractDecisionsBestEffort(meetingId: meetingId)
             await self.scoreIntentBestEffort(meetingId: meetingId)
             await self.computeSpeechStatsBestEffort(meetingId: meetingId)
             await self.computeSentimentBestEffort(meetingId: meetingId)
@@ -1687,9 +2238,9 @@ final class AppState {
             try await self.runEmbedIndex(meetingId: meetingId)
         }
 
-        taskQueueManager.weeklyDigestHandler = { [weak self] in
+        taskQueueManager.weeklyDigestHandler = { [weak self] sentinel in
             guard let self else { return }
-            try await self.generateWeeklyDigest()
+            try await self.generateWeeklyDigest(sentinel: sentinel)
         }
 
         taskQueueManager.gardenerHandler = { [weak self] in
@@ -1866,6 +2417,16 @@ final class AppState {
             // full transcript — useful when the first 20-turn LLM window
             // didn't have enough context.
             await self.maybeEnqueueRetryAttribution(meetingId: meetingId)
+            // TASK-135: cleanup is the last step of the audio-reading pipeline
+            // that every transcribed meeting runs (AI-configured or not), so
+            // this is where the recordings become archivable.
+            await self.maybeEnqueueAudioArchive(meetingId: meetingId)
+        }
+
+        // TASK-135: compress this meeting's recordings to Apple Lossless.
+        taskQueueManager.audioArchiveHandler = { [weak self] meetingId in
+            guard let self else { return }
+            try await self.runAudioArchive(meetingId: meetingId)
         }
 
         // v3.10 #7: second-pass speaker attribution — runs the same flow as
@@ -2038,8 +2599,8 @@ final class AppState {
         // Pull relevant Knowledge Base excerpts so the summary can reference the
         // KB is intentionally OUT of the main-summary prompt. Earlier we injected
         // KB excerpts here, but they leaked unrelated content into Discussion
-        // Points / Decisions / Open Questions — e.g. an Globex meeting summary
-        // citing Initech-specific people and Umbrella Health pricing pulled from
+        // Points / Decisions / Open Questions — e.g. a Globex meeting summary
+        // citing Initech-specific people and Hooli pricing pulled from
         // KB docs about a different customer. The main summary must be grounded
         // ONLY in this meeting's transcript + the user's own notes.
         //
@@ -2365,7 +2926,7 @@ final class AppState {
     /// exact name matches against the meeting's context entities (account
     /// acronyms, product names, participant names). The strict gating exists
     /// because earlier KB injection bled unrelated context into the summary —
-    /// e.g. an Globex-titled meeting picking up Initech-specific people and pricing
+    /// e.g. a Globex-titled meeting picking up Initech-specific people and pricing
     /// from other customer docs in the KB.
     private func appendConnectionsSection(meeting: Meeting, summary: inout MeetingSummary) async {
         let entities = Self.extractContextEntities(meeting: meeting,
@@ -2834,6 +3395,7 @@ final class AppState {
         for meetingId in candidates {
             if Task.isCancelled { break }
             await extractInsightsBestEffort(meetingId: meetingId)
+            await extractDecisionsBestEffort(meetingId: meetingId)
             // Stamp regardless of fact count — zero facts is a valid result,
             // and a real failure logs and gets another chance only when the
             // user regenerates the summary.
@@ -2920,8 +3482,16 @@ final class AppState {
                         }
                     }
 
+                    // TASK-123: a meeting closed as "no speech" (empty-result
+                    // transcription after exhausted retries) is deliberately
+                    // parked in `complete` with noSpeechDetectedAt set — but a
+                    // v72 backfill row or a race could still leave one flagged
+                    // while `transcribing`. Exclude noSpeechDetectedAt != nil
+                    // from the stuck set so the scan never resurrects a silent
+                    // recording into an endless retry loop.
                     let transcribing = try Meeting
                         .filter(Meeting.Columns.status == MeetingStatus.transcribing.rawValue)
+                        .filter(Meeting.Columns.noSpeechDetectedAt == nil)
                         .fetchAll(db)
 
                     return (toTranscribe, transcribing)
@@ -3107,6 +3677,9 @@ final class AppState {
     /// already prompting, or not recording.
     private func beginDepartureConfirmation() {
         guard isRecording, departurePrompt == nil else { return }
+        // Memos (PRJ-017 F4) aren't tied to a call — a call app quitting must
+        // never prompt to end a voice capture.
+        if activeMeeting?.isMemo == true { return }
         if let until = departureSuppressedUntil, until > Date() { return }
         let title = activeMeeting?.title ?? "this meeting"
         departurePrompt = DeparturePrompt(meetingTitle: title, firedAt: Date())
@@ -3160,7 +3733,7 @@ final class AppState {
                 self.audioCaptureService.nextCaptureSkipsSystemAudio = true
                 let title = "Memo — \(Date().formatted(date: .abbreviated, time: .shortened))"
                 var meeting = try await self.stateMachine.createAndStartMeeting(title: title)
-                meeting.templateId = "memo"
+                meeting.source = "memo"
                 try? await self.meetingRepository.save(&meeting)
                 await self.wireActiveRecordingSession()
                 self.selectedMeetingId = meeting.id
@@ -3170,6 +3743,114 @@ final class AppState {
                 self.lastUserError = "Couldn't start the memo: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// What a plain "New Meeting" click resolves to. Extracted so the picker's
+    /// preview row (`newMeetingOptions()`) is the SAME computation the fast path
+    /// runs — not a re-implementation that can drift (TASK-119).
+    enum NewMeetingTarget {
+        case reopen(Meeting)
+        case scheduled(Meeting)
+        case adHoc
+    }
+
+    /// The shared resolution chain used by both `startNewMeeting()` and
+    /// `newMeetingOptions()`: reopenable → nearby-5min recordable → ad-hoc.
+    /// Throws so the fast path keeps its exact DB-error surfacing.
+    func resolveNewMeetingTarget() async throws -> NewMeetingTarget {
+        // A restart during a still-active meeting must re-attach to the meeting
+        // it belongs to — not to whatever calendar block happens to be "current"
+        // (TASK-032: a 1:1's real transcript landed on an untitled focus-time
+        // event because the 1:1 was already complete and its scheduled window
+        // had passed). Reopenable = complete + inside its scheduled window (+1 h
+        // grace), so this appends a session to the original meeting, keeping
+        // series history, prep, and the RSVP attendee gate.
+        if let reopenable = try await bestReopenableMeeting() {
+            return .reopen(reopenable)
+        }
+        let nearby = try await meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
+        if let scheduled = nearby.first(where: { Self.isRecordableCalendarMatch($0) }) {
+            return .scheduled(scheduled)
+        }
+        return .adHoc
+    }
+
+    /// Options for the New Meeting picker (TASK-119). Read-only view state — the
+    /// view renders rows, all business logic stays here.
+    struct NewMeetingOptions {
+        /// What a plain click / ⌘N would bind to (row 1, marked "(default)").
+        let previewTarget: NewMeetingTarget
+        /// `previewTarget`'s meeting (reopen/scheduled); nil for `.adHoc`.
+        let previewMeeting: Meeting?
+        /// Nearby recordable calendar events (±30 min), minus the preview row.
+        let nearbyEvents: [Meeting]
+        /// A reopenable meeting distinct from the preview row (usually nil, since
+        /// reopenable wins the preview when present — kept for API symmetry).
+        let reopenable: Meeting?
+        let isRecording: Bool
+    }
+
+    func newMeetingOptions() async -> NewMeetingOptions {
+        let target = (try? await resolveNewMeetingTarget()) ?? .adHoc
+        let previewMeeting: Meeting?
+        switch target {
+        case .reopen(let m):    previewMeeting = m
+        case .scheduled(let m): previewMeeting = m
+        case .adHoc:            previewMeeting = nil
+        }
+        let previewId = previewMeeting?.id
+        let nearby = (try? await meetingRepository.meetingsNearDate(Date(), windowMinutes: 30)) ?? []
+        let nearbyEvents = nearby.filter { Self.isRecordableCalendarMatch($0) && $0.id != previewId }
+        let reopenable = try? await bestReopenableMeeting()
+        let distinctReopenable = (reopenable?.id != previewId) ? reopenable : nil
+        return NewMeetingOptions(
+            previewTarget: target,
+            previewMeeting: previewMeeting,
+            nearbyEvents: nearbyEvents,
+            reopenable: distinctReopenable,
+            isRecording: isRecording
+        )
+    }
+
+    // MARK: - New Meeting candidate cache (TASK-121)
+
+    /// Cached candidates the New Meeting control uses to decide, synchronously at
+    /// render time, whether a click opens the picker (Menu) or takes the fast
+    /// path (Button). Content is the flattened, deduped candidate set from
+    /// `newMeetingOptions()` — preview + nearby events + reopenable — capped at 5
+    /// (preview always survives), sorted by proximity to now. The menu itself
+    /// still re-fetches fresh rows on open; this cache only drives the shape.
+    private(set) var newMeetingCandidates: [Meeting] = []
+    private var isRefreshingNewMeetingCandidates = false
+
+    /// Recompute `newMeetingCandidates`. Coalesced (skips if a refresh is already
+    /// in flight) and skipped entirely while recording — the control renders the
+    /// switch menu unconditionally there, so the cache is irrelevant. Called from
+    /// the 30s proximity poll, on app activation, and after `loadMeetings()`.
+    func refreshNewMeetingCandidates() {
+        guard !isRecording else { return }
+        guard !isRefreshingNewMeetingCandidates else { return }
+        isRefreshingNewMeetingCandidates = true
+        Task { @MainActor in
+            defer { self.isRefreshingNewMeetingCandidates = false }
+            let options = await self.newMeetingOptions()
+            let preview = options.previewMeeting
+            var rest: [Meeting] = options.nearbyEvents
+            if let r = options.reopenable { rest.append(r) }
+            var seen = Set<String>()
+            if let preview { seen.insert(preview.id) }
+            let dedupedRest = rest.filter { seen.insert($0.id).inserted }
+            let sortedRest = dedupedRest.sorted { Self.candidateProximity($0) < Self.candidateProximity($1) }
+            var result: [Meeting] = []
+            if let preview { result.append(preview) }
+            result.append(contentsOf: sortedRest.prefix(preview == nil ? 5 : 4))
+            self.newMeetingCandidates = result
+        }
+    }
+
+    static func candidateProximity(_ m: Meeting) -> TimeInterval {
+        guard let d = m.scheduledStartDate else { return .greatestFiniteMagnitude }
+        return abs(d.timeIntervalSinceNow)
     }
 
     func startNewMeeting() {
@@ -3192,46 +3873,32 @@ final class AppState {
         Task { @MainActor in
             defer { self.isStartingMeeting = false }
             do {
-                // A restart during a still-active meeting must re-attach to
-                // the meeting it belongs to — not to whatever calendar block
-                // happens to be "current" (TASK-032: a 1:1's real transcript
-                // landed on an untitled focus-time event because the 1:1 was
-                // already complete and its scheduled window had passed).
-                // Reopenable = complete + inside its scheduled window (+1 h
-                // grace), so this appends a session to the original meeting,
-                // keeping series history, prep, and the RSVP attendee gate.
-                if let reopenable = try await self.bestReopenableMeeting() {
+                switch try await self.resolveNewMeetingTarget() {
+                case .reopen(let reopenable):
                     self.fileLog("startNewMeeting: re-attaching to reopenable '\(reopenable.title)' — appending a session")
                     self.isStartingMeeting = false   // reopenRecording has its own debounce
                     self.reopenRecording(for: reopenable)
                     self.selectedMeetingId = reopenable.id
                     self.loadMeetings()
                     return
-                }
 
-                let nearby = try await self.meetingRepository.meetingsNearDate(Date(), windowMinutes: 5)
-                let scheduledMatch = nearby.first(where: { Self.isRecordableCalendarMatch($0) })
-
-                let meeting: Meeting
-                let isAdHoc: Bool
-                if let scheduled = scheduledMatch {
+                case .scheduled(let scheduled):
                     self.fileLog("startNewMeeting: matched scheduled '\(scheduled.title)' — starting it")
                     try await self.stateMachine.startRecording(meeting: scheduled)
-                    meeting = self.stateMachine.currentMeeting ?? scheduled
-                    isAdHoc = false
-                } else {
-                    meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
-                    isAdHoc = true
-                }
+                    let meeting = self.stateMachine.currentMeeting ?? scheduled
+                    await self.wireActiveRecordingSession()
+                    self.selectedMeetingId = meeting.id
+                    self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
+                    self.loadMeetings()
 
-                await self.wireActiveRecordingSession()
-                self.selectedMeetingId = meeting.id
-                self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
-                self.loadMeetings()
-
-                // Only auto-focus the title when the meeting was created ad-hoc; for a scheduled
-                // meeting we want to keep the calendar-provided title as-is.
-                if isAdHoc {
+                case .adHoc:
+                    let meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                    await self.wireActiveRecordingSession()
+                    self.selectedMeetingId = meeting.id
+                    self.fileLog("Meeting started: \(meeting.id) ('\(meeting.title)')")
+                    self.loadMeetings()
+                    // Only auto-focus the title for an ad-hoc meeting; a scheduled
+                    // meeting keeps its calendar-provided title as-is.
                     self.focusTitleForRename = true
                 }
             } catch {
@@ -3239,6 +3906,50 @@ final class AppState {
                 self.lastUserError = "Couldn't start recording: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Start a fresh unlinked meeting titled "New Meeting" — the picker's
+    /// "Blank meeting" row. Skips ALL calendar/reopen matching and never touches
+    /// switch state. Guards mirror `startNewMeeting()` / `startQuickMemo()`.
+    func startBlankMeeting() {
+        guard !isRecording else {
+            lastUserError = "A meeting is already recording. Stop it before starting a new one."
+            fileLog("startBlankMeeting: skipped — already recording")
+            return
+        }
+        guard !isStartingMeeting else {
+            fileLog("startBlankMeeting: skipped — another start in progress (debounce)")
+            return
+        }
+        sidebarDestination = .meetings
+        isStartingMeeting = true
+        fileLog("startBlankMeeting invoked")
+        Task { @MainActor in
+            defer { self.isStartingMeeting = false }
+            do {
+                let meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                await self.wireActiveRecordingSession()
+                self.selectedMeetingId = meeting.id
+                self.focusTitleForRename = true
+                self.loadMeetings()
+                self.fileLog("Blank meeting started: \(meeting.id)")
+            } catch {
+                Logger.general.error("Failed to start blank meeting: \(error.localizedDescription)")
+                self.lastUserError = "Couldn't start recording: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Explicit picker bind: start/reopen a specific meeting the user chose from
+    /// the New Meeting menu (bypasses smart-match). `startOrReopenRecording`
+    /// carries its own not-recording / debounce guards.
+    func startMeeting(boundTo meeting: Meeting) {
+        guard !isRecording else {
+            lastUserError = "A meeting is already recording. Stop it before starting a new one."
+            return
+        }
+        startOrReopenRecording(for: meeting)
+        selectedMeetingId = meeting.id
     }
 
     /// A scheduled meeting that a fresh recording should attach to. Filters
@@ -3266,7 +3977,8 @@ final class AppState {
                 .limit(12)
                 .fetchAll(db)
         }
-        return candidates.first(where: { $0.isReopenable && !$0.isAllDay })
+        // Never re-attach a new recording to a completed memo (PRJ-017 F4).
+        return candidates.first(where: { $0.isReopenable && !$0.isAllDay && !$0.isMemo })
     }
 
     func createMeeting(title: String, scheduledStart: Date? = nil, scheduledEnd: Date? = nil) async throws -> Meeting {
@@ -3353,13 +4065,23 @@ final class AppState {
     /// `startRecording(for:)` did this, so auto-recorded meetings never got
     /// write-error surfacing, the Apple Speech fallback, or screen-based
     /// participant detection.
-    private func wireActiveRecordingSession() async {
+    private func wireActiveRecordingSession(detectorSeedTitle: String? = nil) async {
         guard let current = stateMachine.currentMeeting else { return }
 
         self.activeMeeting = current
         self.isRecording = stateMachine.isRecording
         self.selectedMeetingId = current.id
         if self.isRecording { self.startAudioLevelPolling() }
+
+        // Arm switch detection for real meetings (not solo memos). Seed the
+        // baseline from the detector's browser title when this recording was
+        // browser-detected; otherwise the engine adopts the first stable
+        // observed title set (baseline-adoption rule — never the calendar title).
+        if self.isRecording, !current.isMemo {
+            switchDetectionService.arm(detectorStartedTitle: detectorSeedTitle, startedAt: Date())
+        } else {
+            switchDetectionService.disarm()
+        }
 
         // Warm the transcription model during the meeting so it's ready the
         // moment recording stops (no-op when already loaded; the idle-unload
@@ -3404,12 +4126,16 @@ final class AppState {
         // lines ran, the old service's 30s poll timer would leak for the app
         // lifetime and stack with this one.
         self.participantDetectionService?.stop()
-        let service = ParticipantDetectionService(
-            meetingRepository: self.meetingRepository,
-            database: self.database
-        )
-        self.participantDetectionService = service
-        service.start(meetingId: current.id, existingParticipants: current.participantList)
+        // Memos (PRJ-017 F4) are solo captures — screen/window participant
+        // detection would only mislabel from unrelated open windows.
+        if !current.isMemo {
+            let service = ParticipantDetectionService(
+                meetingRepository: self.meetingRepository,
+                database: self.database
+            )
+            self.participantDetectionService = service
+            service.start(meetingId: current.id, existingParticipants: current.participantList)
+        }
 
         // Resolve template: use meeting's own templateId, or inherit from series.
         self.activeTemplate = await self.resolveTemplate(for: current)
@@ -3477,33 +4203,206 @@ final class AppState {
         }
     }
 
-    /// Stop the current recording and start a new one for `meeting`.
-    /// Drives the "Switch meetings" banner — opens the new meet link and
-    /// kicks off recording in one user-visible step. Idempotent: if no
-    /// recording is active, just starts the new one.
-    func switchActiveMeeting(to meeting: Meeting) async {
-        fileLog("Switch: switching active meeting to '\(meeting.title)' (was '\(activeMeeting?.title ?? "none")')")
+    // MARK: - Switch Suggestion Funnel (TASK-118)
 
-        // Clear pending state up front so the banner dismisses immediately.
-        pendingSwitchMeetingId = nil
-        NotificationCenter.default.post(name: .meetingSwitchDismiss, object: nil)
+    /// Single entry point for every switch producer. No-ops when not recording,
+    /// while stopping, or during a memo; dedupes against dismissed sets and the
+    /// currently-pending offer.
+    func presentSwitchSuggestion(_ suggestion: SwitchSuggestion) {
+        guard isRecording, !isStoppingMeeting, activeMeeting?.isMemo != true else { return }
+        if let mid = suggestion.matchedMeetingId, dismissedSwitchMeetingIds.contains(mid) { return }
+        if let norm = suggestion.normalizedTitle, dismissedSwitchTitles.contains(norm) { return }
+        if let existing = pendingSwitchSuggestion {
+            if existing.id == suggestion.id { return }
+            // A medium detector guess must not override a high calendar-matched
+            // offer that's already showing.
+            if existing.confidence == .high && suggestion.confidence == .medium { return }
+        }
+        pendingSwitchSuggestion = suggestion
+        switchSuggestionDemoted = false
+        scheduleSwitchSuggestionDemotion()
+        fileLog("Switch suggestion: '\(suggestion.detectedTitle)' origin=\(suggestion.origin) confidence=\(suggestion.confidence) matched=\(suggestion.matchedMeetingId ?? "none")")
+        NotificationCenter.default.post(name: .meetingSwitchShow, object: nil)
+    }
 
-        if isRecording {
-            stopRecording()
-            // Wait for the state machine to actually flip isRecording=false
-            // before starting the new one. stopRecording is fire-and-forget
-            // (an internal Task), so poll briefly. 3s upper bound — if it
-            // hasn't flipped by then something else is wrong.
-            let deadline = Date().addingTimeInterval(3)
-            while isRecording && Date() < deadline {
-                try? await Task.sleep(for: .milliseconds(100))
+    /// User declined the offer. Records BOTH dismissal keys (so the other origin
+    /// can't re-nag for the same real meeting) and suppresses the detector.
+    func dismissSwitchSuggestion(byUser: Bool) {
+        guard pendingSwitchSuggestion != nil else { return }
+        clearSwitchSuggestion(recordDismissal: byUser)
+    }
+
+    /// Accept the offer: stop the current recording, then switch to the matched
+    /// calendar meeting or start an ad-hoc meeting titled from the detection.
+    /// `overrideMeeting` lets a stale banner or picker row target a resolved
+    /// meeting explicitly instead of trusting the pending suggestion.
+    func acceptSwitchSuggestion(overrideMeeting: Meeting? = nil) {
+        // isStartingMeeting also debounces a double-fired accept (two surfaces
+        // clicked fast / duplicate .switchToMeeting) — without it two stop→start
+        // Tasks would enqueue and write two split-point notes.
+        guard !isStoppingMeeting, !isStartingMeeting else { return }
+        let suggestion = pendingSwitchSuggestion
+        guard suggestion != nil || overrideMeeting != nil else { return }
+
+        let oldMeeting = activeMeeting
+        let oldTitle = oldMeeting?.title ?? "this meeting"
+        let firedAt = suggestion?.firedAt ?? Date()
+        let origin = suggestion?.origin ?? .calendar
+        let detectedTitle = overrideMeeting?.title ?? suggestion?.detectedTitle ?? "New Meeting"
+        let matchedId = overrideMeeting?.id ?? suggestion?.matchedMeetingId
+
+        clearSwitchSuggestion(recordDismissal: false)
+
+        // Hold isStartingMeeting across the whole stop→start bridge so the 30s
+        // proximity tick's auto-start branch can't slip a second start into the
+        // gap after isRecording flips false. Released before delegating to a
+        // start path that re-acquires it (matched case), or in the defer.
+        isStartingMeeting = true
+        fileLog("Switch accept: '\(oldTitle)' → '\(detectedTitle)' (origin=\(origin), matched=\(matchedId ?? "none"))")
+
+        Task { @MainActor in
+            // Once we hand the guard to a start path that re-acquires it, the
+            // defer must NOT reset it — that would break that path's debounce.
+            var handedOff = false
+            defer { if !handedOff { self.isStartingMeeting = false } }
+
+            var target = overrideMeeting
+            if target == nil, let matchedId {
+                target = try? await self.meetingRepository.find(id: matchedId)
+            }
+
+            // Split-point honesty: annotate the OLD meeting at the detection time.
+            if let old = oldMeeting {
+                await self.appendSwitchPointNote(to: old, newTitle: detectedTitle, at: firedAt)
+            }
+
+            await self.stopCurrentRecordingAndWait()
+
+            do {
+                if let target {
+                    // Open the meet link ONLY for a genuine calendar-origin offer.
+                    // A detector-origin match means the user is already in the
+                    // call; opening a URL would spawn a duplicate tab.
+                    if origin == .calendar, let link = target.meetLink, !link.isEmpty,
+                       let url = URL(string: link) {
+                        NSWorkspace.shared.open(url)
+                    }
+                    handedOff = true
+                    self.isStartingMeeting = false   // startOrReopenRecording re-acquires
+                    self.startOrReopenRecording(for: target)
+                } else {
+                    // Unmatched → ad-hoc meeting titled from the detection. No
+                    // focus theft: set focusTitleForRename WITHOUT activating the
+                    // app — the rename affordance waits until the user visits.
+                    let meeting = try await self.stateMachine.createAndStartMeeting(title: detectedTitle)
+                    await self.wireActiveRecordingSession()
+                    self.selectedMeetingId = meeting.id
+                    self.focusTitleForRename = true
+                    self.loadMeetings()
+                    self.fileLog("Switch accept: started ad-hoc meeting \(meeting.id) ('\(detectedTitle)')")
+                }
+            } catch {
+                self.lastUserError = "Couldn't switch meetings: \(error.localizedDescription)"
+                self.fileLog("Switch accept failed: \(error.localizedDescription)")
             }
         }
+    }
 
-        if let link = meeting.meetLink, !link.isEmpty, let url = URL(string: link) {
-            NSWorkspace.shared.open(url)
+    /// Switch to a fresh unlinked meeting while recording: stop the current
+    /// recording, then start a blank "New Meeting". Mirrors
+    /// `acceptSwitchSuggestion`'s unmatched branch but forces a blank title and
+    /// no calendar link — the picker's "Switch to blank meeting" row (TASK-119).
+    func switchToBlankMeeting() {
+        guard !isStoppingMeeting, !isStartingMeeting else { return }
+        guard isRecording else { startBlankMeeting(); return }
+        let oldMeeting = activeMeeting
+        let oldTitle = oldMeeting?.title ?? "this meeting"
+        clearSwitchSuggestion(recordDismissal: false)
+        isStartingMeeting = true
+        fileLog("Switch to blank: '\(oldTitle)' → 'New Meeting'")
+        Task { @MainActor in
+            defer { self.isStartingMeeting = false }
+            if let old = oldMeeting {
+                await self.appendSwitchPointNote(to: old, newTitle: "New Meeting", at: Date())
+            }
+            await self.stopCurrentRecordingAndWait()
+            do {
+                let meeting = try await self.stateMachine.createAndStartMeeting(title: "New Meeting")
+                await self.wireActiveRecordingSession()
+                self.selectedMeetingId = meeting.id
+                self.focusTitleForRename = true
+                self.loadMeetings()
+                self.fileLog("Switch to blank: started meeting \(meeting.id)")
+            } catch {
+                self.lastUserError = "Couldn't switch meetings: \(error.localizedDescription)"
+                self.fileLog("Switch to blank failed: \(error.localizedDescription)")
+            }
         }
-        startRecording(for: meeting)
+    }
+
+    /// Stop the active recording and wait (≤3s) for `isRecording` to flip false,
+    /// so a new recording can start cleanly. Shared by the switch-accept paths.
+    private func stopCurrentRecordingAndWait() async {
+        guard isRecording else { return }
+        stopRecording()
+        let deadline = Date().addingTimeInterval(3)
+        while isRecording && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    /// Clears the pending offer and its demote timer. When `recordDismissal` is
+    /// true, both dismissal keys are recorded and the detector suppressed.
+    private func clearSwitchSuggestion(recordDismissal: Bool) {
+        if recordDismissal, let suggestion = pendingSwitchSuggestion {
+            recordSwitchDismissal(suggestion)
+        }
+        pendingSwitchSuggestion = nil
+        switchSuggestionDemoted = false
+        switchSuggestionDemoteTask?.cancel()
+        switchSuggestionDemoteTask = nil
+        NotificationCenter.default.post(name: .meetingSwitchDismiss, object: nil)
+    }
+
+    private func recordSwitchDismissal(_ suggestion: SwitchSuggestion) {
+        if let mid = suggestion.matchedMeetingId { dismissedSwitchMeetingIds.insert(mid) }
+        if let norm = suggestion.normalizedTitle {
+            dismissedSwitchTitles.insert(norm)
+            switchDetectionService.suppressTitle(norm)
+        }
+        // App-launch dismissals use a shorter window — the user may have opened
+        // the call app for an unrelated reason.
+        let window: TimeInterval = suggestion.origin == .detectedApp ? 180 : 600
+        switchDetectionService.suppress(until: Date().addingTimeInterval(window))
+        fileLog("Switch suggestion dismissed by user (origin=\(suggestion.origin)) — suppressing \(Int(window / 60))min")
+    }
+
+    /// ~5-min soft timeout. Demotes rather than clears: hides the floating and
+    /// inline banners and reverts the menu bar, but the popover row persists.
+    private func scheduleSwitchSuggestionDemotion() {
+        switchSuggestionDemoteTask?.cancel()
+        switchSuggestionDemoteTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(300))
+            guard !Task.isCancelled, let self, self.pendingSwitchSuggestion != nil else { return }
+            self.switchSuggestionDemoted = true
+            self.fileLog("Switch suggestion soft-timeout — demoting (popover row persists)")
+            // AppKit-only refresh: closes the floating window and reverts the
+            // menu bar. The suggestion itself stays set (popover keeps its row).
+            NotificationCenter.default.post(name: .meetingSwitchDismiss, object: nil)
+        }
+    }
+
+    private func appendSwitchPointNote(to meeting: Meeting, newTitle: String, at date: Date) async {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "h:mm a"
+        let timeStr = fmt.string(from: date)
+        let content = "Switched to \u{201C}\(newTitle)\u{201D} at \(timeStr) — trailing minutes may belong to the next meeting."
+        var note = MeetingNote(meetingId: meeting.id, content: content, createdAt: date)
+        do {
+            try await noteRepository.save(&note)
+        } catch {
+            fileLog("Switch accept: failed to write split-point note: \(error.localizedDescription)")
+        }
     }
 
     /// Stop recording — then run batch transcription on the complete audio file.
@@ -3520,6 +4419,17 @@ final class AppState {
         // surface as a spurious user-facing alert.
         guard !isStoppingMeeting else { return }
         isStoppingMeeting = true
+        // Disarm switch detection synchronously — before the internal Task —
+        // so no candidate can surface mid-teardown (TASK-117). Clear the
+        // suggestion and both dismissal sets: they never outlive the recording,
+        // so tomorrow's same-titled recurring meeting starts clean.
+        switchDetectionService.disarm()
+        clearSwitchSuggestion(recordDismissal: false)
+        dismissedSwitchMeetingIds.removeAll()
+        dismissedSwitchTitles.removeAll()
+        // TASK-124: drop the silent-capture warning synchronously so the menu
+        // bar/popover clear the instant Stop is pressed, before teardown runs.
+        clearCaptureSilence()
         // TASK-080: finalize any video capture (no-op when off). Synchronous
         // trigger creates the teardown handle on the main actor *now* so a
         // back-to-back meeting's start() can observe and await it (the actual
@@ -3639,6 +4549,13 @@ final class AppState {
         var rows: [Transcript]
         var enrollmentMatches: [String: EnrollmentMatch] = [:]
         var fluidResult: FluidDiarizationResult? = nil
+        /// TASK-125: a short (< 30s) recording that produced zero segments from
+        /// real audio is NOT an error — it never throws (that's the >= 30s
+        /// TASK-031 path) — but it IS a genuine no-speech capture. The handler
+        /// stamps `noSpeechDetectedAt` on the completion write so the meeting
+        /// shows the calm "No speech was captured" state instead of the generic
+        /// "record this meeting" placeholder.
+        var noSpeechDetected: Bool = false
         static func rowsOnly(_ rows: [Transcript]) -> BatchTranscriptionOutput { .init(rows: rows) }
     }
 
@@ -3985,17 +4902,25 @@ final class AppState {
     }
 
     /// Partition audio paths into usable sessions vs husks. A crash husk is
-    /// AVAudioFile's header scaffolding (~4 KB, data chunk at offset 4088)
-    /// with zero samples — the old `> 44` check made the husk branch
-    /// near-dead. Missing files (nil size) count as husks.
+    /// AVAudioFile's header scaffolding with zero samples. Classified by walking
+    /// to the WAV `data` chunk rather than by a byte threshold: the old `> 4200`
+    /// rule encoded the header size of one particular layout, so it silently
+    /// misjudges any file whose header pads differently. Missing or empty files
+    /// (nil / zero size) count as husks. `hasAudio` is injected for testability.
     nonisolated static func partitionUsableAudioPaths(
         _ paths: [String],
-        sizeOf: (String) -> Int?
+        sizeOf: (String) -> Int?,
+        hasAudio: (String) -> Bool = { WavFileLayout.containsAudioBytes(atPath: $0) }
     ) -> (usable: [String], husks: [String]) {
         var usable: [String] = []
         var husks: [String] = []
         for path in paths where !path.isEmpty {
-            if let size = sizeOf(path), size > 4200 {
+            guard let size = sizeOf(path), size > 0 else {
+                husks.append(path)
+                continue
+            }
+            let isWav = URL(fileURLWithPath: path).pathExtension.lowercased() == "wav"
+            if !isWav || hasAudio(path) {
                 usable.append(path)
             } else {
                 husks.append(path)
@@ -4188,7 +5113,22 @@ final class AppState {
                     throw TranscriptionEmptyResultError(rawSeconds: prepared.rawSeconds)
                 }
             }
-            return BatchTranscriptionOutput(rows: built.rows, enrollmentMatches: enrollmentMatches, fluidResult: fluidResult)
+
+            // TASK-125: sub-30s zero-segment recordings take the calm path. The
+            // >= 30s honesty gate above THROWS (TASK-031, a failed task the user
+            // retries); a short empty clip is not an error and must not spawn a
+            // failed task / retry loop. Instead, signal the handler to stamp the
+            // no-speech terminal state on the normal completion write. Re-
+            // transcriptions that already have rows are exempt (existing
+            // transcript preserved — a no-speech flag would be noise).
+            var noSpeechDetected = false
+            if built.rows.isEmpty, prepared.rawSeconds < 30 {
+                let existingRows = (try? await database.writer.read { db in
+                    try Transcript.filter(Transcript.Columns.meetingId == meetingId).fetchCount(db)
+                }) ?? 0
+                noSpeechDetected = existingRows == 0
+            }
+            return BatchTranscriptionOutput(rows: built.rows, enrollmentMatches: enrollmentMatches, fluidResult: fluidResult, noSpeechDetected: noSpeechDetected)
 
         } catch {
             // Rethrow — the old `return []` here swallowed WhisperKit and
@@ -4535,7 +5475,7 @@ final class AppState {
         // On the FluidAudio mixed-audio path the local user is a "Speaker N"
         // cluster (no "mic" label), so nothing above identified them. Pin the
         // user's cluster by mic-vs-system energy. SOFT signal: validated at
-        // ~57% precision when it fires (harness/evaluations/2026-05-31), so
+        // ~57% precision when it fires (measured 2026-05-31), so
         // it is (a) gated to the FluidAudio path it was built for — on the
         // default SpeakerKit path diarization runs on system-only audio where
         // every cluster is remote by construction, making any fire a wrong
@@ -5787,6 +6727,16 @@ final class AppState {
                 // and tell the user once.
                 if error is TranscriptionEmptyResultError {
                     fileLog("Pending transcription: \(meetingId) produced no text — dropping from the relaunch queue")
+                    // Park it terminally right here (TASK-123) — leaving the
+                    // meeting in `transcribing` handed it to the startup
+                    // cleanup for one more full retry cycle before the
+                    // exhausted callback finally flagged it.
+                    if var m = try? await meetingRepository.find(id: meetingId), m.noSpeechDetectedAt == nil {
+                        m.status = .complete
+                        m.noSpeechDetectedAt = Date()
+                        m.transcriptionAttemptedAt = m.transcriptionAttemptedAt ?? Date()
+                        try? await meetingRepository.update(m)
+                    }
                     lastUserError = error.localizedDescription
                     continue
                 }
@@ -5861,7 +6811,12 @@ final class AppState {
 
         let defaultTitles: Set<String> = ["New Meeting", "Untitled Meeting", ""]
         let trimmedTitle = meeting.title.trimmingCharacters(in: .whitespaces)
-        guard defaultTitles.contains(meeting.title) || trimmedTitle.isEmpty else { return }
+        // Memos are stamped "Memo — <date>" at creation (PRJ-017 F4) — treat that
+        // as a default so the capture gets a real title from its transcript.
+        let isDefaultTitle = defaultTitles.contains(meeting.title)
+            || trimmedTitle.isEmpty
+            || meeting.title.hasPrefix("Memo — ")
+        guard isDefaultTitle else { return }
 
         let transcriptText = transcripts.map { $0.text }.joined(separator: " ")
         guard !transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -5916,6 +6871,24 @@ final class AppState {
     }
 
     // MARK: - Call Detection Response
+
+    // MARK: - Switch-Detection Forwarders (TASK-117)
+
+    /// Feed every in-call browser title observed this poll to the switch
+    /// detector. Wired from `CallDetectionService.onBrowserCallTitles` by
+    /// AppDelegate; only fires while recording.
+    func forwardBrowserCallTitles(_ titles: [String]) {
+        switchDetectionService.noteBrowserTitles(titles)
+    }
+
+    /// Feed a debounced call-app activation to the switch detector as a
+    /// second-call-surface (medium-confidence) candidate. Wired from
+    /// `CallDetectionService.onCallAppActivated` by AppDelegate.
+    func forwardCallAppActivation(bundleId: String, name: String) {
+        guard isRecording, activeMeeting?.isMemo != true else { return }
+        guard bundleId != autoRecordTriggerBundleId else { return }
+        switchDetectionService.noteCallAppEvent(bundleId: bundleId, appName: name, isActivation: true)
+    }
 
     /// Called when a call app or browser meeting is detected.
     /// Respects `autoRecord` and `autoInvite` settings.
@@ -5990,7 +6963,10 @@ final class AppState {
                         meeting = created
                     }
 
-                    await self.wireActiveRecordingSession()
+                    // Seed the switch detector's baseline from the detected
+                    // browser tab title (nil/generic for native-app detections,
+                    // which fall back to baseline adoption from observation).
+                    await self.wireActiveRecordingSession(detectorSeedTitle: appName)
                     self.selectedMeetingId = meeting.id
                     self.detectedCallApp = nil
                     self.recordingStartedByDetector = self.isRecording
@@ -6182,10 +7158,12 @@ final class AppState {
                 if self.systemLevel > 0.01 {
                     self.lastActiveSystemAudioAt = Date()
                 }
+                // TASK-124: fold the levels into the sustained-silence window.
+                self.updateCaptureSilence()
                 // Log every ~5 seconds (50 ticks) for debugging
                 logCounter += 1
                 if logCounter % 50 == 1 {
-                    self.fileLog("Audio levels: mic=\(String(format: "%.4f", self.micLevel)) sys=\(String(format: "%.4f", self.systemLevel)) engine.running=\(self.audioCaptureService.micCapture.engine.isRunning)")
+                    self.fileLog("Audio levels: mic=\(String(format: "%.4f", self.micLevel)) sys=\(String(format: "%.4f", self.systemLevel)) engine.running=\(self.audioCaptureService.micEngineIsRunning)")
                 }
             }
     }
@@ -6195,6 +7173,39 @@ final class AppState {
         micLevel = 0
         systemLevel = 0
         micHealth = .unknown
+    }
+
+    /// TASK-124: anchor/extend/clear the silent-capture window from the current
+    /// levels. Anchored only while recording and BOTH channels sit below the
+    /// epsilon; the flag flips once the anchor is `captureSilenceThreshold` old.
+    /// Any signal on either channel clears the anchor and the flag at once.
+    private func updateCaptureSilence() {
+        guard isRecording else { clearCaptureSilence(); return }
+        let bothSilent = micLevel < captureSilenceEpsilon && systemLevel < captureSilenceEpsilon
+        if bothSilent {
+            let anchor = captureSilentSince ?? Date()
+            captureSilentSince = anchor
+            setCaptureSilenceWarning(Date().timeIntervalSince(anchor) >= captureSilenceThreshold)
+        } else {
+            captureSilentSince = nil
+            setCaptureSilenceWarning(false)
+        }
+    }
+
+    /// Clear the silent-capture window and flag — called from recording teardown.
+    func clearCaptureSilence() {
+        captureSilentSince = nil
+        setCaptureSilenceWarning(false)
+    }
+
+    /// Flip the observable flag and post `.captureSilenceChanged` ONLY on a
+    /// transition — AppKit surfaces (the menu bar item) can't observe
+    /// @Observable, so they refresh off the notification, and posting every
+    /// tick would thrash the status bar.
+    private func setCaptureSilenceWarning(_ value: Bool) {
+        guard value != captureSilenceWarning else { return }
+        captureSilenceWarning = value
+        NotificationCenter.default.post(name: .captureSilenceChanged, object: nil)
     }
 
     // MARK: - Prep Context Pre-Computation
@@ -6230,6 +7241,16 @@ final class AppState {
             _ = await AudioRetention.sweep(database: self.database, retentionDays: days)
             self.loadMeetings()
         }
+        // PRJ-017 F5: a staged restore was applied at launch → tell the user
+        // what they need to re-connect (Keychain isn't part of a backup).
+        if UserDefaults.standard.bool(forKey: "backup.restoreCompleted") {
+            UserDefaults.standard.removeObject(forKey: "backup.restoreCompleted")
+            lastUserError = "Backup restored. Re-enter your AI API keys and re-connect Google Calendar in Settings, and re-grant microphone / screen-recording access if prompted — those aren't included in a backup."
+        }
+        // PRJ-017 F5: automatic weekly backup — fires on the first launch each
+        // week once a destination is set, skipped while recording. Mirrors the
+        // retention-sweep startup pattern.
+        maybeRunWeeklyBackup()
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))   // let refreshStatus land
             await self?.enqueueEmbeddingBackfillIfNeeded()
@@ -6245,6 +7266,7 @@ final class AppState {
             .sink { [weak self] _ in
                 self?.preComputePrepContext()
                 self?.enqueueWeeklyDigestIfDue()
+                self?.maybeRunWeeklyBackup()
                 self?.enqueueGardenerIfDue()
                 self?.enqueueGlossaryIfDue()
                 // Backfill re-check (TASK-045): the launch-time check can
@@ -6295,6 +7317,11 @@ final class AppState {
         Task { [weak self] in
             guard let self else { return }
             defer { self.isPreComputingPrepContext = false }
+            // The startup pass starts before `loadSettings()` lands, so
+            // `makeTextGenerator()` below would resolve the default `.none`
+            // provider and write "Not enough information…" placeholders into
+            // contextJSON for every upcoming meeting.
+            await self.awaitSettingsReady()
             do {
                 // 48-hour window — broad enough that "tomorrow's meetings"
                 // get briefed today, narrow enough that a calendar with
@@ -6377,6 +7404,10 @@ final class AppState {
     ///   - "Regenerate" button in DailyBriefView (passes `force: true`)
     @MainActor
     func maybeRegenerateDailyBrief(brief precomputed: DailyBrief? = nil, force: Bool = false) async {
+        // The launch trigger arrives before `loadSettings()` lands; without this
+        // the `isAIWorkConfigured` guard below reads the default `.none` provider
+        // and the first pass of the day silently generates nothing.
+        await awaitSettingsReady()
         // Build the brief data if the caller didn't pre-compute it.
         let brief: DailyBrief
         if let p = precomputed { brief = p }
@@ -6388,14 +7419,14 @@ final class AppState {
                 return
             }
         }
-        // Don't even ask the LLM if there's nothing on today's calendar.
+        // Don't even ask the LLM if there's nothing on today's calendar — but
+        // leave the brief we already have alone (TASK-134). An empty meeting
+        // list is just as often a wedged calendar sync as it is a free day, and
+        // this branch used to delete today's cached brief on the strength of
+        // that guess. `loadCachedDailyBriefForToday` already nils the in-memory
+        // fields when today genuinely has no cache entry, and the cache is
+        // day-keyed with a 14-day prune, so nothing leaks by keeping it.
         if brief.meetings.isEmpty {
-            self.dailyBriefAIText = nil
-            self.dailyBriefGeneratedAt = nil
-            self.dailyBriefModel = nil
-            self.dailyBriefKBSources = []
-            self.currentDailyBriefSignature = nil
-            DailyBriefCache.clear(date: Date())
             return
         }
 
@@ -6550,8 +7581,12 @@ final class AppState {
         autoJoinedMeetingIds = autoJoinedMeetingIds.intersection(currentIds)
         dismissedSwitchMeetingIds = dismissedSwitchMeetingIds.intersection(currentIds)
 
-        // Clear an outstanding switch offer if it no longer applies.
-        if let pendingId = pendingSwitchMeetingId {
+        // Clear an outstanding CALENDAR-origin switch offer if it no longer
+        // applies. Detector-origin offers aren't tied to the upcoming set —
+        // they expire via the soft-timeout demote, recording stop, or
+        // call-terminated teardown instead.
+        if let suggestion = pendingSwitchSuggestion, suggestion.origin == .calendar,
+           let pendingId = suggestion.matchedMeetingId {
             let stillValid: Bool = {
                 guard isRecording, activeMeeting?.id != pendingId else { return false }
                 guard let m = upcomingMeetings.first(where: { $0.id == pendingId }),
@@ -6562,8 +7597,7 @@ final class AppState {
                     && (m.meetLink?.isEmpty == false)
             }()
             if !stillValid {
-                pendingSwitchMeetingId = nil
-                NotificationCenter.default.post(name: .meetingSwitchDismiss, object: nil)
+                clearSwitchSuggestion(recordDismissal: false)
             }
         }
 
@@ -6654,15 +7688,23 @@ final class AppState {
                       !dismissedSwitchMeetingIds.contains(meeting.id),
                       pendingSwitchMeetingId != meeting.id {
                 // Already recording a different meeting; offer to switch
-                // instead of silently skipping. The banner persists until
-                // the user acts on it (handled by AppDelegate observer).
-                pendingSwitchMeetingId = meeting.id
-                fileLog("Switch: offering switch from '\(activeMeeting?.title ?? "?")' to '\(meeting.title)' (in \(Int(timeUntilStart))s)")
-                NotificationCenter.default.post(
-                    name: .meetingSwitchShow,
-                    object: nil,
-                    userInfo: ["meetingId": meeting.id]
-                )
+                // instead of silently skipping. Funneled through the unified
+                // suggestion so it renders on every surface.
+                fileLog("Switch: offering calendar switch from '\(activeMeeting?.title ?? "?")' to '\(meeting.title)' (in \(Int(timeUntilStart))s)")
+                // Normalized calendar title makes the dual-key dismissal stick:
+                // dismissing this offer also suppresses a later detector
+                // title-diff for the same real meeting (Meet tabs often carry
+                // the meeting name) even after the calendar-booster window.
+                presentSwitchSuggestion(SwitchSuggestion(
+                    id: meeting.id,
+                    detectedTitle: meeting.title,
+                    normalizedTitle: MeetingTitleNormalizer().normalize(meeting.title),
+                    origin: .calendar,
+                    confidence: .high,
+                    matchedMeetingId: meeting.id,
+                    meetLink: meeting.meetLink,
+                    firedAt: Date()
+                ))
             }
 
             // Auto-start: if meeting should have started (within 0-5 min past start) and we're not recording.
@@ -6682,6 +7724,10 @@ final class AppState {
                 startRecording(for: meeting)
             }
         }
+
+        // Keep the New Meeting control's menu-vs-button cache warm (TASK-121).
+        // No-op while recording (the switch menu renders unconditionally).
+        refreshNewMeetingCandidates()
     }
 
     // MARK: - Task Notifications (PRJ-013 Phase 5)
@@ -6694,6 +7740,27 @@ final class AppState {
         let enabled = settings.taskDueAlertsEnabled
         let candidates = (try? await taskRepository.notificationCandidates()) ?? []
         await notificationService.rescheduleAllTaskNotificationsAsync(tasks: candidates, enabled: enabled)
+    }
+
+    /// Refresh the suggested-decision badge count (PRJ-020 / TASK-128). Driven
+    /// by `.decisionDataDidChange` and run once at launch.
+    func refreshDecisionInboxCount() async {
+        suggestedDecisionCount = (try? await DecisionRepository(database: database).suggestedCount()) ?? 0
+    }
+
+    /// Re-export a meeting's KB note after a user decision mutation (TASK-129),
+    /// so its `## Decisions` section reflects the current confirmed set.
+    /// No-ops unless KB write-back is enabled and the meeting already has a
+    /// non-empty summary note to attach to. `writeMeeting` is idempotent — it
+    /// overwrites its own prior output and updates the stored hash.
+    private func reexportDecisionsToKB(meetingId: String) async {
+        guard settings.kbWriteBack else { return }
+        guard let meeting = try? await meetingRepository.find(id: meetingId),
+              let summary = try? await summaryRepository.latestSummary(meetingId: meetingId),
+              !summary.summaryText.isEmpty else { return }
+        let segments: [Transcript] = (try? await transcriptRepository.transcriptsForMeeting(meetingId)) ?? []
+        await KBWriteBackService.shared.writeMeeting(
+            meeting, summary: summary.summaryText, transcript: segments)
     }
 
     // MARK: - Notification Observers
@@ -6709,6 +7776,16 @@ final class AppState {
             }
             .store(in: &cancellables)
 
+        // Quick voice capture (PRJ-017 F4) — ⇧⌘M, the menu-bar item, and the
+        // global hotkey all route here.
+        NotificationCenter.default.publisher(for: .startQuickMemo)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.startQuickMemo()
+                }
+            }
+            .store(in: &cancellables)
+
         // Task data changed (PRJ-013 Phase 5) — reconcile per-task due alerts.
         // Debounced so a bulk operation (e.g. accept-all) triggers one reconcile.
         NotificationCenter.default.publisher(for: .taskDataDidChange)
@@ -6720,28 +7797,79 @@ final class AppState {
             }
             .store(in: &cancellables)
 
-        // Switch banner action: stop the current recording and start the new
-        // meeting (opens its meet link too if present).
-        NotificationCenter.default.publisher(for: .switchToMeeting)
-            .sink { [weak self] notification in
-                guard let self,
-                      let meetingId = notification.userInfo?["meetingId"] as? String,
-                      let meeting = self.upcomingMeetings.first(where: { $0.id == meetingId })
-                else { return }
+        // Decision data changed (PRJ-020 / TASK-128) — refresh the sidebar
+        // badge count. Fires on triage transitions AND when a fresh extraction's
+        // merge lands new suggestions. Debounced so a bulk pass triggers once.
+        NotificationCenter.default.publisher(for: .decisionDataDidChange)
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
                 Task { @MainActor in
-                    await self.switchActiveMeeting(to: meeting)
+                    await self?.refreshDecisionInboxCount()
                 }
             }
             .store(in: &cancellables)
 
-        // User dismissed the switch banner — remember it so we don't re-offer.
-        NotificationCenter.default.publisher(for: .meetingSwitchDismiss)
+        // Decision confirm/edit/setOwner (TASK-129) re-exports that meeting's KB
+        // note so its ## Decisions section stays current and KB-grounded chat can
+        // see it. Gated on `userMutation` so an extraction merge (which lands
+        // still-suggested rows) never rewrites a note — no export loop. Not
+        // debounced: each notification carries a distinct meetingId that a
+        // debounce would coalesce away; `writeMeeting` is idempotent and
+        // serializes per meeting id itself (see `KBWriteBackService.writeChain`).
+        NotificationCenter.default.publisher(for: .decisionDataDidChange)
+            .sink { [weak self] note in
+                guard let self else { return }
+                guard (note.userInfo?["userMutation"] as? Bool) == true,
+                      let meetingId = note.userInfo?["meetingId"] as? String else { return }
+                Task { @MainActor in
+                    await self.reexportDecisionsToKB(meetingId: meetingId)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Legacy switch-banner action. Routes by payload — resolve the meeting
+        // from upcomingMeetings and pass it explicitly so a stale banner can't
+        // accept the wrong target — falling back to the pending suggestion.
+        NotificationCenter.default.publisher(for: .switchToMeeting)
             .sink { [weak self] notification in
                 guard let self else { return }
-                if let id = notification.userInfo?["dismissedByUser"] as? String {
-                    self.dismissedSwitchMeetingIds.insert(id)
+                let meetingId = notification.userInfo?["meetingId"] as? String
+                let meeting = meetingId.flatMap { id in
+                    self.upcomingMeetings.first(where: { $0.id == id })
                 }
-                self.pendingSwitchMeetingId = nil
+                Task { @MainActor in
+                    self.acceptSwitchSuggestion(overrideMeeting: meeting)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Switch detected by the engine (TASK-117) — funnel into the unified
+        // suggestion. Origin is inferred from the source signal; confidence
+        // mirrors the engine's calendar-boost verdict.
+        NotificationCenter.default.publisher(for: .meetingSwitchDetected)
+            .sink { [weak self] notification in
+                guard let self, let info = notification.userInfo else { return }
+                guard let detectedTitle = info["detectedTitle"] as? String,
+                      let normalizedTitle = info["normalizedTitle"] as? String,
+                      let sourceSignal = info["sourceSignal"] as? String,
+                      let confidenceStr = info["confidence"] as? String else { return }
+                let matchedId = info["matchedMeetingId"] as? String
+                let confidence: SwitchConfidence = (confidenceStr == "high") ? .high : .medium
+                let origin: SwitchSuggestion.Origin = (sourceSignal == "secondCallApp") ? .detectedApp : .detectedTitle
+                let suggestion = SwitchSuggestion(
+                    id: matchedId ?? "detector:\(normalizedTitle)",
+                    detectedTitle: detectedTitle,
+                    normalizedTitle: normalizedTitle,
+                    origin: origin,
+                    confidence: confidence,
+                    matchedMeetingId: matchedId,
+                    meetLink: nil,
+                    firedAt: Date(),
+                    sourceBundleId: (info["bundleIdentifier"] as? String)
+                        ?? (origin == .detectedTitle ? "browser.googleMeet" : nil)
+                )
+                self.fileLog("Switch detected: '\(detectedTitle)' via \(sourceSignal) confidence=\(confidenceStr) matched=\(matchedId ?? "none")")
+                self.presentSwitchSuggestion(suggestion)
             }
             .store(in: &cancellables)
 
@@ -6771,7 +7899,21 @@ final class AppState {
                 let appName = notification.userInfo?["appName"] as? String ?? "Meeting"
                 let bundleId = notification.userInfo?["bundleIdentifier"] as? String
                 Task { @MainActor in
-                    self.handleCallDetected(appName: appName, bundleId: bundleId)
+                    // While recording, a launch of a DIFFERENT call app is a
+                    // second-call-surface switch signal (Signal B) rather than a
+                    // new-recording trigger. Browser (Signal A) and the trigger
+                    // app itself are excluded.
+                    if self.isRecording {
+                        if let bundleId,
+                           CallAppRegistry.isCallApp(bundleIdentifier: bundleId),
+                           bundleId != self.autoRecordTriggerBundleId,
+                           self.activeMeeting?.isMemo != true {
+                            self.switchDetectionService.noteCallAppEvent(
+                                bundleId: bundleId, appName: appName, isActivation: false)
+                        }
+                    } else {
+                        self.handleCallDetected(appName: appName, bundleId: bundleId)
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -6786,6 +7928,14 @@ final class AppState {
                 guard let self else { return }
                 let terminatedBundleId = notification.userInfo?["bundleIdentifier"] as? String
                 Task { @MainActor in
+                    // A pending switch offer whose source surface just quit is
+                    // stale — the user left that call rather than switching.
+                    if let suggestion = self.pendingSwitchSuggestion,
+                       let source = suggestion.sourceBundleId,
+                       source == terminatedBundleId {
+                        self.fileLog("Switch suggestion expired — source surface \(source) terminated")
+                        self.clearSwitchSuggestion(recordDismissal: false)
+                    }
                     if self.isRecording && self.recordingStartedByDetector {
                         if let trigger = self.autoRecordTriggerBundleId,
                            let terminated = terminatedBundleId,
@@ -6898,6 +8048,22 @@ final class AppState {
                 Logger.general.info("Thermal state: \(stateName, privacy: .public)")
                 Task { @MainActor in
                     self.thermalState = state
+                }
+            }
+            .store(in: &cancellables)
+
+        // App activation (TASK-121): the proximity poll only ticks every 30s, so
+        // a meeting can enter/leave the ±30 min window or become reopenable while
+        // the app is backgrounded. Refresh the New Meeting picker cache the moment
+        // the app comes forward so the first click reflects reality.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshNewMeetingCandidates()
+                    // Covers the lid-open case: NSWorkspace.didWake can fire
+                    // before the network is actually reachable, so that sync
+                    // fails and the next one is a full interval away.
+                    self?.calendarSyncManager.resyncIfStale()
                 }
             }
             .store(in: &cancellables)
@@ -7048,8 +8214,43 @@ final class AppState {
                 Logger.calendar.info("Calendar sync not started — source is .none")
                 return
             }
+            // NOTE: `loadSettings()` is async and hasn't landed yet, so this is
+            // always the 15-minute default on the first pass. That is fine — the
+            // `settings.didSet` above restarts the timer if the persisted interval
+            // differs. Do not "fix" this into a synchronous DB read on the init
+            // path; a blocking read there froze the app for minutes on 2026-06-11.
             let intervalSeconds = TimeInterval(max(1, self.settings.calendarSyncIntervalMinutes) * 60)
             await self.calendarSyncManager.startPeriodicSync(interval: intervalSeconds)
+        }
+    }
+
+    // MARK: - Calendar Reconnect
+
+    /// The canonical Google Calendar (re)connect, shared by the Home health banner
+    /// and Settings → Calendar so the three-step contract can't drift apart:
+    ///
+    /// 1. Fresh OAuth handshake. `signIn()` drops the stale Keychain item first, so
+    ///    the new grant carries full calendar scope rather than inheriting whatever
+    ///    scope a revoked refresh token was minted with.
+    /// 2. Invalidate the cached calendar-verification verdict, so the sync below
+    ///    re-checks the selection against whichever account just connected.
+    /// 3. Post `.calendarSourceChanged`, which restarts the periodic timer and
+    ///    fires an immediate sync.
+    ///
+    /// Returns a `Result` rather than throwing or writing `lastUserError`: Settings
+    /// renders failure inline, and Home needs no alert because the still-present
+    /// banner *is* the feedback. A modal on a health action would be wrong.
+    @discardableResult
+    func reconnectGoogleCalendar() async -> Result<Void, Error> {
+        do {
+            try await googleAuthManager.signIn()
+            calendarSyncManager.invalidateCalendarVerification()
+            NotificationCenter.default.post(name: .calendarSourceChanged, object: nil)
+            AppFileLogger.shared.log("CALSYNC: reconnected account=\(googleAuthManager.userEmail ?? "unknown")")
+            return .success(())
+        } catch {
+            Logger.calendar.error("Google reconnect failed: \(error.localizedDescription)")
+            return .failure(error)
         }
     }
 }
@@ -7058,7 +8259,6 @@ final class AppState {
 
 enum SidebarDestination: Hashable {
     case home
-    case dailyBrief
     case chat
     case people
     case activity        // background-job queue (TaskQueueManager) — renamed from .tasks (PRJ-013)
@@ -7067,6 +8267,7 @@ enum SidebarDestination: Hashable {
     case meetings
     case analytics
     case keyQuotes       // TASK-078: saved clips across all meetings
+    case decisions       // PRJ-017 F1: the Decision Log across all meetings
     case topics          // TASK-081: topic trackers across all meetings
     case knowledgeBase   // PRJ-014: KB viewer/editor; gated on AppState.kbConfigured
     case folder(String)  // folder key = normalised base title

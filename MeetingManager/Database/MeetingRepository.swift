@@ -29,6 +29,7 @@ final class MeetingRepository {
             // live schema) — clean derived rows explicitly (review M9).
             try db.execute(sql: "DELETE FROM embedding WHERE meetingId = ?", arguments: [meeting.id])
             try db.execute(sql: "DELETE FROM entityFact WHERE meetingId = ?", arguments: [meeting.id])
+            try db.execute(sql: "DELETE FROM decision WHERE meetingId = ?", arguments: [meeting.id])
             try db.execute(sql: "DELETE FROM kbExport WHERE meetingId = ?", arguments: [meeting.id])
             // v51 removed taskQueue's FK CASCADE (sentinel rows needed it
             // gone) — clean task rows explicitly instead.

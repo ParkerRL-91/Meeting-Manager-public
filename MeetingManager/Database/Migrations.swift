@@ -1591,5 +1591,128 @@ enum Migrations {
         migrator.registerMigration("v67-fluidaudio-default-on") { db in
             try db.execute(sql: "UPDATE appSettings SET useFluidAudioDiarization = 1")
         }
+
+        // PRJ-017 F1: the Decision Log. A dedicated, user-curated registry of
+        // decisions made in meetings — distinct from the entityFact "decision"
+        // kind (ADR-028), which fans facts out to dossiers. This table carries
+        // rationale, an involved-people list, a transcript anchor (start/end +
+        // quote snapshot), and user edit/dismiss state so re-extraction never
+        // clobbers a human's edits. No FK cascade (append-only on a live
+        // schema, matching entityFact) — MeetingRepository.delete cleans it up.
+        // (Renumbered v67→v68 on merge: main took v67 for fluidaudio-default-on.)
+        migrator.registerMigration("v68-decision-log") { db in
+            try db.create(table: "decision") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("meetingId", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("rationale", .text)
+                t.column("involved", .text)          // JSON array of names
+                t.column("quoteText", .text)         // transcript snapshot (honest after prune/re-transcribe)
+                t.column("startTime", .double)       // seconds; nil when anchoring fails
+                t.column("endTime", .double)
+                t.column("normalizedKey", .text).notNull()  // dedup key within a meeting
+                t.column("status", .text).notNull().defaults(to: "active")  // active | dismissed
+                t.column("editedAt", .datetime)      // set on user edit; shields row from re-extraction
+                t.column("dismissedAt", .datetime)
+                t.column("extractedAt", .datetime).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_decision_meeting", on: "decision", columns: ["meetingId"])
+            try db.create(index: "idx_decision_meeting_key", on: "decision",
+                          columns: ["meetingId", "normalizedKey"], unique: true)
+        }
+
+        // PRJ-017 F4: explicit meeting provenance. Replaces the fragile
+        // `templateId == "memo"` convention (TASK-052) with a dedicated column
+        // — also the landing spot for future audio import (TASK-086). NULL =
+        // normal meeting. Backfill converts existing memos and frees templateId
+        // for real template resolution. (Renumbered v68→v69 on merge.)
+        migrator.registerMigration("v69-meeting-source") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "source", .text)   // "memo" | "import" | NULL
+            }
+            try db.execute(sql: "UPDATE meeting SET source = 'memo', templateId = NULL WHERE templateId = 'memo'")
+        }
+
+        // PRJ-017 F5: backup settings. Destination path + scope toggles +
+        // last-run timestamp. Auto-weekly defaults on (gated on a destination
+        // being set), markdown export on, media off (text-only is the headline
+        // path). Additive, no backfill. (Renumbered v69→v70 on merge.)
+        migrator.registerMigration("v70-backup-settings") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "backupDestinationPath", .text).notNull().defaults(to: "")
+                t.add(column: "backupIncludeMedia", .boolean).notNull().defaults(to: false)
+                t.add(column: "backupIncludeMarkdown", .boolean).notNull().defaults(to: true)
+                t.add(column: "backupAutoWeekly", .boolean).notNull().defaults(to: true)
+                t.add(column: "lastBackupAt", .datetime)
+            }
+        }
+
+        // PRJ-018 / TASK-117: switch-detection kill switch. Default on — the
+        // engine only ever *suggests* a new meeting, never stops a recording.
+        // Additive, no backfill.
+        migrator.registerMigration("v71-switch-detection") { db in
+            try db.alter(table: "appSettings") { t in
+                t.add(column: "switchDetectionEnabled", .boolean).notNull().defaults(to: true)
+            }
+        }
+
+        // PRJ-008 / TASK-123: terminal "no speech" state. A recording whose
+        // audio is genuinely silent (device contention, a muted/dead mic and no
+        // remote audio) fails transcription with an empty-result error and,
+        // before this, never left `transcribing` — so the startup orphan scan
+        // re-enqueued it on every launch, burning through retries forever. This
+        // column marks the meeting as deliberately finished with no speech: the
+        // startup scan skips these rows and the meeting detail offers a manual
+        // Retry. Additive, nullable. Backfill repairs the already-stuck cohort
+        // generically (not by hardcoded id): any meeting still in `transcribing`
+        // with zero transcript rows and a startDate older than 24h is closed to
+        // `complete` + noSpeechDetectedAt now.
+        migrator.registerMigration("v72-no-speech-terminal-state") { db in
+            try db.alter(table: "meeting") { t in
+                t.add(column: "noSpeechDetectedAt", .datetime)
+            }
+            let now = Date()
+            // transcriptionAttemptedAt is stamped too: the queue-startup
+            // orphan scan uses it as its skip marker, so a backfilled row
+            // without it would be re-enqueued the first time the user clears
+            // the queue history. NULL startDate rows are included via
+            // COALESCE(createdAt) so no stuck row escapes the repair.
+            try db.execute(sql: """
+                UPDATE meeting
+                SET status = 'complete', noSpeechDetectedAt = ?, updatedAt = ?,
+                    transcriptionAttemptedAt = COALESCE(transcriptionAttemptedAt, ?)
+                WHERE status = 'transcribing'
+                  AND COALESCE(startDate, createdAt) < ?
+                  AND id NOT IN (SELECT DISTINCT meetingId FROM transcript)
+                """, arguments: [now, now, now, now.addingTimeInterval(-86_400)])
+        }
+
+        // PRJ-020 / TASK-128: decision triage gate + correctable ownership.
+        // Extends the existing `status` values rather than adding a parallel
+        // field: extractions now land as "suggested" (a review inbox), and
+        // "active" means confirmed. Two new columns carry a single correctable
+        // owner ("who decided this") — `ownerName` (display) + `ownerPersonId`
+        // (nullable Person link, resolved in the AppState glue). Backfill: a row
+        // the user never touched (status='active' AND editedAt IS NULL AND
+        // dismissedAt IS NULL) enters the inbox as "suggested" — deliberate, the
+        // user asked to triage the existing rows. Edited or dismissed rows keep
+        // their status.
+        migrator.registerMigration("v73-decision-triage-ownership") { db in
+            try db.alter(table: "decision") { t in
+                t.add(column: "ownerName", .text)
+                t.add(column: "ownerPersonId", .text)
+            }
+            try db.execute(sql: """
+                UPDATE decision SET status = 'suggested'
+                WHERE status = 'active' AND editedAt IS NULL AND dismissedAt IS NULL
+                """)
+        }
+
+        migrator.registerMigration("v74-decision-target") { db in
+            try db.alter(table: "decision") { t in
+                t.add(column: "targetName", .text)
+            }
+        }
     }
 }

@@ -37,6 +37,11 @@ final class AppDatabase {
 
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
 
+        // PRJ-017 F5: apply a staged restore (if any) BEFORE opening the pool —
+        // swapping the live DB under an open DatabasePool is unsafe. No-op when
+        // there's no pending restore.
+        BackupService.consumePendingRestore(in: url)
+
         let dbPath = url.appendingPathComponent("db.sqlite").path
         var config = Configuration()
         config.prepareDatabase { db in

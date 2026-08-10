@@ -31,6 +31,25 @@ final class CallDetectionService {
         didSet { browserDetector?.isRecordingProvider = isRecordingProvider }
     }
 
+    /// Passthrough for `BrowserCallDetector.onInCallTitlesObserved` — every
+    /// matched meeting title per poll while recording, forwarded to the switch
+    /// detector (see `MeetingSwitchDetectionService.noteBrowserTitles`).
+    var onBrowserCallTitles: (([String]) -> Void)? {
+        didSet { browserDetector?.onInCallTitlesObserved = onBrowserCallTitles }
+    }
+
+    /// A known call app was brought to the foreground. NSWorkspace launch
+    /// events miss apps that reuse a running process (Zoom A→B) or auto-launch
+    /// at login (Teams); activation partially covers those as a
+    /// medium-confidence-only switch signal. `(bundleId, displayName)`.
+    var onCallAppActivated: ((String, String) -> Void)?
+
+    /// Debounce: activation is noisy (every app-switch fires it). Suppress a
+    /// repeat activation of the same bundle within this window.
+    private static let activationDebounce: TimeInterval = 30
+    private var lastActivationByBundle: [String: Date] = [:]
+    nonisolated(unsafe) private var activateObserver: NSObjectProtocol?
+
     /// Apps that were already running when we started monitoring.
     /// These are NOT treated as "call started" events because they may have been
     /// open before Meeting Manager launched (e.g., Teams auto-launches at login).
@@ -49,6 +68,7 @@ final class CallDetectionService {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         if let observer = launchObserver { workspaceCenter.removeObserver(observer) }
         if let observer = terminateObserver { workspaceCenter.removeObserver(observer) }
+        if let observer = activateObserver { workspaceCenter.removeObserver(observer) }
         let detector = browserDetector
         Task { @MainActor in detector?.stop() }
     }
@@ -61,6 +81,7 @@ final class CallDetectionService {
         // Start browser-based meeting detection (Google Meet, etc.)
         browserDetector = BrowserCallDetector()
         browserDetector?.isRecordingProvider = isRecordingProvider
+        browserDetector?.onInCallTitlesObserved = onBrowserCallTitles
         browserDetector?.start()
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter
@@ -101,6 +122,17 @@ final class CallDetectionService {
                 self?.handleAppTerminated(app)
             }
         }
+
+        activateObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            MainActor.assumeIsolated {
+                self?.handleAppActivated(app)
+            }
+        }
     }
 
     func stopMonitoring() {
@@ -116,8 +148,13 @@ final class CallDetectionService {
             workspaceCenter.removeObserver(observer)
             terminateObserver = nil
         }
+        if let observer = activateObserver {
+            workspaceCenter.removeObserver(observer)
+            activateObserver = nil
+        }
         runningCallApps.removeAll()
         preExistingApps.removeAll()
+        lastActivationByBundle.removeAll()
         activeCallApp = nil
         activeCallAppName = nil
     }
@@ -151,6 +188,24 @@ final class CallDetectionService {
         }
 
         postNotification(.callAppTerminated, app: app, bundleID: bundleID)
+    }
+
+    /// Forwards a debounced call-app foreground activation to the switch
+    /// detector. Does NOT post `.callAppLaunched` — activation is not a launch,
+    /// and the recording/auto-record paths must keep keying off real launches.
+    private func handleAppActivated(_ app: NSRunningApplication) {
+        guard let bundleID = app.bundleIdentifier,
+              CallAppRegistry.isCallApp(bundleIdentifier: bundleID) else { return }
+
+        let now = Date()
+        if let last = lastActivationByBundle[bundleID],
+           now.timeIntervalSince(last) < Self.activationDebounce {
+            return
+        }
+        lastActivationByBundle[bundleID] = now
+
+        let name = CallAppRegistry.displayName(for: bundleID) ?? bundleID
+        onCallAppActivated?(bundleID, name)
     }
 
     // MARK: - Helpers

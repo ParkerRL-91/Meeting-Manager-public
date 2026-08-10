@@ -88,6 +88,43 @@ final class MeetingReminderWindowController: NSWindowController {
         }
     }
 
+    /// Floating card for a high-confidence unified switch suggestion (TASK-118).
+    /// Persists until the user acts or AppState clears/demotes the offer.
+    func show(suggestion: AppState.SwitchSuggestion) {
+        guard let panel = window else { return }
+
+        let currentTitle = AppState.shared?.activeMeeting?.title ?? "current meeting"
+        let view = SwitchSuggestionView(suggestion: suggestion, currentTitle: currentTitle) { [weak self] in
+            AppState.shared?.dismissSwitchSuggestion(byUser: true)
+            self?.dismiss()
+        }
+        // Cap the width — a long tab title would otherwise stretch the panel
+        // across the screen (visible over a screen share). Text inside
+        // truncates/wraps within the fixed width.
+        let hosting = NSHostingView(rootView: view.frame(width: 520))
+        panel.contentView = hosting
+
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
+        let width: CGFloat = 520
+        let height = max(72, size.height)
+
+        let margin: CGFloat = 16
+        if let screen = NSScreen.main {
+            let visible = screen.visibleFrame
+            panel.setFrame(NSRect(
+                x: visible.maxX - width - margin,
+                y: visible.maxY - height - margin,
+                width: width,
+                height: height
+            ), display: false)
+        }
+
+        panel.orderFront(nil)
+        autoDismissTimer?.invalidate()
+        autoDismissTimer = nil
+    }
+
     func dismiss() {
         autoDismissTimer?.invalidate()
         autoDismissTimer = nil

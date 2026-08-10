@@ -321,6 +321,14 @@ gh release create "v${VERSION}" \
 **Update:** Quit any running copy first, then drag the new version over the previous one." \
     --repo "ParkerRL-91/Meeting-Manager-public"
 
+# ──────────────────────────────────────────────────
+# Step 9: Remove staged .app bundles (TASK-131)
+# Spotlight indexes them, so every leftover bundle shows up as an extra
+# "Meeting Manager" in Spotlight next to the /Applications install.
+# The DMG in ${DMG_DIR} is the only artifact worth keeping.
+# ──────────────────────────────────────────────────
+rm -rf "${BUILD_DIR}/app" "${DMG_STAGING}"
+
 echo ""
 echo "=== Release v${VERSION} complete ==="
 echo "  DMG:      ${DMG_PATH}"
