@@ -24,7 +24,16 @@ enum PracticeMode {
     static func systemPrompt(personaName: String, record: [(index: Int, fact: EntityFact)]) -> String {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
-        let lines = record.map { idx, f in
+        // `lines` MUST be pinned to String. GRDB's `SQL` is also
+        // ExpressibleByStringInterpolation and ships a
+        // `Sequence where Element == SQL` overload of `joined(separator:)`, and
+        // GRDB's declarations are visible here even though this file imports only
+        // Foundation. `lines` is then only ever used inside a string
+        // interpolation, which accepts any type — so with no annotation the
+        // literal below inferred as `SQL`, `joined` resolved to GRDB's overload,
+        // and the prompt carried `SQL(elements: [...])` debug output in place of
+        // the record. The persona was being grounded on nothing.
+        let lines: String = record.map { idx, f -> String in
             let owner = f.owner.map { " — \($0)" } ?? ""
             return "[\(idx)] (\(f.kind), \(df.string(from: f.extractedAt))\(owner)) \(f.text)"
         }.joined(separator: "\n")
